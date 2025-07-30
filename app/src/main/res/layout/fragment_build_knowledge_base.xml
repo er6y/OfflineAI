@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp">
+
+    <!-- 文件浏览按钮 -->
+    <Button
+        android:id="@+id/buttonBrowseFiles"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/button_browse_files"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@+id/buttonClearFiles"
+        app:layout_constraintHorizontal_weight="3" />
+
+    <!-- 文件清空按钮 -->
+    <Button
+        android:id="@+id/buttonClearFiles"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/text_clear_list"
+        android:layout_marginStart="8dp"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toEndOf="@+id/buttonBrowseFiles"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHorizontal_weight="2" />
+
+    <!-- 词嵌入模型标签 -->
+    <TextView
+        android:id="@+id/textViewEmbeddingModelLabel"
+        android:layout_width="80dp"
+        android:layout_height="wrap_content"
+        android:text="@string/label_embedding_model"
+        android:layout_marginTop="16dp"
+        android:gravity="start|center_vertical"
+        app:layout_constraintTop_toBottomOf="@+id/buttonBrowseFiles"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- 词嵌入模型下拉框 -->
+    <Spinner
+        android:id="@+id/spinnerEmbeddingModel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="0dp"
+        app:layout_constraintTop_toTopOf="@+id/textViewEmbeddingModelLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewEmbeddingModelLabel"
+        app:layout_constraintStart_toEndOf="@+id/textViewEmbeddingModelLabel"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- 重排模型标签 -->
+    <TextView
+        android:id="@+id/textViewRerankerModelLabel"
+        android:layout_width="80dp"
+        android:layout_height="wrap_content"
+        android:text="@string/label_reranker_model"
+        android:layout_marginTop="12dp"
+        android:gravity="start|center_vertical"
+        app:layout_constraintTop_toBottomOf="@+id/spinnerEmbeddingModel"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- 重排模型下拉框 -->
+    <Spinner
+        android:id="@+id/spinnerRerankerModel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="0dp"
+        app:layout_constraintTop_toTopOf="@+id/textViewRerankerModelLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewRerankerModelLabel"
+        app:layout_constraintStart_toEndOf="@+id/textViewRerankerModelLabel"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- 文件列表标签 -->
+    <TextView
+        android:id="@+id/textViewFileListLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/label_selected_files"
+        android:layout_marginTop="16dp"
+        app:layout_constraintTop_toBottomOf="@+id/spinnerRerankerModel"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- 文件列表 -->
+    <ScrollView
+        android:id="@+id/scrollViewFileList"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="8dp"
+        android:background="@android:color/darker_gray"
+        app:layout_constraintTop_toBottomOf="@+id/textViewFileListLabel"
+        app:layout_constraintBottom_toTopOf="@+id/textViewProgressLabelText"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHeight_default="percent"
+        app:layout_constraintHeight_percent="0.18">
+
+        <TextView
+            android:id="@+id/textViewFileList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="8dp"
+            android:textIsSelectable="true" />
+    </ScrollView>
+    
+    <!-- 处理进度标签 -->
+    <TextView
+        android:id="@+id/textViewProgressLabelText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/label_processing_progress"
+        android:layout_marginTop="8dp"
+        app:layout_constraintTop_toBottomOf="@+id/scrollViewFileList"
+        app:layout_constraintStart_toStartOf="parent" />
+        
+    <!-- 处理进度计数和时间 -->
+    <TextView
+        android:id="@+id/textViewProgressLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="0/0 00:00:00"
+        android:layout_marginStart="8dp"
+        app:layout_constraintTop_toTopOf="@+id/textViewProgressLabelText"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewProgressLabelText"
+        app:layout_constraintStart_toEndOf="@+id/textViewProgressLabelText" />
+        
+    <!-- 处理进度文本框 - 修改为TextView -->
+    <TextView
+        android:id="@+id/textViewProgress"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="8dp"
+        android:background="#DDDDDD"
+        android:gravity="top|start"
+        android:padding="8dp"
+        android:scrollbars="vertical"
+        android:focusable="true"
+        android:clickable="true"
+        android:longClickable="true"
+        android:textIsSelectable="true"
+        android:text="@string/text_ready_to_create_kb"
+        android:textColor="#666666"
+        app:layout_constraintTop_toBottomOf="@+id/textViewProgressLabelText"
+        app:layout_constraintBottom_toTopOf="@+id/textViewKnowledgeBaseNameLabel"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- 知识库名称标签和下拉框 -->
+    <TextView
+        android:id="@+id/textViewKnowledgeBaseNameLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/label_knowledge_base_name"
+        android:layout_marginTop="16dp"
+        app:layout_constraintTop_toBottomOf="@+id/textViewProgress"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <Spinner
+        android:id="@+id/knowledge_base_name_spinner"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp"
+        app:layout_constraintTop_toTopOf="@+id/textViewKnowledgeBaseNameLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewKnowledgeBaseNameLabel"
+        app:layout_constraintStart_toEndOf="@+id/textViewKnowledgeBaseNameLabel"
+        app:layout_constraintEnd_toStartOf="@+id/buttonNewKnowledgeBase" />
+        
+    <!-- 新建知识库名称按钮 -->
+    <Button
+        android:id="@+id/buttonNewKnowledgeBase"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/common_new"
+        android:textSize="12sp"
+        android:minWidth="60dp"
+        android:minHeight="40dp"
+        app:layout_constraintTop_toTopOf="@+id/knowledge_base_name_spinner"
+        app:layout_constraintBottom_toBottomOf="@+id/knowledge_base_name_spinner"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- 新建知识库按钮 -->
+    <Button
+        android:id="@+id/buttonCreateKnowledgeBase"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/button_new_kb"
+        android:layout_marginTop="8dp"
+        app:layout_constraintTop_toBottomOf="@+id/textViewKnowledgeBaseNameLabel"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

@@ -1,0 +1,20 @@
+[package]
+name = "tokenizers-jni"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "tokenizers_jni"
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = false
+panic = "abort"
+codegen-units = 1
+
+[dependencies]
+tokenizers = { path = "../../../../tokenizers-rust/tokenizers" }
+serde_json = "1.0"
+jni = "0.19.0"
+
+# Android交叉编译配置将通过环境变量或cargo-ndk处理

@@ -1,0 +1,225 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp">
+
+    <TextView
+        android:id="@+id/textViewApiUrlLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/label_llm_api_url"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <Spinner
+        android:id="@+id/spinnerApiUrl"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        app:layout_constraintTop_toTopOf="@+id/textViewApiUrlLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewApiUrlLabel"
+        app:layout_constraintStart_toEndOf="@+id/textViewApiUrlLabel"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/textViewApiKeyLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/label_llm_api_key"
+        app:layout_constraintTop_toBottomOf="@+id/spinnerApiUrl" 
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <EditText
+        android:id="@+id/editTextApiKey"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp"
+        android:inputType="textPassword"
+        app:layout_constraintTop_toTopOf="@+id/textViewApiKeyLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewApiKeyLabel"
+        app:layout_constraintStart_toEndOf="@+id/textViewApiKeyLabel"
+        app:layout_constraintEnd_toStartOf="@+id/checkBoxThinkingModeKey" />
+        
+    <CheckBox
+        android:id="@+id/checkBoxThinkingModeKey"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/text_thinking_mode"
+        android:layout_marginStart="8dp"
+        app:layout_constraintTop_toTopOf="@+id/textViewApiKeyLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewApiKeyLabel"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/textViewApiModelLabel"
+        android:layout_width="50dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/label_llm_model"
+        app:layout_constraintTop_toBottomOf="@+id/editTextApiKey"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <Spinner
+        android:id="@+id/spinnerApiModel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="0dp"
+        android:layout_marginEnd="0dp"
+        app:layout_constraintTop_toTopOf="@+id/textViewApiModelLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewApiModelLabel"
+        app:layout_constraintStart_toEndOf="@+id/textViewApiModelLabel"
+        app:layout_constraintEnd_toStartOf="@+id/textViewSearchDepthLabel" />
+
+    <TextView
+        android:id="@+id/textViewKnowledgeBaseLabel"
+        android:layout_width="50dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/label_knowledge_base"
+        app:layout_constraintTop_toBottomOf="@+id/spinnerApiModel"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <TextView
+        android:id="@+id/textViewSearchDepthLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/label_search_depth"
+        android:layout_marginStart="0dp"
+        app:layout_constraintTop_toTopOf="@+id/spinnerApiModel"
+        app:layout_constraintBottom_toBottomOf="@+id/spinnerApiModel"
+        app:layout_constraintStart_toEndOf="@+id/spinnerApiModel" />
+
+    <Spinner
+        android:id="@+id/spinnerSearchDepth"
+        android:layout_width="60dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="0dp"
+        android:paddingEnd="10dp"  
+        app:layout_constraintTop_toTopOf="@+id/textViewSearchDepthLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewSearchDepthLabel"
+        app:layout_constraintStart_toEndOf="@+id/textViewSearchDepthLabel"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <Spinner
+        android:id="@+id/spinnerKnowledgeBase"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="0dp"
+        android:layout_marginEnd="0dp"
+        app:layout_constraintTop_toTopOf="@+id/textViewKnowledgeBaseLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewKnowledgeBaseLabel"
+        app:layout_constraintStart_toEndOf="@+id/textViewKnowledgeBaseLabel"
+        app:layout_constraintEnd_toStartOf="@+id/textViewRerankCountLabel" />
+
+    <TextView
+        android:id="@+id/textViewRerankCountLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/label_rerank_count"
+        android:layout_marginStart="0dp"
+        app:layout_constraintTop_toTopOf="@+id/spinnerKnowledgeBase"
+        app:layout_constraintBottom_toBottomOf="@+id/spinnerKnowledgeBase"
+        app:layout_constraintStart_toEndOf="@+id/spinnerKnowledgeBase" />
+
+    <Spinner
+        android:id="@+id/spinnerRerankCount"
+        android:layout_width="60dp"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="0dp"
+        android:paddingEnd="10dp"
+        app:layout_constraintTop_toTopOf="@+id/textViewRerankCountLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewRerankCountLabel"
+        app:layout_constraintStart_toEndOf="@+id/textViewRerankCountLabel"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/textViewSystemPromptLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:text="@string/label_system_prompt"
+        app:layout_constraintTop_toBottomOf="@+id/spinnerKnowledgeBase"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <EditText
+        android:id="@+id/editTextSystemPrompt"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:inputType="text"
+        android:singleLine="true"
+        android:layout_marginStart="8dp"
+        app:layout_constraintTop_toTopOf="@+id/textViewSystemPromptLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewSystemPromptLabel"
+        app:layout_constraintStart_toEndOf="@+id/textViewSystemPromptLabel"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <ScrollView
+        android:id="@+id/scrollViewResponse"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginBottom="8dp"
+        android:background="@android:color/darker_gray"
+        app:layout_constraintTop_toBottomOf="@+id/editTextSystemPrompt"
+        app:layout_constraintBottom_toTopOf="@+id/textViewUserPromptLabel" 
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <TextView
+            android:id="@+id/textViewResponse"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="8dp"
+            android:textIsSelectable="true"
+            android:longClickable="true"
+            android:contextClickable="true"
+            android:focusable="true"
+            android:textSize="14sp"
+            android:textAppearance="@style/TextAppearance.AppCompat.Body1" />
+    </ScrollView>
+
+    <TextView
+        android:id="@+id/textViewUserPromptLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp" 
+        android:text="@string/label_user_prompt"
+        app:layout_constraintBottom_toTopOf="@+id/editTextUserPrompt"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <EditText
+        android:id="@+id/editTextUserPrompt"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:inputType="text"
+        android:singleLine="true"
+        android:imeOptions="actionSend"
+        android:layout_marginBottom="8dp"
+        app:layout_constraintBottom_toTopOf="@+id/buttonSendStop"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" /> 
+
+    <Button
+        android:id="@+id/buttonSendStop"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="8dp"
+        android:text="@string/button_send"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@+id/buttonNewChat" />
+
+    <Button
+        android:id="@+id/buttonNewChat"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/text_new_conversation"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

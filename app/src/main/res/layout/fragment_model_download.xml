@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <!-- 顶部标题栏 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="16dp"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_default_model_download"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+    </LinearLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:padding="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+        <!-- 嵌入模型列表 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_embedding_model_list"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="0dp" />
+
+        <CheckBox
+            android:id="@+id/checkBoxBgeM3"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="bge-m3_dynamic_int8_onnx"
+            android:layout_marginBottom="0dp" />
+
+        <!-- 重排模型列表 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_reranker_model_list"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="2dp"
+            android:layout_marginBottom="0dp" />
+
+        <CheckBox
+            android:id="@+id/checkBoxBgeReranker"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="bge-reranker-v2-m3_dynamic_int8_onnx"
+            android:layout_marginBottom="0dp" />
+
+        <!-- LLM列表 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_llm_list"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="2dp"
+            android:layout_marginBottom="0dp" />
+
+        <CheckBox
+            android:id="@+id/checkBoxQwen06B"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Qwen3-0.6B-GGUF"
+            android:layout_marginBottom="0dp" />
+
+        <CheckBox
+            android:id="@+id/checkBoxQwen17B"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Qwen3-1.7B-GGUF"
+            android:layout_marginBottom="0dp" />
+
+        <!-- 进度显示区域 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_download_progress"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="2dp"
+            android:layout_marginBottom="0dp" />
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="120dp"
+            android:background="@android:color/black"
+            android:layout_marginBottom="2dp"
+            android:scrollbars="vertical">
+
+            <TextView
+                android:id="@+id/textViewProgress"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="@android:color/white"
+                android:fontFamily="monospace"
+                android:textSize="12sp"
+                android:padding="8dp"
+                android:text="@string/text_waiting_download"
+                android:textIsSelectable="true"
+                android:longClickable="true" />
+
+        </ScrollView>
+
+        <!-- 下载按钮 -->
+        <Button
+            android:id="@+id/buttonDownload"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/button_download_selected_models"
+            android:layout_marginBottom="2dp" />
+
+        <!-- 最佳实践文本 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_best_practice"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="2dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/text_best_practice_description"
+            android:textSize="14sp"
+            android:lineSpacingExtra="4dp" />
+
+        </LinearLayout>
+
+    </ScrollView>
+
+</LinearLayout>

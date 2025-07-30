@@ -1,0 +1,1019 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">StarLocalRAG</string>
+    
+    <!-- 通用状态字符串 -->
+    <string name="common_success">成功</string>
+    <string name="common_error">错误</string>
+    <string name="common_failed">失败</string>
+    <string name="common_warning">警告</string>
+    <string name="common_info">信息</string>
+    <string name="common_pending">等待中</string>
+    <string name="common_timeout">超时</string>
+    <string name="common_cancelled">已取消</string>
+    <string name="common_retry">重试</string>
+    <string name="common_running">运行中</string>
+    <string name="common_completed">已完成</string>
+    <string name="common_stopped">已停止</string>
+    <string name="common_ready">就绪</string>
+    <string name="common_not_ready">未就绪</string>
+    <string name="common_available">可用</string>
+    <string name="common_unavailable">不可用</string>
+    <string name="common_enabled">已启用</string>
+    <string name="common_disabled">已禁用</string>
+    <string name="common_connected">已连接</string>
+    <string name="common_disconnected">已断开</string>
+    <string name="common_online">在线</string>
+    <string name="common_offline">离线</string>
+    <string name="common_idle">空闲</string>
+    <string name="common_busy">忙碌</string>
+    <string name="common_none">无</string>
+    <string name="common_yes">是</string>
+    <string name="common_no">否</string>
+    <string name="common_loading">加载中...</string>
+    <string name="common_processing">处理中</string>
+    <string name="common_preparing">准备中</string>
+    <string name="common_paused">暂停中</string>
+    <string name="common_initializing">初始化中</string>
+    <string name="common_downloading">下载中</string>
+    <string name="common_uploading">上传中</string>
+    <string name="common_analyzing">分析中...</string>
+    <string name="common_saving">保存中</string>
+    <string name="common_generating">生成中...</string>
+    <string name="common_connecting">连接中...</string>
+    <string name="common_waiting">等待中...</string>
+    <string name="common_custom">自定义</string>
+    <string name="common_copy">复制</string>
+    <string name="common_new">新建</string>
+    <string name="common_create">创建</string>
+    <string name="common_update">更新</string>
+    <string name="common_query">查询</string>
+    <string name="common_select_all">全选</string>
+    <string name="common_new_with_dots">新建...</string>
+    <string name="common_close">关闭</string>
+    
+    <string name="common_ok">确定</string>
+    <string name="common_cancel">取消</string>
+    <string name="common_delete">删除</string>
+    <string name="common_clear">清除</string>
+    <string name="common_confirm">确认</string>
+    <string name="common_save">保存</string>
+    <string name="common_refresh">刷新</string>
+    <string name="common_edit">编辑</string>
+    <string name="common_add">添加</string>
+    <string name="common_remove">移除</string>
+    <string name="common_back">返回</string>
+    <string name="common_next">下一步</string>
+    <string name="common_previous">上一步</string>
+    <string name="common_export">导出</string>
+    <string name="common_import">导入</string>
+    <string name="common_share">分享</string>
+    <string name="common_continue">继续</string>
+    <string name="common_finish">完成</string>
+    <string name="common_start">开始</string>
+    <string name="common_stop">停止</string>
+    <string name="common_pause">暂停</string>
+    <string name="common_paste">粘贴</string>
+    <string name="common_cut">剪切</string>
+    <string name="common_overwrite">覆盖</string>
+    <string name="common_append">追加</string>
+    <string name="common_reset">重置</string>
+    <string name="common_apply">应用</string>
+    <string name="common_upload">上传</string>
+    <string name="common_download">下载</string>
+    <string name="common_downloaded">已下载</string>
+    <string name="common_loaded">已加载</string>
+    <string name="common_fetch_failed">获取失败</string>
+    <string name="common_unknown">未知</string>
+    <string name="common_unknown_state">未知状态</string>
+    <string name="common_operation_failed">操作失败</string>
+    <string name="common_parse_failed">解析失败</string>
+    <string name="common_download_failed">下载失败</string>
+    <string name="common_build_failed">构建失败</string>
+    <string name="common_unknown_validation">未知验证错误</string>
+    <string name="common_unknown_error">未知错误</string>
+    <string name="common_unknown_operation">未知操作</string>
+    <string name="common_unknown_file_type">未知文件类型</string>
+    <string name="common_unknown_model">未知模型</string>
+    
+    <!-- MainActivity 生命周期日志 -->
+    <string name="main_activity_on_create">MainActivity 创建</string>
+    <string name="main_activity_on_destroy">MainActivity 销毁</string>
+    <string name="main_activity_on_pause">MainActivity 暂停</string>
+    <string name="main_activity_on_resume">MainActivity 恢复</string>
+    <string name="main_activity_on_stop">MainActivity 停止</string>
+    <string name="main_activity_on_start">MainActivity 启动</string>
+    <string name="main_activity_on_restart">MainActivity 重新启动</string>
+
+    <!-- 嵌入模型相关 -->
+    <string name="embedding_model_root_directory">根目录</string>
+
+    <!-- 重排模型相关 -->
+    <!-- <string name="reranker_model_none">无</string> 使用 common_none -->
+    <string name="reranker_model_bge_reranker">BGE Reranker</string>
+    <!-- <string name="reranker_model_custom">自定义</string> 使用 common_custom -->
+    <string name="reranker_model_unknown">未知重排模型</string>
+    <string name="reranker_task_complete">重排任务完成，释放模型占用状态</string>
+    <string name="reranker_model_manager_load_success">重排模型加载成功: %s</string>
+    <string name="reranker_current_model_status">当前模型状态: %s</string>
+    <string name="reranker_model_manager_init">正在初始化RerankerModelManager</string>
+
+    <!-- 进度关键词 -->
+    <string name="progress_blocks_generated_keyword">(生成了</string>
+    <string name="progress_text_extraction_keyword">正在提取文本</string>
+    <string name="progress_vectorization_keyword">正在生成向量</string>
+
+    <!-- 导航项 -->
+    <string name="navigation_rag_qa">RAG问答</string>
+    <string name="navigation_build_kb">构建知识库</string>
+    <string name="navigation_kb_note">知识库笔记</string>
+
+    <!-- 菜单项 -->
+    <string name="menu_view_log">查看日志</string>
+    <string name="menu_switch_language">切换语言</string>
+    <string name="menu_item_transfer_to_note">转笔记</string>
+    <!-- <string name="menu_close">关闭</string> 使用 common_close -->
+    <string name="menu_view_logs">查看日志</string>
+    <!-- <string name="menu_refresh">刷新</string> 使用 common_refresh -->
+    <string name="menu_clear_logs">清空日志</string>
+    <string name="menu_share_logs">分享日志</string>
+    <string name="menu_build_kb">构建知识库</string>
+    <string name="menu_kb_note">知识库笔记</string>
+    <string name="menu_convert_to_note">转笔记</string>
+    <string name="menu_switch_to_english">Switch to English</string>
+    <string name="menu_switch_to_chinese">切换中文</string>
+    <string name="menu_settings">设置</string>
+    <string name="menu_about">关于</string>
+    <string name="menu_help">帮助</string>
+    <string name="menu_exit">退出</string>
+    <string name="menu_default_model_download">默认模型下载</string>
+
+    <!-- 通用按钮 -->
+    <string name="button_new_kb">新建知识库</string>
+    <string name="button_create_kb">创建知识库</string>
+    <string name="button_go_to_settings">前往设置</string>
+    <string name="button_stop_with_icon">停止 ■</string>
+    <string name="button_browse">浏览</string>
+    <string name="button_deselect_all">取消全选</string>
+    <string name="button_download_models">下载选中的模型</string>
+    <string name="button_switch_to_chinese">切换中文</string>
+
+    <!-- TextChunkProcessor 日志 -->
+    <string name="text_chunk_processor_init">TextChunkProcessor 已初始化</string>
+    <string name="text_chunk_processor_create_chunks">正在创建文本块，总字符数: %d</string>
+    <string name="text_chunk_processor_chunk_created" formatted="false">已创建文本块 %1$d，字符数: %2$d</string>
+    <string name="text_chunk_processor_final_chunk_created">总共创建了 %d 个文本块</string>
+    <string name="text_chunk_processor_cleanup">正在清理 TextChunkProcessor 资源</string>
+    <string name="text_chunk_processor_invalid_input">无效的输入文本</string>
+    <string name="text_chunk_processor_chunk_too_large">文本块 %d 超过最大大小限制，将被截断</string>
+    <string name="text_chunk_processor_split_by_sentence">正在按句子分割文本</string>
+    <string name="text_chunk_processor_sentence_count">找到 %d 个句子</string>
+    <string name="text_chunk_processor_combine_sentences">正在将句子组合成文本块</string>
+    <string name="text_chunk_processor_created_chunks">已创建 %d 个文本块</string>
+    <string name="text_chunk_processor_error">处理文本块时出错: %s</string>
+
+    <!-- 通用消息 -->
+
+    <string name="message_please_wait">请稍候...</string>
+    <string name="message_operation_completed">操作完成</string>
+
+
+    <!-- ConfigManager 日志信息 -->
+    <string name="config_not_exist">配置文件不存在，创建默认配置</string>
+    <string name="config_read_failed">读取配置文件失败</string>
+    <string name="config_parse_failed">解析配置文件失败</string>
+    <string name="config_missing_key">配置文件缺少必要项: %s，添加默认值</string>
+    <string name="config_add_default_failed">添加默认配置项失败</string>
+    <string name="config_missing_api_keys">配置文件缺少API Keys，添加默认值</string>
+    <string name="config_add_api_keys_failed">添加默认API Keys失败</string>
+    <string name="config_corrupted">配置文件损坏，重置为默认配置</string>
+    <string name="config_load_failed">加载配置失败</string>
+    <string name="config_save_default_failed">保存默认配置失败</string>
+    <string name="config_saved">配置已保存到: %s</string>
+    <string name="config_save_failed">保存配置失败</string>
+    <string name="config_get_string_failed">获取字符串配置失败</string>
+    <string name="config_get_int_failed">获取整数配置失败</string>
+    <string name="config_get_boolean_failed">获取布尔值配置失败</string>
+    <string name="config_try_read_metadata">尝试读取知识库元数据</string>
+    <string name="config_kb_dir_not_exist">知识库目录不存在</string>
+    <string name="config_found_sqlite_db">找到SQLite数据库文件，尝试读取嵌入模型信息</string>
+    <string name="config_read_embedding_from_sqlite">从SQLite数据库中读取到嵌入模型目录</string>
+    <string name="config_search_in_setting_path">尝试在设置的嵌入模型路径中查找</string>
+    <string name="config_found_embedding_file">找到嵌入模型文件</string>
+    <string name="config_embedding_file_not_exist">嵌入模型文件不存在</string>
+    <string name="config_read_sqlite_failed">读取SQLite数据库失败</string>
+    <string name="config_close_sqlite_failed">关闭SQLite数据库失败</string>
+    <string name="config_found_metadata_json">找到metadata.json文件，尝试读取嵌入模型信息</string>
+    <string name="config_read_embedding_from_json">从metadata.json中读取到嵌入模型</string>
+    <string name="config_read_metadata_json_failed">读取metadata.json文件失败</string>
+    <string name="config_search_embedding_in_kb_dir">尝试在知识库目录中查找嵌入模型文件</string>
+    <string name="config_found_possible_embedding">找到可能的嵌入模型文件</string>
+    <string name="config_found_possible_model">找到可能的模型文件</string>
+    <string name="config_search_embedding_error">搜索嵌入模型文件时出错</string>
+    <string name="config_no_embedding_found">无法找到任何可用的嵌入模型</string>
+    <string name="config_save_api_key_failed">保存API Key映射失败</string>
+    <string name="config_get_api_key_failed">获取API Key映射失败</string>
+    <string name="config_get_system_prompts_failed">获取系统提示词列表失败</string>
+    <string name="config_save_system_prompt_failed">保存系统提示词失败</string>
+    <string name="config_get_model_mapping_failed">获取模型映射配置失败</string>
+    <string name="config_default_system_prompt">根据检索内容回答，</string>
+
+    <!-- 验证信息 -->
+    <string name="validation_kb_name_cannot_be_empty">知识库名称不能为空</string>
+    <string name="validation_please_select_files">请选择文件</string>
+    <string name="validation_please_select_valid_embedding">请选择有效的嵌入模型</string>
+    <string name="validation_api_url_empty">API URL不能为空</string>
+    <string name="validation_api_key_empty">API Key不能为空</string>
+    <string name="validation_model_name_empty">模型名称不能为空</string>
+    <string name="validation_file_path_empty">文件路径不能为空</string>
+    <string name="validation_invalid_url">无效的URL格式</string>
+    <string name="validation_invalid_file">无效文件</string>
+    <string name="validation_unsupported_format">不支持的文件格式</string>
+    <string name="validation_kb_name_empty">知识库名称不能为空</string>
+
+
+    <!-- 对话框标题 -->
+
+    <string name="dialog_title_error">错误</string>
+    <string name="dialog_title_warning">警告</string>
+    <string name="dialog_title_info">信息</string>
+    <string name="dialog_title_settings">设置</string>
+
+    <string name="dialog_title_help">帮助</string>
+    <string name="dialog_title_model_download">模型下载</string>
+    <string name="dialog_title_kb_creation">知识库创建</string>
+    <string name="dialog_title_file_selection">文件选择</string>
+    <string name="dialog_title_new_kb">新建知识库</string>
+    <string name="dialog_title_model_mismatch_warning">模型不匹配警告</string>
+    <string name="dialog_title_select_embedding_reranker">选择嵌入模型和重排模型</string>
+    <string name="dialog_title_confirm_interrupt">确认中断</string>
+    <string name="dialog_title_kb_exists">知识库已存在</string>
+    <string name="dialog_title_embedding_model_not_found">找不到嵌入模型</string>
+    <string name="dialog_title_select_embedding_model">选择嵌入模型</string>
+    <string name="dialog_message_embedding_model_not_found">在 %1$s 目录中未找到嵌入模型文件。\n\n请将模型文件（.onnx或.gguf 格式）复制到此目录并重试。\n\n原始模型：%2$s</string>
+
+
+    <string name="dialog_title_add_api_url">添加新的API地址</string>
+    <string name="dialog_title_delete_api_url">删除API地址</string>
+
+    <!-- 对话框消息 -->
+    <string name="dialog_message_enter_kb_name">输入知识库名称</string>
+    <string name="dialog_message_model_mismatch">现有模型：</string>
+    <string name="dialog_message_current_model">当前模型：</string>
+    <string name="dialog_message_mismatch_warning">模型不匹配，是否继续？</string>
+    <string name="dialog_message_confirm_interrupt">确定要中断当前知识库创建过程吗？已处理的数据将被保留。</string>
+    <string name="dialog_message_kb_exists">知识库 "%1$s" 已存在，您想要如何处理？</string>
+    <string name="dialog_title_need_full_file_access">需要完全文件访问权限</string>
+    <string name="dialog_message_need_full_file_access">StarLocalRAG需要完全的文件访问权限才能正常工作。请在接下来的设置页面中授予权限，授予后将不再请求此权限。</string>
+    <string name="dialog_title_need_storage_permission">需要存储权限</string>
+    <string name="dialog_message_need_storage_permission">StarLocalRAG 需要访问外部存储权限才能读取和保存模型文件、知识库文件等。\n\n请在设置中授予应用存储权限，否则应用将无法正常工作。</string>
+    <string name="dialog_title_about">关于 StarLocalRAG</string>
+    <string name="dialog_message_about">版本: %1$s\n\n本地RAG (检索增强生成) 应用</string>
+    <string name="dialog_add_new_api_address">添加新的API地址</string>
+
+
+    <string name="dialog_delete_api_address">删除API地址</string>
+    <string name="dialog_confirm_delete_api_address">确定要删除这个API地址吗？</string>
+    <string name="dialog_message_confirm_delete">确定要删除此项吗？</string>
+    <string name="dialog_message_confirm_clear">确定要清除所有数据吗？</string>
+    <string name="dialog_message_unsaved_changes">您有未保存的更改。是否要保存？</string>
+    <string name="dialog_message_operation_in_progress">操作正在进行中，请稍候...</string>
+    <string name="dialog_message_no_internet">无可用的网络连接</string>
+    <string name="dialog_message_storage_permission">需要存储权限才能访问文件</string>
+    <string name="dialog_message_model_not_found">未找到模型，请先下载</string>
+    <string name="dialog_message_kb_not_found">未找到知识库，请先创建</string>
+    <string name="dialog_message_delete_api_url">确定要删除API地址 \"%1$s\" 吗？</string>
+
+    <!-- 成功消息 -->
+    <string name="success_config_saved">配置保存成功</string>
+    <string name="success_model_downloaded">模型下载成功</string>
+    <string name="success_kb_created">知识库创建成功</string>
+    <string name="success_file_imported">文件导入成功</string>
+    <string name="success_data_exported">数据导出成功</string>
+    <string name="success_operation_completed">操作完成成功</string>
+    <string name="success_kb_name_added">知识库名称已添加</string>
+
+    <!-- 错误消息 -->
+    <string name="error_vector_dimension_mismatch">向量维度不匹配</string>
+    <string name="error_dimension_must_match">维度必须匹配</string>
+    <string name="error_check_vector_dimension">检查向量维度时出错</string>
+    
+    <!-- 向量异常处理相关 -->
+    <string name="vector_anomaly_detected_repairing">检测到向量异常，正在修复...</string>
+    <string name="vector_repair_failed_using_random">向量修复失败，使用随机向量替代</string>
+    <string name="vector_repair_success">向量修复成功</string>
+    <string name="vector_processing_error">向量处理错误: %s</string>
+    <string name="error_network">网络错误</string>
+    <string name="error_permission_denied">权限被拒绝</string>
+
+    <string name="error_config_load">加载配置失败</string>
+    <string name="error_config_save">保存配置失败</string>
+    <string name="error_model_download">模型下载失败</string>
+    <string name="error_model_load">模型加载失败</string>
+    <string name="error_kb_creation">知识库创建失败</string>
+    <string name="error_kb_load">知识库加载失败</string>
+    <string name="error_file_read">文件读取失败</string>
+    <string name="error_file_write">文件写入失败</string>
+    <string name="error_storage_full">存储空间不足</string>
+    <string name="error_invalid_input">无效输入</string>
+
+
+    <!-- 处理状态 -->
+    <string name="processing_status_overwrite_deleted">覆盖已删除</string>
+    <string name="processing_status_task_interrupted">任务中断</string>
+    <string name="processing_status_kb_creation_completed">知识库创建完成</string>
+    
+    <!-- 知识库构建状态消息 -->
+    <string name="kb_build_completed">知识库构建完成: %s</string>
+    <string name="kb_build_cancelled">知识库构建已取消</string>
+    <string name="kb_build_success_log">知识库构建成功完成: %s</string>
+    <string name="kb_build_cancelled_log">知识库构建已取消: %s</string>
+    <string name="kb_build_failed_log">知识库构建失败</string>
+    <!-- 使用统一的资源名称，删除重复定义 -->
+    <string name="processing_status_text_extraction_complete">文本提取完成</string>
+    <string name="processing_status_vectorization_complete">向量化完成</string>
+    <string name="text_extraction_complete_chunks">共 %d 个文本块</string>
+    <string name="vectorization_complete_vectors">共生成 %d 个向量</string>
+
+    <!-- 模型状态 - 已合并到common_前缀 -->
+    <string name="model_status_please_select_embedding">请选择嵌入模型</string>
+    <string name="model_status_directory_not_exist">目录不存在</string>
+    <string name="model_status_not_found">未找到</string>
+    <string name="model_status_no_available">无可用</string>
+
+    <!-- 模型状态显示文本 - 已合并到common_前缀 -->
+    <string name="model_state_not_downloaded">未下载</string>
+    <string name="model_state_unloaded">未加载</string>
+    <string name="model_state_no_available">无可用模型</string>
+    <string name="model_state_fetching">获取中</string>
+    <!-- 知识库状态显示文本 - 已合并到common_前缀 -->
+    <string name="kb_state_building">构建中</string>
+    <string name="kb_state_built">已构建</string>
+    <string name="kb_state_not_built">未构建</string>
+    <string name="kb_state_empty">空知识库</string>
+    <string name="kb_state_please_create">请先创建知识库</string>
+
+    <!-- 进度状态显示文本 - 已合并到common_前缀 -->
+    <string name="progress_state_paused">已暂停</string>
+
+    <!-- 使用统一的资源名称，删除重复定义 -->
+    <string name="progress_text_extraction_complete">文本提取完成</string>
+    <string name="progress_vectorization_complete">向量化处理完成</string>
+
+    <!-- API URL 显示文本 -->
+    <string name="api_url_local">本地</string>
+    <string name="api_url_openai">OpenAI</string>
+
+    <!-- 输入提示 -->
+    <string name="hint_enter_new_kb_name">请输入新知识库名称</string>
+    <string name="hint_enter_title">请输入标题</string>
+    <string name="hint_enter_content">请输入内容</string>
+    <string name="hint_enter_question">在此输入您的问题...</string>
+    <string name="hint_enter_api_url">输入API URL</string>
+    <string name="hint_enter_api_key">输入API Key</string>
+    <string name="hint_enter_model_name">输入模型名称</string>
+    <string name="hint_enter_kb_name">输入知识库名称</string>
+    <string name="hint_enter_file_path">输入文件路径</string>
+    <string name="hint_search">搜索...</string>
+    <string name="hint_filter">筛选...</string>
+    <string name="hint_enter_text">输入文本...</string>
+    <string name="hint_enter_name">输入名称...</string>
+    <string name="hint_enter_description">输入描述...</string>
+    <string name="hint_model_dir_path">模型文件目录路径</string>
+    <string name="hint_embedding_dir_path">嵌入模型目录路径</string>
+    <string name="hint_reranker_dir_path">重排模型目录路径</string>
+    <string name="hint_kb_dir_path">知识库目录路径</string>
+
+    <!-- 界面文本 -->
+    <string name="text_new_conversation">新对话</string>
+    <string name="text_thinking_mode">思考模式</string>
+    <string name="label_llm_api_url">大模型API地址:</string>
+    <string name="label_llm_api_key">大模型API Key:</string>
+    <string name="label_llm_model">大模型:</string>
+    <string name="label_knowledge_base">知识库:</string>
+    <string name="label_search_depth">检索数:</string>
+    <string name="label_rerank_count">重排数:</string>
+    <string name="label_system_prompt">系统提示词:</string>
+    <string name="label_user_prompt">用户提问:</string>
+    <string name="label_title">标题:</string>
+    <string name="label_content">内容:</string>
+    <string name="label_add_progress">添加进度:</string>
+    <string name="content_description_delete_api_url">删除API地址</string>
+    <string name="button_send">发送 ▶</string>
+    <string name="dialog_model_not_found">找不到原始模型，请选择替代模型</string>
+    <string name="dialog_select_embedding_model">请选择要使用的嵌入模型：</string>
+    <string name="dialog_select_reranker_model">请选择要使用的重排模型：</string>
+    <string name="dialog_remember_choice">记住此选择，下次自动使用</string>
+    <string name="title_default_model_download">默认模型下载</string>
+    <string name="title_embedding_model_list">嵌入模型列表</string>
+    <string name="title_reranker_model_list">重排模型列表</string>
+    <string name="title_llm_list">LLM列表</string>
+    <string name="title_download_progress">下载进度</string>
+    <string name="text_waiting_download">等待下载...</string>
+    <string name="button_download_selected_models">下载选中的模型</string>
+    <string name="title_best_practice">最佳实践说明</string>
+    <string name="text_best_practice_description">词嵌入和重排模型采用ONNX Runtime推理，获得最佳广泛模型支持，需要ONNX格式，需要有对应的模型配置文件和tokenizer文件，用户可单独放在设置对应的目录下。注意知识库生成和RAG需要采用一致的模型。\n\n本地LLM推理采用llama.cpp结构的LLM，需要GGUF格式，推荐需要有对应的params文件，用户可单独放在设置对应的目录下。由于手机算力内存有限制，最大勉强支持4B左右的模型。体验较好的是2B以下的模型。本地LLM能力孱弱，效果不佳，可作为学习研究使用。实用性推荐在线大模型。\n\n详细参见帮助</string>
+    <string name="button_browse_files">浏览文件</string>
+    <string name="label_embedding_model">词嵌入模型:</string>
+    <string name="label_reranker_model">重排模型:</string>
+    <string name="label_selected_files">已选择文件:</string>
+    <string name="label_processing_progress">处理进度:</string>
+    <string name="text_ready_to_create_kb">准备就绪，等待创建知识库...</string>
+    <string name="label_knowledge_base_name">知识库名称:</string>
+    <string name="text_clear_list">清空列表</string>
+
+    <string name="text_new_kb">新建知识库</string>
+    <string name="text_add_to_kb">添加到知识库</string>
+    <string name="text_settings">设置</string>
+    <string name="text_text_chunk_settings">文本分块设置</string>
+    <string name="text_directory_settings">目录设置</string>
+    <string name="text_select">选择</string>
+    <string name="text_priority_manual_params">优先手动参数</string>
+    <string name="text_global_settings">全局设置</string>
+    <string name="text_debug_mode">调试模式</string>
+    <string name="text_font_size">字体大小</string>
+    <string name="text_save_settings">保存设置</string>
+    <string name="text_default_model_download">默认模型下载</string>
+    <string name="text_embedding_model_list">嵌入模型列表</string>
+    <string name="text_reranker_model_list">重排模型列表</string>
+    <string name="text_download_progress">下载进度</string>
+    <string name="text_best_practice_guide">最佳实践说明</string>
+    <string name="text_no_data">无可用数据</string>
+    <string name="text_empty_list">列表为空</string>
+    <string name="text_knowledge_base">知识库</string>
+    <string name="text_related">相关</string>
+    <string name="text_text_chunking_settings">文本分块设置</string>
+    <string name="text_model_download">模型下载</string>
+
+
+    <!-- 文件类型显示文本 -->
+    <string name="file_type_pdf">PDF文档</string>
+    <string name="file_type_txt">文本文件</string>
+    <string name="file_type_doc">Word文档</string>
+    <string name="file_type_docx">Word文档</string>
+    <string name="file_type_md">Markdown文档</string>
+    <string name="file_type_html">HTML文档</string>
+
+    <!-- 逻辑判断常量 -->
+
+    <string name="value_no_available_kb">无可用知识库</string>
+    <string name="status_vectorization_progress">向量化进度</string>
+    <string name="prompt_create_kb_first">请先创建知识库</string>
+
+    <!-- Model Download Messages -->
+    <string name="dialog_close_download_page">关闭下载页面</string>
+    <string name="dialog_select_at_least_one_model">请至少选择一个模型</string>
+    <string name="dialog_download_prompt_title">下载提示</string>
+    <string name="dialog_download_prompt_message">建议在Wi-Fi环境下下载，是否继续？</string>
+    <string name="dialog_continue_download">继续下载</string>
+    <string name="dialog_directory_exists_title">目录已存在</string>
+    <string name="dialog_download_confirm_title">下载确认</string>
+    <string name="dialog_download_confirm_message">确定要下载选中的模型吗？</string>
+
+    <string name="dialog_interrupt">中断</string>
+    <string name="log_start_download">开始下载</string>
+    <string name="log_download_interrupted">下载已中断</string>
+    <string name="log_all_models_downloaded">所有模型下载完成</string>
+    <string name="log_download_error">下载过程中发生错误</string>
+
+    <string name="log_start_downloading">开始下载</string>
+    <string name="log_downloading_file">正在下载文件</string>
+    <string name="log_trying_backup_url">尝试备用地址</string>
+    <string name="log_download_failed">下载失败</string>
+    <string name="log_download_completed">下载完成</string>
+    <string name="log_download_failed_http_code">下载失败，HTTP响应码</string>
+    <string name="log_start_download_file_size">开始下载，文件大小</string>
+    <string name="log_download_was_interrupted">下载已被中断</string>
+    <string name="log_progress_update">进度更新</string>
+    <string name="log_download_file_failed">下载文件失败</string>
+    <string name="log_progress">进度</string>
+    <string name="log_100_percent">100%</string>
+    <string name="log_acquire_power_lock_failed">获取电源锁失败</string>
+    <string name="log_release_power_lock_failed">释放电源锁失败</string>
+    <string name="log_download_selected_models">下载选中的模型</string>
+    <string name="log_start_download_with_size">开始下载，文件大小: %1$d 字节</string>
+    <string name="log_progress_update_with_details" formatted="false">进度更新: %1$d%%, 添加内容: %2$s</string>
+    <string name="log_download_failed_http">下载失败，HTTP响应码</string>
+    <string name="log_acquire_wakelock_failed">获取电源锁失败</string>
+    <string name="log_release_wakelock_failed">释放电源锁失败</string>
+
+    <!-- Toast Messages -->
+    <string name="toast_log_file_not_exist">日志文件不存在</string>
+    <string name="toast_text_inserted_to_note">已将文本插入到笔记中</string>
+    <string name="toast_insert_text_failed">插入文本失败: %s</string>
+    <string name="toast_settings_saved">设置已保存</string>
+    <string name="toast_save_settings_failed">保存设置失败: %s</string>
+    <string name="toast_model_dir_not_exist">模型目录不存在: %s</string>
+    <string name="toast_no_model_found">模型目录中没有发现模型: %s</string>
+    <string name="toast_model_path_not_directory">模型路径不是目录: %s</string>
+    <string name="toast_cannot_read_model_dir">无法读取模型目录: %s</string>
+    <string name="toast_no_valid_model_files">模型目录中没有有效的模型文件</string>
+    <string name="toast_set_api_first">请先设置API地址和API Key</string>
+    <string name="toast_parse_model_list_failed">解析模型列表失败: %s</string>
+    <string name="toast_get_model_list_failed">获取模型列表失败: %s</string>
+    <string name="toast_cannot_get_kb_note_page">无法获取知识库笔记页面</string>
+    <string name="toast_load_settings_failed">加载设置失败</string>
+    <string name="toast_chunk_size_range">分块大小应在100-4000之间</string>
+    <string name="toast_overlap_size_range">重叠大小应在20-800之间且小于分块大小</string>
+
+
+    <string name="toast_min_chunk_limit_range">最小分块限制应在10-200之间且小于分块大小</string>
+
+    <string name="toast_max_seq_length_range">最大序列长度应在100-8192之间</string>
+    <string name="toast_inference_threads_range">推理线程数应在1-16之间</string>
+    <string name="toast_max_output_tokens_range">最大输出token数应在512-4096之间</string>
+    <string name="toast_temperature_range">手动温度参数应在0.0-2.0之间</string>
+    <string name="toast_top_p_range">手动Top-P参数应在0.0-1.0之间</string>
+    <string name="toast_top_k_range">手动Top-K参数应在1-100之间</string>
+    <string name="toast_repeat_penalty_range">手动重复惩罚参数应在0.0-2.0之间</string>
+    <string name="toast_max_seq_length_requirement">最大序列长度必须大于最大输出token数加上256 (当前需要大于%d)</string>
+
+    <string name="toast_cannot_get_selected_path">无法获取选择的路径</string>
+
+
+
+    <string name="toast_need_storage_permission">需要存储权限才能访问模型和知识库文件</string>
+
+    <string name="toast_file_permission_denied">未获得文件访问权限，应用可能无法正常工作</string>
+    <string name="toast_app_may_not_work_short">应用可能无法正常工作</string>
+    <string name="toast_load_kb_selection_failed">加载知识库选择失败: %s</string>
+    <string name="toast_please_set_all_paths">请设置所有路径</string>
+    <string name="toast_manual_temperature_range">手动温度参数应在0.0-2.0之间</string>
+    <string name="toast_manual_top_p_range">手动Top-P参数应在0.0-1.0之间</string>
+    <string name="toast_manual_top_k_range">手动Top-K参数应在1-100之间</string>
+    <string name="toast_manual_repeat_penalty_range">手动重复惩罚参数应在0.0-2.0之间</string>
+    <string name="toast_max_seq_length_must_be_greater">最大序列长度必须大于最大输出token数加上256 (当前需要大于%d)</string>
+    <string name="toast_please_enter_valid_number">请输入有效的数字</string>
+    <string name="toast_cannot_open_file_permission_settings">无法打开文件访问权限设置，请手动授予权限</string>
+    <string name="toast_please_re_enable_battery_optimization">请在设置中重新启用对本应用的电池优化</string>
+    <string name="toast_no_selected_text_or_empty">没有选中文本或文本为空</string>
+    <string name="toast_battery_optimization_reminder">请在设置中重新启用此应用的电池优化</string>
+
+
+    <string name="toast_please_create_kb_first">请先创建知识库</string>
+    <string name="toast_please_input_valid_number">请输入有效数字</string>
+    <string name="toast_transfer_to_note_failed">转换为笔记失败</string>
+    <string name="toast_transferred_to_note">已转换为知识库笔记</string>
+    <string name="toast_file_access_permission_granted">已获得文件访问权限</string>
+    <string name="toast_file_access_permission_denied">未获得文件访问权限，应用可能无法正常工作</string>
+    <string name="toast_api_url_deleted">API地址已删除</string>
+    <string name="toast_api_url_empty">API地址不能为空</string>
+    <string name="toast_api_url_added">API地址已添加</string>
+    <string name="toast_enter_user_question">请输入用户问题</string>
+    <string name="toast_ensure_api_model_set">请确保API地址和模型配置正确</string>
+    <string name="toast_enter_api_key">请输入API Key</string>
+    <string name="toast_request_stopped">请求已停止</string>
+    <string name="toast_fetch_model_list_failed">获取模型列表失败: %s</string>
+
+    <string name="toast_cannot_get_note_page">无法获取笔记页面</string>
+    <string name="toast_kb_name_added">知识库名称已添加: %s</string>
+    <string name="toast_kb_name_empty">知识库名称不能为空</string>
+    <string name="toast_please_select_files">请先选择文件</string>
+    <string name="toast_please_enter_kb_name">请输入或选择知识库名称</string>
+    <string name="toast_please_select_embedding_model">请选择嵌入模型</string>
+    <string name="toast_task_cancelled">任务已取消</string>
+    <string name="toast_battery_optimization_requested">已请求忽略电池优化</string>
+    <string name="toast_task_interrupted">任务已中断</string>
+    <string name="toast_kb_creation_complete">知识库创建完成</string>
+    <string name="toast_kb_rename_failed">知识库重命名失败</string>
+    <string name="toast_kb_not_exist">知识库不存在: %s</string>
+    <string name="toast_chunk_size_range_old">分块大小必须在100-8192之间</string>
+    <string name="toast_overlap_size_range_old">重叠大小必须在0-512之间</string>
+    <string name="toast_min_chunk_limit_range_old">最小分块限制必须在50-1024之间</string>
+    <string name="toast_text_selected">已全选文本</string>
+    <string name="toast_log_copied">日志内容已复制到剪贴板</string>
+    <string name="toast_log_cleared">日志已清空</string>
+    <string name="toast_share_failed">分享日志失败</string>
+
+    <!-- 日志消息 -->
+    <string name="log_using_kb_for_query">使用知识库进行查询: %s</string>
+
+    <!-- 嵌入模型显示文本 -->
+    <string name="embedding_model_bge_small">BGE-Small</string>
+    <string name="embedding_model_bge_base">BGE-Base</string>
+    <string name="embedding_model_bge_large">BGE-Large</string>
+    <string name="embedding_model_sentence_transformer">Sentence Transformer</string>
+
+    <!-- RerankerModelManager 日志消息 -->
+    <string name="reranker_request_model_path">请求的模型路径: %s</string>
+    <string name="reranker_callback_object">回调对象: %s</string>
+    <string name="reranker_callback_non_null">非空</string>
+    <string name="reranker_callback_null">空</string>
+    <string name="reranker_model_path_empty">重排模型路径为空</string>
+    <string name="reranker_submit_async_task">提交异步任务到线程池...</string>
+    <string name="reranker_async_task_start">异步任务开始执行，线程: %s</string>
+    <string name="reranker_model_ready_callback">模型获取成功，准备调用onModelReady回调</string>
+    <string name="reranker_send_callback_main_thread">发送onModelReady回调到主线程</string>
+    <string name="reranker_callback_null_no_call">回调对象为空，无法调用onModelReady</string>
+    <string name="reranker_model_error_callback">模型获取失败，准备调用onModelError回调</string>
+    <string name="reranker_async_get_failed">异步获取重排模型失败: %s</string>
+    <string name="reranker_rerank_model_path">模型路径: %s</string>
+    <string name="reranker_rerank_query">查询: %s</string>
+    <string name="reranker_rerank_doc_count">文档数: %s</string>
+    <string name="reranker_query_empty">查询内容为空</string>
+    <string name="reranker_doc_list_empty">文档列表为空</string>
+    <string name="reranker_model_in_use">重排模型正在使用中，请稍候</string>
+    <string name="reranker_submit_rerank_task">提交重排任务到线程池...</string>
+    <string name="reranker_rerank_task_start">重排任务开始执行，线程: %s</string>
+    <string name="reranker_model_get_failed">重排模型获取失败</string>
+    <string name="reranker_model_load_success">重排模型加载成功，开始执行重排</string>
+    <string name="reranker_rerank_complete">重排执行完成，结果数: %s</string>
+    <string name="reranker_task_failed">重排任务执行失败: %s</string>
+    <string name="reranker_current_model_path">当前模型路径: %s</string>
+    <string name="reranker_model_exists">存在</string>
+    <string name="reranker_model_not_exists">不存在</string>
+    <string name="reranker_update_access_time">更新最后访问时间: %s</string>
+    <string name="reranker_cancel_unload_task">取消卸载任务完成</string>
+    <string name="reranker_need_reload_result">是否需要重新加载: %s</string>
+    <string name="reranker_load_new_model">需要加载新的重排模型: %s</string>
+    <string name="reranker_cleanup_current_model">清理当前模型</string>
+    <string name="reranker_start_load_new_model">开始加载新模型</string>
+    <string name="reranker_model_load_result">模型加载完成，结果: %s</string>
+
+
+    <string name="reranker_use_existing_model">使用现有模型，无需重新加载</string>
+    <string name="reranker_start_loading_model">开始加载重排模型: %s</string>
+    <string name="reranker_model_loaded_success">重排模型加载成功: %s</string>
+    <string name="reranker_mark_model_start_use">标记重排模型开始使用</string>
+    <string name="reranker_mark_model_end_use">标记重排模型使用结束</string>
+    <string name="reranker_auto_unload_model">自动卸载重排模型</string>
+    <string name="reranker_unload_model">卸载重排模型: %s</string>
+    <string name="reranker_close_manager">关闭重排模型管理器</string>
+    <string name="reranker_reset_manager">重置重排模型管理器</string>
+    <string name="reranker_model_manager_load_failed">重排模型加载失败: %s</string>
+    <string name="reranker_model_manager_unload">卸载重排模型</string>
+    <string name="reranker_model_manager_rerank_start">开始重排处理</string>
+    <string name="reranker_model_manager_rerank_complete">重排处理完成</string>
+    <string name="reranker_model_manager_rerank_failed">重排处理失败</string>
+    <string name="reranker_model_manager_model_not_loaded">重排模型未加载</string>
+    <string name="reranker_model_manager_invalid_input">重排输入无效</string>
+    <string name="reranker_model_manager_cleanup">清理RerankerModelManager资源</string>
+
+    <!-- MainActivity 日志消息 -->
+    <string name="main_open_file_access_failed">无法打开文件访问权限设置: %s</string>
+    <string name="main_full_file_access_granted">已获得完全文件访问权限并保存状态</string>
+    <string name="main_battery_optimization_status">电池优化状态: %s</string>
+    <string name="main_battery_ignored">已忽略</string>
+    <string name="main_battery_not_ignored">未忽略</string>
+    <string name="main_request_ignore_battery_failed">请求忽略电池优化失败: %s</string>
+    <string name="main_restore_battery_failed">恢复电池优化失败: %s</string>
+    <string name="main_app_startup_load_config">应用启动时加载配置: %s</string>
+    <string name="main_config_file_exists">配置文件已存在: %s</string>
+    <string name="main_config_file_not_exist">配置文件不存在，创建默认配置</string>
+    <string name="main_init_config_failed">初始化配置失败</string>
+    <string name="main_all_permissions_granted">所有权限已授予</string>
+    <string name="main_permissions_denied">权限被拒绝</string>
+    <string name="main_full_file_access_obtained">已获得完全文件访问权限</string>
+    <string name="main_full_file_access_not_obtained">未获得完全文件访问权限</string>
+    <string name="main_battery_optimization_ignored">已忽略电池优化</string>
+    <string name="main_battery_optimization_not_ignored">未忽略电池优化</string>
+    <string name="main_settings_changed_refresh">设置已更改，刷新数据</string>
+    <string name="main_notify_kb_service_foreground">已通知知识库构建服务：应用切换到前台</string>
+    <string name="main_notify_kb_service_background">已通知知识库构建服务：应用切换到后台</string>
+    <string name="main_try_bind_kb_service">尝试绑定到知识库构建服务</string>
+    <string name="main_bind_kb_service_success">已成功绑定到知识库构建服务</string>
+    <string name="main_activity_create">MainActivity已创建</string>
+    <string name="main_activity_resume">MainActivity已恢复</string>
+    <string name="main_activity_pause">MainActivity已暂停</string>
+    <string name="main_activity_destroy">MainActivity已销毁</string>
+    <string name="main_activity_config_change">MainActivity配置已更改</string>
+    <string name="main_activity_permission_granted">权限已授予: %s</string>
+    <string name="main_activity_permission_denied">权限被拒绝: %s</string>
+    <string name="main_activity_fragment_switch">切换到片段: %s</string>
+    <string name="main_activity_back_pressed">按下返回键</string>
+    <string name="main_activity_menu_selected">选择菜单项: %s</string>
+
+    <!-- TextChunkProcessor 日志消息 -->
+    <string name="text_chunk_use_langchain_splitter">使用LangChainTextSplitter进行文本分割</string>
+    <string name="text_chunk_split_complete" formatted="false">文本分割完成，生成了%d个文本块</string>
+    <string name="text_chunk_start_vectorization">开始向量化处理，共 %d 个文本块</string>
+    <string name="text_chunk_mark_model_start_use">标记模型开始使用</string>
+    <string name="text_chunk_vectorization_progress">向量化详细进度: %s</string>
+    <string name="text_chunk_vectorization_complete" formatted="false">向量化处理全部完成，共处理 %1$d 个文本块，线程ID: %2$d</string>
+    <string name="text_chunk_batch_vectorization_complete">批量向量化处理完成，已标记模型为不再使用状态</string>
+    <string name="text_chunk_vector_db_closed">向量数据库已关闭</string>
+    <string name="text_chunk_start_process_file">开始处理文件并构建知识库，线程ID: %d</string>
+    <string name="text_chunk_kb_directory">知识库目录: %s</string>
+    <string name="text_chunk_model_vector_dimension">模型向量维度: %d</string>
+    <string name="text_chunk_start_batch_vectorization">开始批量向量化处理，已标记模型为正在使用状态，防止自动卸载</string>
+    <string name="text_chunk_vectorization_interrupted" formatted="false">向量化处理中断：任务被取消，已处理 %1$d/%2$d 个文本块</string>
+    <string name="text_chunk_vectorization_progress_detail">向量化进度: %s</string>
+    <string name="text_chunk_processor_start">开始文本分块处理</string>
+    <string name="text_chunk_processor_progress" formatted="false">文本分块进度: %d%%</string>
+    <string name="text_chunk_processor_complete">文本分块完成</string>
+    <string name="text_chunk_processor_failed">文本分块失败</string>
+
+    <!-- UriUtils 日志消息 -->
+    <string name="uri_get_filename_failed">获取文件名失败: %s</string>
+    <string name="uri_utils_convert_start">开始URI转换</string>
+    <string name="uri_utils_convert_success">URI转换成功: %s</string>
+    <string name="uri_utils_convert_failed">URI转换失败: %s</string>
+    <string name="uri_utils_invalid_uri">无效URI: %s</string>
+    <string name="uri_utils_permission_required">URI访问需要权限</string>
+    <string name="uri_utils_file_not_found">URI文件未找到: %s</string>
+    <string name="uri_utils_unsupported_scheme">不支持的URI方案: %s</string>
+
+    <!-- RagQaFragment 日志消息 -->
+    <string name="rag_saved_api_url">已保存API URL: %s</string>
+    <string name="rag_saved_api_key">已保存API Key到URL: %s</string>
+    <string name="rag_saved_model_name">已保存模型名称: %s</string>
+    <string name="rag_saved_kb_name">已保存知识库名称: %s</string>
+    <string name="rag_selected_state_display">选择了状态显示文本，清空配置: %s</string>
+    <string name="rag_saved_system_prompt">已保存系统提示词</string>
+    <string name="rag_saved_search_depth">已保存检索数: %s</string>
+    <string name="rag_saved_rerank_count">已保存重排数: %s</string>
+    <string name="rag_saved_thinking_mode">已保存思考模式设置: %s</string>
+    <string name="rag_thinking_enabled">启用</string>
+    <string name="rag_thinking_disabled">禁用</string>
+    <string name="rag_init_markwon_renderer">初始化Markwon渲染器</string>
+    <string name="rag_loaded_api_keys">已加载 %d 个API Keys</string>
+    <string name="rag_loaded_thinking_mode">已加载思考模式设置: %s</string>
+    <string name="rag_config_load_complete">配置加载完成</string>
+    <string name="rag_load_config_failed">加载配置失败</string>
+    <string name="rag_saved_system_prompt_detail">已保存系统提示词: %s</string>
+    <string name="rag_system_prompt_empty">[空]</string>
+    <string name="rag_config_saved_to_file">配置已保存到 .config 文件</string>
+    <string name="rag_save_config_failed">保存配置失败</string>
+    <string name="rag_loaded_api_key_for_url">已加载API URL对应的Key: %s</string>
+    <string name="rag_no_api_key_for_url">未找到API URL对应的Key: %s</string>
+    <string name="rag_start_load_api_urls">开始加载API URL列表</string>
+    <string name="rag_loaded_api_urls">已加载 %d 个API URL</string>
+    <string name="rag_reset_local_llm_stop_flag">已重置本地LLM停止标志</string>
+    <string name="rag_reset_stop_flag_error">重置本地LLM停止标志时出错</string>
+    <string name="rag_wait_query_interrupted">等待查询结果时被中断</string>
+    <string name="rag_start_query_kb" formatted="false">开始查询知识库: %1$s, 查询关键词: %2$s</string>
+    <string name="rag_use_ui_search_depth">使用界面设置的检索数: %s</string>
+    <string name="rag_get_kb_path_from_settings">从设置中获取知识库路径: %s</string>
+    <string name="rag_start_create_sqlite_handler">开始创建SQLite向量数据库处理器，知识库目录: %s</string>
+    <string name="rag_use_model_in_modeldir">使用modeldir中的模型: %s</string>
+    <string name="rag_model_file_not_exist">模型文件不存在: %s，将尝试在嵌入模型目录中查找</string>
+    <string name="rag_no_model_in_embedding_dir">在嵌入模型目录中未找到可用的模型文件</string>
+    <string name="rag_exception_mark_model_end">异常情况下标记模型使用结束，允许自动卸载</string>
+    <string name="rag_exception_close_db">异常情况下关闭数据库连接</string>
+    <string name="rag_start_call_llm_api">开始调用大模型API: %s</string>
+    <string name="rag_use_model">使用模型: %s</string>
+    <string name="rag_prompt_length">提示词长度: %d 字符</string>
+    <string name="rag_response_length">响应长度: %d 字符</string>
+    <string name="rag_final_markdown_render_complete">最终Markdown渲染完成</string>
+    <string name="rag_task_complete_status_reset">任务完成，状态已重置</string>
+    <string name="rag_final_markdown_render_failed">最终Markdown渲染失败</string>
+    <string name="rag_detect_code_block_marker">检测到代码块标记: ``` 在内容中</string>
+    <string name="rag_detect_inline_code_marker">检测到行内代码标记: ` 在内容中</string>
+    <string name="rag_detect_bold_marker">检测到粗体标记: ** 在内容中</string>
+    <string name="rag_detect_header_marker">检测到标题标记: # 在内容中</string>
+    <string name="rag_detect_incomplete_code_block">检测到未完成的代码块，添加结束标记</string>
+    <string name="rag_detect_incomplete_inline_code">检测到未完成的行内代码标记，添加结束标记</string>
+    <string name="rag_content_fixed" formatted="false">内容已修复，原始长度: %1$d, 新长度: %2$d</string>
+    <string name="rag_task_error_status_reset">任务出错，状态已重置</string>
+    <string name="rag_call_llm_api_failed">调用大模型API失败</string>
+    <string name="rag_task_exception_status_reset">任务异常，状态已重置</string>
+    <string name="rag_update_ui_retry_exhausted">更新UI重试次数已用完，放弃更新</string>
+    <string name="rag_cannot_update_ui_fragment_detached">无法更新UI，Fragment未附加到Activity，将在1秒后重试 (剩余重试次数: %d)</string>
+    <string name="rag_cannot_append_response_fragment_detached">无法追加响应，Fragment未附加到Activity</string>
+    <string name="rag_cannot_append_response_view_null">无法追加响应，Fragment的View为空</string>
+    <string name="rag_append_content_failed">追加内容失败</string>
+    <string name="rag_cannot_update_result_fragment_detached">无法更新结果，Fragment未附加到Activity</string>
+    <string name="rag_cannot_update_result_view_null">无法更新结果，Fragment的View为空</string>
+    <string name="rag_update_result_failed">更新结果失败</string>
+    <string name="rag_get_local_model_list">获取本地模型列表</string>
+    <string name="rag_model_dir_not_exist">模型目录不存在: %s</string>
+    <string name="rag_no_model_in_dir">模型目录中没有发现模型: %s</string>
+    <string name="rag_restore_local_model_selection">恢复本地模型选择: %s</string>
+    <string name="rag_get_local_models_success">成功获取本地模型列表: %d个模型</string>
+    <string name="rag_restore_online_model_selection">恢复在线模型选择: %s</string>
+    <string name="rag_get_models_success">成功获取模型列表: %d个模型</string>
+    <string name="rag_parse_model_list_failed">解析模型列表失败</string>
+    <string name="rag_qa_fragment_create">RagQaFragment已创建</string>
+    <string name="rag_qa_fragment_view_created">RagQaFragment视图已创建</string>
+    <string name="rag_qa_fragment_resume">RagQaFragment已恢复</string>
+    <string name="rag_qa_fragment_pause">RagQaFragment已暂停</string>
+    <string name="rag_qa_fragment_destroy">RagQaFragment已销毁</string>
+    <string name="rag_qa_fragment_query_start">开始RAG查询</string>
+    <string name="rag_qa_fragment_query_complete">RAG查询完成</string>
+    <string name="rag_qa_fragment_query_failed">RAG查询失败</string>
+    <string name="rag_qa_fragment_model_load">加载RAG模型</string>
+    <string name="rag_qa_fragment_model_ready">RAG模型就绪</string>
+    <string name="rag_qa_fragment_kb_load">加载知识库</string>
+    <string name="rag_qa_fragment_kb_ready">知识库就绪</string>
+
+    <!-- RagQueryManager 日志信息 -->
+    <string name="rag_query_no_kb_direct_prompt">不使用知识库，直接构建提示词: %s</string>
+    <string name="rag_query_kb_result_preview">知识库查询结果(前200字符): %s</string>
+    <string name="rag_query_no_kb_selected">未选择知识库，跳过知识库查询</string>
+    <string name="rag_query_start_query_kb">开始查询知识库: %s</string>
+    <string name="rag_query_read_kb_file">读取知识库文件: %s</string>
+    <string name="rag_query_kb_error">查询知识库错误</string>
+
+    <!-- KnowledgeBaseService 日志信息 -->
+    <string name="kb_service_started">知识库构建服务已启动</string>
+    <string name="log_knowledge_base_service_start_processing">开始处理知识库</string>
+    <string name="log_knowledge_base_service_processing_complete">知识库处理完成</string>
+    <string name="log_knowledge_base_service_processing_failed">知识库处理失败</string>
+    <string name="log_knowledge_base_service_notification_update">更新通知</string>
+    <string name="log_knowledge_base_service_notification_error">通知错误</string>
+    <string name="log_markwon_renderer_initialized">Markwon渲染器初始化完成</string>
+    <string name="log_search_depth_spinner_initialized">Search depth spinner initialized, current value: </string>
+    <string name="log_rerank_count_spinner_initialized">Rerank count spinner initialized, current value: </string>
+
+    <!-- Toast消息 -->
+    <string name="load_knowledge_base_selection_failed">加载知识库选择失败</string>
+
+    <!-- API URLs 字符串数组 -->
+    <string-array name="api_urls">
+        <item>http://localhost:11434/v1/</item>
+        <item>https://api.openai.com/v1/</item>
+    </string-array>
+    
+    <!-- Settings Fragment -->
+    <string name="title_settings">设置</string>
+    <string name="title_text_chunking_settings">文本分块设置</string>
+    <string name="label_chunk_size">分块大小\n(100~4000):</string>
+    <string name="label_overlap_size">重叠大小\n(20~800):</string>
+    <string name="label_min_chunk_size">最小分块限制\n(10~100):</string>
+    <string name="label_json_dataset_splitting">JSON训练集分块优化</string>
+    <string name="title_directory_settings">目录设置</string>
+    <string name="label_model_directory">模型目录:</string>
+    <string name="hint_model_path">模型文件目录路径</string>
+    <string name="label_embedding_model_directory">嵌入模型目录:</string>
+    <string name="hint_embedding_model_path">嵌入模型目录路径</string>
+    <string name="label_reranker_model_directory">重排模型目录:</string>
+    <string name="hint_reranker_model_path">重排模型目录路径</string>
+    <string name="label_knowledge_base_directory">知识库目录:</string>
+    <string name="hint_knowledge_base_path">知识库目录路径</string>
+    <string name="title_llm_inference_settings">LLM 推理设置</string>
+    <string name="label_max_sequence_length">最大序列长度\n(512~8192):</string>
+    <string name="label_inference_threads">推理线程数\n(1~16):</string>
+    <string name="label_max_output_tokens">最大输出token数\n(512~4096):</string>
+    <string name="label_manual_temperature">手动温度参数\n(0.0~2.0):</string>
+    <string name="label_manual_top_p">手动Top-P参数(0.0~1.0):</string>
+    <string name="label_manual_top_k">手动Top-K参数(10~100):</string>
+    <string name="label_manual_repeat_penalty">手动重复惩罚参数(0.0~2.0):</string>
+    <string name="label_priority_manual_params">优先手动参数</string>
+    <string name="title_global_settings">全局设置</string>
+    <string name="label_debug_mode">调试模式</string>
+    <string name="label_use_gpu">使用GPU加速（如果可用）</string>
+    <string name="label_font_size">字体大小</string>
+    <string name="text_font_size_value">字体大小: 16sp</string>
+    <string name="button_save_settings">保存设置</string>
+    <string name="button_select">选择</string>
+    <string name="button_new_conversation">新对话</string>
+    <string name="button_add_to_knowledge_base">添加到知识库</string>
+    <string name="label_api_url">API地址</string>
+    <string name="hint_api_url_example">例如: https://api.example.com</string>
+    <string name="label_api_key_optional">API密钥 (可选)</string>
+    <string name="hint_api_key_example">例如: sk-abcdefg123456</string>
+    <string name="title_help">StarLocalRAG 使用说明</string>
+    <string name="content_description_scroll_up">向上滚动</string>
+    <string name="content_description_scroll_down">向下滚动</string>
+    
+    <!-- 编译告警修复：添加缺失的字符串资源 -->
+    <string name="button_directory_settings">目录设置</string>
+    <string name="button_global_settings">全局设置</string>
+    <string name="button_llm_inference_settings">LLM推理设置</string>
+    <string name="button_text_chunk_settings">文本分块设置</string>
+    <string name="directory_settings">目录设置</string>
+    <string name="global_settings">全局设置</string>
+    <string name="help_title">帮助</string>
+    <string name="hint_api_address">输入API地址</string>
+    <string name="hint_api_key">输入API密钥</string>
+    <string name="label_api_address">API地址:</string>
+    <string name="label_api_key">API密钥:</string>
+    <string name="llm_inference_settings">LLM推理设置</string>
+    <string name="text_chunk_settings">文本分块设置</string>
+    <!-- 修复ModelDownloadFragment中缺失的字符串 -->
+    <string name="dialog_msg_dir_exists">以下目录已存在，继续下载将覆盖现有文件：</string>
+    <string name="button_interrupt">中断下载</string>
+
+    <string name="select_embedding_reranker">选择嵌入和重排模型</string>
+    <string name="select_embedding_model">选择嵌入模型</string>
+    
+    <!-- UI界面显示文本 -->
+    <string name="debug_info_header">##--- 调试信息 ---</string>
+    <string name="user_question">用户提问: %s</string>
+    <string name="kb_query_time">知识库查询耗时: %dms</string>
+    <string name="calling_llm_api">正在调用大模型API...</string>
+    <string name="similarity_info">相似度信息: %s</string>
+    <string name="chunk_size_info" formatted="false">分块大小: %d, 重叠大小: %d, 最小分块限制: %d</string>
+    
+    <!-- 知识库笔记界面 -->
+    <string name="processing_status">正在处理...</string>
+    <string name="found_embedding_model">找到嵌入模型：%s</string>
+    <string name="loading_model_wait">正在加载模型（可能需要几秒钟）...</string>
+    <string name="using_global_tokenizer">使用已初始化的全局分词器</string>
+    <string name="model_load_success_type">模型加载成功，类型：%s</string>
+    <string name="mark_model_start_use">标记模型开始使用，防止自动卸载</string>
+    <string name="adding_note_to_kb">正在将笔记添加到知识库...</string>
+    <string name="mark_model_end_use">标记模型使用结束，允许自动卸载</string>
+    <string name="chunk_params_info" formatted="false">使用分块参数：块大小=%d，重叠大小=%d，最小块大小=%d</string>
+    <string name="content_exceeds_chunk_size" formatted="false">内容长度(%d)超过分块大小(%d)，进行分块处理...</string>
+    <string name="chunk_complete_info">分块完成，共生成%d个文本块</string>
+    <string name="db_chunk_count_before">添加前数据库文本块数量: %d</string>
+    <string name="processing_chunk_info" formatted="false">处理文本块 %d/%d，长度: %d</string>
+    <string name="db_chunk_count_after">添加后数据库文本块数量: %d</string>
+    <string name="added_chunk_count">成功添加文本块数量: %d</string>
+    <string name="note_added_success">笔记已成功添加到知识库</string>
+    <string name="mark_model_end_use_error">标记模型使用结束（发生错误），允许自动卸载</string>
+
+    <!-- Additional UI Messages -->
+    <string name="tokenizer_init_failed">分词器初始化失败，将使用模型内置分词器</string>
+    <string name="add_chunk_failed">添加文本块 %1$d 失败</string>
+    <string name="new_chunk_count">新文本块数量: %1$d</string>
+    <string name="error_message">错误: %1$s</string>
+    
+    <!-- BuildKnowledgeBaseFragment Messages -->
+    <string name="interrupting_processing">正在中断处理...</string>
+    <string name="ready_waiting_create_kb">准备就绪，等待创建知识库...</string>
+    <string name="existing_kb_dimension">现有知识库维度</string>
+    <string name="current_model_dimension">当前模型维度</string>
+    <string name="battery_optimization_requested">已请求忽略电池优化，构建过程将在后台继续</string>
+    <string name="kb_rename_success">知识库重命名成功</string>
+    <string name="create_knowledge_base">创建知识库</string>
+    
+    <!-- RagQaFragment Messages -->
+    <string name="error_model_file_not_found">错误: 无法在选定的目录中找到模型文件</string>
+    <string name="using_embedding_model">正在使用嵌入模型: %s</string>
+    <string name="loading_embedding_model">正在加载嵌入模型...</string>
+    <string name="error_embedding_model_timeout">错误: 加载嵌入模型超时</string>
+    <string name="error_embedding_model_interrupted">错误: 等待模型加载被中断: %s</string>
+    <string name="error_embedding_model_failed">错误: 加载嵌入模型失败: %s</string>
+    <string name="error_embedding_handler_failed">错误: 创建嵌入模型处理器失败</string>
+    <string name="embedding_model_loaded_success">嵌入模型加载成功: %s</string>
+    <string name="warning_prompt_too_long">警告: 提示词长度超过4000字符，可能被模型截断</string>
+    <string name="calling_llm_api_progress">正在调用大模型API...</string>
+    <string name="model_answer_header">模型回答</string>
+    
+    <!-- KnowledgeNoteFragment Messages -->
+    <string name="warning_update_kb_metadata_error">警告：更新知识库元数据时发生错误: %s</string>
+    <string name="updating_kb_metadata">正在更新知识库元数据...</string>
+    <string name="using_selected_model_only">仅使用所选模型进行此次操作，不更新知识库元数据</string>
+    <string name="selected_new_embedding_model">已选择新的嵌入模型：%s</string>
+    <string name="error_embedding_timeout">错误：加载嵌入模型超时</string>
+    <string name="error_embedding_interrupted">错误：等待模型加载被中断: %s</string>
+    <string name="error_embedding_load_failed">错误：加载嵌入模型失败: %s</string>
+    <string name="error_embedding_handler_create_failed">错误：无法加载嵌入模型，可能是模型文件不兼容或损坏</string>
+    <string name="initializing_tokenizer">正在初始化分词器...</string>
+    <string name="tokenizer_init_success">分词器初始化成功，将使用统一分词策略</string>
+    <string name="error_sqlite_load_failed">错误：无法加载SQLite向量数据库</string>
+    <string name="mark_model_end_use_complete">标记模型使用结束，允许自动卸载</string>
+    <string name="chunk_params_used" formatted="false">使用分块参数：块大小=%d，重叠大小=%d，最小块大小=%d</string>
+    <string name="content_exceeds_chunk_size_processing" formatted="false">内容长度(%d)超过分块大小(%d)，进行分块处理...</string>
+    <string name="chunk_processing_complete">分块完成，共生成%d个文本块</string>
+    <string name="processing_text_chunk" formatted="false">处理文本块 %d/%d，长度: %d</string>
+    <string name="db_chunk_count_before_add">添加前数据库文本块数量: %d</string>
+    
+    <!-- HelpFragment Messages -->
+    <string name="help_doc_load_failed">无法加载帮助文档，请确保应用正确安装。</string>
+
+    <!-- RagQueryManager Messages -->
+    <string name="building_prompt">构建提示词...</string>
+    <string name="not_using_kb_building_prompt">不使用知识库，直接构建提示词</string>
+    <string name="api_type">API类型</string>
+
+    <!-- Additional KnowledgeNoteFragment Messages -->
+    <string name="error_load_sqlite_db">错误：无法加载SQLite向量数据库</string>
+    <string name="error_add_chunk_to_db">错误：无法添加文本块到数据库</string>
+    <string name="error_save_database">错误：无法保存数据库</string>
+    <string name="error_generate_embedding">错误：生成嵌入向量失败</string>
+    <string name="generating_embedding_vector">正在生成嵌入向量...</string>
+    <string name="saving_to_database">正在保存到数据库...</string>
+    <string name="chunk_added_success">文本块添加成功</string>
+    
+    <!-- Missing strings from compilation errors -->
+    <string name="use_selected_model_only">仅使用选定模型</string>
+    <string name="error_embedding_model_handler_failed">错误：嵌入模型处理器失败</string>
+    <string name="chunking_text">正在分块文本</string>
+    <string name="text_chunking_complete">文本分块完成，共%d块</string>
+    <string name="adding_chunk_progress" formatted="false">正在添加文本块 %d/%d</string>
+    <string name="all_chunks_added">所有文本块添加完成</string>
+    <string name="model_response">模型回复</string>
+    
+    <!-- KnowledgeNoteFragment 进度消息 -->
+    <string name="progress_mark_model_end_use">标记模型使用结束，允许自动卸载</string>
+    <string name="progress_chunk_params_info" formatted="false">使用分块参数：块大小=%d，重叠大小=%d，最小块大小=%d</string>
+    <string name="progress_db_chunk_count_before">添加前数据库文本块数量: %d</string>
+    <string name="progress_kb_metadata_updated">已更新知识库元数据中的模型信息</string>
+    <string name="warning_sqlite_load_failed">警告：加载SQLite向量数据库失败</string>
+    <string name="progress_new_db_metadata_created">已创建新的数据库元数据</string>
+    <string name="warning_update_db_metadata_failed">警告：更新数据库元数据失败: %s</string>
+    <string name="warning_update_kb_metadata_failed">警告：更新知识库元数据时发生错误: %s</string>
+    
+    <!-- 注意：以下资源已存在，请复用现有资源 -->
+    <!-- 分享日志: 使用 menu_share_logs -->
+    <!-- 清空日志: 使用 menu_clear_logs -->
+    <!-- 应用可能无法正常工作: 使用 toast_app_may_not_work_short -->
+    <!-- 无法打开文件访问权限设置: 使用 toast_cannot_open_file_permission_settings -->
+    <!-- 电池优化提示: 使用 toast_please_re_enable_battery_optimization -->
+    <!-- 请至少选择一个模型: 使用 dialog_select_at_least_one_model -->
+    <!-- 设置已保存: 使用 toast_settings_saved -->
+    <!-- 保存设置失败: 使用 toast_save_settings_failed -->
+    <!-- 删除API地址: 使用 dialog_title_delete_api_url -->
+    <!-- API地址不能为空: 使用 toast_api_url_empty -->
+    <!-- API地址已添加: 使用 toast_api_url_added -->
+    
+    <!-- 新增的唯一资源 -->
+    <string name="comment_refresh_log">刷新日志内容</string>
+    <string name="comment_copy_all">复制全部文本</string>
+    <string name="clipboard_log_content">日志内容</string>
+    <string name="dialog_title_add_api_url_simple">添加API地址</string>
+
+</resources>

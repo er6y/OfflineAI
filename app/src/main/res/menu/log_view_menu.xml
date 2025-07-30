@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    
+    <item
+        android:id="@+id/action_refresh"
+        android:title="@string/common_refresh"
+        android:icon="@android:drawable/ic_popup_sync"
+        app:showAsAction="ifRoom" />
+    
+    <item
+        android:id="@+id/action_clear_log"
+        android:title="@string/menu_clear_logs"
+        android:icon="@android:drawable/ic_menu_delete"
+        app:showAsAction="ifRoom" />
+        
+    <item
+        android:id="@+id/action_share_log"
+        android:title="@string/menu_share_logs"
+        android:icon="@android:drawable/ic_menu_share"
+        app:showAsAction="ifRoom" />
+    
+    <item
+        android:id="@+id/action_select_all"
+        android:title="@string/common_select_all"
+        app:showAsAction="never" />
+    
+    <item
+        android:id="@+id/action_copy"
+        android:title="@string/common_copy"
+        app:showAsAction="never" />
+        
+    <item
+        android:id="@+id/action_close"
+        android:title="@string/common_close"
+        android:icon="@android:drawable/ic_menu_close_clear_cancel"
+        app:showAsAction="always" />
+</menu>

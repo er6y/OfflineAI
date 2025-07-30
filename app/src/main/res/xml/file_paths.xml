@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 共享内部存储文件 -->
+    <files-path name="files" path="." />
+    <!-- 共享缓存文件 -->
+    <cache-path name="cache" path="." />
+    <!-- 共享外部存储文件 -->
+    <external-files-path name="external_files" path="." />
+    <!-- 共享外部缓存文件 -->
+    <external-cache-path name="external_cache" path="." />
+    <!-- 共享下载文件 -->
+    <external-path name="external" path="." />
+</paths>

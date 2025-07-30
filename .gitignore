@@ -1,0 +1,114 @@
+# Built application files
+*.aab
+*.aar
+
+# Files for the ART/Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+
+# Gradle files
+.gradle/
+build/
+# 不要保留 JNI 工程的 build 目录，这些是临时构建产物
+
+# Local configuration files (sdk path, etc)
+local.properties
+
+# Log files
+*.log
+
+# Android Studio Navigation editor files
+.navigation/
+
+# Android Studio captures folder
+captures/
+
+# IntelliJ
+*.iml
+.idea/
+
+# Keystore files
+*.jks
+*.keystore
+
+# External native build folder created in Android Studio 2.2 and later
+.externalNativeBuild/
+.cxx/
+
+# Google Services (e.g. APIs or Firebase)
+google-services.json
+
+# Version control ignored files
+.DS_Store
+
+# Rust specific ignores
+**/target/
+**/*.rs.bk
+**/Cargo.lock
+
+# Keep necessary JNI libs
+!**/jniLibs/**
+
+# Rust FFI build files to keep
+!libs/tokenizers-jni/src/main/jniLibs/
+!libs/tokenizers-jni/src/main/jniLibs/**
+
+# App JNI libs
+!app/src/main/jniLibs/
+!app/src/main/jniLibs/**
+
+# Rust source files to keep
+!libs/tokenizers-jni/src/rust/
+!libs/tokenizers-jni/src/rust/**
+
+# Ignore Rust build artifacts
+libs/tokenizers-jni/src/rust/target/
+
+# App data directories
+embeddings/
+knowledge_bases/
+models/
+
+# 特定项目文件
+transformers-main/
+transformers/
+test_onnx.py
+
+# 保留必要的tokenizer配置文件
+!**/src/main/assets/tokenizer_config.json
+!**/src/main/assets/tokenizer.json
+
+# 忽略临时文件
+*.tmp
+*.temp
+*.swp
+*~
+
+# 忽略编译生成的中间文件
+*.o
+# *.so - 不排除 .so 文件，因为我们需要 JNI 库文件
+*.a
+*.la
+*.lai
+*.lo
+
+# 大文件现在通过 Git LFS 管理
+# **/*.so - 现在通过 LFS 管理
+# *.apk - 现在通过 LFS 管理
+# *.aab - 现在通过 LFS 管理
+
+# 排除其他大的发布文件
+app/release/
+
+# JNI库文件现在通过 LFS 管理
+# app/src/main/jniLibs/ - 现在通过 LFS 管理
+/log.ini
+/app/debug
+/Rerankers

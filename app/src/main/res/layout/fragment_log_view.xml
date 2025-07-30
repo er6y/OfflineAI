@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp">
+
+    <TextView
+        android:id="@+id/textViewLog"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="#F0F0F0"
+        android:padding="8dp"
+        android:textSize="10sp"
+        android:textIsSelectable="true"
+        android:longClickable="true"
+        android:focusable="true"
+        android:clickable="true"
+        android:scrollbars="vertical"
+        android:fontFamily="monospace"
+        android:gravity="top|start"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="@id/scrollbarTrack" />
+
+    <!-- 滚动条轨道 -->
+    <View
+        android:id="@+id/scrollbarTrack"
+        android:layout_width="12dp"
+        android:layout_height="0dp"
+        android:background="#E0E0E0"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- 滚动条滑块 -->
+    <View
+        android:id="@+id/scrollbarThumb"
+        android:layout_width="8dp"
+        android:layout_height="50dp"
+        android:layout_marginStart="2dp"
+        android:layout_marginEnd="2dp"
+        android:background="#888888"
+        app:layout_constraintEnd_toEndOf="@id/scrollbarTrack"
+        app:layout_constraintStart_toStartOf="@id/scrollbarTrack"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- 向上按钮 -->
+    <ImageButton
+        android:id="@+id/buttonScrollUp"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:background="@android:color/transparent"
+        android:src="@android:drawable/arrow_up_float"
+        android:scaleType="fitCenter"
+        android:padding="2dp"
+        android:contentDescription="@string/content_description_scroll_up"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@id/textViewLog" />
+
+    <!-- 向下按钮 -->
+    <ImageButton
+        android:id="@+id/buttonScrollDown"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:background="@android:color/transparent"
+        android:src="@android:drawable/arrow_down_float"
+        android:scaleType="fitCenter"
+        android:padding="2dp"
+        android:contentDescription="@string/content_description_scroll_down"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toEndOf="@id/textViewLog" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

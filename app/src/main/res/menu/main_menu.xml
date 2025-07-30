@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    
+    <item
+        android:id="@+id/action_settings"
+        android:title="@string/menu_settings"
+        android:orderInCategory="100"
+        app:showAsAction="never" />
+        
+    <item
+        android:id="@+id/action_default_model_download"
+        android:title="@string/menu_default_model_download"
+        android:orderInCategory="125"
+        app:showAsAction="never" />
+        
+    <item
+        android:id="@+id/action_about"
+        android:title="@string/menu_about"
+        android:orderInCategory="150"
+        app:showAsAction="never" />
+        
+    <item
+        android:id="@+id/action_help"
+        android:title="@string/menu_help"
+        android:orderInCategory="160"
+        app:showAsAction="never" />
+        
+    <item
+        android:id="@+id/action_view_log"
+        android:title="@string/menu_view_log"
+        android:orderInCategory="175"
+        app:showAsAction="never" />
+        
+    <item
+        android:id="@+id/action_switch_language"
+        android:title="@string/menu_switch_language"
+        android:orderInCategory="180"
+        app:showAsAction="never" />
+        
+    <item
+        android:id="@+id/action_exit"
+        android:title="@string/menu_exit"
+        android:orderInCategory="200"
+        app:showAsAction="never" />
+        
+</menu>

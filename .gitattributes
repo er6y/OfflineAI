@@ -1,0 +1,20 @@
+# Git LFS configuration for StarLocalRAG
+
+# APK files - large release builds
+*.apk filter=lfs diff=lfs merge=lfs -text
+
+# JNI library files - native shared libraries
+*.so filter=lfs diff=lfs merge=lfs -text
+
+# Additional large binary files that might be added in the future
+*.aar filter=lfs diff=lfs merge=lfs -text
+*.jar filter=lfs diff=lfs merge=lfs -text
+
+# Model files (if any GGUF or ONNX models are added)
+*.gguf filter=lfs diff=lfs merge=lfs -text
+*.onnx filter=lfs diff=lfs merge=lfs -text
+*.bin filter=lfs diff=lfs merge=lfs -text
+
+# Specific files mentioned in the request
+StarLocalRAG_release20250709230825.apk filter=lfs diff=lfs merge=lfs -text
+app/src/main/jniLibs/**/*.so filter=lfs diff=lfs merge=lfs -text

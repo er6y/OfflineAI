@@ -1,0 +1,1013 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">StarLocalRAG</string>
+    
+    <!-- Common status strings -->
+    <string name="common_success">Success</string>
+    <string name="common_error">Error</string>
+    <string name="common_failed">Failed</string>
+    <string name="common_warning">Warning</string>
+    <string name="common_info">Info</string>
+    <string name="common_pending">Pending</string>
+    <string name="common_timeout">Timeout</string>
+    <string name="common_cancelled">Cancelled</string>
+    <string name="common_retry">Retry</string>
+    <string name="common_running">Running</string>
+    <string name="common_completed">Completed</string>
+    <string name="common_stopped">Stopped</string>
+    <string name="common_ready">Ready</string>
+    <string name="common_not_ready">Not Ready</string>
+    <string name="common_available">Available</string>
+    <string name="common_unavailable">Unavailable</string>
+    <string name="common_enabled">Enabled</string>
+    <string name="common_disabled">Disabled</string>
+    <string name="common_connected">Connected</string>
+    <string name="common_disconnected">Disconnected</string>
+    <string name="common_online">Online</string>
+    <string name="common_offline">Offline</string>
+    <string name="common_idle">Idle</string>
+    <string name="common_busy">Busy</string>
+    <string name="common_none">None</string>
+    <string name="common_yes">Yes</string>
+    <string name="common_no">No</string>
+    <string name="common_loading">Loading…</string>
+    <string name="common_processing">Processing</string>
+    <string name="common_preparing">Preparing</string>
+    <string name="common_paused">Paused</string>
+    <string name="common_initializing">Initializing</string>
+    <string name="common_downloading">Downloading</string>
+    <string name="common_uploading">Uploading</string>
+    <string name="common_analyzing">Analyzing…</string>
+    <string name="common_saving">Saving</string>
+    <string name="common_generating">Generating…</string>
+    <string name="common_connecting">Connecting…</string>
+    <string name="common_waiting">Waiting…</string>
+    <string name="common_custom">Custom</string>
+    <string name="common_copy">Copy</string>
+    <string name="common_new">New</string>
+    <string name="common_create">Create</string>
+    <string name="common_update">Update</string>
+    <string name="common_query">Query</string>
+    <string name="common_select_all">Select All</string>
+    <string name="common_new_with_dots">New…</string>
+    <string name="common_close">Close</string>
+    
+    <string name="common_ok">OK</string>
+    <string name="common_cancel">Cancel</string>
+    <string name="common_delete">Delete</string>
+    <string name="common_clear">Clear</string>
+    <string name="common_confirm">Confirm</string>
+    <string name="common_save">Save</string>
+    <string name="common_refresh">Refresh</string>
+    <string name="common_edit">Edit</string>
+    <string name="common_add">Add</string>
+    <string name="common_remove">Remove</string>
+    <string name="common_back">Back</string>
+    <string name="common_next">Next</string>
+    <string name="common_previous">Previous</string>
+    <string name="common_export">Export</string>
+    <string name="common_import">Import</string>
+    <string name="common_share">Share</string>
+    <string name="common_continue">Continue</string>
+    <string name="common_finish">Finish</string>
+    <string name="common_start">Start</string>
+    <string name="common_stop">Stop</string>
+    <string name="common_pause">Pause</string>
+    <string name="common_paste">Paste</string>
+    <string name="common_cut">Cut</string>
+    <string name="common_overwrite">Overwrite</string>
+    <string name="common_append">Append</string>
+    <string name="common_reset">Reset</string>
+    <string name="common_apply">Apply</string>
+    <string name="common_upload">Upload</string>
+    <string name="common_download">Download</string>
+    <string name="common_downloaded">Downloaded</string>
+    <string name="common_loaded">Loaded</string>
+    <string name="common_fetch_failed">Fetch Failed</string>
+    <string name="common_unknown">Unknown</string>
+    <string name="common_unknown_state">Unknown State</string>
+    <string name="common_operation_failed">Operation Failed</string>
+    <string name="common_parse_failed">Parse Failed</string>
+    <string name="common_download_failed">Download Failed</string>
+    <string name="common_build_failed">Build Failed</string>
+    <string name="common_unknown_validation">Unknown Validation Error</string>
+    <string name="common_unknown_error">Unknown Error</string>
+    <string name="common_unknown_operation">Unknown Operation</string>
+    <string name="common_unknown_file_type">Unknown File Type</string>
+    <string name="common_unknown_model">Unknown Model</string>
+    
+    <!-- MainActivity 生命周期日志 -->
+    <string name="main_activity_on_create">MainActivity Created</string>
+    <string name="main_activity_on_destroy">MainActivity Destroyed</string>
+    <string name="main_activity_on_pause">MainActivity Paused</string>
+    <string name="main_activity_on_resume">MainActivity Resumed</string>
+    <string name="main_activity_on_stop">MainActivity Stopped</string>
+    <string name="main_activity_on_start">MainActivity Started</string>
+    <string name="main_activity_on_restart">MainActivity Restarted</string>
+
+    <!-- Embedding model related -->
+    <string name="embedding_model_root_directory">Root Directory</string>
+
+    <!-- Reranker model related -->
+    <!-- <string name="reranker_model_none">无</string> 使用 common_none -->
+    <string name="reranker_model_bge_reranker">BGE Reranker</string>
+    <!-- <string name="reranker_model_custom">自定义</string> 使用 common_custom -->
+    <string name="reranker_model_unknown">Unknown Reranker Model</string>
+    <string name="reranker_task_complete">Reranker task completed, releasing model occupation status</string>
+    <string name="reranker_model_manager_load_success">Reranker model loaded successfully: %s</string>
+    <string name="reranker_current_model_status">Current model status: %s</string>
+    <string name="reranker_model_manager_init">Initializing RerankerModelManager</string>
+
+    <!-- Progress keywords -->
+    <string name="progress_blocks_generated_keyword">(Generated</string>
+    <string name="progress_text_extraction_keyword">Extracting text</string>
+    <string name="progress_vectorization_keyword">Generating vectors</string>
+
+    <!-- Navigation items -->
+    <string name="navigation_rag_qa">RAG Q&amp;A</string>
+    <string name="navigation_build_kb">Build Knowledge Base</string>
+    <string name="navigation_kb_note">Knowledge Base Notes</string>
+
+    <!-- Menu items -->
+    <string name="menu_view_log">View Log</string>
+    <string name="menu_switch_language">Switch Language</string>
+    <string name="menu_item_transfer_to_note">Transfer to Note</string>
+    <!-- <string name="menu_close">关闭</string> 使用 common_close -->
+    <string name="menu_view_logs">View Logs</string>
+    <!-- <string name="menu_refresh">刷新</string> 使用 common_refresh -->
+    <string name="menu_clear_logs">Clear Logs</string>
+    <string name="menu_share_logs">Share Logs</string>
+    <string name="menu_build_kb">Build Knowledge Base</string>
+    <string name="menu_kb_note">Knowledge Base Notes</string>
+    <string name="menu_convert_to_note">Convert to Note</string>
+    <string name="menu_switch_to_english">Switch to English</string>
+    <string name="menu_switch_to_chinese">切换中文</string>
+    <string name="menu_settings">Settings</string>
+    <string name="menu_about">About</string>
+    <string name="menu_help">Help</string>
+    <string name="menu_exit">Exit</string>
+    <string name="menu_default_model_download">Default Model Download</string>
+
+    <!-- Common buttons -->
+    <string name="button_new_kb">New Knowledge Base</string>
+    <string name="button_create_kb">Create Knowledge Base</string>
+    <string name="button_go_to_settings">Go to Settings</string>
+    <string name="button_stop_with_icon">Stop ■</string>
+    <string name="button_browse">Browse</string>
+    <string name="button_deselect_all">Deselect All</string>
+    <string name="button_download_models">Download Selected Models</string>
+    <string name="button_switch_to_chinese">切换中文</string>
+
+    <!-- TextChunkProcessor logs -->
+    <string name="text_chunk_processor_init">TextChunkProcessor initialized</string>
+    <string name="text_chunk_processor_create_chunks">Creating text chunks, total characters: %d</string>
+    <string name="text_chunk_processor_chunk_created" formatted="false">Created text chunk %1$d, characters: %2$d</string>
+    <string name="text_chunk_processor_final_chunk_created">Total %d text chunks created</string>
+    <string name="text_chunk_processor_cleanup">Cleaning up TextChunkProcessor resources</string>
+    <string name="text_chunk_processor_invalid_input">Invalid input text</string>
+    <string name="text_chunk_processor_chunk_too_large">Text chunk %d exceeds maximum size limit, will be truncated</string>
+    <string name="text_chunk_processor_split_by_sentence">Splitting text by sentences</string>
+    <string name="text_chunk_processor_sentence_count">Found %d sentences</string>
+    <string name="text_chunk_processor_combine_sentences">Combining sentences into text chunks</string>
+    <string name="text_chunk_processor_created_chunks">Created %d text chunks</string>
+    <string name="text_chunk_processor_error">Error processing text chunks: %s</string>
+
+    <!-- Common messages -->
+
+    <string name="message_please_wait">Please wait…</string>
+    <string name="message_operation_completed">Operation completed</string>
+
+
+    <!-- ConfigManager log information -->
+    <string name="config_not_exist">Configuration file does not exist, creating default configuration</string>
+    <string name="config_read_failed">Failed to read configuration file</string>
+    <string name="config_parse_failed">Failed to parse configuration file</string>
+    <string name="config_missing_key">Configuration file missing required item: %s, adding default value</string>
+    <string name="config_add_default_failed">Failed to add default configuration item</string>
+    <string name="config_missing_api_keys">Configuration file missing API Keys, adding default values</string>
+    <string name="config_add_api_keys_failed">Failed to add default API Keys</string>
+    <string name="config_corrupted">Configuration file corrupted, resetting to default configuration</string>
+    <string name="config_load_failed">Failed to load configuration</string>
+    <string name="config_save_default_failed">Failed to save default configuration</string>
+    <string name="config_saved">Configuration saved to: %s</string>
+    <string name="config_save_failed">Failed to save configuration</string>
+    <string name="config_get_string_failed">Failed to get string configuration</string>
+    <string name="config_get_int_failed">Failed to get integer configuration</string>
+    <string name="config_get_boolean_failed">Failed to get boolean configuration</string>
+    <string name="config_try_read_metadata">Attempting to read knowledge base metadata</string>
+    <string name="config_kb_dir_not_exist">Knowledge base directory does not exist</string>
+    <string name="config_found_sqlite_db">Found SQLite database file, attempting to read embedding model information</string>
+    <string name="config_read_embedding_from_sqlite">Read embedding model directory from SQLite database</string>
+    <string name="config_search_in_setting_path">Attempting to search in configured embedding model path</string>
+    <string name="config_found_embedding_file">Found embedding model file</string>
+    <string name="config_embedding_file_not_exist">Embedding model file does not exist</string>
+    <string name="config_read_sqlite_failed">Failed to read SQLite database</string>
+    <string name="config_close_sqlite_failed">Failed to close SQLite database</string>
+    <string name="config_found_metadata_json">Found metadata.json file, attempting to read embedding model information</string>
+    <string name="config_read_embedding_from_json">Read embedding model from metadata.json</string>
+    <string name="config_read_metadata_json_failed">Failed to read metadata.json file</string>
+    <string name="config_search_embedding_in_kb_dir">Attempting to search for embedding model files in knowledge base directory</string>
+    <string name="config_found_possible_embedding">Found possible embedding model file</string>
+    <string name="config_found_possible_model">Found possible model file</string>
+    <string name="config_search_embedding_error">Error occurred while searching for embedding model files</string>
+    <string name="config_no_embedding_found">Unable to find any available embedding models</string>
+    <string name="config_save_api_key_failed">Failed to save API Key mapping</string>
+    <string name="config_get_api_key_failed">Failed to get API Key mapping</string>
+    <string name="config_get_system_prompts_failed">Failed to get system prompts list</string>
+    <string name="config_save_system_prompt_failed">Failed to save system prompt</string>
+    <string name="config_get_model_mapping_failed">Failed to get model mapping configuration</string>
+    <string name="config_default_system_prompt">Answer based on retrieved content,</string>
+
+    <!-- Validation information -->
+    <string name="validation_kb_name_cannot_be_empty">Knowledge base name cannot be empty</string>
+    <string name="validation_please_select_files">Please select files</string>
+    <string name="validation_please_select_valid_embedding">Please select a valid embedding model</string>
+    <string name="validation_api_url_empty">API URL cannot be empty</string>
+    <string name="validation_api_key_empty">API Key cannot be empty</string>
+    <string name="validation_model_name_empty">Model name cannot be empty</string>
+    <string name="validation_file_path_empty">File path cannot be empty</string>
+    <string name="validation_invalid_url">Invalid URL format</string>
+    <string name="validation_invalid_file">Invalid file</string>
+    <string name="validation_unsupported_format">Unsupported file format</string>
+    <string name="validation_kb_name_empty">Knowledge base name cannot be empty</string>
+
+
+    <!-- Dialog titles -->
+
+    <string name="dialog_title_error">Error</string>
+    <string name="dialog_title_warning">Warning</string>
+    <string name="dialog_title_info">Information</string>
+    <string name="dialog_title_settings">Settings</string>
+
+    <string name="dialog_title_help">Help</string>
+    <string name="dialog_title_model_download">Model Download</string>
+    <string name="dialog_title_kb_creation">Knowledge Base Creation</string>
+    <string name="dialog_title_file_selection">File Selection</string>
+    <string name="dialog_title_new_kb">New Knowledge Base</string>
+    <string name="dialog_title_model_mismatch_warning">Model Mismatch Warning</string>
+    <string name="dialog_title_select_embedding_reranker">Select Embedding Model and Reranker Model</string>
+    <string name="dialog_title_confirm_interrupt">Confirm Interrupt</string>
+    <string name="dialog_title_kb_exists">Knowledge Base Exists</string>
+    <string name="dialog_title_embedding_model_not_found">Embedding Model Not Found</string>
+    <string name="dialog_title_select_embedding_model">Select Embedding Model</string>
+    <string name="dialog_message_embedding_model_not_found">No embedding model files found in %1$s directory.\n\nPlease copy model files (.onnx or .gguf format) to this directory and try again.\n\nOriginal model: %2$s</string>
+
+
+    <string name="dialog_title_add_api_url">Add New API Address</string>
+    <string name="dialog_title_delete_api_url">Delete API Address</string>
+
+    <!-- Dialog messages -->
+    <string name="dialog_message_enter_kb_name">Enter knowledge base name</string>
+    <string name="dialog_message_model_mismatch">Existing model:</string>
+    <string name="dialog_message_current_model">Current model:</string>
+    <string name="dialog_message_mismatch_warning">Model mismatch, continue anyway?</string>
+    <string name="dialog_message_confirm_interrupt">Are you sure you want to interrupt the current knowledge base creation process? Processed data will be retained.</string>
+    <string name="dialog_message_kb_exists">Knowledge base "%1$s" already exists. How would you like to proceed?</string>
+    <string name="dialog_title_need_full_file_access">Full File Access Required</string>
+    <string name="dialog_message_need_full_file_access">StarLocalRAG requires full file access to function properly. Please grant permission on the next settings page. This permission will not be requested again after granting.</string>
+    <string name="dialog_title_need_storage_permission">Storage Permission Required</string>
+    <string name="dialog_message_need_storage_permission">StarLocalRAG needs external storage access to read and save model files, knowledge base files, etc.\n\nPlease grant storage permission in settings, otherwise the app will not function properly.</string>
+    <string name="dialog_title_about">About StarLocalRAG</string>
+    <string name="dialog_message_about">Version: %1$s\n\nLocal RAG (Retrieval Augmented Generation) Application</string>
+    <string name="dialog_add_new_api_address">Add New API Address</string>
+
+
+    <string name="dialog_delete_api_address">Delete API Address</string>
+    <string name="dialog_confirm_delete_api_address">Are you sure you want to delete this API address?</string>
+    <string name="dialog_message_confirm_delete">Are you sure you want to delete this item?</string>
+    <string name="dialog_message_confirm_clear">Are you sure you want to clear all data?</string>
+    <string name="dialog_message_unsaved_changes">You have unsaved changes. Do you want to save?</string>
+    <string name="dialog_message_operation_in_progress">Operation in progress, please wait…</string>
+    <string name="dialog_message_no_internet">No internet connection available</string>
+    <string name="dialog_message_storage_permission">Storage permission required to access files</string>
+    <string name="dialog_message_model_not_found">Model not found, please download first</string>
+    <string name="dialog_message_kb_not_found">Knowledge base not found, please create first</string>
+    <string name="dialog_message_delete_api_url">Are you sure you want to delete API address \"%1$s\"?</string>
+
+    <!-- Success messages -->
+    <string name="success_config_saved">Configuration saved successfully</string>
+    <string name="success_model_downloaded">Model downloaded successfully</string>
+    <string name="success_kb_created">Knowledge base created successfully</string>
+    <string name="success_file_imported">File imported successfully</string>
+    <string name="success_data_exported">Data exported successfully</string>
+    <string name="success_operation_completed">Operation completed successfully</string>
+    <string name="success_kb_name_added">Knowledge base name added</string>
+
+    <!-- Error messages -->
+    <string name="error_vector_dimension_mismatch">Vector dimension mismatch</string>
+    <string name="error_dimension_must_match">Dimensions must match</string>
+    <string name="error_check_vector_dimension">Error checking vector dimension</string>
+    <string name="error_network">Network error</string>
+    <string name="error_permission_denied">Permission denied</string>
+
+    <string name="error_config_load">Failed to load configuration</string>
+    <string name="error_config_save">Failed to save configuration</string>
+    <string name="error_model_download">Model download failed</string>
+    <string name="error_model_load">Model loading failed</string>
+    <string name="error_kb_creation">Knowledge base creation failed</string>
+    <string name="error_kb_load">Knowledge base loading failed</string>
+    <string name="error_file_read">File reading failed</string>
+    <string name="error_file_write">File writing failed</string>
+    <string name="error_storage_full">Insufficient storage space</string>
+    <string name="error_invalid_input">Invalid input</string>
+
+
+    <!-- Processing status -->
+    <string name="processing_status_overwrite_deleted">Overwrite deleted</string>
+    <string name="processing_status_task_interrupted">Task interrupted</string>
+    <string name="processing_status_kb_creation_completed">Knowledge base creation completed</string>
+    
+    <!-- Knowledge base build status messages -->
+    <string name="kb_build_completed">Knowledge base build completed: %s</string>
+    <string name="kb_build_cancelled">Knowledge base build cancelled</string>
+    <string name="kb_build_success_log">Knowledge base build successfully completed: %s</string>
+    <string name="kb_build_cancelled_log">Knowledge base build cancelled: %s</string>
+    <string name="kb_build_failed_log">Knowledge base build failed</string>
+    <!-- 使用统一的资源名称，删除重复定义 -->
+    <string name="processing_status_text_extraction_complete">Text extraction complete</string>
+    <string name="processing_status_vectorization_complete">Vectorization complete</string>
+    <string name="text_extraction_complete_chunks">Total %d text chunks</string>
+    <string name="vectorization_complete_vectors">Generated %d vectors in total</string>
+
+    <!-- Model status - merged to common_ prefix -->
+    <string name="model_status_please_select_embedding">Please select embedding model</string>
+    <string name="model_status_directory_not_exist">Directory does not exist</string>
+    <string name="model_status_not_found">Not found</string>
+    <string name="model_status_no_available">No available</string>
+
+    <!-- Model state display text - merged to common_ prefix -->
+    <string name="model_state_not_downloaded">Not downloaded</string>
+    <string name="model_state_unloaded">Not loaded</string>
+    <string name="model_state_no_available">No available models</string>
+    <string name="model_state_fetching">Fetching</string>
+    <!-- Knowledge base state display text - merged to common_ prefix -->
+    <string name="kb_state_building">Building</string>
+    <string name="kb_state_built">Built</string>
+    <string name="kb_state_not_built">Not built</string>
+    <string name="kb_state_empty">Empty knowledge base</string>
+    <string name="kb_state_please_create">Please create knowledge base first</string>
+
+    <!-- Progress state display text - merged to common_ prefix -->
+    <string name="progress_state_paused">Paused</string>
+
+    <!-- 使用统一的资源名称，删除重复定义 -->
+    <string name="progress_text_extraction_complete">Text extraction complete</string>
+    <string name="progress_vectorization_complete">Vectorization processing complete</string>
+
+    <!-- API URL -->
+    <string name="api_url_local">Local</string>
+    <string name="api_url_openai">OpenAI</string>
+
+    <!-- Input hints -->
+    <string name="hint_enter_new_kb_name">Please enter new knowledge base name</string>
+    <string name="hint_enter_title">Please enter title</string>
+    <string name="hint_enter_content">Please enter content</string>
+    <string name="hint_enter_question">Enter your question here…</string>
+    <string name="hint_enter_api_url">Enter API URL</string>
+    <string name="hint_enter_api_key">Enter API Key</string>
+    <string name="hint_enter_model_name">Enter model name</string>
+    <string name="hint_enter_kb_name">Enter knowledge base name</string>
+    <string name="hint_enter_file_path">Enter file path</string>
+    <string name="hint_search">Search…</string>
+    <string name="hint_filter">Filter…</string>
+    <string name="hint_enter_text">Enter text…</string>
+    <string name="hint_enter_name">Enter name…</string>
+    <string name="hint_enter_description">Enter description…</string>
+    <string name="hint_model_dir_path">Model file directory path</string>
+    <string name="hint_embedding_dir_path">Embedding model directory path</string>
+    <string name="hint_reranker_dir_path">Reranker model directory path</string>
+    <string name="hint_kb_dir_path">Knowledge base directory path</string>
+
+    <!-- UI text -->
+    <string name="text_new_conversation">New Conversation</string>
+    <string name="text_thinking_mode">Thinking Mode</string>
+    <string name="label_llm_api_url">LLM API URL:</string>
+    <string name="label_llm_api_key">LLM API Key:</string>
+    <string name="label_llm_model">LLM Model:</string>
+    <string name="label_knowledge_base">Knowledge Base:</string>
+    <string name="label_search_depth">Search Count:</string>
+    <string name="label_rerank_count">Rerank Count:</string>
+    <string name="label_system_prompt">System Prompt:</string>
+    <string name="label_user_prompt">User Question:</string>
+    <string name="label_title">Title:</string>
+    <string name="label_content">Content:</string>
+    <string name="label_add_progress">Add Progress:</string>
+    <string name="content_description_delete_api_url">Delete API URL</string>
+    <string name="button_send">Send ▶</string>
+    <string name="dialog_model_not_found">Original model not found, please select alternative model</string>
+    <string name="dialog_select_embedding_model">Please select the embedding model to use:</string>
+    <string name="dialog_select_reranker_model">Please select the reranker model to use:</string>
+    <string name="dialog_remember_choice">Remember this choice, use automatically next time</string>
+    <string name="title_default_model_download">Default Model Download</string>
+    <string name="title_embedding_model_list">Embedding Model List</string>
+    <string name="title_reranker_model_list">Reranker Model List</string>
+    <string name="title_llm_list">LLM List</string>
+    <string name="title_download_progress">Download Progress</string>
+    <string name="text_waiting_download">Waiting for download…</string>
+    <string name="button_download_selected_models">Download Selected Models</string>
+    <string name="title_best_practice">Best Practice Guide</string>
+    <string name="text_best_practice_description">Word embedding and reranker models use ONNX Runtime inference for optimal broad model support, requiring ONNX format with corresponding model configuration files and tokenizer files. Users can place them separately in the corresponding directories in settings. Note that knowledge base generation and RAG need to use consistent models.\n\nLocal LLM inference uses llama.cpp structure LLMs, requiring GGUF format, preferably with corresponding params files. Users can place them separately in the corresponding directories in settings. Due to mobile computing power and memory limitations, maximum support is around 4B models. Better experience is with models below 2B. Local LLMs have weak capabilities and poor performance, suitable for learning and research. For practical use, online large models are recommended.\n\nSee help for details</string>
+    <string name="button_browse_files">Browse Files</string>
+    <string name="label_embedding_model">Embedding Model:</string>
+    <string name="label_reranker_model">Reranker Model:</string>
+    <string name="label_selected_files">Selected Files:</string>
+    <string name="label_processing_progress">Processing Progress:</string>
+    <string name="text_ready_to_create_kb">Ready, waiting to create knowledge base…</string>
+    <string name="label_knowledge_base_name">Knowledge Base Name:</string>
+    <string name="text_clear_list">Clear List</string>
+
+    <string name="text_new_kb">New Knowledge Base</string>
+    <string name="text_add_to_kb">Add to Knowledge Base</string>
+    <string name="text_settings">Settings</string>
+    <string name="text_text_chunk_settings">Text Chunking Settings</string>
+    <string name="text_directory_settings">Directory Settings</string>
+    <string name="text_select">Select</string>
+    <string name="text_priority_manual_params">Prioritize Manual Parameters</string>
+    <string name="text_global_settings">Global Settings</string>
+    <string name="text_debug_mode">Debug Mode</string>
+    <string name="text_font_size">Font Size</string>
+    <string name="text_save_settings">Save Settings</string>
+    <string name="text_default_model_download">Default Model Download</string>
+    <string name="text_embedding_model_list">Embedding Model List</string>
+    <string name="text_reranker_model_list">Reranker Model List</string>
+    <string name="text_download_progress">Download Progress</string>
+    <string name="text_best_practice_guide">Best Practice Guide</string>
+    <string name="text_no_data">No available data</string>
+    <string name="text_empty_list">Empty list</string>
+    <string name="text_knowledge_base">Knowledge Base</string>
+    <string name="text_related">Related</string>
+    <string name="text_text_chunking_settings">Text Chunking Settings</string>
+    <string name="text_model_download">Model Download</string>
+
+
+    <!-- File type display text -->
+    <string name="file_type_pdf">PDF Document</string>
+    <string name="file_type_txt">Text File</string>
+    <string name="file_type_doc">Word Document</string>
+    <string name="file_type_docx">Word Document</string>
+    <string name="file_type_md">Markdown Document</string>
+    <string name="file_type_html">HTML Document</string>
+
+    <!-- Logic judgment constants -->
+
+    <string name="value_no_available_kb">No available knowledge base</string>
+    <string name="status_vectorization_progress">Vectorization progress</string>
+    <string name="prompt_create_kb_first">Please create knowledge base first</string>
+
+    <!-- Model Download Messages -->
+    <string name="dialog_close_download_page">Close Download Page</string>
+    <string name="dialog_select_at_least_one_model">Please select at least one model</string>
+    <string name="dialog_download_prompt_title">Download Prompt</string>
+    <string name="dialog_download_prompt_message">It is recommended to download under Wi-Fi environment, continue?</string>
+    <string name="dialog_continue_download">Continue Download</string>
+    <string name="dialog_directory_exists_title">Directory Already Exists</string>
+    <string name="dialog_download_confirm_title">Download Confirmation</string>
+    <string name="dialog_download_confirm_message">Are you sure you want to download the selected models?</string>
+
+    <string name="dialog_interrupt">Interrupt</string>
+    <string name="log_start_download">Start download</string>
+    <string name="log_download_interrupted">Download interrupted</string>
+    <string name="log_all_models_downloaded">All models downloaded</string>
+    <string name="log_download_error">Error occurred during download</string>
+
+    <string name="log_start_downloading">Start downloading</string>
+    <string name="log_downloading_file">Downloading file</string>
+    <string name="log_trying_backup_url">Trying backup URL</string>
+    <string name="log_download_failed">Download failed</string>
+    <string name="log_download_completed">Download completed</string>
+    <string name="log_download_failed_http_code">Download failed, HTTP response code</string>
+    <string name="log_start_download_file_size">Start download, file size</string>
+    <string name="log_download_was_interrupted">Download was interrupted</string>
+    <string name="log_progress_update">Progress update</string>
+    <string name="log_download_file_failed">Download file failed</string>
+    <string name="log_progress">Progress</string>
+    <string name="log_100_percent">100%</string>
+    <string name="log_acquire_power_lock_failed">Failed to acquire power lock</string>
+    <string name="log_release_power_lock_failed">Failed to release power lock</string>
+    <string name="log_download_selected_models">Download selected models</string>
+    <string name="log_start_download_with_size">Start download, file size: %1$d bytes</string>
+    <string name="log_progress_update_with_details" formatted="false">Progress update: %1$d%%, added content: %2$s</string>
+    <string name="log_download_failed_http">Download failed, HTTP response code</string>
+    <string name="log_acquire_wakelock_failed">Failed to acquire wake lock</string>
+    <string name="log_release_wakelock_failed">Failed to release wake lock</string>
+
+    <!-- Toast Messages -->
+    <string name="toast_log_file_not_exist">Log file does not exist</string>
+    <string name="toast_text_inserted_to_note">Text has been inserted into note</string>
+    <string name="toast_insert_text_failed">Failed to insert text: %s</string>
+    <string name="toast_settings_saved">Settings saved</string>
+    <string name="toast_save_settings_failed">Failed to save settings: %s</string>
+    <string name="toast_model_dir_not_exist">Model directory does not exist: %s</string>
+    <string name="toast_no_model_found">No models found in model directory: %s</string>
+    <string name="toast_model_path_not_directory">Model path is not a directory: %s</string>
+    <string name="toast_cannot_read_model_dir">Cannot read model directory: %s</string>
+    <string name="toast_no_valid_model_files">No valid model files found in model directory</string>
+    <string name="toast_set_api_first">Please set API address and API Key first</string>
+    <string name="toast_parse_model_list_failed">Failed to parse model list: %s</string>
+    <string name="toast_get_model_list_failed">Failed to get model list: %s</string>
+    <string name="toast_cannot_get_kb_note_page">Cannot get knowledge base note page</string>
+    <string name="toast_load_settings_failed">Failed to load settings</string>
+    <string name="toast_chunk_size_range">Chunk size should be between 100–4000</string>
+    <string name="toast_overlap_size_range">Overlap size should be between 20–800 and less than chunk size</string>
+
+
+    <string name="toast_min_chunk_limit_range">Minimum chunk limit should be between 10–200 and less than chunk size</string>
+
+    <string name="toast_max_seq_length_range">Maximum sequence length should be between 100–8192</string>
+    <string name="toast_inference_threads_range">Inference threads should be between 1–16</string>
+    <string name="toast_max_output_tokens_range">Maximum output tokens should be between 512–4096</string>
+    <string name="toast_temperature_range">Manual temperature parameter should be between 0.0–2.0</string>
+    <string name="toast_top_p_range">Manual Top–P parameter should be between 0.0–1.0</string>
+    <string name="toast_top_k_range">Manual Top–K parameter should be between 1–100</string>
+    <string name="toast_repeat_penalty_range">Manual repeat penalty parameter should be between 0.0–2.0</string>
+    <string name="toast_max_seq_length_requirement">Maximum sequence length must be greater than maximum output tokens plus 256 (currently needs to be greater than %d)</string>
+
+    <string name="toast_cannot_get_selected_path">Cannot get selected path</string>
+
+
+
+    <string name="toast_need_storage_permission">Storage permission is required to access model and knowledge base files</string>
+
+    <string name="toast_file_permission_denied">File access permission denied, app may not work properly</string>
+    <string name="toast_app_may_not_work_short">App may not work properly</string>
+    <string name="toast_load_kb_selection_failed">Failed to load knowledge base selection: %s</string>
+    <string name="toast_please_set_all_paths">Please set all paths</string>
+    <string name="toast_manual_temperature_range">Manual temperature parameter should be between 0.0–2.0</string>
+    <string name="toast_manual_top_p_range">Manual Top–P parameter should be between 0.0–1.0</string>
+    <string name="toast_manual_top_k_range">Manual Top–K parameter should be between 1–100</string>
+    <string name="toast_manual_repeat_penalty_range">Manual repeat penalty parameter should be between 0.0–2.0</string>
+    <string name="toast_max_seq_length_must_be_greater">Maximum sequence length must be greater than maximum output tokens plus 256 (currently needs to be greater than %d)</string>
+    <string name="toast_please_enter_valid_number">Please enter a valid number</string>
+    <string name="toast_cannot_open_file_permission_settings">Cannot open file access permission settings, please grant permission manually</string>
+    <string name="toast_please_re_enable_battery_optimization">Please re-enable battery optimization for this app in settings</string>
+    <string name="toast_no_selected_text_or_empty">No selected text or text is empty</string>
+    <string name="toast_battery_optimization_reminder">Please re-enable battery optimization for this app in settings</string>
+
+
+    <string name="toast_please_create_kb_first">Please create knowledge base first</string>
+    <string name="toast_please_input_valid_number">Please input valid number</string>
+    <string name="toast_transfer_to_note_failed">Failed to transfer to note</string>
+    <string name="toast_transferred_to_note">Transferred to knowledge base note</string>
+    <string name="toast_file_access_permission_granted">File access permission granted</string>
+    <string name="toast_file_access_permission_denied">File access permission denied, app may not work properly</string>
+    <string name="toast_api_url_deleted">API URL deleted</string>
+    <string name="toast_api_url_empty">API URL cannot be empty</string>
+    <string name="toast_api_url_added">API URL added</string>
+    <string name="toast_enter_user_question">Please enter user question</string>
+    <string name="toast_ensure_api_model_set">Please ensure API URL and model configuration are correct</string>
+    <string name="toast_enter_api_key">Please enter API Key</string>
+    <string name="toast_request_stopped">Request stopped</string>
+    <string name="toast_fetch_model_list_failed">Failed to fetch model list: %s</string>
+
+    <string name="toast_cannot_get_note_page">Cannot get note page</string>
+    <string name="toast_kb_name_added">Knowledge base name added: %s</string>
+    <string name="toast_kb_name_empty">Knowledge base name cannot be empty</string>
+    <string name="toast_please_select_files">Please select files first</string>
+    <string name="toast_please_enter_kb_name">Please enter or select knowledge base name</string>
+    <string name="toast_please_select_embedding_model">Please select embedding model</string>
+    <string name="toast_task_cancelled">Task cancelled</string>
+    <string name="toast_battery_optimization_requested">Battery optimization ignore requested</string>
+    <string name="toast_task_interrupted">Task interrupted</string>
+    <string name="toast_kb_creation_complete">Knowledge base creation complete</string>
+    <string name="toast_kb_rename_failed">Knowledge base rename failed</string>
+    <string name="toast_kb_not_exist">Knowledge base does not exist: %s</string>
+    <string name="toast_chunk_size_range_old">Chunk size must be between 100-8192</string>
+    <string name="toast_overlap_size_range_old">Overlap size must be between 0-512</string>
+    <string name="toast_min_chunk_limit_range_old">Minimum chunk limit must be between 50-1024</string>
+    <string name="toast_text_selected">All text selected</string>
+    <string name="toast_log_copied">Log content copied to clipboard</string>
+    <string name="toast_log_cleared">Log cleared</string>
+    <string name="toast_share_failed">Failed to share log</string>
+
+    <!-- Log Messages -->
+    <string name="log_using_kb_for_query">Using knowledge base for query: %s</string>
+
+    <!-- Embedding Model Display Text -->
+    <string name="embedding_model_bge_small">BGE-Small</string>
+    <string name="embedding_model_bge_base">BGE-Base</string>
+    <string name="embedding_model_bge_large">BGE-Large</string>
+    <string name="embedding_model_sentence_transformer">Sentence Transformer</string>
+
+    <!-- RerankerModelManager Log Messages -->
+    <string name="reranker_request_model_path">Requested model path: %s</string>
+    <string name="reranker_callback_object">Callback object: %s</string>
+    <string name="reranker_callback_non_null">Non-null</string>
+    <string name="reranker_callback_null">Null</string>
+    <string name="reranker_model_path_empty">Reranker model path is empty</string>
+    <string name="reranker_submit_async_task">Submitting async task to thread pool…</string>
+    <string name="reranker_async_task_start">Async task started, thread: %s</string>
+    <string name="reranker_model_ready_callback">Model retrieved successfully, preparing to call onModelReady callback</string>
+    <string name="reranker_send_callback_main_thread">Sending onModelReady callback to main thread</string>
+    <string name="reranker_callback_null_no_call">Callback object is null, cannot call onModelReady</string>
+    <string name="reranker_model_error_callback">Model retrieval failed, preparing to call onModelError callback</string>
+    <string name="reranker_async_get_failed">Async reranker model retrieval failed: %s</string>
+    <string name="reranker_rerank_model_path">Model path: %s</string>
+    <string name="reranker_rerank_query">Query: %s</string>
+    <string name="reranker_rerank_doc_count">Document count: %s</string>
+    <string name="reranker_query_empty">Query content is empty</string>
+    <string name="reranker_doc_list_empty">Document list is empty</string>
+    <string name="reranker_model_in_use">Reranker model is in use, please wait</string>
+    <string name="reranker_submit_rerank_task">Submitting rerank task to thread pool…</string>
+    <string name="reranker_rerank_task_start">Rerank task started, thread: %s</string>
+    <string name="reranker_model_get_failed">Reranker model retrieval failed</string>
+    <string name="reranker_model_load_success">Reranker model loaded successfully, starting rerank execution</string>
+    <string name="reranker_rerank_complete">Rerank execution completed, result count: %s</string>
+    <string name="reranker_task_failed">Rerank task execution failed: %s</string>
+    <string name="reranker_current_model_path">Current model path: %s</string>
+    <string name="reranker_model_exists">Exists</string>
+    <string name="reranker_model_not_exists">Does not exist</string>
+    <string name="reranker_update_access_time">Update last access time: %s</string>
+    <string name="reranker_cancel_unload_task">Cancel unload task completed</string>
+    <string name="reranker_need_reload_result">Need to reload: %s</string>
+    <string name="reranker_load_new_model">Need to load new reranker model: %s</string>
+    <string name="reranker_cleanup_current_model">Cleanup current model</string>
+    <string name="reranker_start_load_new_model">Start loading new model</string>
+    <string name="reranker_model_load_result">Model loading completed, result: %s</string>
+
+
+    <string name="reranker_use_existing_model">Using existing model, no need to reload</string>
+    <string name="reranker_start_loading_model">Start loading reranker model: %s</string>
+    <string name="reranker_model_loaded_success">Reranker model loaded successfully: %s</string>
+    <string name="reranker_mark_model_start_use">Mark reranker model start use</string>
+    <string name="reranker_mark_model_end_use">Mark reranker model end use</string>
+    <string name="reranker_auto_unload_model">Auto unload reranker model</string>
+    <string name="reranker_unload_model">Unload reranker model: %s</string>
+    <string name="reranker_close_manager">Close reranker model manager</string>
+    <string name="reranker_reset_manager">Reset reranker model manager</string>
+    <string name="reranker_model_manager_load_failed">Reranker model loading failed: %s</string>
+    <string name="reranker_model_manager_unload">Unload reranker model</string>
+    <string name="reranker_model_manager_rerank_start">Start rerank processing</string>
+    <string name="reranker_model_manager_rerank_complete">Rerank processing completed</string>
+    <string name="reranker_model_manager_rerank_failed">Rerank processing failed</string>
+    <string name="reranker_model_manager_model_not_loaded">Reranker model not loaded</string>
+    <string name="reranker_model_manager_invalid_input">Invalid rerank input</string>
+    <string name="reranker_model_manager_cleanup">Cleanup RerankerModelManager resources</string>
+
+    <!-- MainActivity Log Messages -->
+    <string name="main_open_file_access_failed">Cannot open file access permission settings: %s</string>
+    <string name="main_full_file_access_granted">Full file access permission granted and status saved</string>
+    <string name="main_battery_optimization_status">Battery optimization status: %s</string>
+    <string name="main_battery_ignored">Ignored</string>
+    <string name="main_battery_not_ignored">Not ignored</string>
+    <string name="main_request_ignore_battery_failed">Request to ignore battery optimization failed: %s</string>
+    <string name="main_restore_battery_failed">Restore battery optimization failed: %s</string>
+    <string name="main_app_startup_load_config">Load configuration on app startup: %s</string>
+    <string name="main_config_file_exists">Configuration file exists: %s</string>
+    <string name="main_config_file_not_exist">Configuration file does not exist, creating default configuration</string>
+    <string name="main_init_config_failed">Initialize configuration failed</string>
+    <string name="main_all_permissions_granted">All permissions granted</string>
+    <string name="main_permissions_denied">Permissions denied</string>
+    <string name="main_full_file_access_obtained">Full file access permission obtained</string>
+    <string name="main_full_file_access_not_obtained">Full file access permission not obtained</string>
+    <string name="main_battery_optimization_ignored">Battery optimization ignored</string>
+    <string name="main_battery_optimization_not_ignored">Battery optimization not ignored</string>
+    <string name="main_settings_changed_refresh">Settings changed, refreshing data</string>
+    <string name="main_notify_kb_service_foreground">Notified knowledge base build service: app switched to foreground</string>
+    <string name="main_notify_kb_service_background">Notified knowledge base build service: app switched to background</string>
+    <string name="main_try_bind_kb_service">Trying to bind to knowledge base build service</string>
+    <string name="main_bind_kb_service_success">Successfully bound to knowledge base build service</string>
+    <string name="main_activity_create">MainActivity created</string>
+    <string name="main_activity_resume">MainActivity resumed</string>
+    <string name="main_activity_pause">MainActivity paused</string>
+    <string name="main_activity_destroy">MainActivity destroyed</string>
+    <string name="main_activity_config_change">MainActivity configuration changed</string>
+    <string name="main_activity_permission_granted">Permission granted: %s</string>
+    <string name="main_activity_permission_denied">Permission denied: %s</string>
+    <string name="main_activity_fragment_switch">Switch to fragment: %s</string>
+    <string name="main_activity_back_pressed">Back button pressed</string>
+    <string name="main_activity_menu_selected">Menu item selected: %s</string>
+
+    <!-- TextChunkProcessor Log Messages -->
+    <string name="text_chunk_use_langchain_splitter">Using LangChainTextSplitter for text splitting</string>
+    <string name="text_chunk_split_complete" formatted="false">Text splitting completed, generated %d text chunks</string>
+    <string name="text_chunk_start_vectorization">Starting vectorization processing, total %d text chunks</string>
+    <string name="text_chunk_mark_model_start_use">Mark model start use</string>
+    <string name="text_chunk_vectorization_progress">Vectorization detailed progress: %s</string>
+    <string name="text_chunk_vectorization_complete" formatted="false">Vectorization processing completed, processed %1$d text chunks, thread ID: %2$d</string>
+    <string name="text_chunk_batch_vectorization_complete">Batch vectorization processing completed, marked model as no longer in use</string>
+    <string name="text_chunk_vector_db_closed">Vector database closed</string>
+    <string name="text_chunk_start_process_file">Start processing file and building knowledge base, thread ID: %d</string>
+    <string name="text_chunk_kb_directory">Knowledge base directory: %s</string>
+    <string name="text_chunk_model_vector_dimension">Model vector dimension: %d</string>
+    <string name="text_chunk_start_batch_vectorization">Start batch vectorization processing, marked model as in use to prevent auto unload</string>
+    <string name="text_chunk_vectorization_interrupted" formatted="false">Vectorization processing interrupted: task cancelled, processed %1$d/%2$d text chunks</string>
+    <string name="text_chunk_vectorization_progress_detail">Vectorization progress: %s</string>
+    <string name="text_chunk_processor_start">Start text chunk processing</string>
+    <string name="text_chunk_processor_progress" formatted="false">Text chunk progress: %d%%</string>
+    <string name="text_chunk_processor_complete">Text chunk processing completed</string>
+    <string name="text_chunk_processor_failed">Text chunk processing failed</string>
+
+    <!-- UriUtils Log Messages -->
+    <string name="uri_get_filename_failed">Failed to get filename: %s</string>
+    <string name="uri_utils_convert_start">Start URI conversion</string>
+    <string name="uri_utils_convert_success">URI conversion successful: %s</string>
+    <string name="uri_utils_convert_failed">URI conversion failed: %s</string>
+    <string name="uri_utils_invalid_uri">Invalid URI: %s</string>
+    <string name="uri_utils_permission_required">URI access requires permission</string>
+    <string name="uri_utils_file_not_found">URI file not found: %s</string>
+    <string name="uri_utils_unsupported_scheme">Unsupported URI scheme: %s</string>
+
+    <!-- RagQaFragment Log Messages -->
+    <string name="rag_saved_api_url">Saved API URL: %s</string>
+    <string name="rag_saved_api_key">Saved API Key to URL: %s</string>
+    <string name="rag_saved_model_name">Saved model name: %s</string>
+    <string name="rag_saved_kb_name">Saved knowledge base name: %s</string>
+    <string name="rag_selected_state_display">Selected state display text, clear configuration: %s</string>
+    <string name="rag_saved_system_prompt">Saved system prompt</string>
+    <string name="rag_saved_search_depth">Saved search depth: %s</string>
+    <string name="rag_saved_rerank_count">Saved rerank count: %s</string>
+    <string name="rag_saved_thinking_mode">Saved thinking mode setting: %s</string>
+    <string name="rag_thinking_enabled">Enabled</string>
+    <string name="rag_thinking_disabled">Disabled</string>
+    <string name="rag_init_markwon_renderer">Initialize Markwon renderer</string>
+    <string name="rag_loaded_api_keys">Loaded %d API Keys</string>
+    <string name="rag_loaded_thinking_mode">Loaded thinking mode setting: %s</string>
+    <string name="rag_config_load_complete">Configuration loading completed</string>
+    <string name="rag_load_config_failed">Failed to load configuration</string>
+    <string name="rag_saved_system_prompt_detail">Saved system prompt: %s</string>
+    <string name="rag_system_prompt_empty">[Empty]</string>
+    <string name="rag_config_saved_to_file">Configuration saved to .config file</string>
+    <string name="rag_save_config_failed">Failed to save configuration</string>
+    <string name="rag_loaded_api_key_for_url">Loaded API Key for URL: %s</string>
+    <string name="rag_no_api_key_for_url">No API Key found for URL: %s</string>
+    <string name="rag_start_load_api_urls">Start loading API URL list</string>
+    <string name="rag_loaded_api_urls">Loaded %d API URLs</string>
+    <string name="rag_reset_local_llm_stop_flag">Reset local LLM stop flag</string>
+    <string name="rag_reset_stop_flag_error">Error resetting local LLM stop flag</string>
+    <string name="rag_wait_query_interrupted">Interrupted while waiting for query results</string>
+    <string name="rag_start_query_kb" formatted="false">Start querying knowledge base: %1$s, query keywords: %2$s</string>
+    <string name="rag_use_ui_search_depth">Using UI-configured search depth: %s</string>
+    <string name="rag_get_kb_path_from_settings">Get knowledge base path from settings: %s</string>
+    <string name="rag_start_create_sqlite_handler">Start creating SQLite vector database handler, knowledge base directory: %s</string>
+    <string name="rag_use_model_in_modeldir">Using model in modeldir: %s</string>
+    <string name="rag_model_file_not_exist">Model file does not exist: %s, will try to find in embedding model directory</string>
+    <string name="rag_no_model_in_embedding_dir">No available model files found in embedding model directory</string>
+    <string name="rag_exception_mark_model_end">Mark model usage end in exception case, allow automatic unloading</string>
+    <string name="rag_exception_close_db">Close database connection in exception case</string>
+    <string name="rag_start_call_llm_api">Start calling LLM API: %s</string>
+    <string name="rag_use_model">Using model: %s</string>
+    <string name="rag_prompt_length">Prompt length: %d characters</string>
+    <string name="rag_response_length">Response length: %d characters</string>
+    <string name="rag_final_markdown_render_complete">Final Markdown rendering completed</string>
+    <string name="rag_task_complete_status_reset">Task completed, status reset</string>
+    <string name="rag_final_markdown_render_failed">Final Markdown rendering failed</string>
+    <string name="rag_detect_code_block_marker">Detected code block marker: ``` in content</string>
+    <string name="rag_detect_inline_code_marker">Detected inline code marker: ` in content</string>
+    <string name="rag_detect_bold_marker">Detected bold marker: ** in content</string>
+    <string name="rag_detect_header_marker">Detected header marker: # in content</string>
+    <string name="rag_detect_incomplete_code_block">Detected incomplete code block, adding end marker</string>
+    <string name="rag_detect_incomplete_inline_code">Detected incomplete inline code marker, adding end marker</string>
+    <string name="rag_content_fixed" formatted="false">Content fixed, original length: %1$d, new length: %2$d</string>
+    <string name="rag_task_error_status_reset">Task error, status reset</string>
+    <string name="rag_call_llm_api_failed">Failed to call LLM API</string>
+    <string name="rag_task_exception_status_reset">Task exception, status reset</string>
+    <string name="rag_update_ui_retry_exhausted">UI update retry attempts exhausted, giving up update</string>
+    <string name="rag_cannot_update_ui_fragment_detached">Cannot update UI, Fragment not attached to Activity, will retry in 1 second (remaining retries: %d)</string>
+    <string name="rag_cannot_append_response_fragment_detached">Cannot append response, Fragment not attached to Activity</string>
+    <string name="rag_cannot_append_response_view_null">Cannot append response, Fragment View is null</string>
+    <string name="rag_append_content_failed">Failed to append content</string>
+    <string name="rag_cannot_update_result_fragment_detached">Cannot update result, Fragment not attached to Activity</string>
+    <string name="rag_cannot_update_result_view_null">Cannot update result, Fragment View is null</string>
+    <string name="rag_update_result_failed">Failed to update result</string>
+    <string name="rag_get_local_model_list">Get local model list</string>
+    <string name="rag_model_dir_not_exist">Model directory does not exist: %s</string>
+    <string name="rag_no_model_in_dir">No models found in model directory: %s</string>
+    <string name="rag_restore_local_model_selection">Restore local model selection: %s</string>
+    <string name="rag_get_local_models_success">Successfully got local model list: %d models</string>
+    <string name="rag_restore_online_model_selection">Restore online model selection: %s</string>
+    <string name="rag_get_models_success">Successfully got model list: %d models</string>
+    <string name="rag_parse_model_list_failed">Failed to parse model list</string>
+    <string name="rag_qa_fragment_create">RagQaFragment created</string>
+    <string name="rag_qa_fragment_view_created">RagQaFragment view created</string>
+    <string name="rag_qa_fragment_resume">RagQaFragment resumed</string>
+    <string name="rag_qa_fragment_pause">RagQaFragment paused</string>
+    <string name="rag_qa_fragment_destroy">RagQaFragment destroyed</string>
+    <string name="rag_qa_fragment_query_start">Start RAG query</string>
+    <string name="rag_qa_fragment_query_complete">RAG query completed</string>
+    <string name="rag_qa_fragment_query_failed">RAG query failed</string>
+    <string name="rag_qa_fragment_model_load">Loading RAG model</string>
+    <string name="rag_qa_fragment_model_ready">RAG model ready</string>
+    <string name="rag_qa_fragment_kb_load">Loading knowledge base</string>
+    <string name="rag_qa_fragment_kb_ready">Knowledge base ready</string>
+
+    <!-- RagQueryManager Log Messages -->
+    <string name="rag_query_no_kb_direct_prompt">Not using knowledge base, directly building prompt: %s</string>
+    <string name="rag_query_kb_result_preview">Knowledge base query result (first 200 characters): %s</string>
+    <string name="rag_query_no_kb_selected">No knowledge base selected, skipping knowledge base query</string>
+    <string name="rag_query_start_query_kb">Start querying knowledge base: %s</string>
+    <string name="rag_query_read_kb_file">Reading knowledge base file: %s</string>
+    <string name="rag_query_kb_error">Knowledge base query error</string>
+
+    <!-- KnowledgeBaseService Log Messages -->
+    <string name="kb_service_started">Knowledge base construction service started</string>
+    <string name="log_knowledge_base_service_start_processing">Start processing knowledge base</string>
+    <string name="log_knowledge_base_service_processing_complete">Knowledge base processing completed</string>
+    <string name="log_knowledge_base_service_processing_failed">Knowledge base processing failed</string>
+    <string name="log_knowledge_base_service_notification_update">Update notification</string>
+    <string name="log_knowledge_base_service_notification_error">Notification error</string>
+    <string name="log_markwon_renderer_initialized">Markwon renderer initialization completed</string>
+    <string name="log_search_depth_spinner_initialized">Search depth spinner initialized, current value: </string>
+    <string name="log_rerank_count_spinner_initialized">Rerank count spinner initialized, current value: </string>
+
+    <!-- Toast Messages -->
+    <string name="load_knowledge_base_selection_failed">Failed to load knowledge base selection</string>
+
+    <!-- API URLs 字符串数组 -->
+    <string-array name="api_urls">
+        <item>http://localhost:11434/v1/</item>
+        <item>https://api.openai.com/v1/</item>
+    </string-array>
+    
+    <!-- Settings Fragment -->
+    <string name="title_settings">Settings</string>
+    <string name="title_text_chunking_settings">Text Chunking Settings</string>
+    <string name="label_chunk_size">Chunk Size\n(100~4000):</string>
+    <string name="label_overlap_size">Overlap Size\n(20~800):</string>
+    <string name="label_min_chunk_size">Min Chunk Limit\n(10~100):</string>
+    <string name="label_json_dataset_splitting">JSON Dataset Chunking Optimization</string>
+    <string name="title_directory_settings">Directory Settings</string>
+    <string name="label_model_directory">Model Directory:</string>
+    <string name="hint_model_path">Model file directory path</string>
+    <string name="label_embedding_model_directory">Embedding Model Directory:</string>
+    <string name="hint_embedding_model_path">Embedding model directory path</string>
+    <string name="label_reranker_model_directory">Reranker Model Directory:</string>
+    <string name="hint_reranker_model_path">Reranker model directory path</string>
+    <string name="label_knowledge_base_directory">Knowledge Base Directory:</string>
+    <string name="hint_knowledge_base_path">Knowledge base directory path</string>
+    <string name="title_llm_inference_settings">LLM Inference Settings</string>
+    <string name="label_max_sequence_length">Max Sequence Length\n(512~8192):</string>
+    <string name="label_inference_threads">Inference Threads\n(1~16):</string>
+    <string name="label_max_output_tokens">Max Output Tokens\n(512~4096):</string>
+    <string name="label_manual_temperature">Manual Temperature\n(0.0~2.0):</string>
+    <string name="label_manual_top_p">Manual Top-P (0.0~1.0):</string>
+    <string name="label_manual_top_k">Manual Top-K (10~100):</string>
+    <string name="label_manual_repeat_penalty">Manual Repeat Penalty (0.0~2.0):</string>
+    <string name="label_priority_manual_params">Prioritize Manual Parameters</string>
+    <string name="title_global_settings">Global Settings</string>
+    <string name="label_debug_mode">Debug Mode</string>
+    <string name="label_use_gpu">Use GPU Acceleration (if available)</string>
+    <string name="label_font_size">Font Size</string>
+    <string name="text_font_size_value">Font Size: 16sp</string>
+    <string name="button_save_settings">Save Settings</string>
+    <string name="button_select">Select</string>
+    <string name="button_new_conversation">New Conversation</string>
+    <string name="button_add_to_knowledge_base">Add to Knowledge Base</string>
+    <string name="label_api_url">API URL</string>
+    <string name="hint_api_url_example">e.g.: https://api.example.com</string>
+    <string name="label_api_key_optional">API Key (optional)</string>
+    <string name="hint_api_key_example">e.g.: sk-abcdefg123456</string>
+    <string name="title_help">StarLocalRAG User Guide</string>
+    <string name="content_description_scroll_up">Scroll up</string>
+    <string name="content_description_scroll_down">Scroll down</string>
+    
+    <!-- Compilation Warning Fix: Added Missing String Resources -->
+    <string name="button_directory_settings">Directory Settings</string>
+    <string name="button_global_settings">Global Settings</string>
+    <string name="button_llm_inference_settings">LLM Inference Settings</string>
+    <string name="button_text_chunk_settings">Text Chunking Settings</string>
+    <string name="directory_settings">Directory Settings</string>
+    <string name="global_settings">Global Settings</string>
+    <string name="help_title">Help</string>
+    <string name="hint_api_address">Enter API address</string>
+    <string name="hint_api_key">Enter API key</string>
+    <string name="label_api_address">API Address:</string>
+    <string name="label_api_key">API Key:</string>
+    <string name="llm_inference_settings">LLM Inference Settings</string>
+    <string name="text_chunk_settings">Text Chunking Settings</string>
+    <!-- Fix Missing Strings in ModelDownloadFragment -->
+    <string name="dialog_msg_dir_exists">The following directory already exists, continuing download will overwrite existing files:</string>
+    <string name="button_interrupt">Interrupt Download</string>
+
+    <string name="select_embedding_reranker">Select Embedding and Reranker Models</string>
+    <string name="select_embedding_model">Select Embedding Model</string>
+    
+    <!-- UI Display Text -->
+    <string name="debug_info_header">##--- Debug Information ---</string>
+    <string name="user_question">User Question: %s</string>
+    <string name="kb_query_time">Knowledge base query time: %dms</string>
+    <string name="calling_llm_api">Calling LLM API…</string>
+    <string name="similarity_info">Similarity information: %s</string>
+    <string name="chunk_size_info" formatted="false">Chunk size: %d, Overlap size: %d, Min chunk limit: %d</string>
+    
+    <!-- Knowledge Base Notes Interface -->
+    <string name="processing_status">Processing…</string>
+    <string name="found_embedding_model">Found embedding model: %s</string>
+    <string name="loading_model_wait">Loading model (may take a few seconds)…</string>
+    <string name="using_global_tokenizer">Using initialized global tokenizer</string>
+    <string name="model_load_success_type">Model loaded successfully, type: %s</string>
+    <string name="mark_model_start_use">Mark model start use, prevent automatic unloading</string>
+    <string name="adding_note_to_kb">Adding note to knowledge base…</string>
+    <string name="mark_model_end_use">Mark model end use, allow automatic unloading</string>
+    <string name="chunk_params_info" formatted="false">Using chunk parameters: chunk size=%d, overlap size=%d, min chunk size=%d</string>
+    <string name="content_exceeds_chunk_size" formatted="false">Content length (%d) exceeds chunk size (%d), performing chunking…</string>
+    <string name="chunk_complete_info">Chunking completed, generated %d text chunks</string>
+    <string name="db_chunk_count_before">Database text chunk count before adding: %d</string>
+    <string name="processing_chunk_info" formatted="false">Processing text chunk %d/%d, length: %d</string>
+    <string name="db_chunk_count_after">Database text chunk count after adding: %d</string>
+    <string name="added_chunk_count">Successfully added text chunk count: %d</string>
+    <string name="note_added_success">Note successfully added to knowledge base</string>
+    <string name="mark_model_end_use_error">Mark model end use (error occurred), allow automatic unloading</string>
+
+    <!-- Additional UI Messages -->
+    <string name="tokenizer_init_failed">Tokenizer initialization failed, will use model built-in tokenizer</string>
+    <string name="add_chunk_failed">Failed to add text chunk %1$d</string>
+    <string name="new_chunk_count">New text chunk count: %1$d</string>
+    <string name="error_message">Error: %1$s</string>
+    
+    <!-- BuildKnowledgeBaseFragment Messages -->
+    <string name="interrupting_processing">Interrupting processing…</string>
+    <string name="ready_waiting_create_kb">Ready, waiting to create knowledge base…</string>
+    <string name="existing_kb_dimension">Existing knowledge base dimension</string>
+    <string name="current_model_dimension">Current model dimension</string>
+    <string name="battery_optimization_requested">Battery optimization ignore requested, build process will continue in background</string>
+    <string name="kb_rename_success">Knowledge base renamed successfully</string>
+    <string name="create_knowledge_base">Create Knowledge Base</string>
+    
+    <!-- RagQaFragment Messages -->
+    <string name="error_model_file_not_found">Error: Cannot find model file in selected directory</string>
+    <string name="using_embedding_model">Using embedding model: %s</string>
+    <string name="loading_embedding_model">Loading embedding model…</string>
+    <string name="error_embedding_model_timeout">Error: Loading embedding model timeout</string>
+    <string name="error_embedding_model_interrupted">Error: Waiting for model loading interrupted: %s</string>
+    <string name="error_embedding_model_failed">Error: Failed to load embedding model: %s</string>
+    <string name="error_embedding_handler_failed">Error: Failed to create embedding model handler</string>
+    <string name="embedding_model_loaded_success">Embedding model loaded successfully: %s</string>
+    <string name="warning_prompt_too_long">Warning: Prompt length exceeds 4000 characters, may be truncated by model</string>
+    <string name="calling_llm_api_progress">Calling LLM API…</string>
+    <string name="model_answer_header">Model Answer</string>
+    
+    <!-- KnowledgeNoteFragment Messages -->
+    <string name="warning_update_kb_metadata_error">Warning: Error occurred while updating knowledge base metadata: %s</string>
+    <string name="updating_kb_metadata">Updating knowledge base metadata…</string>
+    <string name="using_selected_model_only">Using selected model only for this operation, not updating knowledge base metadata</string>
+    <string name="selected_new_embedding_model">Selected new embedding model: %s</string>
+    <string name="error_embedding_timeout">Error: Loading embedding model timeout</string>
+    <string name="error_embedding_interrupted">Error: Waiting for model loading interrupted: %s</string>
+    <string name="error_embedding_load_failed">Error: Failed to load embedding model: %s</string>
+    <string name="error_embedding_handler_create_failed">Error: Cannot load embedding model, possibly incompatible or corrupted model file</string>
+    <string name="initializing_tokenizer">Initializing tokenizer…</string>
+    <string name="tokenizer_init_success">Tokenizer initialization successful, will use unified tokenization strategy</string>
+    <string name="error_sqlite_load_failed">Error: Cannot load SQLite vector database</string>
+    <string name="mark_model_end_use_complete">Mark model usage end, allow automatic unloading</string>
+    <string name="chunk_params_used" formatted="false">Using chunk parameters: chunk size=%d, overlap size=%d, min chunk size=%d</string>
+    <string name="content_exceeds_chunk_size_processing" formatted="false">Content length(%d) exceeds chunk size(%d), processing chunks…</string>
+    <string name="chunk_processing_complete">Chunking complete, generated %d text chunks</string>
+    <string name="processing_text_chunk" formatted="false">Processing text chunk %d/%d, length: %d</string>
+    <string name="db_chunk_count_before_add">Database text chunk count before adding: %d</string>
+    
+    <!-- HelpFragment Messages -->
+    <string name="help_doc_load_failed">Cannot load help documentation, please ensure the app is properly installed.</string>
+
+    <!-- RagQueryManager Messages -->
+    <string name="building_prompt">Building prompt…</string>
+    <string name="not_using_kb_building_prompt">Not using knowledge base, building prompt directly</string>
+    <string name="api_type">API Type</string>
+
+    <!-- Additional KnowledgeNoteFragment Messages -->
+    <string name="error_load_sqlite_db">Error: Cannot load SQLite vector database</string>
+    <string name="error_add_chunk_to_db">Error: Cannot add text chunk to database</string>
+    <string name="error_save_database">Error: Cannot save database</string>
+    <string name="error_generate_embedding">Error: Failed to generate embedding vector</string>
+    <string name="generating_embedding_vector">Generating embedding vector…</string>
+    <string name="saving_to_database">Saving to database…</string>
+    <string name="chunk_added_success">Text chunk added successfully</string>
+    
+    <!-- Missing strings from compilation errors -->
+    <string name="use_selected_model_only">Use Selected Model Only</string>
+    <string name="error_embedding_model_handler_failed">Error: Embedding model handler failed</string>
+    <string name="chunking_text">Chunking text</string>
+    <string name="text_chunking_complete">Text chunking complete, %d chunks total</string>
+    <string name="adding_chunk_progress" formatted="false">Adding text chunk %d/%d</string>
+    <string name="all_chunks_added">All text chunks added</string>
+    <string name="model_response">Model Response</string>
+    
+    <!-- KnowledgeNoteFragment Progress Messages -->
+    <string name="progress_mark_model_end_use">Mark model usage end, allow auto unload</string>
+    <string name="progress_chunk_params_info" formatted="false">Using chunk parameters: chunk size=%d, overlap size=%d, min chunk size=%d</string>
+    <string name="progress_db_chunk_count_before">Database text chunk count before adding: %d</string>
+    <string name="progress_kb_metadata_updated">Updated model information in knowledge base metadata</string>
+    <string name="warning_sqlite_load_failed">Warning: Failed to load SQLite vector database</string>
+    <string name="progress_new_db_metadata_created">Created new database metadata</string>
+    <string name="warning_update_db_metadata_failed">Warning: Failed to update database metadata: %s</string>
+    <string name="warning_update_kb_metadata_failed">Warning: Error occurred while updating knowledge base metadata: %s</string>
+    
+    <!-- Note: Reuse existing resources to avoid duplication -->
+    <!-- Share log: use menu_share_logs -->
+    <!-- Clear log: use menu_clear_logs -->
+    <!-- App may not work properly: use toast_app_may_not_work_short -->
+    <!-- Cannot open file permission settings: use toast_cannot_open_file_permission_settings -->
+    <!-- Battery optimization reminder: use toast_please_re_enable_battery_optimization -->
+    <!-- Please select at least one model: use dialog_select_at_least_one_model -->
+    <!-- Settings saved: use toast_settings_saved -->
+    <!-- Save settings failed: use toast_save_settings_failed -->
+    <!-- Delete API URL: use dialog_title_delete_api_url -->
+    <!-- API URL cannot be empty: use toast_api_url_empty -->
+    <!-- API URL added: use toast_api_url_added -->
+    
+    <!-- New unique resources -->
+    <string name="comment_refresh_log">Refresh log content</string>
+    <string name="comment_copy_all">Copy all text</string>
+    <string name="clipboard_log_content">Log content</string>
+    <string name="dialog_title_add_api_url_simple">Add API URL</string>
+
+</resources>

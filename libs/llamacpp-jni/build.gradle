@@ -1,0 +1,75 @@
+apply plugin: 'com.android.library'
+
+android {
+    namespace = 'com.starlocalrag.llamacpp'
+    compileSdkVersion 34
+    // buildToolsVersion removed - using default from Android Gradle Plugin
+
+    defaultConfig {
+        minSdkVersion 24
+        targetSdkVersion 34
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles "consumer-rules.pro"
+
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17 -frtti -fexceptions"
+                arguments "-DANDROID_STL=c++_static", "-DGGML_F16C=0", "-DGGML_USE_F16C=0"
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            // 开源项目：启用压缩和优化，但禁用混淆
+            minifyEnabled true
+            shrinkResources false  // 库模块不支持资源压缩
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            externalNativeBuild {
+                cmake {
+                    cppFlags "-std=c++17 -frtti -fexceptions -O3 -DNDEBUG"
+                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0"
+                }
+            }
+        }
+        debug {
+            externalNativeBuild {
+                cmake {
+                    cppFlags "-std=c++17 -frtti -fexceptions -O3 -DNDEBUG"
+                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0"
+                }
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version = "3.22.1"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // sourceSets {
+    //     main {
+    //         jniLibs.srcDirs = ['src/main/jniLibs']
+    //     }
+    // }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.10.0'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+}

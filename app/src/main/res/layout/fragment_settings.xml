@@ -1,0 +1,714 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_settings"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="16dp" />
+
+        <!-- 分块大小设置 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_text_chunking_settings"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_chunk_size"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarChunkSize"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="39"
+                android:progress="4" />
+
+            <TextView
+                android:id="@+id/textViewChunkSizeValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="500"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_overlap_size"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarOverlapSize"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="39"
+                android:progress="0" />
+
+            <TextView
+                android:id="@+id/textViewOverlapSizeValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="20"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_min_chunk_size"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarMinChunkSize"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="9"
+                android:progress="0" />
+
+            <TextView
+                android:id="@+id/textViewMinChunkSizeValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="10"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+        
+        <!-- JSON训练集分块优化开关 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="16dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/label_json_dataset_splitting"
+                android:textSize="16sp" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchJsonDatasetSplitting"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- 目录设置 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_directory_settings"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp" />
+
+        <!-- 模型目录设置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/label_model_directory"
+                android:textSize="16sp"
+                android:layout_marginBottom="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <EditText
+                    android:id="@+id/editTextModelPath"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginEnd="8dp"
+                    android:inputType="text"
+                    android:hint="@string/hint_model_path" />
+
+                <Button
+                    android:id="@+id/buttonSelectModelPath"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/button_select"
+                    android:textSize="14sp"
+                    android:padding="4dp"
+                    android:minWidth="60dp"
+                    android:minHeight="36dp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 嵌入模型目录设置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/label_embedding_model_directory"
+                android:textSize="16sp"
+                android:layout_marginBottom="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <EditText
+                    android:id="@+id/editTextEmbeddingModelPath"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginEnd="8dp"
+                    android:inputType="text"
+                    android:hint="@string/hint_embedding_model_path" />
+
+                <Button
+                    android:id="@+id/buttonSelectEmbeddingModelPath"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/button_select"
+                    android:textSize="14sp"
+                    android:padding="4dp"
+                    android:minWidth="60dp"
+                    android:minHeight="36dp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 重排模型目录设置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/label_reranker_model_directory"
+                android:textSize="16sp"
+                android:layout_marginBottom="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <EditText
+                    android:id="@+id/editTextRerankerModelPath"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginEnd="8dp"
+                    android:inputType="text"
+                    android:hint="@string/hint_reranker_model_path" />
+
+                <Button
+                    android:id="@+id/buttonSelectRerankerModelPath"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/button_select"
+                    android:textSize="14sp"
+                    android:padding="4dp"
+                    android:minWidth="60dp"
+                    android:minHeight="36dp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- 知识库目录设置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="16dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/label_knowledge_base_directory"
+                android:textSize="16sp"
+                android:layout_marginBottom="4dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <EditText
+                    android:id="@+id/editTextKnowledgeBasePath"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginEnd="8dp"
+                    android:inputType="text"
+                    android:hint="@string/hint_knowledge_base_path" />
+
+                <Button
+                    android:id="@+id/buttonSelectKnowledgeBasePath"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/button_select"
+                    android:textSize="14sp"
+                    android:padding="4dp"
+                    android:minWidth="60dp"
+                    android:minHeight="36dp" />
+            </LinearLayout>
+        </LinearLayout>
+
+
+        
+        <!-- LLM 推理设置 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_llm_inference_settings"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp" />
+            
+        <!-- 最大生成token数设置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_max_sequence_length"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarMaxSequenceLength"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="15"
+                android:progress="0" />
+
+            <TextView
+                android:id="@+id/textViewMaxSequenceLengthValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="512"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+        
+        <!-- 推理线程数设置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_inference_threads"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarThreads"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="15"
+                android:progress="0" />
+
+            <TextView
+                android:id="@+id/textViewThreadsValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="1"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+        
+        <!-- 最大输出token数设置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_max_output_tokens"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarKvCacheSize"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="7"
+                android:progress="0" />
+
+            <TextView
+                android:id="@+id/textViewKvCacheSizeValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="512"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+
+        <!-- 备份推理参数（归属于LLM推理设置） -->
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_manual_temperature"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarManualTemperature"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="20"
+                android:progress="0" />
+
+            <TextView
+                android:id="@+id/textViewManualTemperatureValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="0.0"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_manual_top_p"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarManualTopP"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="20"
+                android:progress="0" />
+
+            <TextView
+                android:id="@+id/textViewManualTopPValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="0.00"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_manual_top_k"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarManualTopK"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="9"
+                android:progress="0" />
+
+            <TextView
+                android:id="@+id/textViewManualTopKValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="1"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_manual_repeat_penalty"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarManualRepeatPenalty"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="20"
+                android:progress="0" />
+
+            <TextView
+                android:id="@+id/textViewManualRepeatPenaltyValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="0.0"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+        
+        <!-- 优先备份参数开关 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/label_priority_manual_params"
+                android:textSize="16sp" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchPriorityManualParams"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+        
+        <!-- ONNX引擎开关UI已移除 -->
+        
+        <!-- 思考模式开关已移动到RAG问答界面 -->
+
+        <!-- 全局设置 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_global_settings"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp" />
+
+        <!-- 调试模式开关 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/label_debug_mode"
+                android:textSize="16sp" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchDebugMode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- GPU加速开关 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/label_use_gpu"
+                android:textSize="16sp" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchUseGpu"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <!-- 字体大小调整 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/label_font_size"
+                android:textSize="16sp"
+                android:layout_marginBottom="8dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="-"
+                    android:textSize="20sp"
+                    android:layout_marginEnd="8dp" />
+
+                <SeekBar
+                    android:id="@+id/seekBarFontSize"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="14"
+                    android:progress="7" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="+"
+                    android:textSize="20sp"
+                    android:layout_marginStart="8dp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/textViewFontSizeValue"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/text_font_size_value"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginTop="4dp" />
+        </LinearLayout>
+
+        <!-- 保存按钮 -->
+        <Button
+            android:id="@+id/buttonSaveSettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/button_save_settings"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="16dp" />
+
+    </LinearLayout>
+</ScrollView>

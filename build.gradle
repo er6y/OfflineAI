@@ -1,0 +1,27 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+plugins {
+    id 'com.android.application' version '8.11.0' apply false // Updated AGP version
+    id 'com.android.library' version '8.11.0' apply false
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+    
+    // 清理 Rust 编译产物
+    delete 'libs/tokenizers-jni/src/main/rust/target'
+    
+    // 清理 app 模块的 jniLibs 目录
+    delete 'app/src/main/jniLibs'
+    
+    // 清理其他可能的编译产物
+    delete 'app/build'
+    delete 'libs/tokenizers-jni/build'
+    delete 'libs/llamacpp-jni/build'
+    
+    doLast {
+        println "已清理所有编译产物："
+        println "- Rust target 目录"
+        println "- JNI 库文件"
+        println "- 所有模块的 build 目录"
+    }
+}

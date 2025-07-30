@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:padding="8dp">
+
+    <RadioButton
+        android:id="@+id/radioButtonSelectApiUrl"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_vertical"
+        android:clickable="true"
+        android:focusable="true" />
+
+    <TextView
+        android:id="@+id/textViewApiUrl"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:singleLine="true"
+        android:textSize="16sp"
+        android:layout_marginStart="8dp" />
+
+    <ImageButton
+        android:id="@+id/buttonDeleteApiUrl"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_gravity="center_vertical"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="@string/content_description_delete_api_url"
+        android:src="@android:drawable/ic_menu_delete" />
+
+</LinearLayout>
