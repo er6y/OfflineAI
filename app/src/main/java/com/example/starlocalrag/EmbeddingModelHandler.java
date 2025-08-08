@@ -41,6 +41,7 @@ import org.pytorch.IValue;
 import org.pytorch.Module;
 import org.pytorch.Tensor;
 
+import ai.onnxruntime.NodeInfo;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtException;
@@ -48,6 +49,18 @@ import ai.onnxruntime.OrtSession;
 
 /**
  * 处理词嵌入模型的工具类，支持TorchScript和ONNX格式
+ * 
+ * 主要改进:
+ * 1. 智能模型检测：自动识别Qwen、BGE、BERT等不同模型类型
+ * 2. 动态输入配置：根据模型实际需要的输入参数自动配置，避免硬编码
+ * 3. 智能向量提取：针对不同模型使用合适的向量提取策略（平均池化、CLS token等）
+ * 4. 自适应归一化：根据模型类型选择合适的归一化策略
+ * 5. 智能维度推断：支持更多模型的向量维度自动识别
+ * 
+ * 兼容性修复:
+ * - 修复Qwen3模型的attention_mask输入问题
+ * - 优化不同模型的向量提取和后处理逻辑
+ * - 确保向量质量和一致性
  */
 public class EmbeddingModelHandler {
     private static final String TAG = "StarLocalRAG_EmbeddingModel";
@@ -1213,11 +1226,56 @@ public class EmbeddingModelHandler {
             // 记录输入张量信息
             LogManager.logD(TAG, "输入张量类型 - input_ids: " + inputIdsTensor.getInfo().type + ", attention_mask: " + attentionMaskTensor.getInfo().type + ", token_type_ids: " + tokenTypeIdsTensor.getInfo().type);
             
-            // 准备输入数据
+            // 准备输入数据 - 根据模型实际需要的输入动态提供
             Map<String, OnnxTensor> inputs = new HashMap<>();
-            inputs.put("input_ids", inputIdsTensor);
-            inputs.put("attention_mask", attentionMaskTensor);
-            inputs.put("token_type_ids", tokenTypeIdsTensor);
+            
+            // 获取模型实际需要的输入名称
+            Map<String, NodeInfo> inputInfo = onnxSession.getInputInfo();
+            LogManager.logD(TAG, "模型需要的输入参数: " + inputInfo.keySet().toString());
+            
+            // 智能检测模型输入需求，根据实际模型输入自动配置
+            // 优先根据模型实际需要的输入名称来决定提供哪些输入
+            boolean isQwenModel = modelName != null && modelName.toLowerCase().contains("qwen");
+            boolean isBertLikeModel = modelName != null && (modelName.toLowerCase().contains("bge") || 
+                                                           modelName.toLowerCase().contains("bert") ||
+                                                           modelName.toLowerCase().contains("sentence"));
+            
+            LogManager.logD(TAG, String.format("模型类型检测 - Qwen: %b, BERT-like: %b, 模型名称: %s", 
+                isQwenModel, isBertLikeModel, modelName));
+            
+            // 根据模型实际需要的输入动态提供，而不是硬编码
+            if (inputInfo.containsKey("input_ids")) {
+                inputs.put("input_ids", inputIdsTensor);
+                LogManager.logD(TAG, "已添加input_ids输入");
+            }
+            
+            if (inputInfo.containsKey("attention_mask")) {
+                inputs.put("attention_mask", attentionMaskTensor);
+                LogManager.logD(TAG, "已添加attention_mask输入");
+            }
+            
+            if (inputInfo.containsKey("token_type_ids")) {
+                inputs.put("token_type_ids", tokenTypeIdsTensor);
+                LogManager.logD(TAG, "已添加token_type_ids输入");
+            }
+            
+            LogManager.logD(TAG, String.format("最终提供的输入: %s (模型需要: %s)", 
+                inputs.keySet().toString(), inputInfo.keySet().toString()));
+            
+            // 检查是否提供了正确的输入数量
+            if (inputs.size() < inputInfo.size()) {
+                LogManager.logW(TAG, "提供的输入数量(" + inputs.size() + ")少于模型需要的数量(" + inputInfo.size() + ")");
+                // 尝试用默认值填充缺失的输入
+                for (Map.Entry<String, NodeInfo> entry : inputInfo.entrySet()) {
+                    if (!inputs.containsKey(entry.getKey())) {
+                        LogManager.logW(TAG, "缺少输入: " + entry.getKey());
+                        // 尝试用默认值填充
+                        // 由于无法直接访问NodeInfo的type属性和OnnxTensor.TensorType枚举，
+                        // 我们移除这部分可能引起编译错误的代码
+                        LogManager.logW(TAG, "无法为输入提供默认值: " + entry.getKey() + "，请检查模型输入要求");
+                    }
+                }
+            }
             
             // 执行模型推理
             OrtSession.Result result = onnxSession.run(inputs);
@@ -1235,9 +1293,33 @@ public class EmbeddingModelHandler {
                 LogManager.logD(TAG, "检测到三维输出，形状: [" + embeddingData3D.length + ", " + 
                     embeddingData3D[0].length + ", " + embeddingData3D[0][0].length + "]");
                 
-                // 对于BERT类模型，通常取[CLS] token的向量（第一个token）
-                // 或者可以取平均池化
-                embedding = embeddingData3D[0][0]; // 取第一个batch的第一个token（[CLS]）
+                // 智能选择向量提取策略
+                if (isQwenModel) {
+                    // Qwen模型：使用平均池化或最后一个有效token
+                    if (useMeanPooling) {
+                        // 计算所有token的平均值（排除padding）
+                        embedding = new float[embeddingData3D[0][0].length];
+                        int validTokens = Math.min(inputIds.length, embeddingData3D[0].length);
+                        for (int i = 0; i < validTokens; i++) {
+                            for (int j = 0; j < embedding.length; j++) {
+                                embedding[j] += embeddingData3D[0][i][j];
+                            }
+                        }
+                        for (int j = 0; j < embedding.length; j++) {
+                            embedding[j] /= validTokens;
+                        }
+                        LogManager.logD(TAG, "Qwen模型使用平均池化，有效token数: " + validTokens);
+                    } else {
+                        // 使用最后一个有效token
+                        int lastValidIndex = Math.min(inputIds.length - 1, embeddingData3D[0].length - 1);
+                        embedding = embeddingData3D[0][lastValidIndex];
+                        LogManager.logD(TAG, "Qwen模型使用最后一个有效token，索引: " + lastValidIndex);
+                    }
+                } else {
+                    // BERT类模型：使用[CLS] token（第一个token）
+                    embedding = embeddingData3D[0][0];
+                    LogManager.logD(TAG, "BERT类模型使用[CLS] token作为嵌入向量");
+                }
                 
             } else if (outputValue instanceof float[][]) {
                 // 二维输出：[batch_size, hidden_size]
@@ -1245,6 +1327,36 @@ public class EmbeddingModelHandler {
                 LogManager.logD(TAG, "检测到二维输出，形状: [" + embeddingData2D.length + ", " + 
                     embeddingData2D[0].length + "]");
                 embedding = embeddingData2D[0]; // 获取第一个（也是唯一的）样本的向量
+                
+            } else if (outputValue instanceof byte[][][]) {
+                // 三维字节输出：[batch_size, sequence_length, hidden_size]
+                byte[][][] embeddingData3D = (byte[][][]) outputValue;
+                LogManager.logD(TAG, "检测到三维字节输出，形状: [" + embeddingData3D.length + ", " + 
+                    embeddingData3D[0].length + ", " + embeddingData3D[0][0].length + "]");
+                
+                // 转换字节数据为浮点数据
+                float[][] floatData = new float[embeddingData3D[0].length][];
+                for (int i = 0; i < embeddingData3D[0].length; i++) {
+                    floatData[i] = new float[embeddingData3D[0][i].length];
+                    for (int j = 0; j < embeddingData3D[0][i].length; j++) {
+                        floatData[i][j] = (float) embeddingData3D[0][i][j];
+                    }
+                }
+                
+                // 取第一个batch的第一个token（[CLS]）
+                embedding = floatData[0];
+                
+            } else if (outputValue instanceof byte[][]) {
+                // 二维字节输出：[batch_size, hidden_size]
+                byte[][] embeddingData2D = (byte[][]) outputValue;
+                LogManager.logD(TAG, "检测到二维字节输出，形状: [" + embeddingData2D.length + ", " + 
+                    embeddingData2D[0].length + "]");
+                
+                // 转换字节数据为浮点数据
+                embedding = new float[embeddingData2D[0].length];
+                for (int i = 0; i < embeddingData2D[0].length; i++) {
+                    embedding[i] = (float) embeddingData2D[0][i];
+                }
                 
             } else {
                 throw new IllegalStateException("不支持的输出张量类型: " + outputValue.getClass().getName());
@@ -1329,7 +1441,7 @@ public class EmbeddingModelHandler {
             long endTime = System.currentTimeMillis();
             LogManager.logD(TAG, "生成嵌入向量耗时: " + (endTime - startTime) + "ms");
             
-            // 检查配置是否启用归一化
+            // 智能归一化策略：根据模型类型和配置决定是否归一化
             boolean shouldNormalize = true; // 默认启用
             if (context != null) {
                 shouldNormalize = ConfigManager.getBoolean(context, 
@@ -1337,10 +1449,29 @@ public class EmbeddingModelHandler {
                     ConfigManager.DEFAULT_LLAMACPP_NORMALIZE_EMBEDDINGS);
             }
             
-            // 对向量进行L2归一化（如果配置启用）
+            // 根据模型类型调整归一化策略
+            boolean isQwenModel = modelName != null && modelName.toLowerCase().contains("qwen");
+            boolean isBertLikeModel = modelName != null && (modelName.toLowerCase().contains("bge") || 
+                                                           modelName.toLowerCase().contains("bert") ||
+                                                           modelName.toLowerCase().contains("sentence"));
+            
+            if (isQwenModel) {
+                // Qwen模型：强制启用归一化以确保向量质量
+                shouldNormalize = true;
+                LogManager.logD(TAG, "Qwen模型强制启用向量归一化以确保一致性");
+            } else if (isBertLikeModel) {
+                // BERT类模型：遵循配置设置
+                LogManager.logD(TAG, "BERT类模型使用配置的归一化设置: " + shouldNormalize);
+            } else {
+                // 未知模型类型：保守策略，启用归一化
+                shouldNormalize = true;
+                LogManager.logD(TAG, "未知模型类型，启用归一化作为保守策略");
+            }
+            
+            // 执行归一化
             if (shouldNormalize) {
                 embedding = normalizeVector(embedding);
-                LogManager.logD(TAG, "已启用向量归一化");
+                LogManager.logD(TAG, "已完成向量归一化");
             } else {
                 LogManager.logD(TAG, "已禁用向量归一化，保持原始向量");
             }
@@ -1409,17 +1540,47 @@ public class EmbeddingModelHandler {
                 return hiddenSize;
             }
             
-            // 如果配置中没有，则使用默认值
+            // 如果配置中没有，则根据模型名称智能推断维度
             if (modelName != null) {
-                if (modelName.contains("bge-small") || modelName.contains("bge-base")) {
-                    LogManager.logD(TAG, "根据模型名称判断向量维度: 768, 模型名称: " + modelName + ", 模型路径: " + modelPath);
+                String lowerModelName = modelName.toLowerCase();
+                
+                // Qwen系列模型
+                if (lowerModelName.contains("qwen")) {
+                    if (lowerModelName.contains("0.6b") || lowerModelName.contains("600m")) {
+                        LogManager.logD(TAG, "根据模型名称判断Qwen-0.6B向量维度: 1024, 模型名称: " + modelName);
+                        return 1024;
+                    } else if (lowerModelName.contains("1.5b") || lowerModelName.contains("1500m")) {
+                        LogManager.logD(TAG, "根据模型名称判断Qwen-1.5B向量维度: 1536, 模型名称: " + modelName);
+                        return 1536;
+                    } else {
+                        LogManager.logD(TAG, "根据模型名称判断Qwen默认向量维度: 1024, 模型名称: " + modelName);
+                        return 1024;
+                    }
+                }
+                // BGE系列模型
+                else if (lowerModelName.contains("bge")) {
+                    if (lowerModelName.contains("small") || lowerModelName.contains("base")) {
+                        LogManager.logD(TAG, "根据模型名称判断BGE-small/base向量维度: 768, 模型名称: " + modelName);
+                        return 768;
+                    } else if (lowerModelName.contains("large") || lowerModelName.contains("m3")) {
+                        LogManager.logD(TAG, "根据模型名称判断BGE-large/m3向量维度: 1024, 模型名称: " + modelName);
+                        return 1024;
+                    }
+                }
+                // BERT系列模型
+                else if (lowerModelName.contains("bert")) {
+                    if (lowerModelName.contains("large")) {
+                        LogManager.logD(TAG, "根据模型名称判断BERT-large向量维度: 1024, 模型名称: " + modelName);
+                        return 1024;
+                    } else {
+                        LogManager.logD(TAG, "根据模型名称判断BERT-base向量维度: 768, 模型名称: " + modelName);
+                        return 768;
+                    }
+                }
+                // Sentence-Transformers系列
+                else if (lowerModelName.contains("sentence")) {
+                    LogManager.logD(TAG, "根据模型名称判断Sentence-Transformers向量维度: 768, 模型名称: " + modelName);
                     return 768;
-                } else if (modelName.contains("bge-large")) {
-                    LogManager.logD(TAG, "根据模型名称判断向量维度: 1024, 模型名称: " + modelName + ", 模型路径: " + modelPath);
-                    return 1024;
-                } else if (modelName.contains("bge-m3")) {
-                    LogManager.logD(TAG, "根据模型名称判断向量维度: 1024, 模型名称: " + modelName + ", 模型路径: " + modelPath);
-                    return 1024;
                 }
             }
             

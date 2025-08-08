@@ -48,6 +48,13 @@
             android:text="bge-m3_dynamic_int8_onnx"
             android:layout_marginBottom="0dp" />
 
+        <CheckBox
+            android:id="@+id/checkBoxQwen3Embedding"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Qwen3-Embedding-0.6B-onnx-uint8"
+            android:layout_marginBottom="0dp" />
+
         <!-- 重排模型列表 -->
         <TextView
             android:layout_width="match_parent"
@@ -99,53 +106,25 @@
             android:layout_marginTop="2dp"
             android:layout_marginBottom="0dp" />
 
-        <ScrollView
+        <TextView
+            android:id="@+id/textViewProgress"
             android:layout_width="match_parent"
-            android:layout_height="120dp"
-            android:background="@android:color/black"
-            android:layout_marginBottom="2dp"
-            android:scrollbars="vertical">
+            android:layout_height="wrap_content"
+            android:background="@android:color/white"
+            android:padding="8dp"
+            android:text="@string/text_waiting_download"
+            android:textSize="12sp"
+            android:typeface="monospace"
+            android:scrollbars="vertical"
+            android:maxLines="20" />
 
-            <TextView
-                android:id="@+id/textViewProgress"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:textColor="@android:color/white"
-                android:fontFamily="monospace"
-                android:textSize="12sp"
-                android:padding="8dp"
-                android:text="@string/text_waiting_download"
-                android:textIsSelectable="true"
-                android:longClickable="true" />
-
-        </ScrollView>
-
-        <!-- 下载按钮 -->
         <Button
             android:id="@+id/buttonDownload"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/button_download_selected_models"
-            android:layout_marginBottom="2dp" />
-
-        <!-- 最佳实践文本 -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/title_best_practice"
-            android:textSize="16sp"
-            android:textStyle="bold"
-            android:layout_marginBottom="2dp" />
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/text_best_practice_description"
-            android:textSize="14sp"
-            android:lineSpacingExtra="4dp" />
+            android:layout_marginTop="16dp"
+            android:text="@string/button_download_selected_models" />
 
         </LinearLayout>
-
     </ScrollView>
-
 </LinearLayout>

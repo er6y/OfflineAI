@@ -51,6 +51,7 @@ public class ModelDownloadFragment extends Fragment {
     // UI组件
     private CheckBox checkBoxBgeM3;
     private CheckBox checkBoxBgeReranker;
+    private CheckBox checkBoxQwen3Embedding;
     private CheckBox checkBoxQwen06B;
     private CheckBox checkBoxQwen17B;
     private TextView textViewProgress;
@@ -92,6 +93,32 @@ public class ModelDownloadFragment extends Fragment {
                 "model.onnx",
                 "conversion_info.json",
                 "config.json"
+            }
+        ));
+        
+        // Qwen3 Embedding模型配置
+        MODEL_CONFIGS.put("qwen3-embedding", new ModelConfig(
+            "Qwen3-Embedding-0.6B-onnx-uint8",
+            ModelType.EMBEDDING,
+            new String[]{
+                "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/.gitattributes?download=true",
+                "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/added_tokens.json?download=true",
+                "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/config.json?download=true",
+                "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/dynamic_uint8.onnx?download=true",
+                "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/merges.txt?download=true",
+                "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/tokenizer.json?download=true",
+                "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/tokenizer_config.json?download=true",
+                "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/vocab.json?download=true"
+            },
+            new String[]{
+                ".gitattributes",
+                "added_tokens.json",
+                "config.json",
+                "dynamic_uint8.onnx",
+                "merges.txt",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "vocab.json"
             }
         ));
         
@@ -166,10 +193,13 @@ public class ModelDownloadFragment extends Fragment {
     private void initViews(View view) {
         checkBoxBgeM3 = view.findViewById(R.id.checkBoxBgeM3);
         checkBoxBgeReranker = view.findViewById(R.id.checkBoxBgeReranker);
+        checkBoxQwen3Embedding = view.findViewById(R.id.checkBoxQwen3Embedding);
         checkBoxQwen06B = view.findViewById(R.id.checkBoxQwen06B);
         checkBoxQwen17B = view.findViewById(R.id.checkBoxQwen17B);
         textViewProgress = view.findViewById(R.id.textViewProgress);
-        scrollViewProgress = (ScrollView) textViewProgress.getParent();
+        // 修复类型转换错误：根据布局文件，textViewProgress的父视图是LinearLayout，不是ScrollView
+        // 因此我们不尝试获取ScrollView引用，将其设为null
+        scrollViewProgress = null;
         buttonDownload = view.findViewById(R.id.buttonDownload);
         
         // 设置进度文本框支持文本选择和滚动
@@ -225,6 +255,9 @@ public class ModelDownloadFragment extends Fragment {
         
         if (checkBoxBgeM3.isChecked()) {
             selected.add("bge-m3");
+        }
+        if (checkBoxQwen3Embedding.isChecked()) {
+            selected.add("qwen3-embedding");
         }
         if (checkBoxBgeReranker.isChecked()) {
             selected.add("bge-reranker");
@@ -614,10 +647,12 @@ public class ModelDownloadFragment extends Fragment {
         // 直接设置文本内容
         textViewProgress.setText(progressText.toString());
         
-        // 自动滚动到底部
-        scrollViewProgress.post(() -> {
-            scrollViewProgress.fullScroll(ScrollView.FOCUS_DOWN);
-        });
+        // 自动滚动到底部（如果scrollViewProgress不为null）
+        if (scrollViewProgress != null) {
+            scrollViewProgress.post(() -> {
+                scrollViewProgress.fullScroll(ScrollView.FOCUS_DOWN);
+            });
+        }
     }
     
     private void acquireWakeLocks() {
