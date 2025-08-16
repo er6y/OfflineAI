@@ -122,6 +122,27 @@ set(GGML_USE_OPENCL OFF CACHE BOOL "Enable OpenCL backend" FORCE)
 set(GGML_USE_VULKAN OFF CACHE BOOL "Enable Vulkan backend" FORCE)
 set(GGML_USE_CUDA OFF CACHE BOOL "Enable CUDA backend" FORCE)
 
+# 处理Vulkan相关的CMake版本兼容性问题
+# 如果启用Vulkan，需要确保CMake版本满足要求
+if(GGML_USE_VULKAN)
+    # Vulkan backend需要CMake 3.19+，当前版本已满足
+    if(CMAKE_VERSION VERSION_LESS "3.19")
+        message(FATAL_ERROR "Vulkan backend requires CMake 3.19 or higher, current version: ${CMAKE_VERSION}")
+    endif()
+    
+    # 设置Vulkan相关的CMake策略
+    if(POLICY CMP0114)
+        cmake_policy(SET CMP0114 NEW)
+    endif()
+    
+    # 查找Vulkan包
+    find_package(Vulkan COMPONENTS glslc)
+    if(NOT Vulkan_FOUND)
+        message(WARNING "Vulkan not found, disabling Vulkan backend")
+        set(GGML_USE_VULKAN OFF CACHE BOOL "Enable Vulkan backend" FORCE)
+    endif()
+endif()
+
 # 根据架构设置指令集支持
 if(ANDROID_ABI STREQUAL "x86_64" OR ANDROID_ABI STREQUAL "x86")
     # 对于x86/x86_64架构，禁用高级指令集以避免模拟器兼容性问题
@@ -141,13 +162,34 @@ set(GGML_USE_KOMPUTE OFF CACHE BOOL "Enable Kompute backend" FORCE)
 set(GGML_USE_NNAPI OFF CACHE BOOL "Enable NNAPI backend" FORCE)
 
 # 收集ggml源文件
-file(GLOB GGML_SOURCES
+set(GGML_SOURCES
     "${LLAMA_CPP_DIR}/ggml/src/ggml.c"
     "${LLAMA_CPP_DIR}/ggml/src/ggml.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-alloc.c"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-backend.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-backend-reg.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-quants.c"
+)
+
+# 如果启用Vulkan，添加Vulkan相关源文件
+if(GGML_USE_VULKAN AND Vulkan_FOUND)
+    list(APPEND GGML_SOURCES
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/ggml-vulkan.cpp"
+    )
+    
+    # 添加Vulkan相关的编译定义
+    add_definitions(-DGGML_USE_VULKAN=1)
+    
+    # 包含Vulkan头文件目录
+    include_directories("${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan")
+    
+    message(STATUS "Vulkan backend enabled for GGML")
+else()
+    add_definitions(-DGGML_USE_VULKAN=0)
+endif()
+
+# 继续添加其他GGML源文件
+list(APPEND GGML_SOURCES
     "${LLAMA_CPP_DIR}/ggml/src/ggml-opt.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-threading.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/gguf.cpp"
@@ -159,14 +201,28 @@ file(GLOB GGML_SOURCES
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/vec.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/traits.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/quants.c"
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/repack.cpp"
 )
+
+# 根据目标架构添加架构特定的源文件
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
+    list(APPEND GGML_SOURCES
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/quants.c"
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/repack.cpp"
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/cpu-feats.cpp"
+    )
+elseif(ANDROID_ABI STREQUAL "x86_64" OR ANDROID_ABI STREQUAL "x86")
+    list(APPEND GGML_SOURCES
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/quants.c"
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/repack.cpp"
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp"
+    )
+endif()
 
 # 收集llama.cpp源文件
 file(GLOB LLAMA_SOURCES
     "${LLAMA_CPP_DIR}/src/*.cpp"
     "${LLAMA_CPP_DIR}/src/*.c"
-    "${LLAMA_CPP_DIR}/ggml/src/*.c"
-    "${LLAMA_CPP_DIR}/ggml/src/*.cpp"
     "${LLAMA_CPP_DIR}/common/*.cpp"
     "${LLAMA_CPP_DIR}/common/*.c"
 )
@@ -185,6 +241,29 @@ message(STATUS "BUILD_COMMIT: ${BUILD_COMMIT}")
 message(STATUS "BUILD_COMPILER: ${BUILD_COMPILER}")
 message(STATUS "BUILD_TARGET: ${BUILD_TARGET}")
 
+# 获取Git版本信息
+find_program(GIT_EXE NAMES git git.exe)
+if(GIT_EXE)
+    execute_process(COMMAND ${GIT_EXE} rev-list --count HEAD
+        WORKING_DIRECTORY ${LLAMA_CPP_DIR}
+        OUTPUT_VARIABLE GGML_BUILD_NUMBER
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    execute_process(COMMAND ${GIT_EXE} rev-parse --short HEAD
+        WORKING_DIRECTORY ${LLAMA_CPP_DIR}
+        OUTPUT_VARIABLE GGML_BUILD_COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+else()
+    set(GGML_BUILD_NUMBER "0")
+    set(GGML_BUILD_COMMIT "unknown")
+endif()
+
+# 设置版本信息
+set(GGML_INSTALL_VERSION "0.0.${GGML_BUILD_NUMBER}")
+
 # 添加llama.cpp相关的编译定义
 add_definitions(
     -DGGML_USE_LLAMAFILE=0
@@ -193,6 +272,8 @@ add_definitions(
     -DGGML_USE_OPENCL=0
     -DGGML_USE_VULKAN=0
     -DGGML_USE_CPU=1
+    -DGGML_VERSION="${GGML_INSTALL_VERSION}"
+    -DGGML_COMMIT="${GGML_BUILD_COMMIT}"
 )
 
 # Android平台特定宏
@@ -222,6 +303,22 @@ target_link_libraries(llamacpp_jni
     android
     m
 )
+
+# 如果启用Vulkan，链接Vulkan库
+if(GGML_USE_VULKAN AND Vulkan_FOUND)
+    target_link_libraries(llamacpp_jni Vulkan::Vulkan)
+    
+    # 如果存在Vulkan::Headers目标，也链接它
+    if(TARGET Vulkan::Headers)
+        target_link_libraries(llamacpp_jni Vulkan::Headers)
+        message(STATUS "Linked Vulkan::Headers target")
+    elseif(DEFINED Vulkan_INCLUDE_DIRS)
+        target_include_directories(llamacpp_jni PRIVATE ${Vulkan_INCLUDE_DIRS})
+        message(STATUS "Added Vulkan_INCLUDE_DIRS: ${Vulkan_INCLUDE_DIRS}")
+    endif()
+    
+    message(STATUS "Vulkan libraries linked to llamacpp_jni")
+endif()
 
 # 设置输出目录 - 直接输出到app的jniLibs目录
 set(APP_JNILIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../app/src/main/jniLibs")

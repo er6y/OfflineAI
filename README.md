@@ -205,8 +205,8 @@ cargo build --release
 本项目是AI编程能力的一次深度实践，展示了现代AI在复杂软件开发中的潜力：
 
 #### 🛠️ **开发工具链**
-- **主要AI IDE**: Lingma - 世界领先的AI编程环境
-- **核心AI模型**: qwen3-coder - 提供主要的代码生成和架构设计
+- **主要AI IDE**: Lingma - 目前主要开发环境；前期采用Trae AI进行初期开发
+- **核心AI模型**: qwen3-coder - 现在核心代码维护优化、框架优化、模型下载、新模型qwen3嵌入模型支持、GPU加速代码开发等；早期采用Claude等进行初期开发
 
 #### 💡 **AI编程实践**
 - **完全AI生成**: 从架构设计到具体实现，全部由AI完成
@@ -406,8 +406,8 @@ This project is licensed under the [MIT License](LICENSE).
 This project represents a deep practice of AI programming capabilities, showcasing the potential of modern AI in complex software development:
 
 #### 🛠️ **Development Toolchain**
-- **Primary AI IDE**: Lingma - World's leading AI programming environment
-- **Core AI Model**: qwen3-coder - Providing main code generation and architecture design
+- **Primary AI IDE**: Lingma - Current main development environment; early development with Trae AI
+- **Core AI Model**: qwen3-coder - Current core code maintenance optimization, framework optimization, model downloading, new qwen3 embedding model support, GPU acceleration code development, etc.; early development with Claude and others
 
 #### 💡 **AI Programming Practice**
 - **Fully AI Generated**: From architecture design to specific implementation, all completed by AI

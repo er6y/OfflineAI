@@ -995,14 +995,18 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                     // 对从LlamaCpp返回的token进行Unicode修复
                     String fixedToken = token;
                     try {
-                        // 使用UnicodeDecoder进行多重修复，确保完全解码
-                        fixedToken = UnicodeDecoder.decodeUnicodeEscapes(token);
-                        // 如果仍然包含转义序列，再次修复
-                        while (fixedToken.contains("\\u") && !fixedToken.equals(token)) {
-                            token = fixedToken;
+                        // 检查是否需要修复
+                        if (UnicodeDecoder.containsUnicodeEscapes(token)) {
+                            // 使用UnicodeDecoder进行多重修复，确保完全解码
                             fixedToken = UnicodeDecoder.decodeUnicodeEscapes(token);
+                            // 如果仍然包含转义序列，再次修复
+                            while (fixedToken.contains("\\u") && !fixedToken.equals(token)) {
+                                token = fixedToken;
+                                fixedToken = UnicodeDecoder.decodeUnicodeEscapes(token);
+                            }
+                            // 只在实际修复时才打印日志
+                            LogManager.logD(TAG, String.format("Token Unicode修复: '%s' -> '%s'", token, fixedToken));
                         }
-                        LogManager.logD(TAG, String.format("Token Unicode修复: '%s' -> '%s'", token, fixedToken));
                     } catch (Exception e) {
                         LogManager.logW(TAG, "Token Unicode修复失败: " + e.getMessage());
                         fixedToken = token; // 回退到原始token
@@ -1154,14 +1158,18 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                     // 对从LlamaCpp返回的token进行Unicode修复
                     String fixedToken = token;
                     try {
-                        // 使用UnicodeDecoder进行多重修复，确保完全解码
-                        fixedToken = UnicodeDecoder.decodeUnicodeEscapes(token);
-                        // 如果仍然包含转义序列，再次修复
-                        while (fixedToken.contains("\\u") && !fixedToken.equals(token)) {
-                            token = fixedToken;
+                        // 检查是否需要修复
+                        if (UnicodeDecoder.containsUnicodeEscapes(token)) {
+                            // 使用UnicodeDecoder进行多重修复，确保完全解码
                             fixedToken = UnicodeDecoder.decodeUnicodeEscapes(token);
+                            // 如果仍然包含转义序列，再次修复
+                            while (fixedToken.contains("\\u") && !fixedToken.equals(token)) {
+                                token = fixedToken;
+                                fixedToken = UnicodeDecoder.decodeUnicodeEscapes(token);
+                            }
+                            // 只在实际修复时才打印日志
+                            LogManager.logD(TAG, String.format("传统API Token Unicode修复: '%s' -> '%s'", token, fixedToken));
                         }
-                        LogManager.logD(TAG, String.format("传统API Token Unicode修复: '%s' -> '%s'", token, fixedToken));
                     } catch (Exception e) {
                         LogManager.logW(TAG, "传统API Token Unicode修复失败: " + e.getMessage());
                         fixedToken = token; // 回退到原始token
@@ -1348,19 +1356,22 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                         // 多重Unicode修复逻辑
                         String originalToken = token;
                         String fixedToken = token;
-                        int maxAttempts = 3;
                         
-                        for (int attempt = 0; attempt < maxAttempts; attempt++) {
-                            String previousToken = fixedToken;
-                            fixedToken = UnicodeDecoder.decodeUnicodeEscapes(fixedToken);
+                        // 检查是否需要修复
+                        if (UnicodeDecoder.containsUnicodeEscapes(token)) {
+                            int maxAttempts = 3;
                             
-                            // 如果没有变化，说明已经完全解码
-                            if (fixedToken.equals(previousToken)) {
-                                break;
+                            for (int attempt = 0; attempt < maxAttempts; attempt++) {
+                                String previousToken = fixedToken;
+                                fixedToken = UnicodeDecoder.decodeUnicodeEscapes(fixedToken);
+                                
+                                // 如果没有变化，说明已经完全解码
+                                if (fixedToken.equals(previousToken)) {
+                                    break;
+                                }
                             }
-                        }
-                        
-                        if (!originalToken.equals(fixedToken)) {
+                            
+                            // 只在实际修复时才打印日志
                             LogManager.logD(TAG, "Unicode修复: " + originalToken + " -> " + fixedToken);
                         }
                         

@@ -3,4 +3,4 @@
 	url = git@github.com:ggml-org/llama.cpp.git
 [submodule "libs/tokenizers-rust"]
 	path = libs/tokenizers-rust
-	url = https://github.com/huggingface/tokenizers.git
+	url = git@github.com:huggingface/tokenizers.git
