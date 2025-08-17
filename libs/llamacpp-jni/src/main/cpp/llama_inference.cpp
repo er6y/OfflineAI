@@ -8,22 +8,65 @@
 #include <unordered_map>
 #include <mutex>
 #include <atomic>
+#include <pthread.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <stdarg.h>
 #include "llama.h"
 #include "common.h"
+#include "vulkan_version_patch.h"
+#include "vulkan_runtime_detector.h"
+#include "ggml-backend.h"
+
+// JNI全局引用，用于调用LogManager.print方法
+static JavaVM* g_jvm = nullptr;
+static jclass g_log_manager_class = nullptr;
+static jmethodID g_log_manager_print_method = nullptr;
 
 // 调试日志宏定义
 #ifdef ENABLE_DEBUG_LOGS
-    #define DEBUG_LOG(tag, fmt, ...) __android_log_print(ANDROID_LOG_INFO, tag, "[DEBUG] " fmt, ##__VA_ARGS__)
-    #define ERROR_LOG(tag, fmt, ...) __android_log_print(ANDROID_LOG_ERROR, tag, "[ERROR] " fmt, ##__VA_ARGS__)
-    #define TRACE_LOG(tag, fmt, ...) __android_log_print(ANDROID_LOG_VERBOSE, tag, "[TRACE] " fmt, ##__VA_ARGS__)
+    #define DEBUG_LOG(tag, fmt, ...) do { \
+        __android_log_print(ANDROID_LOG_INFO, tag, "[DEBUG] " fmt, ##__VA_ARGS__); \
+        char buffer[1024]; \
+        snprintf(buffer, sizeof(buffer), "[llama-debug] " fmt, ##__VA_ARGS__); \
+        std::string formatted_message = std::string(buffer) + "\n"; \
+        call_log_manager_print(formatted_message.c_str()); \
+    } while(0)
+    #define ERROR_LOG(tag, fmt, ...) do { \
+        __android_log_print(ANDROID_LOG_ERROR, tag, "[ERROR] " fmt, ##__VA_ARGS__); \
+        char buffer[1024]; \
+        snprintf(buffer, sizeof(buffer), "[llama-error] " fmt, ##__VA_ARGS__); \
+        std::string formatted_message = std::string(buffer) + "\n"; \
+        call_log_manager_print(formatted_message.c_str()); \
+    } while(0)
+    #define TRACE_LOG(tag, fmt, ...) do { \
+        __android_log_print(ANDROID_LOG_VERBOSE, tag, "[TRACE] " fmt, ##__VA_ARGS__); \
+        char buffer[1024]; \
+        snprintf(buffer, sizeof(buffer), "[llama-trace] " fmt, ##__VA_ARGS__); \
+        std::string formatted_message = std::string(buffer) + "\n"; \
+        call_log_manager_print(formatted_message.c_str()); \
+    } while(0)
 #else
     #define DEBUG_LOG(tag, fmt, ...) // 发布版本禁用调试日志
-    #define ERROR_LOG(tag, fmt, ...) __android_log_print(ANDROID_LOG_ERROR, tag, fmt, ##__VA_ARGS__)
+    #define ERROR_LOG(tag, fmt, ...) do { \
+        __android_log_print(ANDROID_LOG_ERROR, tag, fmt, ##__VA_ARGS__); \
+        char buffer[1024]; \
+        snprintf(buffer, sizeof(buffer), "[llama-error] " fmt, ##__VA_ARGS__); \
+        std::string formatted_message = std::string(buffer) + "\n"; \
+        call_log_manager_print(formatted_message.c_str()); \
+    } while(0)
     #define TRACE_LOG(tag, fmt, ...) // 发布版本禁用跟踪日志
 #endif
 
 // 强制日志宏（始终启用）
-#define FORCE_LOG(tag, fmt, ...) __android_log_print(ANDROID_LOG_INFO, tag, "[FORCE] " fmt, ##__VA_ARGS__)
+#define FORCE_LOG(tag, fmt, ...) do { \
+    __android_log_print(ANDROID_LOG_INFO, tag, "[FORCE] " fmt, ##__VA_ARGS__); \
+    char buffer[1024]; \
+    snprintf(buffer, sizeof(buffer), "[llama-force] " fmt, ##__VA_ARGS__); \
+    std::string formatted_message = std::string(buffer) + "\n"; \
+    call_log_manager_print(formatted_message.c_str()); \
+} while(0)
 
 // 全局停止标志，用于中断推理
 static std::atomic<bool> g_should_stop{false};
@@ -47,8 +90,200 @@ static std::atomic<bool> g_should_stop{false};
 //    }
 
 #define TAG "llama-android.cpp"
-#define LOGi(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
-#define LOGe(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOGi(...) do { \
+    __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__); \
+    char buffer[1024]; \
+    snprintf(buffer, sizeof(buffer), __VA_ARGS__); \
+    std::string formatted_message = "[llama-info] " + std::string(buffer) + "\n"; \
+    call_log_manager_print(formatted_message.c_str()); \
+} while(0)
+#define LOGe(...) do { \
+    __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__); \
+    char buffer[1024]; \
+    snprintf(buffer, sizeof(buffer), __VA_ARGS__); \
+    std::string formatted_message = "[llama-error] " + std::string(buffer) + "\n"; \
+    call_log_manager_print(formatted_message.c_str()); \
+} while(0)
+
+// stdout/stderr重定向相关变量
+static int stdout_pipe[2] = {-1, -1};
+static int stderr_pipe[2] = {-1, -1};
+static pthread_t stdout_thread = 0;
+static pthread_t stderr_thread = 0;
+static bool redirect_initialized = false;
+static volatile bool should_stop_threads = false;
+
+// 读取管道并输出到logcat的线程函数
+// 调用LogManager.print方法的辅助函数
+void call_log_manager_print(const char* message) {
+    if (!g_jvm || !g_log_manager_class || !g_log_manager_print_method) {
+        return;
+    }
+    
+    JNIEnv* env = nullptr;
+    bool detach_needed = false;
+    
+    // 获取JNI环境
+    int status = g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (status == JNI_EDETACHED) {
+        status = g_jvm->AttachCurrentThread(&env, nullptr);
+        detach_needed = true;
+    }
+    
+    if (status == JNI_OK && env) {
+        jstring jmessage = env->NewStringUTF(message);
+        if (jmessage) {
+            env->CallStaticVoidMethod(g_log_manager_class, g_log_manager_print_method, jmessage);
+            env->DeleteLocalRef(jmessage);
+        }
+        
+        if (detach_needed) {
+            g_jvm->DetachCurrentThread();
+        }
+    }
+}
+
+void* stdout_reader_thread(void* arg) {
+    char buffer[1024];
+    ssize_t count;
+    
+    while (!should_stop_threads) {
+        count = read(stdout_pipe[0], buffer, sizeof(buffer) - 1);
+        if (count > 0) {
+            buffer[count] = '\0';
+            // 移除末尾的换行符
+            if (count > 0 && buffer[count - 1] == '\n') {
+                buffer[count - 1] = '\0';
+            }
+            
+            // 输出到logcat
+            __android_log_print(ANDROID_LOG_INFO, "llama-stdout", "%s", buffer);
+        // 同时调用LogManager.print保存到文件
+        std::string formatted_message = "[llama-stdout] " + std::string(buffer) + "\n";
+        call_log_manager_print(formatted_message.c_str());
+        } else if (count == 0) {
+            // EOF reached
+            break;
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // No data available, sleep briefly
+            usleep(10000); // 10ms
+        } else {
+            // Error occurred
+            break;
+        }
+    }
+    return nullptr;
+}
+
+void* stderr_reader_thread(void* arg) {
+    char buffer[1024];
+    ssize_t count;
+    
+    while (!should_stop_threads) {
+        count = read(stderr_pipe[0], buffer, sizeof(buffer) - 1);
+        if (count > 0) {
+            buffer[count] = '\0';
+            // 移除末尾的换行符
+            if (count > 0 && buffer[count - 1] == '\n') {
+                buffer[count - 1] = '\0';
+            }
+            
+            // 输出到logcat
+            __android_log_print(ANDROID_LOG_ERROR, "llama-stderr", "%s", buffer);
+        // 同时调用LogManager.print保存到文件
+        std::string formatted_message = "[llama-stderr] " + std::string(buffer) + "\n";
+        call_log_manager_print(formatted_message.c_str());
+        } else if (count == 0) {
+            // EOF reached
+            break;
+        } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // No data available, sleep briefly
+            usleep(10000); // 10ms
+        } else {
+            // Error occurred
+            break;
+        }
+    }
+    return nullptr;
+}
+
+// 初始化stdout/stderr重定向
+void setup_stdout_stderr_redirect() {
+    if (redirect_initialized) {
+        return;
+    }
+    
+    FORCE_LOG(TAG, "[REDIRECT] Setting up stdout/stderr redirection to logcat...");
+    
+    // 创建stdout管道
+    if (pipe(stdout_pipe) == -1) {
+        ERROR_LOG(TAG, "[REDIRECT] Failed to create stdout pipe: %s", strerror(errno));
+        return;
+    }
+    
+    // 创建stderr管道
+    if (pipe(stderr_pipe) == -1) {
+        ERROR_LOG(TAG, "[REDIRECT] Failed to create stderr pipe: %s", strerror(errno));
+        close(stdout_pipe[0]);
+        close(stdout_pipe[1]);
+        return;
+    }
+    
+    // 备份原始的stdout和stderr
+    int stdout_backup = dup(STDOUT_FILENO);
+    int stderr_backup = dup(STDERR_FILENO);
+    
+    // 重定向stdout和stderr到管道
+    if (dup2(stdout_pipe[1], STDOUT_FILENO) == -1) {
+        ERROR_LOG(TAG, "[REDIRECT] Failed to redirect stdout: %s", strerror(errno));
+        goto cleanup;
+    }
+    
+    if (dup2(stderr_pipe[1], STDERR_FILENO) == -1) {
+        ERROR_LOG(TAG, "[REDIRECT] Failed to redirect stderr: %s", strerror(errno));
+        goto cleanup;
+    }
+    
+    // 关闭管道的写端副本，保持重定向的文件描述符
+    close(stdout_pipe[1]);
+    close(stderr_pipe[1]);
+    
+    // 设置管道读端为非阻塞模式
+    fcntl(stdout_pipe[0], F_SETFL, O_NONBLOCK);
+    fcntl(stderr_pipe[0], F_SETFL, O_NONBLOCK);
+    
+    // 创建读取线程
+    if (pthread_create(&stdout_thread, nullptr, stdout_reader_thread, nullptr) != 0) {
+        ERROR_LOG(TAG, "[REDIRECT] Failed to create stdout reader thread");
+        goto cleanup;
+    }
+    
+    if (pthread_create(&stderr_thread, nullptr, stderr_reader_thread, nullptr) != 0) {
+        ERROR_LOG(TAG, "[REDIRECT] Failed to create stderr reader thread");
+        should_stop_threads = true;
+        pthread_join(stdout_thread, nullptr);
+        goto cleanup;
+    }
+    
+    redirect_initialized = true;
+    FORCE_LOG(TAG, "[REDIRECT] stdout/stderr redirection setup completed successfully");
+    return;
+    
+cleanup:
+    if (stdout_backup != -1) {
+        dup2(stdout_backup, STDOUT_FILENO);
+        close(stdout_backup);
+    }
+    if (stderr_backup != -1) {
+        dup2(stderr_backup, STDERR_FILENO);
+        close(stderr_backup);
+    }
+    if (stdout_pipe[0] != -1) close(stdout_pipe[0]);
+    if (stdout_pipe[1] != -1) close(stdout_pipe[1]);
+    if (stderr_pipe[0] != -1) close(stderr_pipe[0]);
+    if (stderr_pipe[1] != -1) close(stderr_pipe[1]);
+    ERROR_LOG(TAG, "[REDIRECT] Failed to setup stdout/stderr redirection");
+}
 
 jclass la_int_var;
 jfieldID la_int_var_value;
@@ -109,10 +344,45 @@ bool is_valid_utf8(const char * string) {
 }
 
 static void log_callback(ggml_log_level level, const char * fmt, void * data) {
-    if (level == GGML_LOG_LEVEL_ERROR)     __android_log_print(ANDROID_LOG_ERROR, TAG, fmt, data);
-    else if (level == GGML_LOG_LEVEL_INFO) __android_log_print(ANDROID_LOG_INFO, TAG, fmt, data);
-    else if (level == GGML_LOG_LEVEL_WARN) __android_log_print(ANDROID_LOG_WARN, TAG, fmt, data);
-    else __android_log_print(ANDROID_LOG_DEFAULT, TAG, fmt, data);
+    // 直接输出格式化字符串，不进行额外处理
+    // 注意：这里假设fmt已经是完整的字符串，不需要额外的格式化参数
+    if (level == GGML_LOG_LEVEL_ERROR) {
+        __android_log_print(ANDROID_LOG_ERROR, TAG, "%s", fmt);
+        // 同时调用LogManager.print保存到文件
+        std::string formatted_message = "[llama-error] " + std::string(fmt) + "\n";
+        call_log_manager_print(formatted_message.c_str());
+    } else if (level == GGML_LOG_LEVEL_INFO) {
+        __android_log_print(ANDROID_LOG_INFO, TAG, "%s", fmt);
+        // 同时调用LogManager.print保存到文件
+        std::string formatted_message = "[llama-info] " + std::string(fmt) + "\n";
+        call_log_manager_print(formatted_message.c_str());
+    } else if (level == GGML_LOG_LEVEL_WARN) {
+        __android_log_print(ANDROID_LOG_WARN, TAG, "%s", fmt);
+        // 同时调用LogManager.print保存到文件
+        std::string formatted_message = "[llama-warn] " + std::string(fmt) + "\n";
+        call_log_manager_print(formatted_message.c_str());
+    } else {
+        __android_log_print(ANDROID_LOG_DEFAULT, TAG, "%s", fmt);
+        // 同时调用LogManager.print保存到文件
+        std::string formatted_message = "[llama-default] " + std::string(fmt) + "\n";
+        call_log_manager_print(formatted_message.c_str());
+    }
+}
+
+// 使用新的Vulkan运行时检测器进行兼容性检查
+static bool is_vulkan_suitable_for_llamacpp() {
+    DEBUG_LOG(TAG, "[VULKAN] Checking Vulkan suitability for llama.cpp...");
+    
+    vulkan_runtime::VulkanRuntimeInfo info = vulkan_runtime::detect_vulkan_runtime();
+    
+    FORCE_LOG(TAG, "[VULKAN] Runtime detection results:");
+    FORCE_LOG(TAG, "  Library available: %s", info.library_available ? "yes" : "no");
+    FORCE_LOG(TAG, "  Instance creation: %s", info.instance_creation_works ? "yes" : "no");
+    FORCE_LOG(TAG, "  Physical devices: %s (%u found)", info.physical_devices_available ? "yes" : "no", info.device_count);
+    FORCE_LOG(TAG, "  Vulkan 1.1 APIs: %s", info.vulkan_1_1_apis_available ? "yes" : "no");
+    FORCE_LOG(TAG, "  Suitable for llama.cpp: %s", info.suitable_for_llamacpp ? "yes" : "no");
+    
+    return info.suitable_for_llamacpp;
 }
 
 
@@ -146,11 +416,32 @@ JNIEXPORT jlong JNICALL
 Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1gpu(JNIEnv *env, jobject, jstring filename, jint gpu_layers) {
     llama_model_params model_params = llama_model_default_params();
     
-    // 设置GPU层数
-    model_params.n_gpu_layers = std::max(-1, gpu_layers); // -1表示全部使用GPU，0表示仅CPU
+    // 初始设置GPU层数
+    int requested_gpu_layers = std::max(-1, gpu_layers); // -1表示全部使用GPU，0表示仅CPU
+    int final_gpu_layers = requested_gpu_layers;
+    
+    // 如果请求使用GPU（gpu_layers > 0 或 gpu_layers == -1），则检测Vulkan可用性
+    if (requested_gpu_layers != 0) {
+        FORCE_LOG(TAG, "[GPU] GPU acceleration requested with %d layers", requested_gpu_layers);
+        
+        // 使用新的Vulkan运行时检测器
+        if (is_vulkan_suitable_for_llamacpp()) {
+            FORCE_LOG(TAG, "[GPU] Vulkan is suitable for llama.cpp, using GPU acceleration with %d layers", requested_gpu_layers);
+            final_gpu_layers = requested_gpu_layers;
+        } else {
+            FORCE_LOG(TAG, "[GPU] Vulkan is not suitable for llama.cpp, falling back to CPU-only mode");
+            final_gpu_layers = 0; // 回退到CPU模式
+        }
+    } else {
+        FORCE_LOG(TAG, "[GPU] CPU-only mode requested");
+        final_gpu_layers = 0;
+    }
+    
+    model_params.n_gpu_layers = final_gpu_layers;
 
     auto path_to_model = env->GetStringUTFChars(filename, 0);
-    LOGi("Loading model from %s with %d GPU layers", path_to_model, model_params.n_gpu_layers);
+    FORCE_LOG(TAG, "Loading model from %s with %d GPU layers (requested: %d, final: %d)", 
+             path_to_model, model_params.n_gpu_layers, requested_gpu_layers, final_gpu_layers);
 
     auto model = llama_model_load_from_file(path_to_model, model_params);
     env->ReleaseStringUTFChars(filename, path_to_model);
@@ -160,6 +451,29 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1gpu(JNIEnv *
         env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), "load_model_with_gpu() failed");
         return 0;
     }
+
+    // 获取并打印模型层分配信息
+    int32_t total_layers = llama_model_n_layer(model);
+    FORCE_LOG(TAG, "[MODEL_INFO] Model loaded successfully!");
+    FORCE_LOG(TAG, "[MODEL_INFO] Total model layers: %d", total_layers);
+    FORCE_LOG(TAG, "[MODEL_INFO] Requested GPU layers: %d", requested_gpu_layers);
+    FORCE_LOG(TAG, "[MODEL_INFO] Final GPU layers: %d", final_gpu_layers);
+    
+    if (final_gpu_layers > 0) {
+        int actual_gpu_layers = std::min(final_gpu_layers, total_layers);
+        int cpu_layers = total_layers - actual_gpu_layers;
+        FORCE_LOG(TAG, "[MODEL_INFO] ✓ GPU acceleration enabled");
+        FORCE_LOG(TAG, "[MODEL_INFO] ✓ Layers on GPU: %d/%d", actual_gpu_layers, total_layers);
+        FORCE_LOG(TAG, "[MODEL_INFO] ✓ Layers on CPU: %d/%d", cpu_layers, total_layers);
+        if (final_gpu_layers == -1) {
+            FORCE_LOG(TAG, "[MODEL_INFO] ✓ All layers offloaded to GPU (n_gpu_layers = -1)");
+        }
+    } else {
+        FORCE_LOG(TAG, "[MODEL_INFO] ✓ CPU-only mode");
+        FORCE_LOG(TAG, "[MODEL_INFO] ✓ All %d layers running on CPU", total_layers);
+    }
+    
+    FORCE_LOG(TAG, "[MODEL_INFO] Model handle: %p", model);
 
     return reinterpret_cast<jlong>(model);
 }
@@ -296,8 +610,16 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1context(JNIEnv *, jobject
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1free(JNIEnv *, jobject) {
+Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1free(JNIEnv *env, jobject) {
     llama_backend_free();
+    
+    // 清理JNI全局引用
+    if (g_log_manager_class) {
+        env->DeleteGlobalRef(g_log_manager_class);
+        g_log_manager_class = nullptr;
+    }
+    g_log_manager_print_method = nullptr;
+    g_jvm = nullptr;
 }
 
 extern "C"
@@ -698,8 +1020,34 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1sampler(JNIEnv *, jobject
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1init(JNIEnv *, jobject) {
-    // Backend initialization logging removed
+Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1init(JNIEnv *env, jobject) {
+    FORCE_LOG(TAG, "[BACKEND] Starting backend initialization...");
+    
+    // 初始化JNI全局引用用于LogManager调用
+    if (!g_jvm) {
+        env->GetJavaVM(&g_jvm);
+        
+        // 获取LogManager类
+        jclass local_log_manager_class = env->FindClass("com/example/starlocalrag/LogManager");
+        if (local_log_manager_class) {
+            g_log_manager_class = (jclass)env->NewGlobalRef(local_log_manager_class);
+            env->DeleteLocalRef(local_log_manager_class);
+            
+            // 获取print方法
+            g_log_manager_print_method = env->GetStaticMethodID(g_log_manager_class, "print", "(Ljava/lang/String;)V");
+            
+            if (g_log_manager_print_method) {
+                FORCE_LOG(TAG, "[BACKEND] LogManager.print method initialized successfully");
+            } else {
+                FORCE_LOG(TAG, "[BACKEND] Failed to find LogManager.print method");
+            }
+        } else {
+            FORCE_LOG(TAG, "[BACKEND] Failed to find LogManager class");
+        }
+    }
+    
+    // 设置stdout/stderr重定向到logcat
+    setup_stdout_stderr_redirect();
     
     // 设置日志回调
     llama_log_set(log_callback, NULL);
@@ -707,7 +1055,18 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1init(JNIEnv *, jobject
     // 初始化后端
     llama_backend_init();
     
-    // Backend initialization completed logging removed
+    // 加载所有后端，包括可用的Vulkan后端
+    FORCE_LOG(TAG, "[BACKEND] Loading all GGML backends...");
+    ggml_backend_load_all();
+    FORCE_LOG(TAG, "[BACKEND] All GGML backends loaded");
+    
+    FORCE_LOG(TAG, "[BACKEND] Backend initialization completed");
+    
+    // 测试重定向是否工作
+    printf("[TEST] This printf should appear in logcat as llama-stdout\n");
+    fprintf(stderr, "[TEST] This fprintf to stderr should appear in logcat as llama-stderr\n");
+    fflush(stdout);
+    fflush(stderr);
 }
 
 extern "C"
@@ -998,12 +1357,14 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1loop(
     const auto model = llama_get_model(context);
     if (model == nullptr) {
         __android_log_print(ANDROID_LOG_ERROR, "LlamaCppJNI", "[MODEL_ERROR] llama_get_model returned null");
+        call_log_manager_print("[llama-error] [MODEL_ERROR] llama_get_model returned null\n");
         return nullptr;
     }
     
     const auto vocab = llama_model_get_vocab(model);
     if (vocab == nullptr) {
         __android_log_print(ANDROID_LOG_ERROR, "LlamaCppJNI", "[VOCAB_ERROR] llama_model_get_vocab returned null");
+        call_log_manager_print("[llama-error] [VOCAB_ERROR] llama_model_get_vocab returned null\n");
         return nullptr;
     }
 
@@ -1033,6 +1394,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1loop(
     // 增强的 sampler 指针验证
     if (sampler == nullptr) {
         __android_log_print(ANDROID_LOG_ERROR, "LlamaCppJNI", "[SAMPLER_ERROR] sampler pointer is null before sampling");
+        call_log_manager_print("[llama-error] [SAMPLER_ERROR] sampler pointer is null before sampling\n");
         return nullptr;
     }
     
@@ -1064,6 +1426,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1loop(
         is_bos_token = (new_token_id == llama_vocab_bos(vocab));
     } else {
         __android_log_print(ANDROID_LOG_ERROR, "LlamaCppJNI", "[VOCAB_ERROR] vocab pointer is null when checking special tokens");
+        call_log_manager_print("[llama-error] [VOCAB_ERROR] vocab pointer is null when checking special tokens\n");
     }
     
     DEBUG_LOG("LlamaCppJNI", "特殊token检查: is_eog=%s, is_eos=%s, is_bos=%s", 
@@ -1212,6 +1575,8 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_set_1should_1stop(
     LOGi("[JNI] 设置停止标志: %s", should_stop ? "true" : "false");
     // 强制输出日志确保能看到
     __android_log_print(ANDROID_LOG_INFO, "LlamaCppJNI", "[强制日志] 设置停止标志: %s", should_stop ? "true" : "false");
+    std::string formatted_message = "[llama-info] [强制日志] 设置停止标志: " + std::string(should_stop ? "true" : "false") + "\n";
+    call_log_manager_print(formatted_message.c_str());
 }
 
 extern "C"

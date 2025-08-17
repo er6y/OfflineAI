@@ -47,11 +47,13 @@ StarLocalRAG 是一个基于Android平台的**完全本地化RAG（检索增强�
 - **ONNX Runtime 1.21.0**：高性能推理，支持GPU加速
 - **Rust分词器**：高效的多架构分词处理（ARM64/ARMv7/x86_64）
 
-#### 📚 **智能知识库系统**
+#### 📚 **智能知识库笔记系统**
 - 支持多种文档格式：PDF、Word、Excel、PPT、TXT、JSON
 - 智能文本分块策略：固定长度、语义分块、层次化分块
 - 向量异常检测与修复系统，确保检索质量
 - SQLite本地向量数据库，高效存储和检索
+- 知识库笔记管理：支持笔记创建、编辑、分类和标签管理
+- 笔记与文档关联：建立笔记与原始文档的双向链接关系
 
 #### 🔍 **高级检索技术**
 - **向量检索**：基于语义相似度的精确匹配
@@ -73,7 +75,7 @@ StarLocalRAG 是一个基于Android平台的**完全本地化RAG（检索增强�
 │                    StarLocalRAG 架构                        │
 ├─────────────────────────────────────────────────────────────┤
 │  UI Layer (Android)                                         │
-│  ├── RAG问答界面    ├── 知识库构建    ├── 模型管理           │
+│  ├── RAG问答界面    ├── 构建知识库    ├── 知识库笔记         │
 ├─────────────────────────────────────────────────────────────┤
 │  Business Logic Layer                                       │
 │  ├── RagQueryManager  ├── KnowledgeBaseService              │
@@ -127,23 +129,60 @@ if (isBusy.compareAndSet(false, true)) {
 
 ### 📱 功能模块
 
+StarLocalRAG 提供了完整的本地化RAG解决方案，包含以下核心功能模块：
+
 #### RAG问答系统
 - 基于知识库的智能问答
 - 支持思考模式（`/no_think`指令）
 - 流式输出和实时中断
 - 多参数配置：检索深度、重排数量等
+- 上下文记忆和对话历史管理
+- 多轮对话支持和语境理解
 
-#### 知识库构建
-- 多格式文档解析和处理
-- 智能文本分块策略
-- 向量化和数据库存储
-- 模型兼容性检查
+#### 知识库笔记管理
+- **文档导入与解析**：支持PDF、Word、Excel、PPT、TXT、JSON等多种格式
+- **智能分块处理**：固定长度、语义分块、层次化分块策略
+- **向量化存储**：高效的向量数据库存储和检索
+- **笔记创建与编辑**：支持富文本笔记创建、在线编辑和格式化
+- **分类与标签**：灵活的笔记分类体系和标签管理
+- **关联链接**：建立笔记与原始文档的双向关联关系
+- **搜索与过滤**：基于关键词、标签、时间的多维度搜索
+- **导出与分享**：支持笔记导出为多种格式（Markdown、PDF、TXT）
+
+#### 设置页面功能
+- **模型配置**：LLM模型选择、参数调优（温度、top-p、top-k等）
+- **推理设置**：GPU层数配置、内存限制、并发控制
+- **检索参数**：向量检索深度、重排模型配置、相似度阈值
+- **界面定制**：主题切换、字体大小、显示密度调整
+- **数据管理**：缓存清理、数据备份与恢复、存储路径配置
+- **性能优化**：推理加速选项、内存优化策略
+- **隐私安全**：本地数据加密、访问权限控制
+
+#### 日志页面功能
+- **系统日志**：应用启动、模型加载、推理过程的详细日志
+- **错误追踪**：异常信息捕获、错误堆栈跟踪、崩溃报告
+- **性能监控**：推理耗时、内存使用、GPU利用率统计
+- **操作记录**：用户操作历史、查询记录、文档处理日志
+- **调试信息**：开发者模式下的详细调试信息
+- **日志过滤**：按时间、级别、模块进行日志筛选
+- **日志导出**：支持日志文件导出，便于问题排查
+
+#### 帮助页面功能
+- **快速入门**：新用户引导、基础功能介绍、操作演示
+- **功能说明**：详细的功能模块说明和使用指南
+- **常见问题**：FAQ解答、问题排查指南、解决方案
+- **模型指南**：推荐模型列表、模型选择建议、性能对比
+- **技术文档**：API文档、开发指南、架构说明
+- **更新日志**：版本更新记录、新功能介绍、已知问题
+- **联系支持**：问题反馈渠道、社区链接、开发者联系方式
 
 #### 模型管理
 - 本地模型下载和管理
 - 断点续传和智能重试
 - 多模型并发下载
 - GPU配置检测和优化
+- 模型性能评估和推荐
+- 模型版本管理和更新
 
 ### 🛠️ 开发环境
 
@@ -248,11 +287,13 @@ StarLocalRAG is a **fully local RAG (Retrieval-Augmented Generation) application
 - **ONNX Runtime 1.21.0**: High-performance inference with GPU acceleration
 - **Rust Tokenizer**: Efficient multi-architecture tokenization (ARM64/ARMv7/x86_64)
 
-#### 📚 **Intelligent Knowledge Base System**
+#### 📚 **Intelligent Knowledge Base Note System**
 - Multiple document formats: PDF, Word, Excel, PPT, TXT, JSON
 - Smart text chunking strategies: fixed-length, semantic, hierarchical
 - Vector anomaly detection and repair system for quality assurance
 - SQLite local vector database for efficient storage and retrieval
+- Knowledge base note management: support for note creation, editing, categorization and tag management
+- Note-document association: establish bidirectional linking between notes and original documents
 
 #### 🔍 **Advanced Retrieval Technology**
 - **Vector Retrieval**: Precise matching based on semantic similarity
@@ -274,7 +315,7 @@ StarLocalRAG is a **fully local RAG (Retrieval-Augmented Generation) application
 │                    StarLocalRAG Architecture                │
 ├─────────────────────────────────────────────────────────────┤
 │  UI Layer (Android)                                         │
-│  ├── RAG Q&A Interface  ├── Knowledge Base  ├── Model Mgmt  │
+│  ├── RAG Q&A Interface  ├── Build Knowledge  ├── Knowledge Notes │
 ├─────────────────────────────────────────────────────────────┤
 │  Business Logic Layer                                       │
 │  ├── RagQueryManager  ├── KnowledgeBaseService              │
@@ -328,23 +369,60 @@ if (isBusy.compareAndSet(false, true)) {
 
 ### 📱 Functional Modules
 
+StarLocalRAG provides a complete local RAG solution with the following core functional modules:
+
 #### RAG Q&A System
 - Knowledge base-driven intelligent Q&A
 - Think mode support (`/no_think` command)
 - Streaming output and real-time interruption
 - Multi-parameter configuration: retrieval depth, rerank count, etc.
+- Context memory and conversation history management
+- Multi-turn dialogue support and contextual understanding
 
-#### Knowledge Base Construction
-- Multi-format document parsing and processing
-- Smart text chunking strategies
-- Vectorization and database storage
-- Model compatibility checking
+#### Knowledge Base Note Management
+- **Document Import & Parsing**: Support for PDF, Word, Excel, PPT, TXT, JSON and other formats
+- **Smart Chunking**: Fixed-length, semantic, and hierarchical chunking strategies
+- **Vector Storage**: Efficient vector database storage and retrieval
+- **Note Creation & Editing**: Rich text note creation, online editing and formatting
+- **Classification & Tagging**: Flexible note categorization system and tag management
+- **Association Links**: Establish bidirectional associations between notes and original documents
+- **Search & Filtering**: Multi-dimensional search based on keywords, tags, and time
+- **Export & Sharing**: Support note export to multiple formats (Markdown, PDF, TXT)
+
+#### Settings Page Features
+- **Model Configuration**: LLM model selection, parameter tuning (temperature, top-p, top-k, etc.)
+- **Inference Settings**: GPU layer configuration, memory limits, concurrency control
+- **Retrieval Parameters**: Vector retrieval depth, rerank model configuration, similarity thresholds
+- **Interface Customization**: Theme switching, font size, display density adjustment
+- **Data Management**: Cache cleanup, data backup & recovery, storage path configuration
+- **Performance Optimization**: Inference acceleration options, memory optimization strategies
+- **Privacy & Security**: Local data encryption, access permission control
+
+#### Log Page Features
+- **System Logs**: Detailed logs of app startup, model loading, inference processes
+- **Error Tracking**: Exception capture, error stack traces, crash reports
+- **Performance Monitoring**: Inference timing, memory usage, GPU utilization statistics
+- **Operation Records**: User operation history, query records, document processing logs
+- **Debug Information**: Detailed debug info in developer mode
+- **Log Filtering**: Filter logs by time, level, module
+- **Log Export**: Support log file export for troubleshooting
+
+#### Help Page Features
+- **Quick Start**: New user guidance, basic feature introduction, operation demonstrations
+- **Feature Documentation**: Detailed functional module descriptions and usage guides
+- **FAQ**: Frequently asked questions, troubleshooting guides, solutions
+- **Model Guide**: Recommended model lists, model selection advice, performance comparisons
+- **Technical Documentation**: API docs, development guides, architecture descriptions
+- **Update Logs**: Version update records, new feature introductions, known issues
+- **Contact Support**: Feedback channels, community links, developer contact information
 
 #### Model Management
 - Local model download and management
 - Resume download and smart retry
 - Concurrent multi-model downloads
 - GPU configuration detection and optimization
+- Model performance evaluation and recommendations
+- Model version management and updates
 
 ### 🛠️ Development Environment
 

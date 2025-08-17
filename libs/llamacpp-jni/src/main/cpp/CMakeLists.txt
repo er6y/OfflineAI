@@ -117,10 +117,14 @@ include_directories("${LLAMA_CPP_DIR}/ggml/src/ggml-cpu")
 include_directories("${LLAMA_CPP_DIR}/src")
 include_directories("${LLAMA_CPP_DIR}/vendor")
 
-# 后端加速选项 - 暂时全部禁用，确保基本编译通过
+# 后端加速选项 - 启用后端注册系统，使用运行时Vulkan检测
+# 避免静态链接Vulkan，通过JNI层动态加载实现GPU加速
+set(GGML_USE_BACKEND_REGISTRY ON CACHE BOOL "Enable backend registry" FORCE)
 set(GGML_USE_OPENCL OFF CACHE BOOL "Enable OpenCL backend" FORCE)
 set(GGML_USE_VULKAN OFF CACHE BOOL "Enable Vulkan backend" FORCE)
 set(GGML_USE_CUDA OFF CACHE BOOL "Enable CUDA backend" FORCE)
+set(GGML_VULKAN OFF CACHE BOOL "Enable Vulkan runtime" FORCE)
+set(GGML_NO_ACCELERATE ON CACHE BOOL "Disable other acceleration methods" FORCE)
 
 # 处理Vulkan相关的CMake版本兼容性问题
 # 如果启用Vulkan，需要确保CMake版本满足要求
@@ -135,11 +139,32 @@ if(GGML_USE_VULKAN)
         cmake_policy(SET CMP0114 NEW)
     endif()
     
-    # 查找Vulkan包
-    find_package(Vulkan COMPONENTS glslc)
-    if(NOT Vulkan_FOUND)
-        message(WARNING "Vulkan not found, disabling Vulkan backend")
-        set(GGML_USE_VULKAN OFF CACHE BOOL "Enable Vulkan backend" FORCE)
+    # Android NDK Vulkan库配置
+    if(ANDROID)
+        # 手动设置Vulkan为可用状态，使用NDK内置的vulkan库
+        set(Vulkan_FOUND TRUE)
+        set(Vulkan_LIBRARIES "vulkan")
+        
+        # 尝试使用系统Vulkan SDK头文件（如果存在）
+        set(HOST_VULKAN_INCLUDE "D:/tools/VulkanSDK/1.4.321.1/Include")
+        if(EXISTS "${HOST_VULKAN_INCLUDE}")
+            set(Vulkan_INCLUDE_DIRS "${HOST_VULKAN_INCLUDE}")
+            message(STATUS "Using host Vulkan SDK headers: ${Vulkan_INCLUDE_DIRS}")
+        else()
+            # 回退到NDK Vulkan头文件
+            set(Vulkan_INCLUDE_DIRS "${ANDROID_NDK}/sources/third_party/vulkan/src/include")
+            message(STATUS "Using NDK Vulkan headers: ${Vulkan_INCLUDE_DIRS}")
+        endif()
+        
+        # 添加Vulkan头文件路径
+        include_directories("${Vulkan_INCLUDE_DIRS}")
+    else()
+        # 非Android平台使用标准查找
+        find_package(Vulkan COMPONENTS glslc)
+        if(NOT Vulkan_FOUND)
+            message(WARNING "Vulkan not found, disabling Vulkan backend")
+            set(GGML_USE_VULKAN OFF CACHE BOOL "Enable Vulkan backend" FORCE)
+        endif()
     endif()
 endif()
 
@@ -161,8 +186,9 @@ set(GGML_USE_SYCL OFF CACHE BOOL "Enable SYCL backend" FORCE)
 set(GGML_USE_KOMPUTE OFF CACHE BOOL "Enable Kompute backend" FORCE)
 set(GGML_USE_NNAPI OFF CACHE BOOL "Enable NNAPI backend" FORCE)
 
-# 收集ggml源文件
-set(GGML_SOURCES
+# 创建模块化的ggml库架构
+# 1. 创建ggml-base库（核心功能）
+set(GGML_BASE_SOURCES
     "${LLAMA_CPP_DIR}/ggml/src/ggml.c"
     "${LLAMA_CPP_DIR}/ggml/src/ggml.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-alloc.c"
@@ -171,30 +197,78 @@ set(GGML_SOURCES
     "${LLAMA_CPP_DIR}/ggml/src/ggml-quants.c"
 )
 
-# 如果启用Vulkan，添加Vulkan相关源文件
+# 添加ggml-base库
+add_library(ggml-base STATIC ${GGML_BASE_SOURCES})
+target_include_directories(ggml-base PUBLIC 
+    "${LLAMA_CPP_DIR}/ggml/include"
+    "${LLAMA_CPP_DIR}/ggml/src"
+)
+
+# 2. 创建ggml-cpu库
+set(GGML_CPU_SOURCES
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/ggml-cpu.cpp"
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/ggml-cpu.c"
+)
+add_library(ggml-cpu STATIC ${GGML_CPU_SOURCES})
+target_link_libraries(ggml-cpu PUBLIC ggml-base)
+
+# 4. 如果启用Vulkan，创建ggml-vulkan库
 if(GGML_USE_VULKAN AND Vulkan_FOUND)
-    list(APPEND GGML_SOURCES
+    # 创建ggml-vulkan静态库
+    set(GGML_VULKAN_SOURCES
         "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/ggml-vulkan.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated/ggml-vulkan-shaders.cpp"
+    )
+    add_library(ggml-vulkan STATIC ${GGML_VULKAN_SOURCES})
+    target_link_libraries(ggml-vulkan PUBLIC ggml-base)
+    
+    # 设置Vulkan编译定义
+    target_compile_definitions(ggml-vulkan PRIVATE 
+        VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1
+        VK_USE_PLATFORM_ANDROID_KHR=1
+        VK_API_VERSION=VK_API_VERSION_1_1
     )
     
-    # 添加Vulkan相关的编译定义
-    add_definitions(-DGGML_USE_VULKAN=1)
+    # 添加Vulkan包含路径
+    target_include_directories(ggml-vulkan PRIVATE 
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan"
+        "${Vulkan_INCLUDE_DIRS}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/generated"
+    )
     
-    # 包含Vulkan头文件目录
-    include_directories("${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan")
+    # 链接Vulkan库到ggml-vulkan
+    if(ANDROID)
+        # Android上链接NDK的Vulkan库
+        target_link_libraries(ggml-vulkan PRIVATE vulkan android log)
+    else()
+        target_link_libraries(ggml-vulkan PRIVATE Vulkan::Vulkan)
+    endif()
     
-    message(STATUS "Vulkan backend enabled for GGML")
+    message(STATUS "ggml-vulkan backend included")
 else()
-    add_definitions(-DGGML_USE_VULKAN=0)
+    message(STATUS "Vulkan backend disabled; skipping ggml-vulkan")
 endif()
 
-# 继续添加其他GGML源文件
-list(APPEND GGML_SOURCES
+# 5. 创建主ggml库，链接所有子库
+add_library(ggml INTERFACE)
+target_link_libraries(ggml INTERFACE ggml-base ggml-cpu)
+
+# 如果启用Vulkan，将ggml-vulkan链接到主ggml库
+if(GGML_USE_VULKAN AND Vulkan_FOUND)
+    target_link_libraries(ggml INTERFACE ggml-vulkan)
+    message(STATUS "ggml-vulkan linked to main ggml interface")
+endif()
+
+# 添加其他GGML源文件到相应的库
+# 添加到ggml-base库
+target_sources(ggml-base PRIVATE
     "${LLAMA_CPP_DIR}/ggml/src/ggml-opt.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-threading.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/gguf.cpp"
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/ggml-cpu.cpp"
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/ggml-cpu.c"
+)
+
+# 添加到ggml-cpu库
+target_sources(ggml-cpu PRIVATE
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/ops.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/binary-ops.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/unary-ops.cpp"
@@ -204,33 +278,22 @@ list(APPEND GGML_SOURCES
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/repack.cpp"
 )
 
-# 根据目标架构添加架构特定的源文件
+# 根据目标架构添加架构特定的源文件到ggml-cpu库
 if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
-    list(APPEND GGML_SOURCES
+    target_sources(ggml-cpu PRIVATE
         "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/quants.c"
         "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/repack.cpp"
         "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/cpu-feats.cpp"
     )
 elseif(ANDROID_ABI STREQUAL "x86_64" OR ANDROID_ABI STREQUAL "x86")
-    list(APPEND GGML_SOURCES
+    target_sources(ggml-cpu PRIVATE
         "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/quants.c"
         "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/repack.cpp"
         "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp"
     )
 endif()
 
-# 收集llama.cpp源文件
-file(GLOB LLAMA_SOURCES
-    "${LLAMA_CPP_DIR}/src/*.cpp"
-    "${LLAMA_CPP_DIR}/src/*.c"
-    "${LLAMA_CPP_DIR}/common/*.cpp"
-    "${LLAMA_CPP_DIR}/common/*.c"
-)
 
-# 排除不需要的文件
-list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*main\.cpp$")
-list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*test.*")
-list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*example.*")
 
 # Build-info file already added above
 
@@ -270,11 +333,20 @@ add_definitions(
     -DGGML_USE_CUDA=0
     -DGGML_USE_METAL=0
     -DGGML_USE_OPENCL=0
-    -DGGML_USE_VULKAN=0
     -DGGML_USE_CPU=1
     -DGGML_VERSION="${GGML_INSTALL_VERSION}"
     -DGGML_COMMIT="${GGML_BUILD_COMMIT}"
+    -DVULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1
 )
+
+# 仅当启用了 Vulkan 时才定义相关宏
+if(GGML_USE_VULKAN AND Vulkan_FOUND)
+    add_definitions(-DGGML_USE_VULKAN=1 -DGGML_VULKAN=1)
+    message(STATUS "Vulkan backend enabled: ${Vulkan_LIBRARIES}")
+else()
+    add_definitions(-DGGML_USE_VULKAN=0 -DGGML_VULKAN=0)
+    message(STATUS "Vulkan backend disabled")
+endif()
 
 # Android平台特定宏
 if(ANDROID)
@@ -282,13 +354,29 @@ if(ANDROID)
     add_definitions(-D__ANDROID__)
 endif()
 
-# 创建JNI共享库，包含所有源文件
+# 收集llama.cpp源文件（避免重复包含 ggml 源码）
+file(GLOB LLAMA_SOURCES
+    "${LLAMA_CPP_DIR}/src/*.cpp"
+    "${LLAMA_CPP_DIR}/src/*.c"
+    "${LLAMA_CPP_DIR}/common/*.cpp"
+    "${LLAMA_CPP_DIR}/common/*.c"
+)
+
+# 排除不需要的文件
+list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*main\.cpp$")
+list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*test.*")
+list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*example.*")
+
+# 创建JNI共享库，使用模块化的ggml库
 add_library(llamacpp_jni SHARED
     llama_inference.cpp
     ggml-backend-opencl-stub.cpp
-    ${GGML_SOURCES}
+    vulkan_symbol_keeper.cpp
+    vulkan_runtime_detector.cpp
     ${LLAMA_SOURCES}
 )
+
+
 
 # 设置目标属性
 set_target_properties(llamacpp_jni PROPERTIES
@@ -297,27 +385,18 @@ set_target_properties(llamacpp_jni PROPERTIES
     CXX_STANDARD_REQUIRED ON
 )
 
-# 链接库
+# 链接库：ggml + Android NDK 库
 target_link_libraries(llamacpp_jni
+    ggml
     ${log-lib}
     android
     m
 )
 
-# 如果启用Vulkan，链接Vulkan库
-if(GGML_USE_VULKAN AND Vulkan_FOUND)
-    target_link_libraries(llamacpp_jni Vulkan::Vulkan)
-    
-    # 如果存在Vulkan::Headers目标，也链接它
-    if(TARGET Vulkan::Headers)
-        target_link_libraries(llamacpp_jni Vulkan::Headers)
-        message(STATUS "Linked Vulkan::Headers target")
-    elseif(DEFINED Vulkan_INCLUDE_DIRS)
-        target_include_directories(llamacpp_jni PRIVATE ${Vulkan_INCLUDE_DIRS})
-        message(STATUS "Added Vulkan_INCLUDE_DIRS: ${Vulkan_INCLUDE_DIRS}")
-    endif()
-    
-    message(STATUS "Vulkan libraries linked to llamacpp_jni")
+# 如果启用Vulkan且已找到Vulkan包，且为Android平台，显式链接NDK vulkan
+if(GGML_USE_VULKAN AND Vulkan_FOUND AND ANDROID)
+    target_link_libraries(llamacpp_jni vulkan)
+    message(STATUS "Linking Android NDK Vulkan library: vulkan")
 endif()
 
 # 设置输出目录 - 直接输出到app的jniLibs目录
@@ -336,9 +415,8 @@ message(STATUS "  ANDROID_ABI: ${ANDROID_ABI}")
 message(STATUS "  CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
 message(STATUS "  CMAKE_C_FLAGS: ${CMAKE_C_FLAGS}")
 message(STATUS "  LLAMA_CPP_DIR: ${LLAMA_CPP_DIR}")
-message(STATUS "  GGML_SOURCES count: ${GGML_SOURCES}")
 message(STATUS "  LLAMA_SOURCES count: ${LLAMA_SOURCES}")
-message(STATUS "  COMMON_SOURCES count: ${COMMON_SOURCES}")
+message(STATUS "  GGML backends: ggml-base, ggml-cpu, ggml-vulkan (if enabled)")
 
 # 编译后处理
 add_custom_command(TARGET llamacpp_jni POST_BUILD

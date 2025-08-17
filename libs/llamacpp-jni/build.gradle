@@ -1,5 +1,52 @@
 apply plugin: 'com.android.library'
 
+// Vulkan着色器预构建任务
+task buildVulkanShaders {
+    description 'Build Vulkan shaders using host toolchain'
+    
+    def llamaCppRoot = file('../llama.cpp-master')
+    def vulkanShadersDir = file("${llamaCppRoot}/ggml/src/ggml-vulkan/vulkan-shaders")
+    def vulkanShadersGenSrc = file("${vulkanShadersDir}/vulkan-shaders-gen.cpp")
+    def buildDir = file('build/vulkan-shaders')
+    def vulkanShadersGenExe = file("${buildDir}/vulkan-shaders-gen.exe")
+    def outputDir = file('src/main/cpp/generated')
+    def headerFile = file("${outputDir}/ggml-vulkan-shaders.hpp")
+    def sourceFile = file("${outputDir}/ggml-vulkan-shaders.cpp")
+    
+    inputs.file vulkanShadersGenSrc
+    inputs.dir vulkanShadersDir
+    outputs.file headerFile
+    outputs.file sourceFile
+    
+    doLast {
+        // 创建构建目录
+        buildDir.mkdirs()
+        outputDir.mkdirs()
+        
+        // 编译vulkan-shaders-gen工具
+        exec {
+            commandLine 'cmd', '/c', 'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl.exe /EHsc /std:c++17 /Fe:' + vulkanShadersGenExe.absolutePath + ' ' + vulkanShadersGenSrc.absolutePath
+            workingDir buildDir
+        }
+        
+        // 运行vulkan-shaders-gen生成着色器
+        exec {
+            commandLine vulkanShadersGenExe.absolutePath, 
+                        '--glslc', 'glslc.exe',
+                        '--input-dir', vulkanShadersDir.absolutePath,
+                        '--output-dir', outputDir.absolutePath,
+                        '--target-hpp', 'ggml-vulkan-shaders.hpp',
+                        '--target-cpp', 'ggml-vulkan-shaders.cpp'
+            workingDir outputDir
+        }
+        
+        println "Vulkan shaders generated successfully"
+    }
+}
+
+// 确保在CMake构建之前运行Vulkan着色器构建
+preBuild.dependsOn buildVulkanShaders
+
 android {
     namespace = 'com.starlocalrag.llamacpp'
     compileSdkVersion 34
@@ -19,7 +66,7 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags "-std=c++17 -frtti -fexceptions"
-                arguments "-DANDROID_STL=c++_static", "-DGGML_F16C=0", "-DGGML_USE_F16C=0"
+                arguments "-DANDROID_STL=c++_static", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_USE_VULKAN=0"
             }
         }
     }

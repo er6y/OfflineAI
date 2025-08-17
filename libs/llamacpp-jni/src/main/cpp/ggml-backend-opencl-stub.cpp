@@ -13,9 +13,12 @@ extern "C" {
         return nullptr;
     }
     
+    // 仅当未启用 Vulkan 后端时，才提供 Vulkan 的 stub，避免覆盖真实实现
+#if !defined(GGML_USE_VULKAN) || (GGML_USE_VULKAN == 0)
     ggml_backend_reg_t ggml_backend_vk_reg(void) {
         return nullptr;
     }
+#endif
     
     ggml_backend_reg_t ggml_backend_cuda_reg(void) {
         return nullptr;

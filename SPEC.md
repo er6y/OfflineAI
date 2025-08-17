@@ -574,9 +574,245 @@ private static final float SKEWNESS_THRESHOLD = 3.0f;        // 偏态阈值
 - 及时释放大型向量的引用
 - 使用对象池管理频繁创建的对象
 
-### 3.3 构建系统
+### 3.3 Vulkan GPU 加速实现
 
-#### 3.3.1 Android 构建优化
+#### 3.3.1 Vulkan 后端架构
+
+**设计理念**：
+- **运行时检测**：动态检测 Vulkan 运行时环境，避免静态链接依赖
+- **优雅降级**：Vulkan 不可用时自动回退到 CPU 模式
+- **跨架构支持**：支持 ARM64、ARMv7、x86/x86_64 架构的 Vulkan 加速
+- **版本兼容**：根据架构自适应 Vulkan 版本要求（ARM: 1.1+, x86: 1.2+）
+
+**核心组件**：
+- `vulkan_runtime_detector.cpp/h`：Vulkan 运行时检测器
+- `vulkan_version_patch.h`：Vulkan 版本兼容性处理
+- `vulkan_symbol_keeper.cpp`：防止链接器裁剪 Vulkan 符号
+- `ggml-backend-opencl-stub.cpp`：后端注册系统 stub 实现
+
+#### 3.3.2 运行时检测机制
+
+**检测流程**：
+```cpp
+// 1. 动态加载 Vulkan 库
+bool load_vulkan_library() {
+    const char* vulkan_lib_names[] = {
+        "libvulkan.so.1", "libvulkan.so", "vulkan"
+    };
+    // 尝试加载 Vulkan 库并获取函数指针
+}
+
+// 2. 测试 Vulkan 实例创建
+bool test_vulkan_instance_creation() {
+    // 创建 Vulkan 实例验证运行时可用性
+}
+
+// 3. 检查 Vulkan 1.1 API 可用性
+bool check_vulkan_1_1_apis(VkInstance instance) {
+    // 验证必要的 Vulkan 1.1 API 是否可用
+}
+```
+
+**检测结果**：
+```cpp
+struct VulkanRuntimeInfo {
+    bool library_available;           // Vulkan 库是否可加载
+    bool instance_creation_works;     // Vulkan 实例是否可创建
+    bool vulkan_1_1_apis_available;   // Vulkan 1.1 API 是否可用
+};
+```
+
+#### 3.3.3 版本兼容性策略
+
+**架构差异化版本要求**：
+```cpp
+#ifdef __aarch64__
+// ARM64 架构：使用 Vulkan 1.1 作为最小版本
+#define GGML_VULKAN_MIN_VERSION VK_API_VERSION_1_1
+#define GGML_VULKAN_MIN_VERSION_STR "1.1"
+#else
+// x86/x86_64 架构：使用 Vulkan 1.2 作为最小版本
+#define GGML_VULKAN_MIN_VERSION VK_API_VERSION_1_2
+#define GGML_VULKAN_MIN_VERSION_STR "1.2"
+#endif
+```
+
+**版本检查宏**：
+```cpp
+#define VULKAN_VERSION_GE(version, major, minor, patch) \
+    (VK_VERSION_MAJOR(version) > major || \
+     (VK_VERSION_MAJOR(version) == major && \
+      (VK_VERSION_MINOR(version) > minor || \
+       (VK_VERSION_MINOR(version) == minor && \
+        VK_VERSION_PATCH(version) >= patch))))
+```
+
+#### 3.3.4 CMake 构建配置
+
+**Vulkan 后端配置**：
+```cmake
+# 启用后端注册系统，使用运行时 Vulkan 检测
+set(GGML_USE_BACKEND_REGISTRY ON CACHE BOOL "Enable backend registry" FORCE)
+set(GGML_USE_VULKAN OFF CACHE BOOL "Enable Vulkan backend" FORCE)
+set(GGML_VULKAN OFF CACHE BOOL "Enable Vulkan runtime" FORCE)
+
+# Android NDK Vulkan 库配置
+if(ANDROID)
+    set(Vulkan_FOUND TRUE)
+    set(Vulkan_LIBRARIES "vulkan")
+    
+    # 优先使用主机 Vulkan SDK 头文件
+    set(HOST_VULKAN_INCLUDE "D:/tools/VulkanSDK/1.4.321.1/Include")
+    if(EXISTS "${HOST_VULKAN_INCLUDE}")
+        set(Vulkan_INCLUDE_DIRS "${HOST_VULKAN_INCLUDE}")
+    else()
+        # 回退到 NDK Vulkan 头文件
+        set(Vulkan_INCLUDE_DIRS "${ANDROID_NDK}/sources/third_party/vulkan/src/include")
+    endif()
+endif()
+```
+
+**条件编译定义**：
+```cmake
+# 仅当启用了 Vulkan 时才定义相关宏
+if(GGML_USE_VULKAN AND Vulkan_FOUND)
+    add_definitions(-DGGML_USE_VULKAN=1 -DGGML_VULKAN=1)
+    add_definitions(-DVULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
+else()
+    add_definitions(-DGGML_USE_VULKAN=0 -DGGML_VULKAN=0)
+endif()
+```
+
+#### 3.3.5 着色器预构建系统
+
+**Vulkan 着色器构建任务**：
+```gradle
+task buildVulkanShaders {
+    description 'Build Vulkan shaders using host toolchain'
+    
+    def vulkanShadersDir = file("${llamaCppRoot}/ggml/src/ggml-vulkan/vulkan-shaders")
+    def vulkanShadersGenSrc = file("${vulkanShadersDir}/vulkan-shaders-gen.cpp")
+    def vulkanShadersGenExe = file("${buildDir}/vulkan-shaders-gen.exe")
+    
+    // 编译 vulkan-shaders-gen 工具
+    exec {
+        commandLine 'cmd', '/c', 'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl.exe /EHsc /std:c++17 /Fe:' + vulkanShadersGenExe.absolutePath + ' ' + vulkanShadersGenSrc.absolutePath
+    }
+    
+    // 运行 vulkan-shaders-gen 生成着色器
+    exec {
+        commandLine vulkanShadersGenExe.absolutePath,
+            '--output-dir', outputDir.absolutePath,
+            '--input-dir', vulkanShadersDir.absolutePath,
+            '--target-hpp', 'ggml-vulkan-shaders.hpp',
+            '--target-cpp', 'ggml-vulkan-shaders.cpp'
+    }
+}
+
+// 确保在 CMake 构建之前运行 Vulkan 着色器构建
+preBuild.dependsOn buildVulkanShaders
+```
+
+#### 3.3.6 LLM 推理集成
+
+**Vulkan 适用性检查**：
+```cpp
+static bool is_vulkan_suitable_for_llamacpp() {
+    DEBUG_LOG(TAG, "[VULKAN] Checking Vulkan suitability for llama.cpp...");
+    
+    vulkan_runtime::VulkanRuntimeInfo info = vulkan_runtime::detect_vulkan_runtime();
+    
+    FORCE_LOG(TAG, "[VULKAN] Runtime detection results:");
+    FORCE_LOG(TAG, "  Library available: %s", info.library_available ? "yes" : "no");
+    FORCE_LOG(TAG, "  Instance creation: %s", info.instance_creation_works ? "yes" : "no");
+    FORCE_LOG(TAG, "  Vulkan 1.1 APIs: %s", info.vulkan_1_1_apis_available ? "yes" : "no");
+    
+    return info.library_available && 
+           info.instance_creation_works && 
+           info.vulkan_1_1_apis_available;
+}
+```
+
+**GPU 层数分配逻辑**：
+```cpp
+// 如果请求使用 GPU（gpu_layers > 0 或 gpu_layers == -1），则检测 Vulkan 可用性
+if (requested_gpu_layers != 0) {
+    if (is_vulkan_suitable_for_llamacpp()) {
+        FORCE_LOG(TAG, "[GPU] Vulkan is suitable for llama.cpp, using GPU acceleration with %d layers", requested_gpu_layers);
+        final_gpu_layers = requested_gpu_layers;
+    } else {
+        FORCE_LOG(TAG, "[GPU] Vulkan is not suitable for llama.cpp, falling back to CPU-only mode");
+        final_gpu_layers = 0;
+    }
+} else {
+    final_gpu_layers = 0;
+}
+```
+
+#### 3.3.7 性能优化特性
+
+**高级 Vulkan 特性支持**：
+- **Cooperative Matrix**：支持 VK_KHR_cooperative_matrix 和 VK_NV_cooperative_matrix2
+- **Integer Dot Product**：支持 VK_KHR_shader_integer_dot_product
+- **BFloat16**：支持 VK_KHR_shader_bfloat16
+- **Vulkan 1.1/1.2 特性**：根据架构启用相应的 Vulkan 版本特性
+
+**编译时特性检测**：
+```cpp
+#if defined(VK_KHR_cooperative_matrix) && defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
+    // Cooperative Matrix 支持
+#endif
+
+#if defined(VK_NV_cooperative_matrix2) && defined(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)
+    // Cooperative Matrix 2 支持
+#endif
+
+#if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
+    // Integer Dot Product 支持
+#endif
+
+#if defined(GGML_VULKAN_BFLOAT16_GLSLC_SUPPORT)
+    // BFloat16 支持
+#endif
+```
+
+#### 3.3.8 调试和诊断
+
+**调试编译选项**：
+```cmake
+if (GGML_VULKAN_CHECK_RESULTS)
+    add_compile_definitions(GGML_VULKAN_CHECK_RESULTS)
+endif()
+
+if (GGML_VULKAN_DEBUG)
+    add_compile_definitions(GGML_VULKAN_DEBUG)
+endif()
+
+if (GGML_VULKAN_MEMORY_DEBUG)
+    add_compile_definitions(GGML_VULKAN_MEMORY_DEBUG)
+endif()
+
+if (GGML_VULKAN_VALIDATE)
+    add_compile_definitions(GGML_VULKAN_VALIDATE)
+endif()
+```
+
+**运行时日志**：
+```cpp
+// Vulkan 运行时检测日志
+FORCE_LOG(TAG, "[VULKAN] Runtime detection results:");
+FORCE_LOG(TAG, "  Library available: %s", info.library_available ? "yes" : "no");
+FORCE_LOG(TAG, "  Instance creation: %s", info.instance_creation_works ? "yes" : "no");
+FORCE_LOG(TAG, "  Vulkan 1.1 APIs: %s", info.vulkan_1_1_apis_available ? "yes" : "no");
+
+// GPU 加速决策日志
+FORCE_LOG(TAG, "[GPU] Vulkan is suitable for llama.cpp, using GPU acceleration with %d layers", requested_gpu_layers);
+FORCE_LOG(TAG, "[GPU] Vulkan is not suitable for llama.cpp, falling back to CPU-only mode");
+```
+
+### 3.4 构建系统
+
+#### 3.4.1 Android 构建优化
 
 **CMake 配置**：
 - 静态库改为共享库
