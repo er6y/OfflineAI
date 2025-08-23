@@ -42,6 +42,21 @@ captures/
 .externalNativeBuild/
 .cxx/
 
+# CMake build files and cache
+CMakeCache.txt
+CMakeFiles/
+build.ninja
+cmake_install.cmake
+.ninja_deps
+.ninja_log
+# CMake build files in specific directories
+libs/llamacpp-jni/src/main/cpp/CMakeCache.txt
+libs/llamacpp-jni/src/main/cpp/CMakeFiles/
+libs/llamacpp-jni/src/main/cpp/build.ninja
+libs/llamacpp-jni/src/main/cpp/cmake_install.cmake
+libs/llamacpp-jni/src/main/cpp/.ninja_deps
+libs/llamacpp-jni/src/main/cpp/.ninja_log
+
 # Google Services (e.g. APIs or Firebase)
 google-services.json
 

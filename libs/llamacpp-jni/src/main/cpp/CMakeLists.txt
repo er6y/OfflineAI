@@ -26,13 +26,21 @@ if(ANDROID)
     
     # 根据ABI设置优化选项
     if(ANDROID_ABI STREQUAL "arm64-v8a")
-        # ARM64架构优化 - ARM64本身支持NEON，不需要-mfpu选项
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}  -march=armv8-a+fp+simd -fno-limit-debug-info")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv8-a+fp+simd")
+        # ARM64架构优化 - ARM64本身支持NEON，启用fp16指令
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}  -march=armv8-a+fp+simd+fp16 -fno-limit-debug-info")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv8-a+fp+simd+fp16")
+        # 启用ARM的fp16支持
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DGGML_USE_FP16_VA=1 -D__ARM_FEATURE_FP16_VECTOR_ARITHMETIC=1")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DGGML_USE_FP16_VA=1 -D__ARM_FEATURE_FP16_VECTOR_ARITHMETIC=1")
+        message(STATUS "Android ${ANDROID_ABI} - ARM fp16 instructions enabled")
     elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
-        # ARMv7架构优化
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}  -march=armv7-a -mfpu=neon")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv7-a -mfpu=neon")
+        # ARMv7架构优化 - 检查是否支持fp16
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}  -march=armv7-a -mfpu=neon-fp16")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv7-a -mfpu=neon-fp16")
+        # 启用ARMv7的fp16支持（如果可用）
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DGGML_USE_FP16_VA=1 -D__ARM_FEATURE_FP16_VECTOR_ARITHMETIC=1")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DGGML_USE_FP16_VA=1 -D__ARM_FEATURE_FP16_VECTOR_ARITHMETIC=1")
+        message(STATUS "Android ${ANDROID_ABI} - ARM fp16 instructions enabled")
     elseif(ANDROID_ABI STREQUAL "x86_64" OR ANDROID_ABI STREQUAL "x86")
         # x86/x86_64架构 - 禁用高级指令集以避免模拟器兼容性问题
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mno-f16c -mno-fma -mno-avx2 -mno-avx -mno-sse4.2 -mno-sse4.1 -mno-ssse3 -mno-sse3")
@@ -121,10 +129,16 @@ include_directories("${LLAMA_CPP_DIR}/vendor")
 # 避免静态链接Vulkan，通过JNI层动态加载实现GPU加速
 set(GGML_USE_BACKEND_REGISTRY ON CACHE BOOL "Enable backend registry" FORCE)
 set(GGML_USE_OPENCL OFF CACHE BOOL "Enable OpenCL backend" FORCE)
-set(GGML_USE_VULKAN OFF CACHE BOOL "Enable Vulkan backend" FORCE)
+# 尊重外部 -D 传入的开关；如未指定则默认开启 Vulkan
+if(NOT DEFINED GGML_USE_VULKAN)
+    set(GGML_USE_VULKAN ON CACHE BOOL "Enable Vulkan backend")
+endif()
+if(NOT DEFINED GGML_VULKAN)
+    set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan runtime")
+endif()
 set(GGML_USE_CUDA OFF CACHE BOOL "Enable CUDA backend" FORCE)
-set(GGML_VULKAN OFF CACHE BOOL "Enable Vulkan runtime" FORCE)
 set(GGML_NO_ACCELERATE ON CACHE BOOL "Disable other acceleration methods" FORCE)
+message(STATUS "GGML_USE_VULKAN: ${GGML_USE_VULKAN}, GGML_VULKAN: ${GGML_VULKAN}")
 
 # 处理Vulkan相关的CMake版本兼容性问题
 # 如果启用Vulkan，需要确保CMake版本满足要求
@@ -145,14 +159,28 @@ if(GGML_USE_VULKAN)
         set(Vulkan_FOUND TRUE)
         set(Vulkan_LIBRARIES "vulkan")
         
-        # 尝试使用系统Vulkan SDK头文件（如果存在）
-        set(HOST_VULKAN_INCLUDE "D:/tools/VulkanSDK/1.4.321.1/Include")
-        if(EXISTS "${HOST_VULKAN_INCLUDE}")
-            set(Vulkan_INCLUDE_DIRS "${HOST_VULKAN_INCLUDE}")
-            message(STATUS "Using host Vulkan SDK headers: ${Vulkan_INCLUDE_DIRS}")
+        # 尝试使用系统VULKAN_SDK环境变量指向的Vulkan SDK头文件（如果存在）
+        if(DEFINED ENV{VULKAN_SDK} AND EXISTS "$ENV{VULKAN_SDK}/Include")
+            set(Vulkan_INCLUDE_DIRS "$ENV{VULKAN_SDK}/Include")
+            message(STATUS "Using VULKAN_SDK headers: ${Vulkan_INCLUDE_DIRS}")
         else()
-            # 回退到NDK Vulkan头文件
-            set(Vulkan_INCLUDE_DIRS "${ANDROID_NDK}/sources/third_party/vulkan/src/include")
+            # 回退到NDK Vulkan头文件 - 自动探测NDK根目录
+            if(NOT DEFINED NDK_ROOT)
+                if(DEFINED ENV{ANDROID_NDK_ROOT} AND EXISTS "$ENV{ANDROID_NDK_ROOT}")
+                    set(NDK_ROOT "$ENV{ANDROID_NDK_ROOT}")
+                elseif(DEFINED CMAKE_ANDROID_NDK AND EXISTS "${CMAKE_ANDROID_NDK}")
+                    set(NDK_ROOT "${CMAKE_ANDROID_NDK}")
+                elseif(DEFINED ANDROID_NDK AND EXISTS "${ANDROID_NDK}")
+                    set(NDK_ROOT "${ANDROID_NDK}")
+                elseif(DEFINED ENV{ANDROID_NDK_HOME} AND EXISTS "$ENV{ANDROID_NDK_HOME}")
+                    set(NDK_ROOT "$ENV{ANDROID_NDK_HOME}")
+                endif()
+            endif()
+            if(DEFINED NDK_ROOT AND EXISTS "${NDK_ROOT}/sources/third_party/vulkan/src/include")
+                set(Vulkan_INCLUDE_DIRS "${NDK_ROOT}/sources/third_party/vulkan/src/include")
+            else()
+                message(WARNING "Unable to locate NDK Vulkan headers; please set VULKAN_SDK or ensure NDK has sources/third_party/vulkan/src/include")
+            endif()
             message(STATUS "Using NDK Vulkan headers: ${Vulkan_INCLUDE_DIRS}")
         endif()
         
@@ -162,8 +190,8 @@ if(GGML_USE_VULKAN)
         # 非Android平台使用标准查找
         find_package(Vulkan COMPONENTS glslc)
         if(NOT Vulkan_FOUND)
-            message(WARNING "Vulkan not found, disabling Vulkan backend")
-            set(GGML_USE_VULKAN OFF CACHE BOOL "Enable Vulkan backend" FORCE)
+            message(WARNING "Vulkan not found, disabling Vulkan backend on non-Android platform")
+            set(GGML_USE_VULKAN OFF CACHE BOOL "Enable Vulkan backend")
         endif()
     endif()
 endif()
@@ -195,6 +223,12 @@ set(GGML_BASE_SOURCES
     "${LLAMA_CPP_DIR}/ggml/src/ggml-backend.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-backend-reg.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-quants.c"
+    # 需要 GGUF 读写与元数据支持
+    "${LLAMA_CPP_DIR}/ggml/src/gguf.cpp"
+    # 线程临界区实现（ggml_critical_section_* 等）
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-threading.cpp"
+    # 优化与数据集 API 实现（ggml_opt_*）
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-opt.cpp"
 )
 
 # 添加ggml-base库
@@ -203,148 +237,260 @@ target_include_directories(ggml-base PUBLIC
     "${LLAMA_CPP_DIR}/ggml/include"
     "${LLAMA_CPP_DIR}/ggml/src"
 )
+# ggml.c 需要 GGML_VERSION/GGML_COMMIT 宏；若上游未定义，则提供缺省值，避免编译失败
+# 正确的 CMake 书写应为 GGML_VERSION="unknown"，让编译命令行成为 -DGGML_VERSION="unknown"
+# 之前的转义过度导致命令行宏非法，已修正
+# 同时明确开启 CPU 后端注册（关键修复：保证 CPU backend 注册到 registry）
+target_compile_definitions(ggml-base PUBLIC
+    GGML_VERSION="unknown"
+    GGML_COMMIT="unknown"
+    GGML_USE_CPU=1
+)
 
 # 2. 创建ggml-cpu库
 set(GGML_CPU_SOURCES
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/ggml-cpu.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/ggml-cpu.c"
+    # 补全上游必需实现文件，解决链接缺符号
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/repack.cpp"
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/hbm.cpp"
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/quants.c"
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/traits.cpp"
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/binary-ops.cpp"
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/unary-ops.cpp"
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/vec.cpp"
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/ops.cpp"
+    # 某些 x86 专用源码包含 AMX/IMMINTRIN 接口，原始仓库无条件加入并通过宏保护
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/amx/amx.cpp"
+    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/amx/mmq.cpp"
 )
+
+# 按架构补充 arch 特定实现
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
+    list(APPEND GGML_CPU_SOURCES
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/quants.c"
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/repack.cpp"
+    )
+elseif(ANDROID_ABI STREQUAL "x86_64" OR ANDROID_ABI STREQUAL "x86")
+    list(APPEND GGML_CPU_SOURCES
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/quants.c"
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/repack.cpp"
+    )
+endif()
+
 add_library(ggml-cpu STATIC ${GGML_CPU_SOURCES})
+# 确保包含 ggml-cpu 目录头文件
+target_include_directories(ggml-cpu PUBLIC ggml-base
+    PRIVATE
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu"
+        "${LLAMA_CPP_DIR}/ggml/src"
+)
+# 维护依赖顺序：ggml-cpu 依赖 ggml-base
 target_link_libraries(ggml-cpu PUBLIC ggml-base)
 
 # 4. 如果启用Vulkan，创建ggml-vulkan库
-if(GGML_USE_VULKAN AND Vulkan_FOUND)
-    # 创建ggml-vulkan静态库
+if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
+    # 确保核心库在编译时包含Vulkan后端注册代码
+    target_compile_definitions(ggml-base PUBLIC GGML_USE_VULKAN=1 GGML_VULKAN=1)
+
+    # 禁用预生成着色器路径，强制使用宿主生成器 (ExternalProject)
+
+    # ========== 生成 ggml-vulkan 着色器（使用上游生成器） ==========
+    if(TRUE)
+        # 引入 ExternalProject 模块（修复：之前未包含导致 ExternalProject_Add 未定义）
+        include(ExternalProject)
+
+        # 定义生成器源码/构建/安装目录变量（修复：之前未定义 _vkgen_* 导致变量未展开）
+        set(_vkgen_source_dir  "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders")
+        if(CMAKE_HOST_WIN32)
+            set(_vkgen_build_dir   "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders-build-vs")
+        else()
+            set(_vkgen_build_dir   "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders-build-ninja")
+        endif()
+        set(_vkgen_install_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders-install")
+        set(_vkgen_toolchain_arg "")
+
+        if(NOT EXISTS "${_vkgen_source_dir}")
+            message(FATAL_ERROR "vulkan-shaders source directory not found: ${_vkgen_source_dir}")
+        endif()
+
+        # glslc 可执行文件（优先使用环境变量 VULKAN_SDK，其次使用常见安装路径提示；在 Android 构建下也尝试从 NDK 中寻找）
+        set(_glslc_hints
+            $ENV{VULKAN_SDK}/Bin
+            "D:/tools/VulkanSDK/1.4.321.1/Bin"
+            $ENV{ANDROID_NDK}/shader-tools
+            $ENV{ANDROID_NDK_HOME}/shader-tools
+            $ENV{ANDROID_NDK_ROOT}/shader-tools
+            $ENV{NDK_ROOT}/shader-tools
+            $ENV{ANDROID_NDK}/toolchains/llvm/prebuilt/windows-x86_64/bin
+            $ENV{ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/windows-x86_64/bin
+            $ENV{ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/windows-x86_64/bin
+            $ENV{NDK_ROOT}/toolchains/llvm/prebuilt/windows-x86_64/bin
+        )
+        find_program(Vulkan_GLSLC_EXECUTABLE NAMES glslc glslc.exe
+            HINTS ${_glslc_hints}
+            REQUIRED)
+        message(STATUS "glslc found at: ${Vulkan_GLSLC_EXECUTABLE}")
+
+        # 检测 glslc 对关键扩展的支持并将结果传递给生成器
+        set(_vkgen_cmake_args)
+        # GL_KHR_cooperative_matrix
+        execute_process(
+            COMMAND "${Vulkan_GLSLC_EXECUTABLE}" -o - -fshader-stage=compute --target-env=vulkan1.3 "${_vkgen_source_dir}/test_coopmat_support.comp"
+            OUTPUT_VARIABLE _vkgen_out
+            ERROR_VARIABLE _vkgen_err
+        )
+        if (NOT _vkgen_err MATCHES ".*extension not supported: GL_KHR_cooperative_matrix.*")
+            list(APPEND _vkgen_cmake_args -DGGML_VULKAN_COOPMAT_GLSLC_SUPPORT=ON)
+            message(STATUS "GL_KHR_cooperative_matrix supported by glslc (forwarding to generator)")
+        else()
+            message(STATUS "GL_KHR_cooperative_matrix not supported by glslc")
+        endif()
+        # GL_NV_cooperative_matrix2
+        execute_process(
+            COMMAND "${Vulkan_GLSLC_EXECUTABLE}" -o - -fshader-stage=compute --target-env=vulkan1.3 "${_vkgen_source_dir}/test_coopmat2_support.comp"
+            OUTPUT_VARIABLE _vkgen_out
+            ERROR_VARIABLE _vkgen_err
+        )
+        if (NOT _vkgen_err MATCHES ".*extension not supported: GL_NV_cooperative_matrix2.*")
+            list(APPEND _vkgen_cmake_args -DGGML_VULKAN_COOPMAT2_GLSLC_SUPPORT=ON)
+            message(STATUS "GL_NV_cooperative_matrix2 supported by glslc (forwarding to generator)")
+        else()
+            message(STATUS "GL_NV_cooperative_matrix2 not supported by glslc")
+        endif()
+        # GL_EXT_integer_dot_product
+        execute_process(
+            COMMAND "${Vulkan_GLSLC_EXECUTABLE}" -o - -fshader-stage=compute --target-env=vulkan1.3 "${_vkgen_source_dir}/test_integer_dot_support.comp"
+            OUTPUT_VARIABLE _vkgen_out
+            ERROR_VARIABLE _vkgen_err
+        )
+        if (NOT _vkgen_err MATCHES ".*extension not supported: GL_EXT_integer_dot_product.*")
+            list(APPEND _vkgen_cmake_args -DGGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT=ON)
+            message(STATUS "GL_EXT_integer_dot_product supported by glslc (forwarding to generator)")
+        else()
+            message(STATUS "GL_EXT_integer_dot_product not supported by glslc")
+        endif()
+        # GL_EXT_bfloat16
+        execute_process(
+            COMMAND "${Vulkan_GLSLC_EXECUTABLE}" -o - -fshader-stage=compute --target-env=vulkan1.3 "${_vkgen_source_dir}/test_bfloat16_support.comp"
+            OUTPUT_VARIABLE _vkgen_out
+            ERROR_VARIABLE _vkgen_err
+        )
+        if (NOT _vkgen_err MATCHES ".*extension not supported: GL_EXT_bfloat16.*")
+            list(APPEND _vkgen_cmake_args -DGGML_VULKAN_BFLOAT16_GLSLC_SUPPORT=ON)
+            message(STATUS "GL_EXT_bfloat16 supported by glslc (forwarding to generator)")
+        else()
+            message(STATUS "GL_EXT_bfloat16 not supported by glslc")
+        endif()
+
+        # 准备 host 工具链（交叉编译时用于生成器工程）
+        set(_vkgen_toolchain_arg "")
+        if(GGML_VULKAN_SHADERS_GEN_TOOLCHAIN)
+            set(_vkgen_toolchain_arg "-DCMAKE_TOOLCHAIN_FILE=${GGML_VULKAN_SHADERS_GEN_TOOLCHAIN}")
+        endif()
+
+        if(CMAKE_HOST_WIN32)
+            # 在 Windows 主机上直接使用 Visual Studio 生成器，避免 Ninja + vcvars 环境传递问题
+            ExternalProject_Add(vulkan-shaders-gen-ext
+                SOURCE_DIR "${_vkgen_source_dir}"
+                BINARY_DIR "${_vkgen_build_dir}"
+                CMAKE_GENERATOR "Visual Studio 17 2022"
+                CMAKE_GENERATOR_PLATFORM "x64"
+                CMAKE_ARGS
+                           -DCMAKE_INSTALL_PREFIX=${_vkgen_install_dir}
+                           -DCMAKE_INSTALL_BINDIR=.
+                           -DCMAKE_BUILD_TYPE=Release
+                           ${_vkgen_toolchain_arg}
+                           ${_vkgen_cmake_args}
+                BUILD_COMMAND     ${CMAKE_COMMAND} --build . --config Release
+                BUILD_ALWAYS TRUE
+                INSTALL_COMMAND   ${CMAKE_COMMAND} -E env --unset=DESTDIR "${CMAKE_COMMAND}" --install . --config Release
+            )
+        else()
+            ExternalProject_Add(vulkan-shaders-gen-ext
+                SOURCE_DIR "${_vkgen_source_dir}"
+                BINARY_DIR "${_vkgen_build_dir}"
+                CMAKE_ARGS -G Ninja
+                           -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
+                           -DCMAKE_INSTALL_PREFIX=${_vkgen_install_dir}
+                           -DCMAKE_INSTALL_BINDIR=.
+                           -DCMAKE_BUILD_TYPE=Release
+                           ${_vkgen_toolchain_arg}
+                           ${_vkgen_cmake_args}
+                BUILD_COMMAND     ${CMAKE_COMMAND} --build .
+                BUILD_ALWAYS TRUE
+                INSTALL_COMMAND   ${CMAKE_COMMAND} -E env --unset=DESTDIR "${CMAKE_COMMAND}" --install .
+            )
+        endif()
+        # 生成的头/源路径
+        set(_ggml_vk_header "${CMAKE_CURRENT_BINARY_DIR}/ggml-vulkan-shaders.hpp")
+        set(_ggml_vk_source "${CMAKE_CURRENT_BINARY_DIR}/ggml-vulkan-shaders.cpp")
+        set(_ggml_vk_input_dir  "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders")
+        set(_ggml_vk_output_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders.spv")
+
+        # 主机生成器可执行文件路径
+        set(_ggml_vk_host_suffix $<IF:$<STREQUAL:${CMAKE_HOST_SYSTEM_NAME},Windows>,.exe,>)
+        set(_ggml_vk_genshaders_cmd "${_vkgen_install_dir}/vulkan-shaders-gen${_ggml_vk_host_suffix}")
+
+        add_custom_command(
+            OUTPUT ${_ggml_vk_header} ${_ggml_vk_source}
+            COMMAND ${_ggml_vk_genshaders_cmd}
+                    --glslc      ${Vulkan_GLSLC_EXECUTABLE}
+                    --input-dir  ${_ggml_vk_input_dir}
+                    --output-dir ${_ggml_vk_output_dir}
+                    --target-hpp ${_ggml_vk_header}
+                    --target-cpp ${_ggml_vk_source}
+                    --no-clean
+            DEPENDS vulkan-shaders-gen-ext
+            COMMENT "Generate vulkan shaders (ggml-vulkan)"
+        )
+    endif()
+
+    # ========== 创建 ggml-vulkan 静态库（切换为本地 ggml-vulkan.cpp + 生成的 shaders） ==========
     set(GGML_VULKAN_SOURCES
-        "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/ggml-vulkan.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/generated/ggml-vulkan-shaders.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ggml-vulkan.cpp"
+        ${_ggml_vk_source}
     )
     add_library(ggml-vulkan STATIC ${GGML_VULKAN_SOURCES})
+    add_dependencies(ggml-vulkan vulkan-shaders-gen-ext)
     target_link_libraries(ggml-vulkan PUBLIC ggml-base)
-    
+
     # 设置Vulkan编译定义
     target_compile_definitions(ggml-vulkan PRIVATE 
         VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1
         VK_USE_PLATFORM_ANDROID_KHR=1
-        VK_API_VERSION=VK_API_VERSION_1_1
+        VK_API_VERSION=VK_API_VERSION_1_2
     )
-    
-    # 添加Vulkan包含路径
+
+    # 添加Vulkan包含路径（VulkanSDK 头文件 + 本目录生成头）
     target_include_directories(ggml-vulkan PRIVATE 
         "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan"
         "${Vulkan_INCLUDE_DIRS}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/generated"
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}"
     )
-    
-    # 链接Vulkan库到ggml-vulkan
+    if(_use_pregenerated_shaders)
+        target_include_directories(ggml-vulkan PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/generated")
+    endif()
+
+    # 链接Vulkan库到ggml-vulkan（Android 使用 NDK Vulkan）
     if(ANDROID)
-        # Android上链接NDK的Vulkan库
         target_link_libraries(ggml-vulkan PRIVATE vulkan android log)
     else()
         target_link_libraries(ggml-vulkan PRIVATE Vulkan::Vulkan)
     endif()
-    
-    message(STATUS "ggml-vulkan backend included")
+
+    message(STATUS "ggml-vulkan backend included (with shader auto-generation)")
 else()
     message(STATUS "Vulkan backend disabled; skipping ggml-vulkan")
 endif()
 
-# 5. 创建主ggml库，链接所有子库
-add_library(ggml INTERFACE)
-target_link_libraries(ggml INTERFACE ggml-base ggml-cpu)
-
-# 如果启用Vulkan，将ggml-vulkan链接到主ggml库
-if(GGML_USE_VULKAN AND Vulkan_FOUND)
-    target_link_libraries(ggml INTERFACE ggml-vulkan)
-    message(STATUS "ggml-vulkan linked to main ggml interface")
-endif()
-
-# 添加其他GGML源文件到相应的库
-# 添加到ggml-base库
-target_sources(ggml-base PRIVATE
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-opt.cpp"
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-threading.cpp"
-    "${LLAMA_CPP_DIR}/ggml/src/gguf.cpp"
-)
-
-# 添加到ggml-cpu库
-target_sources(ggml-cpu PRIVATE
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/ops.cpp"
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/binary-ops.cpp"
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/unary-ops.cpp"
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/vec.cpp"
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/traits.cpp"
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/quants.c"
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/repack.cpp"
-)
-
-# 根据目标架构添加架构特定的源文件到ggml-cpu库
-if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
-    target_sources(ggml-cpu PRIVATE
-        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/quants.c"
-        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/repack.cpp"
-        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/cpu-feats.cpp"
-    )
-elseif(ANDROID_ABI STREQUAL "x86_64" OR ANDROID_ABI STREQUAL "x86")
-    target_sources(ggml-cpu PRIVATE
-        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/quants.c"
-        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/repack.cpp"
-        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/cpu-feats.cpp"
-    )
-endif()
-
-
-
-# Build-info file already added above
-
-# Debug: Print build info file path
-message(STATUS "BUILD_INFO_FILE: ${BUILD_INFO_FILE}")
-message(STATUS "BUILD_NUMBER: ${BUILD_NUMBER}")
-message(STATUS "BUILD_COMMIT: ${BUILD_COMMIT}")
-message(STATUS "BUILD_COMPILER: ${BUILD_COMPILER}")
-message(STATUS "BUILD_TARGET: ${BUILD_TARGET}")
-
-# 获取Git版本信息
-find_program(GIT_EXE NAMES git git.exe)
-if(GIT_EXE)
-    execute_process(COMMAND ${GIT_EXE} rev-list --count HEAD
-        WORKING_DIRECTORY ${LLAMA_CPP_DIR}
-        OUTPUT_VARIABLE GGML_BUILD_NUMBER
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-    execute_process(COMMAND ${GIT_EXE} rev-parse --short HEAD
-        WORKING_DIRECTORY ${LLAMA_CPP_DIR}
-        OUTPUT_VARIABLE GGML_BUILD_COMMIT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-    )
-else()
-    set(GGML_BUILD_NUMBER "0")
-    set(GGML_BUILD_COMMIT "unknown")
-endif()
-
-# 设置版本信息
-set(GGML_INSTALL_VERSION "0.0.${GGML_BUILD_NUMBER}")
-
-# 添加llama.cpp相关的编译定义
-add_definitions(
-    -DGGML_USE_LLAMAFILE=0
-    -DGGML_USE_CUDA=0
-    -DGGML_USE_METAL=0
-    -DGGML_USE_OPENCL=0
-    -DGGML_USE_CPU=1
-    -DGGML_VERSION="${GGML_INSTALL_VERSION}"
-    -DGGML_COMMIT="${GGML_BUILD_COMMIT}"
-    -DVULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1
-)
-
 # 仅当启用了 Vulkan 时才定义相关宏
-if(GGML_USE_VULKAN AND Vulkan_FOUND)
-    add_definitions(-DGGML_USE_VULKAN=1 -DGGML_VULKAN=1)
+if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
+    set(ENABLE_VULKAN_BACKEND ON)
     message(STATUS "Vulkan backend enabled: ${Vulkan_LIBRARIES}")
 else()
-    add_definitions(-DGGML_USE_VULKAN=0 -DGGML_VULKAN=0)
+    set(ENABLE_VULKAN_BACKEND OFF)
     message(STATUS "Vulkan backend disabled")
 endif()
 
@@ -352,6 +498,7 @@ endif()
 if(ANDROID)
     add_definitions(-DANDROID)
     add_definitions(-D__ANDROID__)
+    add_definitions(-DVK_USE_PLATFORM_ANDROID_KHR=1)
 endif()
 
 # 收集llama.cpp源文件（避免重复包含 ggml 源码）
@@ -363,9 +510,13 @@ file(GLOB LLAMA_SOURCES
 )
 
 # 排除不需要的文件
-list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*main\.cpp$")
+list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*main\\.cpp$")
 list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*test.*")
 list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*example.*")
+# llama.cpp 的 common/build-info.cpp 由其自身 CMake 生成，这里不使用，避免找不到文件或重复符号
+list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*/common/build-info\\.cpp$")
+# 追加本项目生成的 build-info.cpp，提供 LLAMA_BUILD_NUMBER/LLAMA_COMMIT 等符号
+list(APPEND LLAMA_SOURCES ${BUILD_INFO_FILE})
 
 # 创建JNI共享库，使用模块化的ggml库
 add_library(llamacpp_jni SHARED
@@ -377,7 +528,6 @@ add_library(llamacpp_jni SHARED
 )
 
 
-
 # 设置目标属性
 set_target_properties(llamacpp_jni PROPERTIES
     POSITION_INDEPENDENT_CODE ON
@@ -385,18 +535,36 @@ set_target_properties(llamacpp_jni PROPERTIES
     CXX_STANDARD_REQUIRED ON
 )
 
-# 链接库：ggml + Android NDK 库
+# 链接库：使用模块化的 ggml 静态库 + Android NDK 库
+# 统一改为 keyword 风格，避免与后续 PRIVATE 混用导致 CMake 报错
 target_link_libraries(llamacpp_jni
-    ggml
-    ${log-lib}
-    android
-    m
+    PRIVATE
+        ggml-base
+        ggml-cpu
+        ${log-lib}
+        android
+        m
 )
 
-# 如果启用Vulkan且已找到Vulkan包，且为Android平台，显式链接NDK vulkan
-if(GGML_USE_VULKAN AND Vulkan_FOUND AND ANDROID)
-    target_link_libraries(llamacpp_jni vulkan)
-    message(STATUS "Linking Android NDK Vulkan library: vulkan")
+# 如果ggml-vulkan目标存在，为JNI目标补充必要的宏定义并链接Vulkan
+if (TARGET ggml-vulkan)
+    target_compile_definitions(llamacpp_jni PRIVATE
+        GGML_USE_VULKAN=1
+        GGML_VULKAN=1
+        VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1
+    )
+    if (ANDROID)
+        target_compile_definitions(llamacpp_jni PRIVATE VK_USE_PLATFORM_ANDROID_KHR=1)
+    endif()
+
+    target_link_libraries(llamacpp_jni PRIVATE ggml-vulkan)
+    if (ANDROID)
+        target_link_libraries(llamacpp_jni PRIVATE vulkan)
+        message(STATUS "Linking Android NDK Vulkan library: vulkan")
+    else()
+        target_link_libraries(llamacpp_jni PRIVATE Vulkan::Vulkan)
+    endif()
+    message(STATUS "Linking ggml-vulkan static library into llamacpp_jni")
 endif()
 
 # 设置输出目录 - 直接输出到app的jniLibs目录

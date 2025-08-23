@@ -4,3 +4,6 @@
 [submodule "libs/tokenizers-rust"]
 	path = libs/tokenizers-rust
 	url = git@github.com:huggingface/tokenizers.git
+[submodule "libs/Vulkan-Headers"]
+	path = libs/Vulkan-Headers
+	url = git@github.com:KhronosGroup/Vulkan-Headers.git

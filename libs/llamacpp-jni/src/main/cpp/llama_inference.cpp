@@ -3,6 +3,7 @@
 #include <iomanip>
 #include <math.h>
 #include <string>
+#include <cstring>
 #include <unistd.h>
 #include <android/log.h>
 #include <unordered_map>
@@ -13,12 +14,16 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include "llama.h"
 #include "common.h"
 #include "vulkan_version_patch.h"
 #include "vulkan_runtime_detector.h"
 #include "ggml-backend.h"
-
+ 
+// 在使用日志宏之前的前向声明，避免未声明标识符错误
+void call_log_manager_print(const char* message);
+ 
 // JNI全局引用，用于调用LogManager.print方法
 static JavaVM* g_jvm = nullptr;
 static jclass g_log_manager_class = nullptr;
@@ -27,7 +32,7 @@ static jmethodID g_log_manager_print_method = nullptr;
 // 调试日志宏定义
 #ifdef ENABLE_DEBUG_LOGS
     #define DEBUG_LOG(tag, fmt, ...) do { \
-        __android_log_print(ANDROID_LOG_INFO, tag, "[DEBUG] " fmt, ##__VA_ARGS__); \
+        __android_log_print(ANDROID_LOG_DEBUG, tag, "[DEBUG] " fmt, ##__VA_ARGS__); \
         char buffer[1024]; \
         snprintf(buffer, sizeof(buffer), "[llama-debug] " fmt, ##__VA_ARGS__); \
         std::string formatted_message = std::string(buffer) + "\n"; \
@@ -70,6 +75,8 @@ static jmethodID g_log_manager_print_method = nullptr;
 
 // 全局停止标志，用于中断推理
 static std::atomic<bool> g_should_stop{false};
+// 在首次请求 GPU 加速时按需加载 GGML 后端（仅加载一次）
+static std::atomic<bool> g_ggml_backends_loaded{false};
 
 // Write C++ code here.
 //
@@ -375,14 +382,21 @@ static bool is_vulkan_suitable_for_llamacpp() {
     
     vulkan_runtime::VulkanRuntimeInfo info = vulkan_runtime::detect_vulkan_runtime();
     
-    FORCE_LOG(TAG, "[VULKAN] Runtime detection results:");
-    FORCE_LOG(TAG, "  Library available: %s", info.library_available ? "yes" : "no");
-    FORCE_LOG(TAG, "  Instance creation: %s", info.instance_creation_works ? "yes" : "no");
-    FORCE_LOG(TAG, "  Physical devices: %s (%u found)", info.physical_devices_available ? "yes" : "no", info.device_count);
-    FORCE_LOG(TAG, "  Vulkan 1.1 APIs: %s", info.vulkan_1_1_apis_available ? "yes" : "no");
-    FORCE_LOG(TAG, "  Suitable for llama.cpp: %s", info.suitable_for_llamacpp ? "yes" : "no");
-    
-    return info.suitable_for_llamacpp;
+    // Simple gate: require Vulkan >= 1.2 and basic runtime availability
+    bool version_ok = VULKAN_VERSION_GE(info.detected_api_version, 1, 2, 0);
+    bool basic_ok = info.library_available && info.instance_creation_works && info.physical_devices_available;
+    bool ok = basic_ok && version_ok;
+
+    FORCE_LOG(TAG, "[VULKAN] Simple version gate: require >= 1.2");
+    FORCE_LOG(TAG, "[VULKAN] Detected Vulkan API %u.%u.%u; version_ok=%s; basic_ok=%s; suitable=%s",
+              VK_VERSION_MAJOR(info.detected_api_version),
+              VK_VERSION_MINOR(info.detected_api_version),
+              VK_VERSION_PATCH(info.detected_api_version),
+              version_ok ? "yes" : "no",
+              basic_ok ? "yes" : "no",
+              ok ? "yes" : "no");
+
+    return ok;
 }
 
 
@@ -437,7 +451,41 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1gpu(JNIEnv *
         final_gpu_layers = 0;
     }
     
-    model_params.n_gpu_layers = final_gpu_layers;
+    // 仅在需要 GPU 时按需加载 GGML 后端：注意 -1 也需要加载
+    if (final_gpu_layers != 0) {
+        bool already_loaded = g_ggml_backends_loaded.load();
+        if (!already_loaded) {
+            FORCE_LOG(TAG, "[BACKEND] Loading GGML backends on-demand for GPU use...");
+            ggml_backend_load_all();
+            g_ggml_backends_loaded.store(true);
+            FORCE_LOG(TAG, "[BACKEND] GGML backends loaded");
+
+            // Enumerate GGML backend devices to confirm whether Vulkan is visible
+            size_t dev_count = ggml_backend_dev_count();
+            FORCE_LOG(TAG, "[BACKEND] Enumerating ggml backend devices: count=%zu", dev_count);
+            bool found_vulkan = false;
+            for (size_t i = 0; i < dev_count; ++i) {
+                auto dev = ggml_backend_dev_get(i);
+                const char * dev_name = ggml_backend_dev_name(dev);
+                int dev_type_val = (int) ggml_backend_dev_type(dev);
+                FORCE_LOG(TAG, "[BACKEND] Device #%zu: name=%s, type=%d", i, dev_name ? dev_name : "(null)", dev_type_val);
+                if (dev_name && (strstr(dev_name, "Vulkan") || strstr(dev_name, "vulkan"))) {
+                    found_vulkan = true;
+                }
+            }
+            FORCE_LOG(TAG, "[BACKEND] Vulkan device present: %s", found_vulkan ? "yes" : "no");
+        }
+    } else {
+        FORCE_LOG(TAG, "[BACKEND] CPU-only mode: skip loading GPU backends");
+    }
+
+    // Map -1 to a large sentinel (e.g., 999) which llama.cpp commonly treats as "all layers"
+    if (final_gpu_layers < 0) {
+        model_params.n_gpu_layers = 999;
+        FORCE_LOG(TAG, "[GPU] n_gpu_layers requested=-1 -> set to 999 for llama.cpp (all layers)");
+    } else {
+        model_params.n_gpu_layers = final_gpu_layers;
+    }
 
     auto path_to_model = env->GetStringUTFChars(filename, 0);
     FORCE_LOG(TAG, "Loading model from %s with %d GPU layers (requested: %d, final: %d)", 
@@ -459,13 +507,13 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1gpu(JNIEnv *
     FORCE_LOG(TAG, "[MODEL_INFO] Requested GPU layers: %d", requested_gpu_layers);
     FORCE_LOG(TAG, "[MODEL_INFO] Final GPU layers: %d", final_gpu_layers);
     
-    if (final_gpu_layers > 0) {
-        int actual_gpu_layers = std::min(final_gpu_layers, total_layers);
+    if (final_gpu_layers != 0) {
+        int actual_gpu_layers = (final_gpu_layers < 0) ? total_layers : std::min(final_gpu_layers, total_layers);
         int cpu_layers = total_layers - actual_gpu_layers;
         FORCE_LOG(TAG, "[MODEL_INFO] ✓ GPU acceleration enabled");
         FORCE_LOG(TAG, "[MODEL_INFO] ✓ Layers on GPU: %d/%d", actual_gpu_layers, total_layers);
         FORCE_LOG(TAG, "[MODEL_INFO] ✓ Layers on CPU: %d/%d", cpu_layers, total_layers);
-        if (final_gpu_layers == -1) {
+        if (final_gpu_layers < 0) {
             FORCE_LOG(TAG, "[MODEL_INFO] ✓ All layers offloaded to GPU (n_gpu_layers = -1)");
         }
     } else {
@@ -667,7 +715,8 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_bench_1model(
         }
 
         batch->logits[batch->n_tokens - 1] = true;
-        llama_kv_self_clear(context);
+        llama_memory_t mem = llama_get_memory(context);
+        llama_memory_clear(mem, true);
 
         const auto t_pp_start = ggml_time_us();
         if (llama_decode(context, *batch) != 0) {
@@ -679,7 +728,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_bench_1model(
 
         LOGi("Benchmark text generation (tg)");
 
-        llama_kv_self_clear(context);
+        llama_memory_clear(mem, true);
         const auto t_tg_start = ggml_time_us();
         for (i = 0; i < tg; i++) {
 
@@ -696,7 +745,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_bench_1model(
 
         const auto t_tg_end = ggml_time_us();
 
-        llama_kv_self_clear(context);
+        llama_memory_clear(mem, true);
 
         const auto t_pp = double(t_pp_end - t_pp_start) / 1000000.0;
         const auto t_tg = double(t_tg_end - t_tg_start) / 1000000.0;
@@ -1055,10 +1104,8 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1init(JNIEnv *env, jobj
     // 初始化后端
     llama_backend_init();
     
-    // 加载所有后端，包括可用的Vulkan后端
-    FORCE_LOG(TAG, "[BACKEND] Loading all GGML backends...");
-    ggml_backend_load_all();
-    FORCE_LOG(TAG, "[BACKEND] All GGML backends loaded");
+    // 跳过在此处加载所有后端，避免在 use_gpu=false 时触发 Vulkan 加载
+    FORCE_LOG(TAG, "[BACKEND] Skipping ggml_backend_load_all(); will load backends on-demand if GPU is requested");
     
     FORCE_LOG(TAG, "[BACKEND] Backend initialization completed");
     
@@ -1560,7 +1607,8 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_kv_1cache_1clear(JNIEnv *, jobj
     }
     
     LOGi("[KV_CACHE_CLEAR] Clearing KV cache for context: %p", ctx);
-    llama_kv_self_clear(ctx);
+    llama_memory_t mem = llama_get_memory(ctx);
+    llama_memory_clear(mem, true);
     LOGi("[KV_CACHE_CLEAR] KV cache cleared successfully");
 }
 
@@ -1820,4 +1868,24 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_model_1size(JNIEnv *env, jobjec
     }
     
     return static_cast<jlong>(llama_model_size(model));
+}
+
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1vulkan_1version(JNIEnv *env, jobject) {
+    vulkan_runtime::VulkanRuntimeInfo info = vulkan_runtime::detect_vulkan_runtime();
+    
+    if (!info.library_available || !info.instance_creation_works || !info.physical_devices_available) {
+        DEBUG_LOG(TAG, "[VULKAN_VERSION] Vulkan not available, returning null");
+        return nullptr;
+    }
+    
+    uint32_t major = VK_VERSION_MAJOR(info.detected_api_version);
+    uint32_t minor = VK_VERSION_MINOR(info.detected_api_version);
+    
+    char version_str[16];
+    snprintf(version_str, sizeof(version_str), "%u.%u", major, minor);
+    
+    DEBUG_LOG(TAG, "[VULKAN_VERSION] Returning Vulkan version: %s", version_str);
+    return env->NewStringUTF(version_str);
 }

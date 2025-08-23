@@ -1,7 +1,7 @@
 1.用中文回答，问题。
 2.添加打印注释采用英文！！！
 3.了解用户需求同时，参看 SPEC.md 的设计说明作为参考。
-4.如果存在代码修改，windows编译一定要加“.\” ！！ 例如“.\gradlew.bat build”
+4.如果存在代码修改，windows构建设置app为key.jks文件密码abc-1234 ！！ 例如“ ./gradlew assembleRelease -PKEYPSWD=abc-1234” ” ./gradlew :app:assembleDebug -PKEYPSWD=abc-1234“
 5.所有工作完成后，根据这次工作，如果这段工作涉到本项目需求和代码的调整（修语法错误不算，或酌情考虑），则需要内容说明文件 SPEC.md中，同时不要更改 SPEC.md章节，如果涉及需求变更、新需求、需求细化，
    a. 实现细化、代码关键点等添加或变更到SPEC.md 
    b. 功能设计；如果是优化考虑，和注意等，合并调整到SPEC.md 

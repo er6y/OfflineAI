@@ -217,17 +217,23 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
      * 请求必要的权限
      */
     private void requestRequiredPermissions() {
-        // 检查是否已经获得了所有权限
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            
-            // 请求存储权限
-            ActivityCompat.requestPermissions(this,
-                    new String[]{
-                            Manifest.permission.READ_EXTERNAL_STORAGE,
-                            Manifest.permission.WRITE_EXTERNAL_STORAGE
-                    },
-                    PERMISSION_REQUEST_CODE);
+        // 对 Android 11 以下版本（API < 30），仍需请求传统存储权限
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            // 检查是否已经获得了所有权限
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED ||
+                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                
+                // 请求存储权限
+                ActivityCompat.requestPermissions(this,
+                        new String[]{
+                                Manifest.permission.READ_EXTERNAL_STORAGE,
+                                Manifest.permission.WRITE_EXTERNAL_STORAGE
+                        },
+                        PERMISSION_REQUEST_CODE);
+            }
+        } else {
+            // English log: skip legacy storage permissions on Android 11+
+            LogManager.logD(TAG, "Skip legacy READ/WRITE external storage permissions on Android 11+ (MANAGE_EXTERNAL_STORAGE flow only)");
         }
         
         // 对于Android 11及以上版本，需要请求MANAGE_EXTERNAL_STORAGE权限
@@ -715,9 +721,14 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
             result -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     if (Environment.isExternalStorageManager()) {
-                        logManager.i(TAG, "存储管理权限已获取");
+                        // English log: persist granted status to avoid repeated prompts
+                        ConfigManager.setBoolean(MainActivity.this, "has_storage_permission", true);
+                        LogManager.logD(TAG, "Full file access permission obtained via launcher; persisted flag");
+                        Toast.makeText(MainActivity.this, getString(R.string.toast_file_access_permission_granted), Toast.LENGTH_SHORT).show();
                     } else {
-                        logManager.w(TAG, "用户拒绝了存储管理权限");
+                        // English log: user denied full file access
+                        LogManager.logW(TAG, "User denied MANAGE_EXTERNAL_STORAGE, app may not work properly");
+                        Toast.makeText(MainActivity.this, getString(R.string.toast_file_access_permission_denied), Toast.LENGTH_LONG).show();
                     }
                 }
             }

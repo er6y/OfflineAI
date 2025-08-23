@@ -7,7 +7,20 @@ android {
     compileSdk = 34 // Use an appropriate SDK version
     
     // 添加NDK配置
-    ndkVersion = "25.1.8937393" // 使用合适的NDK版本
+    ndkVersion = "27.0.12077973" // 使用用户指定的NDK版本
+
+    signingConfigs {
+        release {
+            storeFile file('../key.jks')
+            keyAlias 'key0'
+            // 直接获取密码，如果没有提供则使用空字符串（会在实际使用时报错）
+            def keyPwd = project.findProperty('KEYPSWD') ?: System.getenv('KEYPSWD') ?: ''
+            storePassword keyPwd
+            keyPassword keyPwd
+        }
+    }
+    
+
 
     defaultConfig {
         applicationId "com.example.starlocalrag"
@@ -18,16 +31,18 @@ android {
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         
-        // 生成编译时间戳
+        // 生成编译时间戳 - 在配置阶段生成，确保与APK文件名一致
         def buildTimeStr = new Date().format('yyyyMMddHHmmss')
         buildConfigField "String", "BUILD_VERSION", "\"${buildTimeStr}\""
+        // 将时间戳存储为项目属性，供后续任务使用
+        project.ext.buildTimeStamp = buildTimeStr
     }
 
     buildTypes {
         release {
             // 开源项目配置：启用代码压缩和资源压缩，但不混淆
             minifyEnabled true
-            shrinkResources = true
+
             // 使用不混淆的ProGuard配置文件
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
             
@@ -37,7 +52,7 @@ android {
             buildConfigField "boolean", "ENABLE_GPU_ACCELERATION", "true"
             buildConfigField "boolean", "ENABLE_NNAPI", "true"
             buildConfigField "int", "THREAD_COUNT", "4"
-            signingConfig = signingConfigs.debug // CPU线程数优化
+            signingConfig signingConfigs.release // 使用release签名配置
             
             // 启用资源优化
             crunchPngs true
@@ -47,6 +62,12 @@ android {
             buildConfigField "boolean", "ENABLE_GPU_ACCELERATION", "true"
             buildConfigField "boolean", "ENABLE_NNAPI", "true"
             buildConfigField "int", "THREAD_COUNT", "2"  // Debug模式使用较少线程
+            // 若未提供 KEYPSWD，则使用默认 debug keystore，避免签名失败
+            if (project.hasProperty('KEYPSWD') || System.getenv('KEYPSWD')) {
+                signingConfig signingConfigs.release // 仅在提供了密码时沿用 release 签名
+            } else {
+                println "[app] Debug 构建未提供 KEYPSWD，使用默认 debug keystore"
+            }
         }
     }
     compileOptions {
@@ -240,3 +261,42 @@ dependencies {
 
 // 确保在构建app之前先复制Rust库
 preBuild.dependsOn ':libs:tokenizers-jni:copyRustLibrariesArm64', ':libs:tokenizers-jni:copyRustLibrariesArm7', ':libs:tokenizers-jni:copyRustLibrariesX86', ':libs:tokenizers-jni:copyRustLibrariesX86_64'
+
+// 集成APK复制到构建流程中
+afterEvaluate {
+    // 为assembleRelease任务添加APK复制
+    tasks.named('assembleRelease').configure {
+        doLast {
+            // 使用配置阶段生成的时间戳，确保与BUILD_VERSION一致
+            def buildTime = project.ext.buildTimeStamp
+            def releaseApk = file('build/outputs/apk/release/app-release.apk')
+            if (releaseApk.exists()) {
+                def targetName = "StarLocalRAG_release_${buildTime}.apk"
+                copy {
+                    from releaseApk
+                    into project.rootDir
+                    rename { targetName }
+                }
+                println "Release APK copied to: ${project.rootDir}/${targetName}"
+            }
+        }
+    }
+    
+    // 为assembleDebug任务添加APK复制
+    tasks.named('assembleDebug').configure {
+        doLast {
+            // 与release对齐，使用配置阶段生成的同一时间戳
+            def buildTime = project.ext.buildTimeStamp
+            def debugApk = file('build/outputs/apk/debug/app-debug.apk')
+            if (debugApk.exists()) {
+                def targetName = "StarLocalRAG_debug_${buildTime}.apk"
+                copy {
+                    from debugApk
+                    into project.rootDir
+                    rename { targetName }
+                }
+                println "Debug APK copied to: ${project.rootDir}/${targetName}"
+            }
+        }
+    }
+}

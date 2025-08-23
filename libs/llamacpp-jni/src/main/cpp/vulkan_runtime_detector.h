@@ -18,6 +18,9 @@ struct VulkanRuntimeInfo {
     bool vulkan_1_1_apis_available = false;   // Vulkan 1.1 API是否可用
     bool suitable_for_llamacpp = false;       // 是否适合llama.cpp使用
     uint32_t device_count = 0;                // 物理设备数量
+    uint32_t detected_api_version = 0;        // 检测到的实际API版本
+    uint32_t instance_version = 0;            // 实例支持的版本
+    bool meets_min_version_requirement = false; // 是否满足最小版本要求
 };
 
 /**
@@ -36,6 +39,12 @@ void unload_vulkan_library();
  * @return 成功返回true，失败返回false
  */
 bool test_vulkan_instance_creation();
+
+/**
+ * 检测实际的Vulkan API版本
+ * @return 检测到的API版本
+ */
+uint32_t detect_vulkan_api_version();
 
 /**
  * 检查Vulkan 1.1 API可用性

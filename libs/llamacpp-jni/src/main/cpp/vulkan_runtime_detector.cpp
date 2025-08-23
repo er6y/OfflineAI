@@ -1,4 +1,5 @@
 #include "vulkan_runtime_detector.h"
+#include "vulkan_version_patch.h"
 #include <android/log.h>
 #include <dlfcn.h>
 #include <string>
@@ -25,6 +26,18 @@ extern void call_log_manager_print(const char* message);
     std::string formatted_message = std::string(buffer) + "\n"; \
     call_log_manager_print(formatted_message.c_str()); \
 } while(0)
+
+#ifndef VULKAN_RT_DEBUG
+#define LOGD(...) ((void)0)
+#else
+#define LOGD(...) do { \
+    __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__); \
+    char buffer[1024]; \
+    snprintf(buffer, sizeof(buffer), "[vulkan-debug] " __VA_ARGS__); \
+    std::string formatted_message = std::string(buffer) + "\n"; \
+    call_log_manager_print(formatted_message.c_str()); \
+} while(0)
+#endif
 
 #define LOGW(...) do { \
     __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__); \
@@ -56,6 +69,7 @@ static PFN_vkEnumeratePhysicalDevices vkEnumeratePhysicalDevices_func = nullptr;
 static PFN_vkGetPhysicalDeviceProperties vkGetPhysicalDeviceProperties_func = nullptr;
 static PFN_vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceFeatures2_func = nullptr;
 static PFN_vkGetPhysicalDeviceFeatures2KHR vkGetPhysicalDeviceFeatures2KHR_func = nullptr;
+static PFN_vkEnumerateInstanceVersion vkEnumerateInstanceVersion_func = nullptr;
 
 bool load_vulkan_library() {
     if (vulkan_lib_handle != nullptr) {
@@ -72,10 +86,10 @@ bool load_vulkan_library() {
     for (const char* lib_name : vulkan_lib_names) {
         vulkan_lib_handle = dlopen(lib_name, RTLD_NOW | RTLD_LOCAL);
         if (vulkan_lib_handle != nullptr) {
-            LOGI("Successfully loaded Vulkan library: %s", lib_name);
+            LOGD("Successfully loaded Vulkan library: %s", lib_name);
             break;
         }
-        LOGW("Failed to load %s: %s", lib_name, dlerror());
+        LOGD("Failed to load %s: %s", lib_name, dlerror());
     }
     
     if (vulkan_lib_handle == nullptr) {
@@ -98,6 +112,12 @@ bool load_vulkan_library() {
         vkCreateInstance_func = (PFN_vkCreateInstance)vkGetInstanceProcAddr_func(VK_NULL_HANDLE, "vkCreateInstance");
     }
     
+    // vkEnumerateInstanceVersion也是全局函数（Vulkan 1.1+）
+    vkEnumerateInstanceVersion_func = (PFN_vkEnumerateInstanceVersion)dlsym(vulkan_lib_handle, "vkEnumerateInstanceVersion");
+    if (!vkEnumerateInstanceVersion_func) {
+        vkEnumerateInstanceVersion_func = (PFN_vkEnumerateInstanceVersion)vkGetInstanceProcAddr_func(VK_NULL_HANDLE, "vkEnumerateInstanceVersion");
+    }
+    
     // vkEnumerateInstanceExtensionProperties也是全局函数
     PFN_vkEnumerateInstanceExtensionProperties vkEnumerateInstanceExtensionProperties_func = 
         (PFN_vkEnumerateInstanceExtensionProperties)dlsym(vulkan_lib_handle, "vkEnumerateInstanceExtensionProperties");
@@ -112,7 +132,7 @@ bool load_vulkan_library() {
         return false;
     }
     
-    LOGI("Vulkan library loaded successfully");
+    LOGD("Vulkan library loaded successfully");
     return true;
 }
 
@@ -129,8 +149,9 @@ void unload_vulkan_library() {
         vkGetPhysicalDeviceProperties_func = nullptr;
         vkGetPhysicalDeviceFeatures2_func = nullptr;
         vkGetPhysicalDeviceFeatures2KHR_func = nullptr;
+        vkEnumerateInstanceVersion_func = nullptr;
         
-        LOGI("Vulkan library unloaded");
+        LOGD("Vulkan library unloaded");
     }
 }
 
@@ -185,8 +206,30 @@ bool test_vulkan_instance_creation() {
         return false;
     }
     
-    LOGI("Vulkan instance creation test successful, found %u physical devices", device_count);
+    LOGD("Vulkan instance creation test successful, found %u physical devices", device_count);
     return true;
+}
+
+uint32_t detect_vulkan_api_version() {
+    uint32_t api_version = VK_API_VERSION_1_0; // 默认版本
+    
+    if (vkEnumerateInstanceVersion_func) {
+        VkResult result = vkEnumerateInstanceVersion_func(&api_version);
+        if (result == VK_SUCCESS) {
+            LOGD("Detected Vulkan API version: %u.%u.%u", 
+                 VK_VERSION_MAJOR(api_version),
+                 VK_VERSION_MINOR(api_version),
+                 VK_VERSION_PATCH(api_version));
+        } else {
+            LOGD("Failed to enumerate instance version, using default 1.0.0");
+            api_version = VK_API_VERSION_1_0;
+        }
+    } else {
+        LOGD("vkEnumerateInstanceVersion not available, assuming Vulkan 1.0.0");
+        api_version = VK_API_VERSION_1_0;
+    }
+    
+    return api_version;
 }
 
 bool check_vulkan_1_1_apis(VkInstance instance) {
@@ -201,9 +244,12 @@ bool check_vulkan_1_1_apis(VkInstance instance) {
     bool has_core_1_1 = (vkGetPhysicalDeviceFeatures2_func != nullptr);
     bool has_khr_extension = (vkGetPhysicalDeviceFeatures2KHR_func != nullptr);
     
-    LOGI("Vulkan 1.1 API availability: core=%s, KHR=%s", 
-         has_core_1_1 ? "yes" : "no", 
-         has_khr_extension ? "yes" : "no");
+    // 降低冗余：仅在检测到版本<1.2时打印 1.1 可用性细节
+    if (!VULKAN_VERSION_GE(cached_info.detected_api_version, 1, 2, 0)) {
+        LOGD("Vulkan 1.1 API availability: core=%s, KHR=%s", 
+             has_core_1_1 ? "yes" : "no", 
+             has_khr_extension ? "yes" : "no");
+    }
     
     return has_core_1_1 || has_khr_extension;
 }
@@ -216,7 +262,7 @@ VulkanRuntimeInfo detect_vulkan_runtime() {
     vulkan_detection_attempted = true;
     cached_info = {}; // 初始化为全false
     
-    LOGI("Starting Vulkan runtime detection...");
+    LOGD("Starting Vulkan runtime detection...");
     
     // 1. 尝试加载Vulkan库
     if (!load_vulkan_library()) {
@@ -226,7 +272,10 @@ VulkanRuntimeInfo detect_vulkan_runtime() {
     
     cached_info.library_available = true;
     
-    // 2. 测试Vulkan实例创建
+    // 2. 检测实际的Vulkan API版本
+    cached_info.detected_api_version = detect_vulkan_api_version();
+    
+    // 3. 测试Vulkan实例创建
     if (!test_vulkan_instance_creation()) {
         LOGE("Vulkan instance creation failed");
         return cached_info;
@@ -234,14 +283,15 @@ VulkanRuntimeInfo detect_vulkan_runtime() {
     
     cached_info.instance_creation_works = true;
     
-    // 3. 创建实例来检查API可用性
+    // 4. 枚举物理设备
     VkApplicationInfo app_info = {};
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app_info.pApplicationName = "VulkanAPITest";
     app_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     app_info.pEngineName = "TestEngine";
     app_info.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    app_info.apiVersion = VK_API_VERSION_1_0;
+    // 使用检测到的API版本，但不超过我们支持的最高版本
+    app_info.apiVersion = cached_info.detected_api_version;
     
     VkInstanceCreateInfo create_info = {};
     create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -251,35 +301,92 @@ VulkanRuntimeInfo detect_vulkan_runtime() {
     VkResult result = vkCreateInstance_func(&create_info, nullptr, &instance);
     
     if (result == VK_SUCCESS && instance != VK_NULL_HANDLE) {
-        // 4. 检查Vulkan 1.1 API可用性
-        cached_info.vulkan_1_1_apis_available = check_vulkan_1_1_apis(instance);
+        cached_info.instance_version = app_info.apiVersion;
+
+        // 刷新实例级函数指针，避免使用无效/空指针
+        PFN_vkDestroyInstance newDestroy = (PFN_vkDestroyInstance)vkGetInstanceProcAddr_func(instance, "vkDestroyInstance");
+        if (newDestroy) {
+            vkDestroyInstance_func = newDestroy;
+        }
+        PFN_vkEnumeratePhysicalDevices newEnum = (PFN_vkEnumeratePhysicalDevices)vkGetInstanceProcAddr_func(instance, "vkEnumeratePhysicalDevices");
+        if (newEnum) {
+            vkEnumeratePhysicalDevices_func = newEnum;
+        }
+
+        if (!vkEnumeratePhysicalDevices_func) {
+            LOGE("vkEnumeratePhysicalDevices function not available after instance creation");
+            if (vkDestroyInstance_func) {
+                vkDestroyInstance_func(instance, nullptr);
+            }
+            return cached_info;
+        }
         
-        // 5. 枚举物理设备
+        // 5. 检查Vulkan 1.1 API可用性（若版本>=1.2则无需再检查，直接认为可用，减少冗余日志）
+        if (VULKAN_VERSION_GE(cached_info.detected_api_version, 1, 2, 0)) {
+            cached_info.vulkan_1_1_apis_available = true;
+        } else {
+            cached_info.vulkan_1_1_apis_available = check_vulkan_1_1_apis(instance);
+        }
+        
+        // 6. 枚举物理设备
         uint32_t device_count = 0;
         result = vkEnumeratePhysicalDevices_func(instance, &device_count, nullptr);
         if (result == VK_SUCCESS && device_count > 0) {
             cached_info.physical_devices_available = true;
             cached_info.device_count = device_count;
-            LOGI("Found %u Vulkan physical device(s)", device_count);
+            LOGD("Found %u Vulkan physical device(s)", device_count);
         } else {
-            LOGW("No Vulkan physical devices found or enumeration failed");
+            LOGD("No Vulkan physical devices found or enumeration failed");
         }
         
-        vkDestroyInstance_func(instance, nullptr);
+        if (vkDestroyInstance_func) {
+            vkDestroyInstance_func(instance, nullptr);
+        }
     }
     
-    // 6. 综合判断Vulkan是否可用于llama.cpp
+#ifdef GGML_USE_VULKAN
+    // 7. 检查是否满足最小版本要求：1.2+ 直接满足
+    if (VULKAN_VERSION_GE(cached_info.detected_api_version, 1, 2, 0)) {
+        cached_info.meets_min_version_requirement = true;
+    } else {
+        cached_info.meets_min_version_requirement = 
+            VULKAN_VERSION_GE(cached_info.detected_api_version, 
+                             VK_VERSION_MAJOR(GGML_VULKAN_MIN_VERSION),
+                             VK_VERSION_MINOR(GGML_VULKAN_MIN_VERSION),
+                             VK_VERSION_PATCH(GGML_VULKAN_MIN_VERSION));
+    }
+    
+    LOGD("Minimum required version: %s, detected version meets requirement: %s",
+         GGML_VULKAN_MIN_VERSION_STR,
+         cached_info.meets_min_version_requirement ? "yes" : "no");
+#else
+    cached_info.meets_min_version_requirement = false;
+    LOGD("GGML_USE_VULKAN not defined, version requirement check skipped");
+#endif
+    
+    // 8. 综合判断Vulkan是否可用于llama.cpp
     cached_info.suitable_for_llamacpp = 
         cached_info.library_available &&
         cached_info.instance_creation_works &&
         cached_info.physical_devices_available &&
-        cached_info.vulkan_1_1_apis_available;
+        cached_info.vulkan_1_1_apis_available &&
+        cached_info.meets_min_version_requirement;
     
     LOGI("Vulkan runtime detection completed:");
     LOGI("  Library available: %s", cached_info.library_available ? "yes" : "no");
+    LOGI("  Detected API version: %u.%u.%u", 
+         VK_VERSION_MAJOR(cached_info.detected_api_version),
+         VK_VERSION_MINOR(cached_info.detected_api_version),
+         VK_VERSION_PATCH(cached_info.detected_api_version));
     LOGI("  Instance creation: %s", cached_info.instance_creation_works ? "yes" : "no");
+    LOGI("  Instance version: %u.%u.%u", 
+         VK_VERSION_MAJOR(cached_info.instance_version),
+         VK_VERSION_MINOR(cached_info.instance_version),
+         VK_VERSION_PATCH(cached_info.instance_version));
     LOGI("  Physical devices: %s (%u found)", cached_info.physical_devices_available ? "yes" : "no", cached_info.device_count);
+    // 不再冗余打印 1.1 细节，这里仅给出汇总
     LOGI("  Vulkan 1.1 APIs: %s", cached_info.vulkan_1_1_apis_available ? "yes" : "no");
+    LOGI("  Meets min version requirement: %s", cached_info.meets_min_version_requirement ? "yes" : "no");
     LOGI("  Suitable for llama.cpp: %s", cached_info.suitable_for_llamacpp ? "yes" : "no");
     
     return cached_info;

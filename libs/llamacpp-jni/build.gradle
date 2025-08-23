@@ -22,6 +22,16 @@ task buildVulkanShaders {
         // 创建构建目录
         buildDir.mkdirs()
         outputDir.mkdirs()
+
+        // 解析 glslc 可执行文件路径
+        def vulkanSdk = System.getenv('VULKAN_SDK')
+        def glslcPath = vulkanSdk ? new File(vulkanSdk, 'Bin/glslc.exe').absolutePath : 'glslc.exe'
+        if (vulkanSdk) {
+            println "Using VULKAN_SDK at: ${vulkanSdk}"
+            println "glslc resolved to: ${glslcPath}"
+        } else {
+            println "VULKAN_SDK not set, trying to use glslc from PATH"
+        }
         
         // 编译vulkan-shaders-gen工具
         exec {
@@ -32,7 +42,7 @@ task buildVulkanShaders {
         // 运行vulkan-shaders-gen生成着色器
         exec {
             commandLine vulkanShadersGenExe.absolutePath, 
-                        '--glslc', 'glslc.exe',
+                        '--glslc', glslcPath,
                         '--input-dir', vulkanShadersDir.absolutePath,
                         '--output-dir', outputDir.absolutePath,
                         '--target-hpp', 'ggml-vulkan-shaders.hpp',
@@ -50,6 +60,7 @@ preBuild.dependsOn buildVulkanShaders
 android {
     namespace = 'com.starlocalrag.llamacpp'
     compileSdkVersion 34
+    ndkVersion "28.2.13676358"
     // buildToolsVersion removed - using default from Android Gradle Plugin
 
     defaultConfig {
@@ -66,7 +77,7 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags "-std=c++17 -frtti -fexceptions"
-                arguments "-DANDROID_STL=c++_static", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_USE_VULKAN=0"
+                arguments "-DANDROID_STL=c++_static", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_USE_VULKAN=1", "-DGGML_VULKAN=ON", "-DVULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1", "-DVK_USE_PLATFORM_ANDROID_KHR=1", "-DANDROID_PLATFORM=android-28", "-DVCVARS64_BAT=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat"
             }
         }
     }
@@ -80,7 +91,7 @@ android {
             externalNativeBuild {
                 cmake {
                     cppFlags "-std=c++17 -frtti -fexceptions -O3 -DNDEBUG"
-                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0"
+                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_VULKAN=ON", "-DGGML_USE_VULKAN=1", "-DVULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1", "-DVK_USE_PLATFORM_ANDROID_KHR=1", "-DANDROID_PLATFORM=android-28", "-DVCVARS64_BAT=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat"
                 }
             }
         }
@@ -88,7 +99,7 @@ android {
             externalNativeBuild {
                 cmake {
                     cppFlags "-std=c++17 -frtti -fexceptions -O3 -DNDEBUG"
-                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0"
+                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_VULKAN=ON", "-DGGML_USE_VULKAN=1", "-DVULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1", "-DVK_USE_PLATFORM_ANDROID_KHR=1", "-DGGML_VULKAN_DEBUG=1", "-DANDROID_PLATFORM=android-28", "-DVCVARS64_BAT=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat"
                 }
             }
         }

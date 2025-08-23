@@ -1616,7 +1616,23 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         stats.append(String.format("   • contextSize: %d tokens\n", contextSize));
         stats.append(String.format("   • batchSize: %d tokens\n", batchSize));
         stats.append(String.format("   • threads: %d\n", threads));
-        stats.append(String.format("   • GPU: %s\n", useGpu ? "True" : "False"));
+        
+        if (!useGpu) {
+            stats.append("   • GPU: False\n");
+        } else {
+            String vkVersion = null;
+            try {
+                vkVersion = LlamaCppInference.get_vulkan_version();
+            } catch (Throwable t) {
+                LogManager.logW(TAG, "获取Vulkan版本失败，使用默认True显示", t);
+            }
+            if (vkVersion != null && !vkVersion.isEmpty()) {
+                stats.append(String.format("   • GPU: Vulkan %s\n", vkVersion));
+            } else {
+                // 兼容保底显示
+                stats.append("   • GPU: False\n");
+            }
+        }
         
         // 显示实际使用的推理参数
         LocalLlmHandler.InferenceParams actualParams = getActualInferenceParams();

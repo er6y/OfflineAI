@@ -140,6 +140,14 @@ public class LlamaCppInference {
      */
     public static native boolean get_should_stop();
     
+    // ========== Vulkan信息获取 ==========
+    
+    /**
+     * 获取Vulkan版本字符串
+     * @return Vulkan版本字符串，如"1.3"或"1.1"，如果Vulkan不可用则返回null
+     */
+    public static native String get_vulkan_version();
+    
     // ========== 模型元数据获取 ==========
     
     /**

@@ -13,12 +13,8 @@ extern "C" {
         return nullptr;
     }
     
-    // 仅当未启用 Vulkan 后端时，才提供 Vulkan 的 stub，避免覆盖真实实现
-#if !defined(GGML_USE_VULKAN) || (GGML_USE_VULKAN == 0)
-    ggml_backend_reg_t ggml_backend_vk_reg(void) {
-        return nullptr;
-    }
-#endif
+    // 完全移除 Vulkan 的 stub 实现，避免与真实实现冲突
+    // 注意：不再提供 ggml_backend_vk_reg 的 stub，让链接器使用真实的 Vulkan 后端实现
     
     ggml_backend_reg_t ggml_backend_cuda_reg(void) {
         return nullptr;
