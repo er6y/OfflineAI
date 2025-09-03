@@ -20,6 +20,7 @@ struct VulkanRuntimeInfo {
     uint32_t device_count = 0;                // 物理设备数量
     uint32_t detected_api_version = 0;        // 检测到的实际API版本
     uint32_t instance_version = 0;            // 实例支持的版本
+    uint32_t device_api_version = 0;          // 首个物理设备的API版本（device properties apiVersion）
     bool meets_min_version_requirement = false; // 是否满足最小版本要求
 };
 

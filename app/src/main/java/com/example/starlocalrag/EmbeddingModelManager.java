@@ -55,8 +55,8 @@ public class EmbeddingModelManager {
     // 上下文
     private Context applicationContext;
     
-    // GPU设置
-    private boolean useGpu;
+    // 后端偏好设置
+    private String useGpu = "CPU";
     
     /**
      * 模型回调接口
@@ -98,9 +98,9 @@ public class EmbeddingModelManager {
         if (context != null) {
             instance.applicationContext = context.getApplicationContext();
             
-            // 初始化GPU设置
-            instance.useGpu = ConfigManager.getBoolean(context, ConfigManager.KEY_USE_GPU, false);
-            LogManager.logD(TAG, "EmbeddingModelManager初始化: GPU加速设置为 " + (instance.useGpu ? "启用" : "禁用"));
+            // 初始化后端偏好设置
+            instance.useGpu = SettingsFragment.getBackendPreference(context);
+            LogManager.logD(TAG, "EmbeddingModelManager初始化: 后端偏好设置为 " + instance.useGpu);
         }
         
         return instance;
@@ -138,8 +138,9 @@ public class EmbeddingModelManager {
             // 检查模型是否需要更换或重新加载
             boolean needReload = false;
             
-            // 获取当前GPU设置
-            boolean currentGpuSetting = SettingsFragment.getUseGpu(applicationContext);
+            // 获取当前后端偏好设置
+            String currentBackendPreference = SettingsFragment.getBackendPreference(applicationContext);
+            boolean currentGpuSetting = !"CPU".equals(currentBackendPreference);
             
             // 检查当前模型是否有效
             if (currentModel != null) {
@@ -154,19 +155,19 @@ public class EmbeddingModelManager {
                             new File(currentModelPath).getName() + "，请求模型: " + new File(modelPath).getName());
                         needReload = true;
                     } else {
-                        // 检查GPU设置是否变更，如果变更则需要重新加载
-                        if (this.useGpu != currentGpuSetting) {
-                            String gpuStatusMsg = String.format("当前GPU加速设置: %s，已加载模型设置: %s", 
-                                currentGpuSetting ? "GPU" : "CPU", 
-                                this.useGpu ? "GPU" : "CPU");
+                        // 检查后端偏好是否变更，如果变更则需要重新加载
+                        if (!this.useGpu.equals(currentBackendPreference)) {
+                            String gpuStatusMsg = String.format("当前后端偏好: %s，已加载模型设置: %s", 
+                                currentBackendPreference, 
+                                this.useGpu);
                             
                             LogManager.logD(TAG, gpuStatusMsg + "，需要重新加载模型");
                             LogManager.getInstance(applicationContext).i(TAG, gpuStatusMsg + "，需要重新加载模型");
                             needReload = true;
                         } else {
-                            String gpuStatusMsg = String.format("当前GPU加速设置: %s，已加载模型设置: %s", 
-                                currentGpuSetting ? "GPU" : "CPU", 
-                                this.useGpu ? "GPU" : "CPU");
+                            String gpuStatusMsg = String.format("当前后端偏好: %s，已加载模型设置: %s", 
+                                currentBackendPreference, 
+                                this.useGpu);
                             
                             LogManager.logD(TAG, gpuStatusMsg + "，直接使用现有模型");
                             LogManager.getInstance(applicationContext).d(TAG, gpuStatusMsg + 
@@ -174,16 +175,16 @@ public class EmbeddingModelManager {
                         }
                     }
                 } catch (Exception e) {
-                    String gpuStatusMsg = String.format("当前GPU加速设置: %s，已加载模型状态: 无效", 
-                        currentGpuSetting ? "GPU" : "CPU");
+                    String gpuStatusMsg = String.format("当前后端偏好: %s，已加载模型状态: 无效", 
+                        currentBackendPreference);
                     
                     LogManager.logE(TAG, gpuStatusMsg + "，需要重新加载: " + e.getMessage(), e);
                     LogManager.getInstance(applicationContext).e(TAG, gpuStatusMsg + "，需要重新加载: " + e.getMessage());
                     needReload = true;
                 }
             } else {
-                String gpuStatusMsg = String.format("当前GPU加速设置: %s，已加载模型状态: 未加载", 
-                    currentGpuSetting ? "GPU" : "CPU");
+                String gpuStatusMsg = String.format("当前后端偏好: %s，已加载模型状态: 未加载", 
+                    currentBackendPreference);
                 
                 LogManager.logD(TAG, gpuStatusMsg + "，需要加载模型: " + modelPath);
                 LogManager.getInstance(applicationContext).i(TAG, gpuStatusMsg + 
@@ -212,14 +213,14 @@ public class EmbeddingModelManager {
                 }
                 
                 // 尝试加载模型
-                String loadMsg = String.format("尝试使用%s加速设置加载模型: %s", 
-                    currentGpuSetting ? "GPU" : "CPU", 
+                String loadMsg = String.format("尝试使用%s后端加载模型: %s", 
+                    currentBackendPreference, 
                     new File(modelPath).getName());
                 LogManager.getInstance(applicationContext).i(TAG, loadMsg);
                 
                 currentModel = loadModel(modelPath, currentGpuSetting);
                 currentModelPath = modelPath;
-                this.useGpu = currentGpuSetting;
+                this.useGpu = currentBackendPreference;
                 
                 // 设置调试模式
                 boolean debugMode = SettingsFragment.isDebugModeEnabled(applicationContext);
@@ -271,8 +272,9 @@ public class EmbeddingModelManager {
         // 取消定时卸载任务
         cancelUnloadTask();
         
-        // 获取当前GPU设置
-        boolean currentGpuSetting = SettingsFragment.getUseGpu(applicationContext);
+        // 获取当前后端偏好设置
+        String currentBackendPreference = SettingsFragment.getBackendPreference(applicationContext);
+        boolean currentGpuSetting = !"CPU".equals(currentBackendPreference);
         
         // 检查是否需要重新加载模型
         boolean needReload = false;
@@ -290,19 +292,19 @@ public class EmbeddingModelManager {
                         new File(currentModelPath).getName() + "，请求模型: " + new File(modelPath).getName());
                     needReload = true;
                 } else {
-                    // 检查GPU设置是否变更，如果变更则需要重新加载
-                    if (this.useGpu != currentGpuSetting) {
-                        String gpuStatusMsg = String.format("异步加载 - 当前GPU加速设置: %s，已加载模型设置: %s", 
-                            currentGpuSetting ? "GPU" : "CPU", 
-                            this.useGpu ? "GPU" : "CPU");
+                    // 检查后端偏好是否变更，如果变更则需要重新加载
+                    if (!this.useGpu.equals(currentBackendPreference)) {
+                        String gpuStatusMsg = String.format("异步加载 - 当前后端偏好: %s，已加载模型设置: %s", 
+                            currentBackendPreference, 
+                            this.useGpu);
                         
                         LogManager.logD(TAG, gpuStatusMsg + "，需要重新加载模型");
                         LogManager.getInstance(applicationContext).i(TAG, gpuStatusMsg + "，需要重新加载模型");
                         needReload = true;
                     } else {
-                        String gpuStatusMsg = String.format("异步加载 - 当前GPU加速设置: %s，已加载模型设置: %s", 
-                            currentGpuSetting ? "GPU" : "CPU", 
-                            this.useGpu ? "GPU" : "CPU");
+                        String gpuStatusMsg = String.format("异步加载 - 当前后端偏好: %s，已加载模型设置: %s", 
+                            currentBackendPreference, 
+                            this.useGpu);
                         
                         LogManager.logD(TAG, gpuStatusMsg + "，直接使用现有模型");
                         LogManager.getInstance(applicationContext).d(TAG, gpuStatusMsg + 
@@ -310,16 +312,16 @@ public class EmbeddingModelManager {
                     }
                 }
             } catch (Exception e) {
-                String gpuStatusMsg = String.format("异步加载 - 当前GPU加速设置: %s，已加载模型状态: 无效", 
-                    currentGpuSetting ? "GPU" : "CPU");
+                String gpuStatusMsg = String.format("异步加载 - 当前后端偏好: %s，已加载模型状态: 无效", 
+                    currentBackendPreference);
                 
                 LogManager.logE(TAG, gpuStatusMsg + "，需要重新加载: " + e.getMessage(), e);
                 LogManager.getInstance(applicationContext).e(TAG, gpuStatusMsg + "，需要重新加载: " + e.getMessage());
                 needReload = true;
             }
         } else {
-            String gpuStatusMsg = String.format("异步加载 - 当前GPU加速设置: %s，已加载模型状态: 未加载", 
-                currentGpuSetting ? "GPU" : "CPU");
+            String gpuStatusMsg = String.format("异步加载 - 当前后端偏好: %s，已加载模型状态: 未加载", 
+                currentBackendPreference);
             
             LogManager.logD(TAG, gpuStatusMsg + "，需要加载模型: " + modelPath);
             LogManager.getInstance(applicationContext).i(TAG, gpuStatusMsg + 
@@ -374,14 +376,14 @@ public class EmbeddingModelManager {
                     }
                     
                     // 尝试加载模型
-                    String loadMsg = String.format("异步加载 - 尝试使用%s加速设置加载模型: %s", 
-                        finalGpuSetting ? "GPU" : "CPU", 
+                    String loadMsg = String.format("异步加载 - 尝试使用%s后端加载模型: %s", 
+                        currentBackendPreference, 
                         new File(modelPath).getName());
                     LogManager.getInstance(applicationContext).i(TAG, loadMsg);
                     
                     currentModel = loadModel(modelPath, finalGpuSetting);
                     currentModelPath = modelPath;
-                    useGpu = finalGpuSetting;
+                    useGpu = currentBackendPreference;
                     
                     // 设置调试模式
                     boolean debugMode = SettingsFragment.isDebugModeEnabled(applicationContext);
@@ -553,18 +555,18 @@ public class EmbeddingModelManager {
      * 更新GPU设置
      * @param useGpu 是否使用GPU
      */
-    public synchronized void updateGpuSetting(boolean useGpu) {
-        LogManager.logD(TAG, "EmbeddingModel GPU设置更新: " + (useGpu ? "启用" : "禁用") + "GPU加速");
+    public synchronized void updateGpuSetting(String useGpu) {
+        LogManager.logD(TAG, "EmbeddingModel 后端偏好更新: " + useGpu);
         
-        // 更新GPU设置
+        // 更新后端偏好设置
         this.useGpu = useGpu;
         
         // 如果当前有加载的模型，记录提示信息
         if (currentModel != null) {
-            LogManager.logW(TAG, "EmbeddingModel GPU设置: GPU设置已更新，但当前模型仍在使用中。新的GPU设置将在下次加载模型时生效。");
-            LogManager.logI(TAG, "EmbeddingModel GPU设置: 如需立即应用新的GPU设置，请重新加载模型或重启应用。");
+            LogManager.logW(TAG, "EmbeddingModel 后端偏好: 后端偏好已更新，但当前模型仍在使用中。新的后端偏好将在下次加载模型时生效。");
+            LogManager.logI(TAG, "EmbeddingModel 后端偏好: 如需立即应用新的后端偏好，请重新加载模型或重启应用。");
         } else {
-            LogManager.logI(TAG, "EmbeddingModel GPU设置: GPU设置已更新，将在下次加载模型时生效。");
+            LogManager.logI(TAG, "EmbeddingModel 后端偏好: 后端偏好已更新，将在下次加载模型时生效。");
         }
     }
 }

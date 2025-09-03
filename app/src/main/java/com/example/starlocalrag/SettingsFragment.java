@@ -20,6 +20,9 @@ import android.widget.EditText;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.Spinner;
+import android.widget.ArrayAdapter;
+import android.widget.AdapterView;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
@@ -39,6 +42,10 @@ import java.io.File;
 public class SettingsFragment extends Fragment {
     private static final String TAG = "SettingsFragment";
     
+    // Backend preference options (hardcoded to avoid resource file complexity)
+    private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan", "OpenCL", "BLAS", "CANN"};
+    private static final String[] BACKEND_VALUES = {"CPU", "VULKAN", "OPENCL", "BLAS", "CANN"};
+    
     // UI组件
     private SeekBar seekBarChunkSize;
     private TextView textViewChunkSizeValue;
@@ -56,7 +63,7 @@ public class SettingsFragment extends Fragment {
     private Button buttonSelectKnowledgeBasePath;
     private Button buttonSaveSettings;
     private SwitchCompat switchDebugMode;
-    private SwitchCompat switchUseGpu;
+    private Spinner spinnerUseGpu;
     // ONNX引擎开关已移除
     private SwitchCompat switchJsonDatasetSplitting; // JSON训练集分块优化开关
     private SeekBar seekBarFontSize; // 字体大小拖动条
@@ -176,7 +183,7 @@ public class SettingsFragment extends Fragment {
         buttonSelectKnowledgeBasePath = view.findViewById(R.id.buttonSelectKnowledgeBasePath);
         buttonSaveSettings = view.findViewById(R.id.buttonSaveSettings);
         switchDebugMode = view.findViewById(R.id.switchDebugMode);
-        switchUseGpu = view.findViewById(R.id.switchUseGpu);
+        spinnerUseGpu = view.findViewById(R.id.spinnerBackendPreference);
         // ONNX引擎开关初始化已移除
         switchJsonDatasetSplitting = view.findViewById(R.id.switchJsonDatasetSplitting); // JSON训练集分块优化开关
         
@@ -201,6 +208,12 @@ public class SettingsFragment extends Fragment {
         seekBarManualRepeatPenalty = view.findViewById(R.id.seekBarManualRepeatPenalty);
         textViewManualRepeatPenaltyValue = view.findViewById(R.id.textViewManualRepeatPenaltyValue);
         switchPriorityManualParams = view.findViewById(R.id.switchPriorityManualParams); // 优先手动参数开关
+        
+        // 设置后端偏好Spinner适配器
+        ArrayAdapter<String> backendAdapter = new ArrayAdapter<>(requireContext(), 
+            android.R.layout.simple_spinner_item, BACKEND_OPTIONS);
+        backendAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerUseGpu.setAdapter(backendAdapter);
         
         // 加载当前设置
         loadSettings();
@@ -369,8 +382,16 @@ public class SettingsFragment extends Fragment {
             // 加载调试模式设置
             boolean debugMode = ConfigManager.getBoolean(context, ConfigManager.KEY_DEBUG_MODE, false);
             
-            // 加载GPU加速设置
-            boolean useGpu = ConfigManager.getBoolean(context, ConfigManager.KEY_USE_GPU, false);
+            // 加载后端偏好设置（兼容旧的GPU设置）
+            String backendPreference = ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
+            // 兼容性迁移：如果存储的是布尔值，则转换为字符串
+            if ("true".equals(backendPreference)) {
+                backendPreference = "VULKAN";
+                ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
+            } else if ("false".equals(backendPreference)) {
+                backendPreference = "CPU";
+                ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
+            }
             
             // ONNX引擎设置加载已移除
             
@@ -398,7 +419,16 @@ public class SettingsFragment extends Fragment {
             editTextRerankerModelPath.setText(rerankerModelPath);
             editTextKnowledgeBasePath.setText(knowledgeBasePath);
             switchDebugMode.setChecked(debugMode);
-            switchUseGpu.setChecked(useGpu);
+            
+            // 设置后端偏好Spinner
+            int selectedIndex = 0;
+            for (int i = 0; i < BACKEND_VALUES.length; i++) {
+                if (BACKEND_VALUES[i].equals(backendPreference)) {
+                    selectedIndex = i;
+                    break;
+                }
+            }
+            spinnerUseGpu.setSelection(selectedIndex);
             // ONNX引擎开关设置已移除
             switchJsonDatasetSplitting.setChecked(jsonDatasetSplitting);
             seekBarFontSize.setProgress(Math.round(fontSize) - 10);
@@ -484,8 +514,10 @@ public class SettingsFragment extends Fragment {
             // 获取调试模式设置
             boolean debugMode = switchDebugMode.isChecked();
             
-            // 获取GPU加速设置
-            boolean useGpu = switchUseGpu.isChecked();
+            // 获取后端偏好设置
+            int selectedIndex = spinnerUseGpu.getSelectedItemPosition();
+            String backendPreference = (selectedIndex >= 0 && selectedIndex < BACKEND_VALUES.length) ? 
+                BACKEND_VALUES[selectedIndex] : "CPU";
             
             // ONNX引擎设置获取已移除
             
@@ -565,7 +597,7 @@ public class SettingsFragment extends Fragment {
             ConfigManager.setString(context, ConfigManager.KEY_RERANKER_MODEL_PATH, rerankerModelPath);
             ConfigManager.setString(context, ConfigManager.KEY_KNOWLEDGE_BASE_PATH, knowledgeBasePath);
             ConfigManager.setBoolean(context, ConfigManager.KEY_DEBUG_MODE, debugMode);
-            ConfigManager.setBoolean(context, ConfigManager.KEY_USE_GPU, useGpu);
+            ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
             // ONNX引擎配置保存已移除
             ConfigManager.setJsonDatasetSplittingEnabled(context, jsonDatasetSplitting);
             ConfigManager.setGlobalTextSize(context, fontSize);
@@ -593,7 +625,7 @@ public class SettingsFragment extends Fragment {
             settingsSummary.put("rerankerModelPath", rerankerModelPath);
             settingsSummary.put("knowledgeBasePath", knowledgeBasePath);
             settingsSummary.put("debugMode", debugMode);
-            settingsSummary.put("useGpu", useGpu);
+            settingsSummary.put("backendPreference", backendPreference);
             // ONNX引擎设置摘要已移除
             settingsSummary.put("jsonDatasetSplitting", jsonDatasetSplitting);
             
@@ -720,13 +752,27 @@ public class SettingsFragment extends Fragment {
     }
     
     /**
-     * 获取是否使用GPU加速
+     * 获取后端偏好设置
+     * @param context 上下文
+     * @return 后端偏好字符串
+     */
+    public static String getBackendPreference(Context context) {
+        String backendPreference = ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
+        // 验证后端偏好值是否有效，无效则使用CPU
+        for (String validValue : BACKEND_VALUES) {
+            if (validValue.equals(backendPreference)) {
+                return backendPreference;
+            }
+        }
+        return "CPU";
+    }
+    
+    /**
+     * 获取是否使用GPU加速（兼容性方法）
      * @param context 上下文
      * @return 是否使用GPU加速
      */
-    public static boolean getUseGpu(Context context) {
-        return ConfigManager.getBoolean(context, ConfigManager.KEY_USE_GPU, false);
-    }
+
     
     /**
      * 获取是否启用JSON训练集分块优化

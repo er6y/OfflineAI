@@ -81,7 +81,9 @@ public class GPUErrorHandler {
                 window.setFormat(android.graphics.PixelFormat.RGBA_8888);
                 
                 // 根据配置决定是否启用硬件加速
-                boolean useGpu = ConfigManager.getBoolean(window.getContext(), ConfigManager.KEY_USE_GPU, false);
+                // Note: use_gpu is now stored as string ("CPU", "Vulkan", etc.) instead of boolean
+                String backendPreference = ConfigManager.getString(window.getContext(), ConfigManager.KEY_USE_GPU, "CPU");
+                boolean useGpu = !"CPU".equals(backendPreference);
                 
                 if (useGpu) {
                     // 启用硬件加速

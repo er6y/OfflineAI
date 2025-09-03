@@ -540,33 +540,33 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         // 设置已更改，刷新相关数据
         LogManager.logD(TAG, "Settings changed, refreshing data");
         
-        // 获取最新的GPU设置
-        boolean useGpu = ConfigManager.getBoolean(this, ConfigManager.KEY_USE_GPU, false);
-        LogManager.logI(TAG, "GPU setting change notification: " + (useGpu ? "enabled" : "disabled") + " GPU acceleration");
+        // 获取最新的后端偏好设置
+        String backendPreference = ConfigManager.getString(this, ConfigManager.KEY_USE_GPU, "CPU");
+        LogManager.logI(TAG, "Backend preference change notification: " + backendPreference);
         
-        // 更新LocalLlmAdapter的GPU设置
+        // 更新LocalLlmAdapter的后端设置
         try {
             LocalLlmAdapter localLlmAdapter = LocalLlmAdapter.getInstance(this);
             if (localLlmAdapter != null) {
-                localLlmAdapter.updateGpuSetting(useGpu);
+                localLlmAdapter.updateGpuSetting(backendPreference);
             } else {
-                LogManager.logW(TAG, "GPU setting change: LocalLlmAdapter instance is null, cannot update GPU settings");
+                LogManager.logW(TAG, "Backend setting change: LocalLlmAdapter instance is null, cannot update backend settings");
             }
         } catch (Exception e) {
-            LogManager.logE(TAG, "GPU setting change: Failed to update LocalLlmAdapter GPU settings: " + e.getMessage(), e);
+            LogManager.logE(TAG, "Backend setting change: Failed to update LocalLlmAdapter backend settings: " + e.getMessage(), e);
         }
         
-        // 更新EmbeddingModelManager的GPU设置
+        // 更新EmbeddingModelManager的后端设置
         try {
             EmbeddingModelManager embeddingModelManager = EmbeddingModelManager.getInstance(this);
             if (embeddingModelManager != null) {
-                embeddingModelManager.updateGpuSetting(useGpu);
-                LogManager.logI(TAG, "GPU setting change: Successfully updated EmbeddingModelManager GPU settings");
+                embeddingModelManager.updateGpuSetting(backendPreference);
+                LogManager.logI(TAG, "Backend setting change: Successfully updated EmbeddingModelManager backend settings");
             } else {
-                LogManager.logW(TAG, "GPU setting change: EmbeddingModelManager instance is null, cannot update GPU settings");
+                LogManager.logW(TAG, "Backend setting change: EmbeddingModelManager instance is null, cannot update backend settings");
             }
         } catch (Exception e) {
-            LogManager.logE(TAG, "GPU setting change: Failed to update EmbeddingModelManager GPU settings: " + e.getMessage(), e);
+            LogManager.logE(TAG, "Backend setting change: Failed to update EmbeddingModelManager backend settings: " + e.getMessage(), e);
         }
         
         // 重新加载当前Fragment

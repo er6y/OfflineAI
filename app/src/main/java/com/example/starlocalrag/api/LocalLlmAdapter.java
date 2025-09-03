@@ -406,21 +406,21 @@ public class LocalLlmAdapter {
      * 更新GPU设置
      * @param useGpu 是否使用GPU
      */
-    public void updateGpuSetting(boolean useGpu) {
-        LogManager.logD(TAG, "LocalLLM GPU setting update: " + (useGpu ? "Enable" : "Disable") + " GPU acceleration");
+    public void updateGpuSetting(String useGpu) {
+        LogManager.logD(TAG, "LocalLLM backend preference update: " + useGpu);
         
         if (localLlmHandler != null) {
             try {
                 localLlmHandler.setUseGpu(useGpu);
-                LogManager.logI(TAG, "LocalLLM GPU setting: Successfully updated GPU setting to " + (useGpu ? "enabled" : "disabled"));
+                LogManager.logI(TAG, "LocalLLM backend preference: Successfully updated backend preference to " + useGpu);
                 
-                // 注意：GPU设置变更可能需要重新加载模型才能生效
-                LogManager.logW(TAG, "LocalLLM GPU setting: Note that GPU setting changes may require model reload to take full effect");
+                // 注意：后端偏好设置变更可能需要重新加载模型才能生效
+                LogManager.logW(TAG, "LocalLLM backend preference: Note that backend preference changes may require model reload to take full effect");
             } catch (Exception e) {
-                LogManager.logE(TAG, "LocalLLM GPU setting: Failed to update GPU setting: " + e.getMessage(), e);
+                LogManager.logE(TAG, "LocalLLM backend preference: Failed to update backend preference: " + e.getMessage(), e);
             }
         } else {
-            LogManager.logW(TAG, "LocalLLM GPU setting: LocalLlmHandler not initialized, cannot update GPU setting");
+            LogManager.logW(TAG, "LocalLLM backend preference: LocalLlmHandler not initialized, cannot update backend preference");
         }
     }
     

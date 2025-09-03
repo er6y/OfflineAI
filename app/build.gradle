@@ -7,7 +7,7 @@ android {
     compileSdk = 34 // Use an appropriate SDK version
     
     // 添加NDK配置
-    ndkVersion = "27.0.12077973" // 使用用户指定的NDK版本
+    ndkVersion = "28.2.13676358" // 统一使用最新NDK版本
 
     signingConfigs {
         release {

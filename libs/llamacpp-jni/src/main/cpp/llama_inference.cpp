@@ -424,97 +424,159 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model(JNIEnv *env, jobjec
     return reinterpret_cast<jlong>(model);
 }
 
-// 新增：带GPU层数参数的模型加载方法
+// 后端偏好到GPU层数的映射函数
+// 后端偏好到GPU层数的映射函数（保留用于向后兼容）
+// Unified backend configuration function - eliminates code duplication
+// Returns true if GPU backend should be loaded, false for CPU-only
+static bool configure_backend_for_model(const std::string& backend, llama_model_params& model_params) {
+    FORCE_LOG(TAG, "[BACKEND] Configuring backend: %s", backend.c_str());
+    
+    if (backend == "CPU") {
+        // CPU backend: register and initialize CPU backend only, set layer=0
+        model_params.n_gpu_layers = 0;
+        FORCE_LOG(TAG, "[BACKEND] CPU backend selected: n_gpu_layers=0");
+        return false; // Do not load GPU backends
+        
+    } else if (backend == "VULKAN") {
+        // Vulkan backend: set layer=-1 (use all GPU layers)
+        // Note: This will load Vulkan backend regardless of version compatibility
+        model_params.n_gpu_layers = -1; // Use all GPU layers
+        FORCE_LOG(TAG, "[BACKEND] Vulkan backend selected: n_gpu_layers=-1 (all layers)");
+        return true; // Load GPU backends
+        
+    } else if (backend == "OPENCL" || backend == "BLAS" || backend == "CANN") {
+        // Other backends: TBD implementation, fallback to CPU for now
+        model_params.n_gpu_layers = 0;
+        FORCE_LOG(TAG, "[BACKEND] %s backend TBD (not yet implemented), falling back to CPU", backend.c_str());
+        return false; // Do not load GPU backends
+        
+    } else {
+        // Unknown backend: default to CPU
+        model_params.n_gpu_layers = 0;
+        FORCE_LOG(TAG, "[BACKEND] Unknown backend '%s', defaulting to CPU", backend.c_str());
+        return false; // Do not load GPU backends
+    }
+}
+
+// Legacy function for backward compatibility - deprecated, use configure_backend_for_model instead
+static int map_backend_preference_to_gpu_layers(const char* backend_preference) {
+    if (!backend_preference) {
+        FORCE_LOG(TAG, "[BACKEND] Backend preference is null, defaulting to CPU");
+        return 0;
+    }
+    
+    std::string backend(backend_preference);
+    FORCE_LOG(TAG, "[BACKEND] [DEPRECATED] Using legacy mapping for backend: %s", backend.c_str());
+    
+    if (backend == "CPU") {
+        return 0;
+    } else if (backend == "VULKAN") {
+        return -1; // Use all GPU layers
+    } else if (backend == "OPENCL" || backend == "BLAS" || backend == "CANN") {
+        return 0;
+    } else {
+        return 0;
+    }
+}
+
+
+
+// 新增：带后端偏好参数的模型加载方法
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1gpu(JNIEnv *env, jobject, jstring filename, jint gpu_layers) {
+Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1backend(JNIEnv *env, jobject, jstring filename, jstring backend_preference) {
+    // 获取后端偏好字符串
+    const char* backend_pref_cstr = env->GetStringUTFChars(backend_preference, nullptr);
+    if (!backend_pref_cstr) {
+        LOGe("load_model_with_backend(): Failed to get backend preference string");
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "Backend preference cannot be null");
+        return 0;
+    }
+    
+    std::string backend(backend_pref_cstr);
+    FORCE_LOG(TAG, "[BACKEND] Loading model with backend preference: %s", backend.c_str());
+    
+    // 释放字符串资源
+    env->ReleaseStringUTFChars(backend_preference, backend_pref_cstr);
+    
+    // 获取文件路径
+    const char *file_path = env->GetStringUTFChars(filename, nullptr);
+    if (!file_path) {
+        LOGe("load_model_with_backend(): Failed to get file path");
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "Failed to get file path");
+        return 0;
+    }
+    
     llama_model_params model_params = llama_model_default_params();
     
-    // 初始设置GPU层数
-    int requested_gpu_layers = std::max(-1, gpu_layers); // -1表示全部使用GPU，0表示仅CPU
-    int final_gpu_layers = requested_gpu_layers;
+    // Use unified backend configuration function
+    bool should_load_gpu_backends = configure_backend_for_model(backend, model_params);
+    FORCE_LOG(TAG, "[BACKEND] Final model params: n_gpu_layers=%d", model_params.n_gpu_layers);
     
-    // 如果请求使用GPU（gpu_layers > 0 或 gpu_layers == -1），则检测Vulkan可用性
-    if (requested_gpu_layers != 0) {
-        FORCE_LOG(TAG, "[GPU] GPU acceleration requested with %d layers", requested_gpu_layers);
+    // Load all available backends using unified loading approach
+    bool already_loaded = g_ggml_backends_loaded.load();
+    if (!already_loaded) {
+        FORCE_LOG(TAG, "[BACKEND] Loading all available backends...");
         
-        // 使用新的Vulkan运行时检测器
-        if (is_vulkan_suitable_for_llamacpp()) {
-            FORCE_LOG(TAG, "[GPU] Vulkan is suitable for llama.cpp, using GPU acceleration with %d layers", requested_gpu_layers);
-            final_gpu_layers = requested_gpu_layers;
-        } else {
-            FORCE_LOG(TAG, "[GPU] Vulkan is not suitable for llama.cpp, falling back to CPU-only mode");
-            final_gpu_layers = 0; // 回退到CPU模式
+        // Use unified backend loading - this loads all compiled backends
+        ggml_backend_load_all();
+        
+        g_ggml_backends_loaded.store(true);
+        
+        // Enumerate all available backend devices
+        size_t dev_count = ggml_backend_dev_count();
+        FORCE_LOG(TAG, "[BACKEND] Available backend devices: count=%zu", dev_count);
+        bool found_vulkan = false;
+        for (size_t i = 0; i < dev_count; ++i) {
+            auto dev = ggml_backend_dev_get(i);
+            const char * dev_name = ggml_backend_dev_name(dev);
+            int dev_type_val = (int) ggml_backend_dev_type(dev);
+            FORCE_LOG(TAG, "[BACKEND] Device #%zu: name=%s, type=%d", i, dev_name ? dev_name : "(null)", dev_type_val);
+            if (dev_name && (strstr(dev_name, "Vulkan") || strstr(dev_name, "vulkan"))) {
+                found_vulkan = true;
+            }
         }
-    } else {
-        FORCE_LOG(TAG, "[GPU] CPU-only mode requested");
-        final_gpu_layers = 0;
+        FORCE_LOG(TAG, "[BACKEND] Vulkan device available: %s", found_vulkan ? "yes" : "no");
+        
+        if (!should_load_gpu_backends) {
+            FORCE_LOG(TAG, "[BACKEND] Note: GPU backends loaded but will be avoided due to safety settings");
+        }
     }
     
-    // 仅在需要 GPU 时按需加载 GGML 后端：注意 -1 也需要加载
-    if (final_gpu_layers != 0) {
-        bool already_loaded = g_ggml_backends_loaded.load();
-        if (!already_loaded) {
-            FORCE_LOG(TAG, "[BACKEND] Loading GGML backends on-demand for GPU use...");
-            ggml_backend_load_all();
-            g_ggml_backends_loaded.store(true);
-            FORCE_LOG(TAG, "[BACKEND] GGML backends loaded");
-
-            // Enumerate GGML backend devices to confirm whether Vulkan is visible
-            size_t dev_count = ggml_backend_dev_count();
-            FORCE_LOG(TAG, "[BACKEND] Enumerating ggml backend devices: count=%zu", dev_count);
-            bool found_vulkan = false;
-            for (size_t i = 0; i < dev_count; ++i) {
-                auto dev = ggml_backend_dev_get(i);
-                const char * dev_name = ggml_backend_dev_name(dev);
-                int dev_type_val = (int) ggml_backend_dev_type(dev);
-                FORCE_LOG(TAG, "[BACKEND] Device #%zu: name=%s, type=%d", i, dev_name ? dev_name : "(null)", dev_type_val);
-                if (dev_name && (strstr(dev_name, "Vulkan") || strstr(dev_name, "vulkan"))) {
-                    found_vulkan = true;
-                }
-            }
-            FORCE_LOG(TAG, "[BACKEND] Vulkan device present: %s", found_vulkan ? "yes" : "no");
-        }
-    } else {
-        FORCE_LOG(TAG, "[BACKEND] CPU-only mode: skip loading GPU backends");
-    }
-
     // Map -1 to a large sentinel (e.g., 999) which llama.cpp commonly treats as "all layers"
-    if (final_gpu_layers < 0) {
+    if (model_params.n_gpu_layers < 0) {
         model_params.n_gpu_layers = 999;
         FORCE_LOG(TAG, "[GPU] n_gpu_layers requested=-1 -> set to 999 for llama.cpp (all layers)");
     } else {
-        model_params.n_gpu_layers = final_gpu_layers;
+        FORCE_LOG(TAG, "[GPU] n_gpu_layers set to %d", model_params.n_gpu_layers);
     }
-
-    auto path_to_model = env->GetStringUTFChars(filename, 0);
-    FORCE_LOG(TAG, "Loading model from %s with %d GPU layers (requested: %d, final: %d)", 
-             path_to_model, model_params.n_gpu_layers, requested_gpu_layers, final_gpu_layers);
-
-    auto model = llama_model_load_from_file(path_to_model, model_params);
-    env->ReleaseStringUTFChars(filename, path_to_model);
-
+    
+    FORCE_LOG(TAG, "Loading model from %s with backend: %s (n_gpu_layers=%d)", 
+             file_path, backend.c_str(), model_params.n_gpu_layers);
+    
+    llama_model *model = llama_load_model_from_file(file_path, model_params);
+    env->ReleaseStringUTFChars(filename, file_path);
+    
     if (!model) {
-        LOGe("load_model_with_gpu() failed");
-        env->ThrowNew(env->FindClass("java/lang/IllegalStateException"), "load_model_with_gpu() failed");
+        LOGe("load_model_with_backend(): Failed to load model from %s", file_path);
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"), "Failed to load model");
         return 0;
     }
-
-    // 获取并打印模型层分配信息
-    int32_t total_layers = llama_model_n_layer(model);
-    FORCE_LOG(TAG, "[MODEL_INFO] Model loaded successfully!");
-    FORCE_LOG(TAG, "[MODEL_INFO] Total model layers: %d", total_layers);
-    FORCE_LOG(TAG, "[MODEL_INFO] Requested GPU layers: %d", requested_gpu_layers);
-    FORCE_LOG(TAG, "[MODEL_INFO] Final GPU layers: %d", final_gpu_layers);
     
-    if (final_gpu_layers != 0) {
-        int actual_gpu_layers = (final_gpu_layers < 0) ? total_layers : std::min(final_gpu_layers, total_layers);
+    // Get and print detailed model layer allocation information
+    int32_t total_layers = llama_model_n_layer(model);
+    FORCE_LOG(TAG, "[MODEL_INFO] Model loaded successfully with backend: %s", backend.c_str());
+    FORCE_LOG(TAG, "[MODEL_INFO] Total model layers: %d", total_layers);
+    FORCE_LOG(TAG, "[MODEL_INFO] Configured GPU layers: %d", model_params.n_gpu_layers);
+    
+    if (model_params.n_gpu_layers != 0) {
+        int actual_gpu_layers = (model_params.n_gpu_layers >= 999) ? total_layers : std::min(model_params.n_gpu_layers, total_layers);
         int cpu_layers = total_layers - actual_gpu_layers;
         FORCE_LOG(TAG, "[MODEL_INFO] ✓ GPU acceleration enabled");
         FORCE_LOG(TAG, "[MODEL_INFO] ✓ Layers on GPU: %d/%d", actual_gpu_layers, total_layers);
         FORCE_LOG(TAG, "[MODEL_INFO] ✓ Layers on CPU: %d/%d", cpu_layers, total_layers);
-        if (final_gpu_layers < 0) {
-            FORCE_LOG(TAG, "[MODEL_INFO] ✓ All layers offloaded to GPU (n_gpu_layers = -1)");
+        if (model_params.n_gpu_layers >= 999) {
+            FORCE_LOG(TAG, "[MODEL_INFO] ✓ All layers offloaded to GPU (n_gpu_layers = 999/-1)");
         }
     } else {
         FORCE_LOG(TAG, "[MODEL_INFO] ✓ CPU-only mode");
@@ -522,9 +584,48 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1gpu(JNIEnv *
     }
     
     FORCE_LOG(TAG, "[MODEL_INFO] Model handle: %p", model);
-
     return reinterpret_cast<jlong>(model);
 }
+
+// 新增：带后端偏好参数的上下文创建方法
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1context_1with_1backend(JNIEnv *env, jobject, jlong model_handle, jint n_ctx, jint n_batch, jint n_threads) {
+    FORCE_LOG(TAG, "[BACKEND] Creating context (backend already configured during model loading)");
+    
+    // 验证模型句柄
+    auto model = reinterpret_cast<llama_model *>(model_handle);
+    if (!model) {
+        LOGe("new_context_with_backend(): model cannot be null");
+        env->ThrowNew(env->FindClass("java/lang/IllegalArgumentException"), "Model cannot be null");
+        return 0;
+    }
+    
+    // 使用传入的参数创建上下文
+    llama_context_params ctx_params = llama_context_default_params();
+    ctx_params.n_ctx = n_ctx > 0 ? n_ctx : 2048;
+    ctx_params.n_batch = n_batch > 0 ? n_batch : 512;
+    ctx_params.n_threads = n_threads > 0 ? n_threads : 1;
+    
+    FORCE_LOG(TAG, "[BACKEND] Context params: n_ctx=%d, n_batch=%d, n_threads=%d", 
+              ctx_params.n_ctx, ctx_params.n_batch, ctx_params.n_threads);
+    
+    llama_context *ctx = llama_new_context_with_model(model, ctx_params);
+    
+    if (!ctx) {
+        LOGe("new_context_with_backend(): Failed to create context");
+        env->ThrowNew(env->FindClass("java/lang/RuntimeException"), "Failed to create context");
+        return 0;
+    }
+    
+    FORCE_LOG(TAG, "[BACKEND] Context created successfully (backend configured during model loading)");
+    return reinterpret_cast<jlong>(ctx);
+}
+
+// 新增：带GPU层数参数的模型加载方法
+// DEPRECATED: load_model_with_gpu function has been removed.
+// Use load_model_with_backend with backend preference instead.
+// This function was merged into load_model_with_backend for better code maintainability.
 
 extern "C"
 JNIEXPORT void JNICALL

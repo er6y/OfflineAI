@@ -75,7 +75,7 @@ public class LocalLlmHandler {
     private final AtomicReference<ModelState> modelState = new AtomicReference<>(ModelState.UNLOADED);
     
     // 是否使用GPU
-    private boolean useGpu = false;
+    private String useGpu = "CPU";
     
     // 推理停止标志
     private final AtomicBoolean shouldStopInference = new AtomicBoolean(false);
@@ -388,8 +388,8 @@ public class LocalLlmHandler {
         LogManager.logD(TAG, "LocalLlmHandler初始化: 模型状态设置为 " + ModelState.UNLOADED);
         
         // 初始化GPU设置
-        this.useGpu = ConfigManager.getBoolean(context, ConfigManager.KEY_USE_GPU, false);
-        LogManager.logD(TAG, "LocalLlmHandler初始化: GPU加速设置为 " + (this.useGpu ? "启用" : "禁用"));
+        this.useGpu = ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
+        LogManager.logD(TAG, "LocalLlmHandler初始化: 后端偏好设置为 " + this.useGpu);
         
         // 推理引擎将在loadModel时根据模型类型自动选择
         // 支持的引擎类型：
@@ -423,9 +423,9 @@ public class LocalLlmHandler {
     }
     
     /**
-     * 设置是否使用GPU
+     * 设置后端偏好
      */
-    public void setUseGpu(boolean useGpu) {
+    public void setUseGpu(String useGpu) {
         this.useGpu = useGpu;
     }
     

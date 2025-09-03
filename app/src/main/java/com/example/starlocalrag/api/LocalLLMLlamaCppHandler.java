@@ -175,7 +175,9 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         int configMaxSeqLength = ConfigManager.getMaxSequenceLength(context);
         int configThreads = ConfigManager.getThreads(context);
         int configMaxNewTokens = ConfigManager.getMaxNewTokens(context);
-        boolean configUseGpu = ConfigManager.getBoolean(context, ConfigManager.KEY_USE_GPU, false);
+        
+        // 获取后端偏好设置，支持兼容性迁移
+        String backendPreference = SettingsFragment.getBackendPreference(context);
         
         // 线程数配置 - 与OnnxRuntimeGenAI对齐：MIN(CPU核心数, getThreads)
         int availableProcessors = Runtime.getRuntime().availableProcessors();
@@ -184,32 +186,30 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         // 设置参数
         maxTokens = configMaxNewTokens; // 使用最大输出token数作为maxTokens
         int contextSize = configMaxSeqLength; // 上下文大小应该是最大序列长度，不是输出token数
-        int nGpuLayers = configUseGpu ? -1 : 0; // 根据配置设置GPU层数
         
         LogManager.logI(TAG, String.format("线程配置 - 用户配置: %d线程, CPU核心: %d, 实际使用: %d线程", 
             configThreads, availableProcessors, actualThreads));
-        LogManager.logI(TAG, String.format("GPU配置 - 使用GPU: %s, GPU层数: %d", 
-            configUseGpu ? "是" : "否", nGpuLayers));
+        LogManager.logI(TAG, String.format("后端配置 - 后端偏好: %s", backendPreference));
         
         // 使用新的静态方法初始化
         // 1. 初始化后端
         LlamaCppInference.backend_init();
         
-        // 2. 加载模型（使用GPU层数参数）
-        modelHandle = LlamaCppInference.load_model_with_gpu(ggufFile.getAbsolutePath(), nGpuLayers);
+        // 2. 加载模型（使用后端偏好参数，JNI层内部映射GPU层数）
+        modelHandle = LlamaCppInference.load_model_with_backend(ggufFile.getAbsolutePath(), backendPreference);
         if (modelHandle == 0) {
             throw new RuntimeException("模型加载失败: " + ggufFile.getAbsolutePath());
         }
         
-        // 3. 创建上下文（传递正确的参数：模型句柄、上下文大小、线程数、GPU层数）
-        contextHandle = LlamaCppInference.new_context_with_params(modelHandle, contextSize, actualThreads, nGpuLayers);
+        // 3. 创建上下文（后端已在模型加载时确定）
+        contextHandle = LlamaCppInference.new_context_with_backend(modelHandle, contextSize, contextSize, actualThreads);
         if (contextHandle == 0) {
             LlamaCppInference.free_model(modelHandle);
             throw new RuntimeException("上下文创建失败");
         }
         
-        LogManager.logI(TAG, String.format("上下文创建成功 - contextSize: %d, threads: %d, gpuLayers: %d", 
-            contextSize, actualThreads, nGpuLayers));
+        LogManager.logI(TAG, String.format("上下文创建成功 - contextSize: %d, threads: %d, backend: %s", 
+            contextSize, actualThreads, backendPreference));
         
         // 4. 预分配batch和sampler - 内存池管理
         preallocateResources();
@@ -219,10 +219,12 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         
         LogManager.logI(TAG, "✓ LlamaCpp引擎初始化完成");
         LogManager.logI(TAG, "模型句柄: " + modelHandle + ", 上下文句柄: " + contextHandle);
-        LogManager.logI(TAG, String.format("配置参数 - 最大序列长度: %d, 线程数: %d, 最大输出token数: %d, GPU加速: %s", 
-            configMaxSeqLength, actualThreads, configMaxNewTokens, configUseGpu ? "启用" : "禁用"));
+        LogManager.logI(TAG, String.format("配置参数 - 最大序列长度: %d, 线程数: %d, 最大输出token数: %d, 后端偏好: %s", 
+            configMaxSeqLength, actualThreads, configMaxNewTokens, backendPreference));
         LogManager.logI(TAG, "预分配资源完成 - batch: " + preallocatedBatch + ", sampler: " + preallocatedSampler);
     }
+    
+
     
     /**
      * 预分配资源 - 内存池管理策略
@@ -1610,28 +1612,30 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         int contextSize = ConfigManager.getLlamaCppContextSize(context);
         int batchSize = ConfigManager.getMaxSequenceLength(context);
         int threads = ConfigManager.getThreads(context);
-        boolean useGpu = SettingsFragment.getUseGpu(context);
+        String backendPreference = SettingsFragment.getBackendPreference(context);
         
         stats.append(String.format("\n   • maxNewTokens: %d tokens\n", maxNewTokens));
         stats.append(String.format("   • contextSize: %d tokens\n", contextSize));
         stats.append(String.format("   • batchSize: %d tokens\n", batchSize));
         stats.append(String.format("   • threads: %d\n", threads));
         
-        if (!useGpu) {
-            stats.append("   • GPU: False\n");
-        } else {
+        // Display backend preference and GPU status
+        if ("CPU".equals(backendPreference)) {
+            stats.append("   • Backend: CPU\n");
+        } else if ("VULKAN".equals(backendPreference)) {
             String vkVersion = null;
             try {
                 vkVersion = LlamaCppInference.get_vulkan_version();
             } catch (Throwable t) {
-                LogManager.logW(TAG, "获取Vulkan版本失败，使用默认True显示", t);
+                LogManager.logW(TAG, "Failed to get Vulkan version", t);
             }
             if (vkVersion != null && !vkVersion.isEmpty()) {
-                stats.append(String.format("   • GPU: Vulkan %s\n", vkVersion));
+                stats.append(String.format("   • Backend: Vulkan %s\n", vkVersion));
             } else {
-                // 兼容保底显示
-                stats.append("   • GPU: False\n");
+                stats.append("   • Backend: Vulkan (version unknown)\n");
             }
+        } else {
+            stats.append(String.format("   • Backend: %s\n", backendPreference));
         }
         
         // 显示实际使用的推理参数

@@ -335,6 +335,20 @@ VulkanRuntimeInfo detect_vulkan_runtime() {
             cached_info.physical_devices_available = true;
             cached_info.device_count = device_count;
             LOGD("Found %u Vulkan physical device(s)", device_count);
+
+            // 额外：读取第一个设备的 apiVersion 以供诊断
+            std::vector<VkPhysicalDevice> devices(device_count);
+            result = vkEnumeratePhysicalDevices_func(instance, &device_count, devices.data());
+            if (result == VK_SUCCESS && device_count > 0) {
+                VkPhysicalDeviceProperties props{};
+                vkGetPhysicalDeviceProperties_func(devices[0], &props);
+                cached_info.device_api_version = props.apiVersion;
+                LOGD("First device apiVersion: %u.%u.%u (deviceName=%s)",
+                     VK_VERSION_MAJOR(props.apiVersion),
+                     VK_VERSION_MINOR(props.apiVersion),
+                     VK_VERSION_PATCH(props.apiVersion),
+                     props.deviceName);
+            }
         } else {
             LOGD("No Vulkan physical devices found or enumeration failed");
         }
@@ -371,7 +385,8 @@ VulkanRuntimeInfo detect_vulkan_runtime() {
         cached_info.physical_devices_available &&
         cached_info.vulkan_1_1_apis_available &&
         cached_info.meets_min_version_requirement;
-    
+
+    // English summary for upstream debugging
     LOGI("Vulkan runtime detection completed:");
     LOGI("  Library available: %s", cached_info.library_available ? "yes" : "no");
     LOGI("  Detected API version: %u.%u.%u", 
@@ -384,10 +399,17 @@ VulkanRuntimeInfo detect_vulkan_runtime() {
          VK_VERSION_MINOR(cached_info.instance_version),
          VK_VERSION_PATCH(cached_info.instance_version));
     LOGI("  Physical devices: %s (%u found)", cached_info.physical_devices_available ? "yes" : "no", cached_info.device_count);
-    // 不再冗余打印 1.1 细节，这里仅给出汇总
     LOGI("  Vulkan 1.1 APIs: %s", cached_info.vulkan_1_1_apis_available ? "yes" : "no");
+    LOGI("  First device apiVersion: %u.%u.%u", 
+         VK_VERSION_MAJOR(cached_info.device_api_version),
+         VK_VERSION_MINOR(cached_info.device_api_version),
+         VK_VERSION_PATCH(cached_info.device_api_version));
     LOGI("  Meets min version requirement: %s", cached_info.meets_min_version_requirement ? "yes" : "no");
     LOGI("  Suitable for llama.cpp: %s", cached_info.suitable_for_llamacpp ? "yes" : "no");
+
+    if (!VULKAN_VERSION_GE(cached_info.detected_api_version, 1, 2, 0)) {
+        LOGW("Vulkan instance version < 1.2; will force CPU fallback in JNI if GPU was requested");
+    }
     
     return cached_info;
 }

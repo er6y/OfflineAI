@@ -851,7 +851,8 @@
     <string name="label_priority_manual_params">优先手动参数</string>
     <string name="title_global_settings">全局设置</string>
     <string name="label_debug_mode">调试模式</string>
-    <string name="label_use_gpu">使用GPU加速（如果可用）</string>
+    <string name="label_backend_preference">后端偏好</string>
+
     <string name="label_font_size">字体大小</string>
     <string name="text_font_size_value">字体大小: 16sp</string>
     <string name="button_save_settings">保存设置</string>

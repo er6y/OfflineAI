@@ -35,13 +35,16 @@ public class LlamaCppInference {
      */
     public static native long load_model(String modelPath);
     
+    // DEPRECATED: load_model_with_gpu has been removed.
+    // Use load_model_with_backend with backend preference instead.
+    
     /**
-     * 加载模型（带GPU层数参数）
+     * 加载模型（带后端偏好参数）
      * @param modelPath 模型文件路径
-     * @param gpuLayers GPU层数，-1表示全部使用GPU，0表示仅CPU
+     * @param backendPreference 后端偏好字符串（"CPU"/"VULKAN"/"OPENCL"/"BLAS"/"CANN"）
      * @return 模型句柄
      */
-    public static native long load_model_with_gpu(String modelPath, int gpuLayers);
+    public static native long load_model_with_backend(String modelPath, String backendPreference);
     
     /**
      * 释放模型
@@ -58,6 +61,16 @@ public class LlamaCppInference {
      * @return 上下文句柄
      */
     public static native long new_context_with_params(long modelHandle, int contextSize, int threads, int gpuLayers);
+    
+    /**
+     * 创建上下文（简化版本，后端配置已在模型加载时确定）
+     * @param modelHandle 模型句柄
+     * @param nCtx 上下文长度
+     * @param nBatch 批处理大小
+     * @param nThreads 线程数
+     * @return 上下文句柄
+     */
+    public static native long new_context_with_backend(long modelHandle, int nCtx, int nBatch, int nThreads);
     
     /**
      * 释放上下文
@@ -224,6 +237,63 @@ public class LlamaCppInference {
     public static void setTopK(int topK) {
         // 此方法已废弃，参数应通过采样器设置
         android.util.Log.w("LlamaCppInference", "setTopK已废弃，请使用new_sampler_with_params");
+    }
+    
+    // ========== 后端偏好设置 ==========
+    
+    /**
+     * 设置后端偏好
+     * @param backendPreference 后端偏好字符串 ("CPU", "VULKAN", "BLAS", "OPENCL", "CANN")
+     */
+    public static native void set_backend_preference(String backendPreference);
+    
+    /**
+     * 获取当前后端偏好设置
+     * @return 当前后端偏好字符串
+     */
+    public static native String get_backend_preference();
+    
+    /**
+     * 设置后端偏好（Java层包装方法）
+     * 提供参数验证和日志记录
+     * @param backendPreference 后端偏好字符串
+     */
+    public static void setBackendPreference(String backendPreference) {
+        if (backendPreference == null) {
+            Log.w(TAG, "Backend preference is null, using default CPU");
+            backendPreference = "CPU";
+        }
+        
+        // 验证后端偏好值
+        String normalizedPreference = backendPreference.toUpperCase().trim();
+        switch (normalizedPreference) {
+            case "CPU":
+            case "VULKAN":
+            case "BLAS":
+            case "OPENCL":
+            case "CANN":
+                Log.i(TAG, "Setting backend preference to: " + normalizedPreference);
+                set_backend_preference(normalizedPreference);
+                break;
+            default:
+                Log.w(TAG, "Unknown backend preference: " + backendPreference + ", using CPU");
+                set_backend_preference("CPU");
+                break;
+        }
+    }
+    
+    /**
+     * 获取后端偏好（Java层包装方法）
+     * @return 后端偏好字符串，默认为"CPU"
+     */
+    public static String getBackendPreference() {
+        try {
+            String preference = get_backend_preference();
+            return preference != null ? preference : "CPU";
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to get backend preference", e);
+            return "CPU";
+        }
     }
     
     // ========== 辅助类和接口 ==========

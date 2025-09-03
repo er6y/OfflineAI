@@ -77,7 +77,7 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags "-std=c++17 -frtti -fexceptions"
-                arguments "-DANDROID_STL=c++_static", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_USE_VULKAN=1", "-DGGML_VULKAN=ON", "-DVULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1", "-DVK_USE_PLATFORM_ANDROID_KHR=1", "-DANDROID_PLATFORM=android-28", "-DVCVARS64_BAT=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat"
+                arguments "-DANDROID_STL=c++_static", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_USE_VULKAN=1", "-DGGML_VULKAN=ON", "-DANDROID_PLATFORM=android-28"
             }
         }
     }
@@ -91,7 +91,7 @@ android {
             externalNativeBuild {
                 cmake {
                     cppFlags "-std=c++17 -frtti -fexceptions -O3 -DNDEBUG"
-                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_VULKAN=ON", "-DGGML_USE_VULKAN=1", "-DVULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1", "-DVK_USE_PLATFORM_ANDROID_KHR=1", "-DANDROID_PLATFORM=android-28", "-DVCVARS64_BAT=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat"
+                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_VULKAN=ON", "-DGGML_USE_VULKAN=1", "-DANDROID_PLATFORM=android-28"
                 }
             }
         }
@@ -99,7 +99,7 @@ android {
             externalNativeBuild {
                 cmake {
                     cppFlags "-std=c++17 -frtti -fexceptions -O3 -DNDEBUG"
-                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_VULKAN=ON", "-DGGML_USE_VULKAN=1", "-DVULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1", "-DVK_USE_PLATFORM_ANDROID_KHR=1", "-DGGML_VULKAN_DEBUG=1", "-DANDROID_PLATFORM=android-28", "-DVCVARS64_BAT=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat"
+                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_VULKAN=ON", "-DGGML_USE_VULKAN=1", "-DGGML_VULKAN_DEBUG=1", "-DANDROID_PLATFORM=android-28"
                 }
             }
         }

@@ -845,7 +845,8 @@
     <string name="label_priority_manual_params">Prioritize Manual Parameters</string>
     <string name="title_global_settings">Global Settings</string>
     <string name="label_debug_mode">Debug Mode</string>
-    <string name="label_use_gpu">Use GPU Acceleration (if available)</string>
+    <string name="label_backend_preference">Backend Preference</string>
+
     <string name="label_font_size">Font Size</string>
     <string name="text_font_size_value">Font Size: 16sp</string>
     <string name="button_save_settings">Save Settings</string>
