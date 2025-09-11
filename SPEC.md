@@ -125,6 +125,14 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - 英文日志：后端相关日志统一使用英文，如 "Backend preference: VULKAN"、"Using CPU backend"。
 - 构建验证：修改完成后通过 ./gradlew :app:assembleDebug -PKEYPSWD=abc-1234 验证构建成功，确保资源引用正确。
 
+ 变更补充（UI 精简与兼容性处理）
+ - 设置页面的“后端偏好”下拉菜单已精简为仅包含：CPU、Vulkan、CANN。暂不在UI中提供 OpenCL 与 BLAS 选项。
+ - 兼容性策略：如果已有配置中保存为 "OPENCL" 或 "BLAS"，在读取时将判定为无效并回退为 "CPU"，避免出现无法匹配导致的异常或错误显示。
+ - 代码位置：`app/src/main/java/com/example/starlocalrag/SettingsFragment.java` 中的 `BACKEND_OPTIONS/BACKEND_VALUES` 为硬编码选项来源；`getBackendPreference(Context)` 会对读取到的值进行有效性校验并在无效时回退为 `"CPU"`。
+ - 设计动因：
+   - OpenCL/BLAS 当前并未在移动端提供稳定可用的实现路径，展示会造成误导；CANN（昇腾）与 Vulkan（常见安卓GPU）为更现实可用路径。
+   - 精简选项降低用户选择成本，同时保持底层 JNI 对其他后端的向后兼容空间（如后续实现再放开UI）。
+
 ---
 
 JNI接口重构与代码重复消除（本次优化）
@@ -271,3 +279,18 @@ Vulkan版本检查与后端注册逻辑修复（本次优化）
   - 使用 ./gradlew clean 清理缓存可以减少重复构建的概率。
   - 避免频繁修改CMake配置参数，减少不必要的重新配置。
   - 监控构建日志中的警告信息，及时清理不必要的编译参数传递。
+
+构建与ABI精简（本次实现）
+- 目标：仅保留 64 位架构，减少包体与构建时间，同时统一原生库管理策略。
+- ABI 策略：
+  - App 模块与 `libs/llamacpp-jni` 仅保留 `arm64-v8a` 与 `x86_64`（移除 `armeabi-v7a` 与 `x86`）。
+  - `app/build.gradle` 中的 `defaultConfig.ndk.abiFilters` 设置为 `['arm64-v8a','x86_64']`；`packagingOptions.jniLibs.keepDebugSymbols` 同步为这两个架构。
+  - `libs/llamacpp-jni/build.gradle` 的 `ndk.abiFilters` 同步为 `['arm64-v8a','x86_64']`。
+- SO 管理策略变更：
+  - 不再将任何库的 .so 复制到 `app/src/main/jniLibs/`；各模块自行管理自己的 .so（AAR 中自带），与当前 `llamacpp-jni` 的做法保持一致。
+  - `libs/tokenizers-jni/build.gradle`：复制目标改为模块自身 `src/main/jniLibs/<abi>/`，并仅在构建时复制 `arm64-v8a` 与 `x86_64`；不再执行 `armeabi-v7a`、`x86` 的复制任务。
+- 清理脚本调整：
+  - 顶层 `build.gradle` 的 `clean` 任务不再删除 `app/src/main/jniLibs/`，该目录预留用于未来第三方 SO 存放。
+- 影响与收益：
+  - 降低 APK 体积与构建耗时，避免 32 位架构兼容负担。
+  - 提升模块化与封装性：各库模块自带其 SO，应用无需人工汇聚。

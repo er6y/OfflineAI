@@ -35,6 +35,12 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
+    // 由构建系统自动打包 build/jniLibs 下的 .so，不污染源码目录
+    sourceSets {
+        main {
+            jniLibs.srcDirs += ['build/jniLibs']
+        }
+    }
 }
 
 group = 'com.starlocalrag'
@@ -65,35 +71,7 @@ task compileRustJNIAndroidArm64(type: Exec) {
     outputs.file 'src/main/rust/target/aarch64-linux-android/release/libtokenizers_jni.so'
 }
 
-task compileRustJNIAndroidArm7(type: Exec) {
-    description = 'Compile Rust JNI library for ARMv7'
-    workingDir file('src/main/rust')
-    
-    if (System.getProperty('os.name').toLowerCase().contains('windows')) {
-        commandLine 'cmd', '/c', 'cargo', 'ndk', '--target', 'armv7-linux-androideabi', '--', 'build', '--release'
-    } else {
-        commandLine 'cargo', 'ndk', '--target', 'armv7-linux-androideabi', '--', 'build', '--release'
-    }
-    
-    inputs.files fileTree(dir: 'src/main/rust/src', include: '**/*.rs')
-    inputs.file 'src/main/rust/Cargo.toml'
-    outputs.file 'src/main/rust/target/armv7-linux-androideabi/release/libtokenizers_jni.so'
-}
-
-task compileRustJNIAndroidX86(type: Exec) {
-    description = 'Compile Rust JNI library for x86'
-    workingDir file('src/main/rust')
-    
-    if (System.getProperty('os.name').toLowerCase().contains('windows')) {
-        commandLine 'cmd', '/c', 'cargo', 'ndk', '--target', 'i686-linux-android', '--', 'build', '--release'
-    } else {
-        commandLine 'cargo', 'ndk', '--target', 'i686-linux-android', '--', 'build', '--release'
-    }
-    
-    inputs.files fileTree(dir: 'src/main/rust/src', include: '**/*.rs')
-    inputs.file 'src/main/rust/Cargo.toml'
-    outputs.file 'src/main/rust/target/i686-linux-android/release/libtokenizers_jni.so'
-}
+// 移除 armv7 与 x86 的 Rust 构建任务，仅保留 64 位目标
 
 task compileRustJNIAndroidX86_64(type: Exec) {
     description = 'Compile Rust JNI library for x86_64'
@@ -110,37 +88,25 @@ task compileRustJNIAndroidX86_64(type: Exec) {
     outputs.file 'src/main/rust/target/x86_64-linux-android/release/libtokenizers_jni.so'
 }
 
-// 复制任务 - 将编译好的.so文件复制到app/src/main/jniLibs目录
+// 复制任务 - 将编译好的.so文件复制到当前模块的 build/jniLibs 目录
 task copyRustLibrariesArm64(type: Copy) {
     description = 'Copy ARM64 Rust library to app jniLibs'
     dependsOn compileRustJNIAndroidArm64
     from 'src/main/rust/target/aarch64-linux-android/release/libtokenizers_jni.so'
-    into '../../app/src/main/jniLibs/arm64-v8a'
+    into 'build/jniLibs/arm64-v8a'
 }
 
-task copyRustLibrariesArm7(type: Copy) {
-    description = 'Copy ARMv7 Rust library to app jniLibs'
-    dependsOn compileRustJNIAndroidArm7
-    from 'src/main/rust/target/armv7-linux-androideabi/release/libtokenizers_jni.so'
-    into '../../app/src/main/jniLibs/armeabi-v7a'
-}
-
-task copyRustLibrariesX86(type: Copy) {
-    description = 'Copy x86 Rust library to app jniLibs'
-    dependsOn compileRustJNIAndroidX86
-    from 'src/main/rust/target/i686-linux-android/release/libtokenizers_jni.so'
-    into '../../app/src/main/jniLibs/x86'
-}
+// 不再支持 32 位：armv7/x86 的复制任务已移除
 
 task copyRustLibrariesX86_64(type: Copy) {
     description = 'Copy x86_64 Rust library to app jniLibs'
     dependsOn compileRustJNIAndroidX86_64
     from 'src/main/rust/target/x86_64-linux-android/release/libtokenizers_jni.so'
-    into '../../app/src/main/jniLibs/x86_64'
+    into 'build/jniLibs/x86_64'
 }
 
-// 确保在构建时执行复制任务
-preBuild.dependsOn copyRustLibrariesArm64, copyRustLibrariesArm7, copyRustLibrariesX86, copyRustLibrariesX86_64
+// 确保在构建时仅复制 arm64-v8a 与 x86_64 的 .so 到当前模块 jniLibs（模块自管理SO）
+preBuild.dependsOn copyRustLibrariesArm64, copyRustLibrariesX86_64
 
 // 清理任务
 task cleanRust(type: Delete) {

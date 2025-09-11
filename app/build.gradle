@@ -5,9 +5,6 @@ plugins {
 android {
     namespace = 'com.example.starlocalrag'
     compileSdk = 34 // Use an appropriate SDK version
-    
-    // 添加NDK配置
-    ndkVersion = "28.2.13676358" // 统一使用最新NDK版本
 
     signingConfigs {
         release {
@@ -36,6 +33,11 @@ android {
         buildConfigField "String", "BUILD_VERSION", "\"${buildTimeStr}\""
         // 将时间戳存储为项目属性，供后续任务使用
         project.ext.buildTimeStamp = buildTimeStr
+
+        // 指定仅构建 arm64-v8a 与 x86_64 两个 ABI
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
     }
 
     buildTypes {
@@ -90,7 +92,7 @@ android {
         // 配置原生库提取
         jniLibs {
             useLegacyPackaging = true
-            keepDebugSymbols += ['*/arm64-v8a/*.so', '*/armeabi-v7a/*.so']
+            keepDebugSymbols += ['*/arm64-v8a/*.so', '*/x86_64/*.so']
         }
     }
     
@@ -259,8 +261,7 @@ dependencies {
     }
 }
 
-// 确保在构建app之前先复制Rust库
-preBuild.dependsOn ':libs:tokenizers-jni:copyRustLibrariesArm64', ':libs:tokenizers-jni:copyRustLibrariesArm7', ':libs:tokenizers-jni:copyRustLibrariesX86', ':libs:tokenizers-jni:copyRustLibrariesX86_64'
+// 不再从子模块复制 .so 到 app/src/main/jniLibs，模块自行打包其 .so
 
 // 集成APK复制到构建流程中
 afterEvaluate {

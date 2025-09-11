@@ -43,8 +43,8 @@ public class SettingsFragment extends Fragment {
     private static final String TAG = "SettingsFragment";
     
     // Backend preference options (hardcoded to avoid resource file complexity)
-    private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan", "OpenCL", "BLAS", "CANN"};
-    private static final String[] BACKEND_VALUES = {"CPU", "VULKAN", "OPENCL", "BLAS", "CANN"};
+    private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan", "CANN"};
+    private static final String[] BACKEND_VALUES = {"CPU", "VULKAN", "CANN"};
     
     // UI组件
     private SeekBar seekBarChunkSize;

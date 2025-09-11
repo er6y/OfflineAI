@@ -567,27 +567,20 @@ if (TARGET ggml-vulkan)
     message(STATUS "Linking ggml-vulkan static library into llamacpp_jni")
 endif()
 
-# 设置输出目录 - 直接输出到app的jniLibs目录
-set(APP_JNILIBS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../app/src/main/jniLibs")
-file(MAKE_DIRECTORY "${APP_JNILIBS_DIR}/${ANDROID_ABI}")
+    # 让 Android Gradle Plugin 自行管理 .so 输出与打包
+    # 移除将产物写入 app/src/main/jniLibs 的做法，避免跨模块写入
 
-set_target_properties(llamacpp_jni PROPERTIES
-    ARCHIVE_OUTPUT_DIRECTORY "${APP_JNILIBS_DIR}/${ANDROID_ABI}"
-    LIBRARY_OUTPUT_DIRECTORY "${APP_JNILIBS_DIR}/${ANDROID_ABI}"
-)
+    # 打印配置信息
+    message(STATUS "LlamaCpp JNI Configuration:")
+    message(STATUS "  CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
+    message(STATUS "  ANDROID_ABI: ${ANDROID_ABI}")
+    message(STATUS "  CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
+    message(STATUS "  CMAKE_C_FLAGS: ${CMAKE_C_FLAGS}")
+    message(STATUS "  LLAMA_CPP_DIR: ${LLAMA_CPP_DIR}")
+    message(STATUS "  LLAMA_SOURCES count: ${LLAMA_SOURCES}")
+    message(STATUS "  GGML backends: ggml-base, ggml-cpu, ggml-vulkan (if enabled)")
 
-# 打印配置信息
-message(STATUS "LlamaCpp JNI Configuration:")
-message(STATUS "  CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
-message(STATUS "  ANDROID_ABI: ${ANDROID_ABI}")
-message(STATUS "  CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
-message(STATUS "  CMAKE_C_FLAGS: ${CMAKE_C_FLAGS}")
-message(STATUS "  LLAMA_CPP_DIR: ${LLAMA_CPP_DIR}")
-message(STATUS "  LLAMA_SOURCES count: ${LLAMA_SOURCES}")
-message(STATUS "  GGML backends: ggml-base, ggml-cpu, ggml-vulkan (if enabled)")
-
-# 编译后处理
-add_custom_command(TARGET llamacpp_jni POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E echo "LlamaCpp JNI library built for ${ANDROID_ABI}"
-    COMMAND ${CMAKE_COMMAND} -E echo "Output: ${APP_JNILIBS_DIR}/${ANDROID_ABI}/libllamacpp_jni.so"
-)
+    # 编译后处理
+    add_custom_command(TARGET llamacpp_jni POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E echo "LlamaCpp JNI library built for ${ANDROID_ABI}"
+    )
