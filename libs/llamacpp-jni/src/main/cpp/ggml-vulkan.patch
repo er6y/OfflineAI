@@ -1,27 +1,8 @@
-diff --git a/libs/llama.cpp-master/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/libs/llama.cpp-master/ggml/src/ggml-vulkan/ggml-vulkan.cpp
-index cd3379a..138e1f3 100644
---- a/libs/llama.cpp-master/ggml/src/ggml-vulkan/ggml-vulkan.cpp
-+++ b/libs/llama.cpp-master/ggml/src/ggml-vulkan/ggml-vulkan.cpp
-@@ -3375,17 +3375,28 @@ static vk_device ggml_vk_get_device(size_t idx) {
-         device->prefer_host_memory = GGML_VK_PREFER_HOST_MEMORY != nullptr;
- 
-         const char* GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM = getenv("GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM");
-         device->disable_host_visible_vidmem = GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM != nullptr;
- 
-+        // Helper function to check if extension is available
-+        auto is_extension_available = [&ext_props](const char* ext_name) -> bool {
-+            for (const auto& prop : ext_props) {
-+                if (strcmp(prop.extensionName, ext_name) == 0) {
-+                    return true;
-+                }
-+            }
-+            return false;
-+        };
-+
-         bool fp16_storage = false;
-         bool fp16_compute = false;
-         bool maintenance4_support = false;
-         bool sm_builtins = false;
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 178d8eb3d..2452abe71 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -3610,6 +3610,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
          bool amd_shader_core_properties2 = false;
          bool pipeline_robustness = false;
          bool coopmat2_support = false;
@@ -29,11 +10,7 @@ index cd3379a..138e1f3 100644
          device->coopmat_support = false;
          device->integer_dot_product = false;
          bool bfloat16_support = false;
- 
-         for (const auto& properties : ext_props) {
-@@ -3401,10 +3412,12 @@ static vk_device ggml_vk_get_device(size_t idx) {
-                 amd_shader_core_properties2 = true;
-             } else if (strcmp("VK_EXT_pipeline_robustness", properties.extensionName) == 0) {
+@@ -3629,6 +3630,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
                  pipeline_robustness = true;
              } else if (strcmp("VK_EXT_subgroup_size_control", properties.extensionName) == 0) {
                  device->subgroup_size_control = true;
@@ -42,44 +19,18 @@ index cd3379a..138e1f3 100644
  #if defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
              } else if (strcmp("VK_KHR_cooperative_matrix", properties.extensionName) == 0 &&
                         !getenv("GGML_VK_DISABLE_COOPMAT")) {
-                 device->coopmat_support = true;
-                 device->coopmat_m = 0;
-@@ -3661,19 +3674,19 @@ static vk_device ggml_vk_get_device(size_t idx) {
-                             getenv("GGML_VK_DISABLE_MULTI_ADD") == nullptr;
- 
-         if (device->subgroup_size_control) {
-             device->subgroup_min_size = subgroup_size_control_props.minSubgroupSize;
-             device->subgroup_max_size = subgroup_size_control_props.maxSubgroupSize;
--            device_extensions.push_back("VK_EXT_subgroup_size_control");
-         }
- 
-         device->subgroup_size_control = device->subgroup_size_control &&
-                 (subgroup_size_control_props.requiredSubgroupSizeStages & vk::ShaderStageFlagBits::eCompute) &&
-                 subgroup_size_control_features.subgroupSizeControl;
- 
-         if (device->subgroup_size_control) {
-             device->subgroup_require_full_support = subgroup_size_control_features.computeFullSubgroups;
-+            device_extensions.push_back("VK_EXT_subgroup_size_control");
-         }
- 
- #if defined(VK_KHR_cooperative_matrix)
-         device->coopmat_support = device->coopmat_support && coopmat_features.cooperativeMatrix;
- 
-@@ -3758,21 +3771,27 @@ static vk_device ggml_vk_get_device(size_t idx) {
-             }
+@@ -3993,18 +3996,21 @@ static vk_device ggml_vk_get_device(size_t idx) {
  #endif
          }
  
++        // 16-bit storage: if not supported, fall back to disabling fp16 features; only request extension when available
          if (!vk11_features.storageBuffer16BitAccess) {
 -            std::cerr << "ggml_vulkan: device " << GGML_VK_NAME << idx << " does not support 16-bit storage." << std::endl;
 -            throw std::runtime_error("Unsupported device");
 +            std::cerr << "ggml_vulkan: device " << GGML_VK_NAME << idx << " does not support 16-bit storage, falling back to 32-bit mode." << std::endl;
-+            device->fp16 = false;  // Disable FP16 features that require 16-bit storage
++            device->fp16 = false;
 +        } else if (fp16_storage) {
-+            // Extension available: enable it
 +            device_extensions.push_back("VK_KHR_16bit_storage");
-+        } else {
-+            // Feature is promoted to core (>= Vulkan 1.1) but extension not present: do not request the extension
          }
  
 -        device_extensions.push_back("VK_KHR_16bit_storage");
@@ -93,237 +44,43 @@ index cd3379a..138e1f3 100644
  
 -        if (device->fp16) {
 +        if (device->fp16 && fp16_compute) {
-+            // Extension available: enable it; otherwise rely on core (>= Vulkan 1.2)
              device_extensions.push_back("VK_KHR_shader_float16_int8");
          }
  
- #if defined(VK_KHR_cooperative_matrix)
-         if (device->coopmat_support) {
-@@ -4152,63 +4171,123 @@ static void ggml_vk_instance_init() {
-     if (vk_instance_initialized) {
-         return;
+@@ -4395,11 +4401,19 @@ static void ggml_vk_instance_init() {
      }
      VK_LOG_DEBUG("ggml_vk_instance_init()");
  
 +#if defined(VULKAN_HPP_DISPATCH_LOADER_DYNAMIC)
-+    // Ensure Vulkan-Hpp dynamic dispatcher is initialized before calling any Hpp global functions
++    // Initialize global Vulkan-HPP dispatcher before any HPP global calls
 +    VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr);
-+#ifdef GGML_VK_LOADER_GUARD
-+    // Guard: verify global function vkEnumerateInstanceVersion is resolvable
-+    PFN_vkEnumerateInstanceVersion pfnEnumerateInstanceVersion =
-+        reinterpret_cast<PFN_vkEnumerateInstanceVersion>(vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
-+    if (pfnEnumerateInstanceVersion == nullptr) {
-+        GGML_LOG_DEBUG("ggml_vulkan: vkEnumerateInstanceVersion missing; skipping Vulkan backend initialization.\n");
-+        return;
-+    }
-+    // Guard: verify global function vkCreateInstance is resolvable
-+    PFN_vkCreateInstance pfnCreateInstance =
-+        reinterpret_cast<PFN_vkCreateInstance>(vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
-+    if (pfnCreateInstance == nullptr) {
-+        GGML_LOG_DEBUG("ggml_vulkan: vkCreateInstance missing; skipping Vulkan backend initialization.\n");
-+        return;
-+    }
-+#endif // GGML_VK_LOADER_GUARD
-+#endif // VULKAN_HPP_DISPATCH_LOADER_DYNAMIC
++#endif
 +
      uint32_t api_version = vk::enumerateInstanceVersion();
-+    GGML_LOG_DEBUG("ggml_vulkan: api_version = 0x%08x\n", api_version);
  
      if (api_version < VK_API_VERSION_1_2) {
 -        std::cerr << "ggml_vulkan: Error: Vulkan 1.2 required." << std::endl;
 -        GGML_ABORT("fatal error");
-+        GGML_LOG_DEBUG("ggml_vulkan: Vulkan < 1.2 detected (0x%08x). Skipping Vulkan backend initialization.\n", api_version);
++        // Lower than 1.2: skip Vulkan backend gracefully
++        std::cerr << "ggml_vulkan: Info: Vulkan 1.2 required; skipping Vulkan backend (api="
++                  << VK_VERSION_MAJOR(api_version) << "." << VK_VERSION_MINOR(api_version) << ")" << std::endl;
++        vk_instance_initialized = true;
 +        return;
      }
  
      vk::ApplicationInfo app_info{ "ggml-vulkan", 1, nullptr, 0, api_version };
- 
--    const std::vector<vk::ExtensionProperties> instance_extensions = vk::enumerateInstanceExtensionProperties();
--    const bool validation_ext = ggml_vk_instance_validation_ext_available(instance_extensions);
--#ifdef __APPLE__
--    const bool portability_enumeration_ext = ggml_vk_instance_portability_enumeration_ext_available(instance_extensions);
-+    // Conditionally enumerate instance extensions to avoid buggy loaders
-+    std::vector<vk::ExtensionProperties> instance_extensions;
-+    bool can_enum_ext = true;
-+#if defined(VULKAN_HPP_DISPATCH_LOADER_DYNAMIC)
-+    if (vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties") == nullptr) {
-+        can_enum_ext = false;
-+        GGML_LOG_DEBUG("ggml_vulkan: vkEnumerateInstanceExtensionProperties missing; skip pre-instance extension enumeration.\n");
-+    }
- #endif
--    const bool debug_utils_ext = ggml_vk_instance_debug_utils_ext_available(instance_extensions) && getenv("GGML_VK_DEBUG_MARKERS") != nullptr;
-+    if (can_enum_ext) {
-+        GGML_LOG_DEBUG("ggml_vulkan: Enumerating instance extensions...\n");
-+        instance_extensions = vk::enumerateInstanceExtensionProperties();
-+        GGML_LOG_DEBUG("ggml_vulkan: Found %zu instance extensions\n", instance_extensions.size());
-+        for (const auto & ie : instance_extensions) {
-+            GGML_LOG_DEBUG("ggml_vulkan:   ext: %s\n", ie.extensionName.data());
-+        }
-+    } else {
-+        GGML_LOG_DEBUG("ggml_vulkan: Skipping instance extension enumeration\n");
-+    }
-+    const bool validation_ext = can_enum_ext && ggml_vk_instance_validation_ext_available(instance_extensions);
-+    const bool portability_enumeration_ext = can_enum_ext && ggml_vk_instance_portability_enumeration_ext_available(instance_extensions);
-+    const bool debug_utils_ext = can_enum_ext && ggml_vk_instance_debug_utils_ext_available(instance_extensions) && getenv("GGML_VK_DEBUG_MARKERS") != nullptr;
-     std::vector<const char*> layers;
- 
--    if (validation_ext) {
-+    // Only enable validation layer if actually present
-+    bool has_validation_layer = false;
-+    bool can_enum_layer = true;
-+#if defined(VULKAN_HPP_DISPATCH_LOADER_DYNAMIC)
-+    if (vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceLayerProperties") == nullptr) {
-+        can_enum_layer = false;
-+        GGML_LOG_DEBUG("ggml_vulkan: vkEnumerateInstanceLayerProperties missing; skip layer enumeration.\n");
-+    }
-+#endif
-+    if (can_enum_layer) {
-+        GGML_LOG_DEBUG("ggml_vulkan: Enumerating instance layers...\n");
-+        auto layer_props = vk::enumerateInstanceLayerProperties();
-+        for (const auto & lp : layer_props) {
-+            if (strcmp(lp.layerName, "VK_LAYER_KHRONOS_validation") == 0) { has_validation_layer = true; break; }
-+        }
-+        GGML_LOG_DEBUG("ggml_vulkan: Validation layer available = %s\n", has_validation_layer ? "yes" : "no");
-+    } else {
-+        GGML_LOG_DEBUG("ggml_vulkan: Skipping instance layer enumeration\n");
-+    }
-+
-+    if (validation_ext && has_validation_layer) {
-         layers.push_back("VK_LAYER_KHRONOS_validation");
-     }
-     std::vector<const char*> extensions;
-     if (validation_ext) {
-         extensions.push_back("VK_EXT_validation_features");
-     }
--#ifdef __APPLE__
-     if (portability_enumeration_ext) {
-         extensions.push_back("VK_KHR_portability_enumeration");
-     }
--#endif
-     if (debug_utils_ext) {
-         extensions.push_back("VK_EXT_debug_utils");
-     }
-+    GGML_LOG_DEBUG("ggml_vulkan: Creating instance (layers=%zu, extensions=%zu)\n", layers.size(), extensions.size());
-     vk::InstanceCreateInfo instance_create_info(vk::InstanceCreateFlags{}, &app_info, layers, extensions);
--#ifdef __APPLE__
-     if (portability_enumeration_ext) {
-         instance_create_info.flags |= vk::InstanceCreateFlagBits::eEnumeratePortabilityKHR;
-     }
--#endif
- 
-     std::vector<vk::ValidationFeatureEnableEXT> features_enable;
-     vk::ValidationFeaturesEXT validation_features;
- 
--    if (validation_ext) {
-+    if (validation_ext && has_validation_layer) {
-         features_enable = { vk::ValidationFeatureEnableEXT::eBestPractices };
-         validation_features = {
-             features_enable,
-             {},
-         };
-         validation_features.setPNext(nullptr);
-         instance_create_info.setPNext(&validation_features);
+@@ -4448,6 +4462,10 @@ static void ggml_vk_instance_init() {
          GGML_LOG_DEBUG("ggml_vulkan: Validation layers enabled\n");
      }
      vk_instance.instance = vk::createInstance(instance_create_info);
-+    GGML_LOG_DEBUG("ggml_vulkan: vk::createInstance OK\n");
 +#if defined(VULKAN_HPP_DISPATCH_LOADER_DYNAMIC)
++    // Initialize instance-level dispatcher
 +    VULKAN_HPP_DEFAULT_DISPATCHER.init(vk_instance.instance);
-+    GGML_LOG_DEBUG("ggml_vulkan: Dispatch loader init(instance) OK\n");
 +#endif
      vk_instance_initialized = true;
  
      if (debug_utils_ext) {
-         vk_instance.debug_utils_support              = true;
-         vk_instance.pfn_vkSetDebugUtilsObjectNameEXT = (PFN_vkSetDebugUtilsObjectNameEXT) vkGetInstanceProcAddr(vk_instance.instance, "vkSetDebugUtilsObjectNameEXT");
-@@ -4223,11 +4302,29 @@ static void ggml_vk_instance_init() {
-     vk_perf_logger_enabled = getenv("GGML_VK_PERF_LOGGER") != nullptr;
- 
-     // Emulate behavior of CUDA_VISIBLE_DEVICES for Vulkan
-     char * devices_env = getenv("GGML_VK_VISIBLE_DEVICES");
-     if (devices_env != nullptr) {
--        size_t num_available_devices = vk_instance.instance.enumeratePhysicalDevices().size();
-+        std::vector<vk::PhysicalDevice> all_devices = vk_instance.instance.enumeratePhysicalDevices();
-+        size_t num_available_devices = all_devices.size();
-+        GGML_LOG_DEBUG("ggml_vulkan: GGML_VK_VISIBLE_DEVICES=%s\n", devices_env ? devices_env : "(null)");
-+        GGML_LOG_DEBUG("ggml_vulkan: raw device count via enumeratePhysicalDevices = %zu\n", num_available_devices);
-+
-+        // Print device info for all detected devices
-+        for (size_t i = 0; i < all_devices.size(); i++) {
-+            vk::PhysicalDeviceProperties props = all_devices[i].getProperties();
-+            const char* deviceTypeStr = "Unknown";
-+            switch (props.deviceType) {
-+                case vk::PhysicalDeviceType::eOther: deviceTypeStr = "Other"; break;
-+                case vk::PhysicalDeviceType::eIntegratedGpu: deviceTypeStr = "IntegratedGpu"; break;
-+                case vk::PhysicalDeviceType::eDiscreteGpu: deviceTypeStr = "DiscreteGpu"; break;
-+                case vk::PhysicalDeviceType::eVirtualGpu: deviceTypeStr = "VirtualGpu"; break;
-+                case vk::PhysicalDeviceType::eCpu: deviceTypeStr = "Cpu"; break;
-+            }
-+            GGML_LOG_DEBUG("ggml_vulkan: Device %zu: %s (Type: %s, VendorID: 0x%x, DeviceID: 0x%x)\n", 
-+                         i, props.deviceName.data(), deviceTypeStr, props.vendorID, props.deviceID);
-+        }
- 
-         std::string devices(devices_env);
-         std::replace(devices.begin(), devices.end(), ',', ' ');
- 
-         std::stringstream ss(devices);
-@@ -4235,18 +4332,52 @@ static void ggml_vk_instance_init() {
-         while (ss >> tmp) {
-             if(tmp >= num_available_devices) {
-                 std::cerr << "ggml_vulkan: Invalid device index " << tmp << " in GGML_VK_VISIBLE_DEVICES." << std::endl;
-                 throw std::runtime_error("Invalid Vulkan device index");
-             }
-+            GGML_LOG_DEBUG("ggml_vulkan: Adding device index %zu to device_indices\n", tmp);
-             vk_instance.device_indices.push_back(tmp);
-         }
-+        GGML_LOG_DEBUG("ggml_vulkan: Final device_indices size after GGML_VK_VISIBLE_DEVICES processing: %zu\n", vk_instance.device_indices.size());
-     } else {
-         std::vector<vk::PhysicalDevice> devices = vk_instance.instance.enumeratePhysicalDevices();
- 
-+        // Debug info: print enumerate result first
-+        GGML_LOG_DEBUG("ggml_vulkan: vkEnumeratePhysicalDevices returned %zu raw device(s)\n", devices.size());
-+        for (size_t i = 0; i < devices.size(); i++) {
-+            vk::PhysicalDeviceProperties props = devices[i].getProperties();
-+            const char* device_type_str = "";
-+            switch (props.deviceType) {
-+                case vk::PhysicalDeviceType::eDiscreteGpu: device_type_str = "DiscreteGpu"; break;
-+                case vk::PhysicalDeviceType::eIntegratedGpu: device_type_str = "IntegratedGpu"; break;
-+                case vk::PhysicalDeviceType::eCpu: device_type_str = "Cpu"; break;
-+                case vk::PhysicalDeviceType::eVirtualGpu: device_type_str = "VirtualGpu"; break;
-+                case vk::PhysicalDeviceType::eOther: device_type_str = "Other"; break;
-+                default: device_type_str = "Unknown"; break;
-+            }
-+            GGML_LOG_DEBUG("ggml_vulkan: Device #%zu: %s (%s)\n", i, props.deviceName.data(), device_type_str);
-+        }
-+
-         // If no vulkan devices are found, return early
-         if (devices.empty()) {
--            GGML_LOG_INFO("ggml_vulkan: No devices found.\n");
-+            GGML_LOG_DEBUG("ggml_vulkan: No devices found.\n");
-+            // Fallback diagnostic: try raw C vkEnumeratePhysicalDevices for verification
-+            auto pfnEnum = (PFN_vkEnumeratePhysicalDevices) vkGetInstanceProcAddr(vk_instance.instance, "vkEnumeratePhysicalDevices");
-+            if (pfnEnum != nullptr) {
-+                uint32_t c_count = 0;
-+                VkResult c_res = pfnEnum(vk_instance.instance, &c_count, nullptr);
-+                GGML_LOG_DEBUG("ggml_vulkan: C vkEnumeratePhysicalDevices -> count=%u, VkResult=%d\n", c_count, (int)c_res);
-+            } else {
-+                GGML_LOG_DEBUG("ggml_vulkan: vkGetInstanceProcAddr could not fetch vkEnumeratePhysicalDevices symbol.\n");
-+            }
-+            // Try device groups as well (some portability paths report via groups)
-+            try {
-+                auto groups = vk_instance.instance.enumeratePhysicalDeviceGroups();
-+                GGML_LOG_DEBUG("ggml_vulkan: enumeratePhysicalDeviceGroups -> %zu group(s)\n", groups.size());
-+            } catch (const std::exception &e) {
-+                GGML_LOG_DEBUG("ggml_vulkan: enumeratePhysicalDeviceGroups threw: %s\n", e.what());
-+            }
-             return;
-         }
- 
-         // Default to using all dedicated GPUs
-         for (size_t i = 0; i < devices.size(); i++) {
-@@ -4326,22 +4457,34 @@ static void ggml_vk_instance_init() {
-                 }
-             }
+@@ -4568,7 +4586,7 @@ static void ggml_vk_instance_init() {
          }
  
          // If no dedicated GPUs found, fall back to the first non-CPU device.
@@ -332,18 +89,14 @@ index cd3379a..138e1f3 100644
          if (vk_instance.device_indices.empty()) {
              for (size_t i = 0; i < devices.size(); i++) {
                  if (devices[i].getProperties().deviceType != vk::PhysicalDeviceType::eCpu) {
-                     vk_instance.device_indices.push_back(i);
-                     break;
-                 }
+@@ -4578,6 +4596,16 @@ static void ggml_vk_instance_init() {
              }
          }
  
-+        // Last resort: if no non-CPU devices found, use the first CPU device (e.g., SwiftShader)
++        // Last resort: pick a CPU device (e.g., SwiftShader) if present
 +        if (vk_instance.device_indices.empty()) {
 +            for (size_t i = 0; i < devices.size(); i++) {
 +                if (devices[i].getProperties().deviceType == vk::PhysicalDeviceType::eCpu) {
-+                    GGML_LOG_DEBUG("ggml_vulkan: No GPU devices found, falling back to CPU device: %s\n", 
-+                                 devices[i].getProperties().deviceName.data());
 +                    vk_instance.device_indices.push_back(i);
 +                    break;
 +                }
@@ -351,63 +104,18 @@ index cd3379a..138e1f3 100644
 +        }
 +
          if (vk_instance.device_indices.empty()) {
--            GGML_LOG_INFO("ggml_vulkan: No devices found.\n");
-+            GGML_LOG_DEBUG("ggml_vulkan: No devices found.\n");
+             GGML_LOG_INFO("ggml_vulkan: No devices found.\n");
              return;
-         }
-     }
-     GGML_LOG_DEBUG("ggml_vulkan: Found %zu Vulkan devices:\n", vk_instance.device_indices.size());
- 
-@@ -4710,26 +4853,32 @@ static vk_buffer ggml_vk_create_buffer_temp(ggml_backend_vk_context * ctx, size_
-     return buf;
- }
- 
- static void * ggml_vk_host_malloc(vk_device& device, size_t size) {
-     VK_LOG_MEMORY("ggml_vk_host_malloc(" << size << ")");
--    vk_buffer buf = ggml_vk_create_buffer(device, size,
-+    // Add extra space for potential alignment adjustment
-+    size_t alloc_size = size + TENSOR_ALIGNMENT;
-+    vk_buffer buf = ggml_vk_create_buffer(device, alloc_size,
-         vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent | vk::MemoryPropertyFlagBits::eHostCached,
-         vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent);
- 
-     if(!(buf->memory_property_flags & vk::MemoryPropertyFlagBits::eHostVisible)) {
-         fprintf(stderr, "WARNING: failed to allocate %.2f MB of pinned memory\n",
--            size/1024.0/1024.0);
-+            alloc_size/1024.0/1024.0);
-         device->device.freeMemory(buf->device_memory);
-         device->device.destroyBuffer(buf->buffer);
-         return nullptr;
-     }
- 
-+    // Align the pointer to TENSOR_ALIGNMENT boundary
-+    void* aligned_ptr = (void*)(((uintptr_t)buf->ptr + TENSOR_ALIGNMENT - 1) & ~(TENSOR_ALIGNMENT - 1));
-+    
-     std::lock_guard<std::recursive_mutex> guard(device->mutex);
--    device->pinned_memory.push_back(std::make_tuple(buf->ptr, size, buf));
-+    // Store the original pointer for tracking, but return the aligned one
-+    device->pinned_memory.push_back(std::make_tuple(buf->ptr, alloc_size, buf));
- 
--    return buf->ptr;
-+    return aligned_ptr;
- }
- 
- static void ggml_vk_host_free(vk_device& device, void* ptr) {
-     if (ptr == nullptr) {
-         return;
-@@ -10946,10 +11095,15 @@ static ggml_backend_buffer_t ggml_backend_vk_host_buffer_type_alloc_buffer(ggml_
-         GGML_LOG_WARN("ggml_vulkan: Failed to allocate pinned memory (%s)\n", e.what());
-         // fallback to cpu buffer
+@@ -11417,6 +11445,12 @@ static ggml_backend_buffer_t ggml_backend_vk_host_buffer_type_alloc_buffer(ggml_
          return ggml_backend_buft_alloc_buffer(ggml_backend_cpu_buffer_type(), size);
      }
  
 +    if (ptr == nullptr) {
-+        GGML_LOG_WARN("ggml_vulkan: Failed to allocate pinned memory, falling back to CPU buffer\n");
++        // Pinned alloc may return nullptr on devices without host-visible memory; fallback to CPU buffer
++        GGML_LOG_WARN("ggml_vulkan: Pinned memory returned nullptr, falling back to CPU buffer\n");
 +        return ggml_backend_buft_alloc_buffer(ggml_backend_cpu_buffer_type(), size);
 +    }
 +
      ggml_backend_buffer_t buffer = ggml_backend_cpu_buffer_from_ptr(ptr, size);
      buffer->buft = buft;
      buffer->iface.free_buffer = ggml_backend_vk_host_buffer_free_buffer;
- 
-     return buffer;

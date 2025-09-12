@@ -447,6 +447,7 @@ if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
     endif()
 
     # ========== 创建 ggml-vulkan 静态库（切换为本地 ggml-vulkan.cpp + 生成的 shaders） ==========
+    # Use locally maintained ggml-vulkan.cpp to decouple from upstream edits
     set(GGML_VULKAN_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/ggml-vulkan.cpp"
         ${_ggml_vk_source}

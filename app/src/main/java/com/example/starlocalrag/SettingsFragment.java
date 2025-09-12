@@ -43,8 +43,8 @@ public class SettingsFragment extends Fragment {
     private static final String TAG = "SettingsFragment";
     
     // Backend preference options (hardcoded to avoid resource file complexity)
-    private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan", "CANN"};
-    private static final String[] BACKEND_VALUES = {"CPU", "VULKAN", "CANN"};
+    private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan"};
+    private static final String[] BACKEND_VALUES = {"CPU", "VULKAN"};
     
     // UI组件
     private SeekBar seekBarChunkSize;
@@ -389,6 +389,12 @@ public class SettingsFragment extends Fragment {
                 backendPreference = "VULKAN";
                 ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
             } else if ("false".equals(backendPreference)) {
+                backendPreference = "CPU";
+                ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
+            }
+            // 兼容性迁移：移除 CANN 选项后，如发现旧值，则回退为 CPU
+            if ("CANN".equals(backendPreference)) {
+                LogManager.logW(TAG, "Backend 'CANN' is deprecated and removed from UI. Fallback to 'CPU'.");
                 backendPreference = "CPU";
                 ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
             }
@@ -758,6 +764,12 @@ public class SettingsFragment extends Fragment {
      */
     public static String getBackendPreference(Context context) {
         String backendPreference = ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
+        // Compatibility: map deprecated CANN to CPU
+        if ("CANN".equals(backendPreference)) {
+            LogManager.logW(TAG, "Detected deprecated backend 'CANN' in config. Using 'CPU' instead.");
+            backendPreference = "CPU";
+            ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
+        }
         // 验证后端偏好值是否有效，无效则使用CPU
         for (String validValue : BACKEND_VALUES) {
             if (validValue.equals(backendPreference)) {

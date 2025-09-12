@@ -34,7 +34,7 @@ android {
         // 将时间戳存储为项目属性，供后续任务使用
         project.ext.buildTimeStamp = buildTimeStr
 
-        // 指定仅构建 arm64-v8a 与 x86_64 两个 ABI
+        // 仅构建 arm64-v8a（CANN 后端仅支持 ARM64）
         ndk {
             abiFilters 'arm64-v8a', 'x86_64'
         }

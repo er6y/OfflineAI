@@ -1,61 +1,63 @@
 apply plugin: 'com.android.library'
 
-// Vulkan着色器预构建任务
-task buildVulkanShaders {
-    description 'Build Vulkan shaders using host toolchain'
-    
-    def llamaCppRoot = file('../llama.cpp-master')
-    def vulkanShadersDir = file("${llamaCppRoot}/ggml/src/ggml-vulkan/vulkan-shaders")
-    def vulkanShadersGenSrc = file("${vulkanShadersDir}/vulkan-shaders-gen.cpp")
-    def buildDir = file('build/vulkan-shaders')
-    def vulkanShadersGenExe = file("${buildDir}/vulkan-shaders-gen.exe")
-    def outputDir = file('src/main/cpp/generated')
-    def headerFile = file("${outputDir}/ggml-vulkan-shaders.hpp")
-    def sourceFile = file("${outputDir}/ggml-vulkan-shaders.cpp")
-    
-    inputs.file vulkanShadersGenSrc
-    inputs.dir vulkanShadersDir
-    outputs.file headerFile
-    outputs.file sourceFile
-    
-    doLast {
-        // 创建构建目录
-        buildDir.mkdirs()
-        outputDir.mkdirs()
+// Vulkan 着色器预构建任务（默认禁用，避免与 CMake ExternalProject 重复生成导致头/源不一致）
+// 如需使用 Gradle 侧生成，请以 -PUSE_GRADLE_VK_SHADERS=true 显式开启
+def useGradleVkShaders = project.hasProperty('USE_GRADLE_VK_SHADERS') && project.property('USE_GRADLE_VK_SHADERS').toString().toBoolean()
+if (useGradleVkShaders) {
+    task buildVulkanShaders {
+        description 'Build Vulkan shaders using host toolchain (opt-in)'
+        def llamaCppRoot = file('../llama.cpp-master')
+        def vulkanShadersDir = file("${llamaCppRoot}/ggml/src/ggml-vulkan/vulkan-shaders")
+        def vulkanShadersGenSrc = file("${vulkanShadersDir}/vulkan-shaders-gen.cpp")
+        def buildDir = file('build/vulkan-shaders')
+        def vulkanShadersGenExe = file("${buildDir}/vulkan-shaders-gen.exe")
+        def outputDir = file('src/main/cpp/generated')
+        def headerFile = file("${outputDir}/ggml-vulkan-shaders.hpp")
+        def sourceFile = file("${outputDir}/ggml-vulkan-shaders.cpp")
 
-        // 解析 glslc 可执行文件路径
-        def vulkanSdk = System.getenv('VULKAN_SDK')
-        def glslcPath = vulkanSdk ? new File(vulkanSdk, 'Bin/glslc.exe').absolutePath : 'glslc.exe'
-        if (vulkanSdk) {
-            println "Using VULKAN_SDK at: ${vulkanSdk}"
-            println "glslc resolved to: ${glslcPath}"
-        } else {
-            println "VULKAN_SDK not set, trying to use glslc from PATH"
+        inputs.file vulkanShadersGenSrc
+        inputs.dir vulkanShadersDir
+        outputs.file headerFile
+        outputs.file sourceFile
+
+        doLast {
+            // Create build directories
+            buildDir.mkdirs()
+            outputDir.mkdirs()
+
+            // Resolve glslc from VULKAN_SDK or PATH
+            def vulkanSdk = System.getenv('VULKAN_SDK')
+            def glslcPath = vulkanSdk ? new File(vulkanSdk, 'Bin/glslc.exe').absolutePath : 'glslc.exe'
+            if (vulkanSdk) {
+                println "Using VULKAN_SDK at: ${vulkanSdk}"
+                println "glslc resolved to: ${glslcPath}"
+            } else {
+                println "VULKAN_SDK not set, trying to use glslc from PATH"
+            }
+
+            // Build vulkan-shaders-gen tool
+            exec {
+                commandLine 'cmd', '/c', 'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl.exe /EHsc /std:c++17 /Fe:' + vulkanShadersGenExe.absolutePath + ' ' + vulkanShadersGenSrc.absolutePath
+                workingDir buildDir
+            }
+
+            // Run generator
+            exec {
+                commandLine vulkanShadersGenExe.absolutePath,
+                            '--glslc', glslcPath,
+                            '--input-dir', vulkanShadersDir.absolutePath,
+                            '--output-dir', outputDir.absolutePath,
+                            '--target-hpp', 'ggml-vulkan-shaders.hpp',
+                            '--target-cpp', 'ggml-vulkan-shaders.cpp'
+                workingDir outputDir
+            }
+
+            println "Vulkan shaders generated successfully (Gradle path)"
         }
-        
-        // 编译vulkan-shaders-gen工具
-        exec {
-            commandLine 'cmd', '/c', 'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl.exe /EHsc /std:c++17 /Fe:' + vulkanShadersGenExe.absolutePath + ' ' + vulkanShadersGenSrc.absolutePath
-            workingDir buildDir
-        }
-        
-        // 运行vulkan-shaders-gen生成着色器
-        exec {
-            commandLine vulkanShadersGenExe.absolutePath, 
-                        '--glslc', glslcPath,
-                        '--input-dir', vulkanShadersDir.absolutePath,
-                        '--output-dir', outputDir.absolutePath,
-                        '--target-hpp', 'ggml-vulkan-shaders.hpp',
-                        '--target-cpp', 'ggml-vulkan-shaders.cpp'
-            workingDir outputDir
-        }
-        
-        println "Vulkan shaders generated successfully"
     }
+    // 仅在显式启用时串联
+    preBuild.dependsOn buildVulkanShaders
 }
-
-// 确保在CMake构建之前运行Vulkan着色器构建
-preBuild.dependsOn buildVulkanShaders
 
 android {
     namespace = 'com.starlocalrag.llamacpp'
@@ -70,6 +72,7 @@ android {
         consumerProguardFiles "consumer-rules.pro"
 
         ndk {
+            // Build both 64-bit ABIs: arm64-v8a and x86_64
             abiFilters 'arm64-v8a', 'x86_64'
         }
 

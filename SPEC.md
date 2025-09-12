@@ -20,26 +20,32 @@ Android 存储权限策略（实践经验与避坑总结片段，不改变章节
 ---
 
 Vulkan 源路径与补丁策略（不改变章节结构，记录实现细节与最佳实践）
-- 源路径切换：llamacpp 的 Vulkan 后端源码编译路径改为本地副本 libs/llamacpp-jni/src/main/cpp/ggml-vulkan.cpp，避免直接改动上游目录，便于后续升级合并。
-- 补丁文件：将对上游 ggml-vulkan.cpp 的定制化改动沉淀在 libs/llamacpp-jni/src/main/cpp/ggml-vulkan.patch，保持与上游版本的差异清晰、可追踪。英文日志关键点示例："vkCreateInstance missing; skipping Vulkan backend initialization."、"Enumerating instance extensions..."、"No devices found."。
-- CMake 配置：JNI CMakeLists.txt 使用本地 ggml-vulkan.cpp，并集成着色器自动生成（ExternalProject + glslc），定义 VULKAN_HPP_DISPATCH_LOADER_DYNAMIC、VK_USE_PLATFORM_ANDROID_KHR、VK_API_VERSION=VK_API_VERSION_1_2 等编译宏；JNI 目标在启用 Vulkan 时追加 GGML_USE_VULKAN 与 GGML_VULKAN 宏。
-- 编译警告修复（本次优化）：移除 build.gradle 中不必要的 CMake 参数传递（VULKAN_HPP_DISPATCH_LOADER_DYNAMIC、VK_USE_PLATFORM_ANDROID_KHR），这些变量已在 CMakeLists.txt 中正确设置，Gradle 重复传递会导致"Manually-specified variables were not used"警告，但不影响 Vulkan 后端的正常编译和运行。
-- 上游目录保持洁净：libs/llama.cpp-master 下的文件不再直接修改，若出现临时改动需及时还原（checkout/覆盖方式），升级上游时以 patch 作为变更来源。
-- 扩展与特性处理最佳实践：
-  - VK_KHR_16bit_storage：优先检测 core feature（Vulkan ≥ 1.1）与扩展声明，仅在扩展存在时才 push 到 device_extensions；当缺失 16-bit storage feature 时，回退到 32-bit 模式，英文日志提示："does not support 16-bit storage, falling back to 32-bit mode"。
-  - VK_KHR_shader_non_semantic_info：在校验层/验证场景下，存在该扩展时再启用，避免无效请求。
-  - 实例创建前的 loader/符号守护：在启用 VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 时，优先初始化 dispatcher；可选地通过 GGML_VK_LOADER_GUARD 保护 vkEnumerateInstanceVersion / vkCreateInstance 的可用性，缺失时英文日志直接跳过后端初始化。
-  - 设备枚举与回退：优先选择离散/非 CPU 设备；找不到 GPU 时作为兜底可以选择首个 CPU 设备（如 SwiftShader），并在日志中打印详细设备列表，便于排查。
-- 日志规范：Vulkan 相关日志统一英文，便于跨平台/跨团队沟通与检索；Debug 级别的信息不影响正常用户使用体验。
+- 源路径策略（最新）：直接编译上游源码 `libs/llama.cpp-master/ggml/src/ggml-vulkan/ggml-vulkan.cpp`，保持与上游完全一致，减少分叉维护成本。
+- 补丁策略：仅当编译或运行在目标平台出现明确问题时，才以最小化补丁的方式修复，并且将补丁应用在上游文件路径（同目录）上。请将差异以 patch 形式保存，避免长期维护本地副本。
+- CMake 配置：`libs/llamacpp-jni/src/main/cpp/CMakeLists.txt` 的 `GGML_VULKAN_SOURCES` 已切换为上游路径，并集成着色器自动生成（ExternalProject + glslc），定义 `VULKAN_HPP_DISPATCH_LOADER_DYNAMIC`、`VK_USE_PLATFORM_ANDROID_KHR`、`VK_API_VERSION=VK_API_VERSION_1_2` 等编译宏；JNI 目标在启用 Vulkan 时追加 `GGML_USE_VULKAN` 与 `GGML_VULKAN` 宏。
+- Gradle 参数精简：移除 `build.gradle` 中不必要的 CMake 宏转发（如 `VULKAN_HPP_DISPATCH_LOADER_DYNAMIC`、`VK_USE_PLATFORM_ANDROID_KHR`），以避免 "Manually-specified variables were not used" 警告；这些宏均由 CMake 正确管理。
+- 上游洁净性：除非应用最小补丁，否则不直接修改 `libs/llama.cpp-master` 目录中的其他文件；升级上游版本时优先对比并再应用本地补丁文件。
+- 扩展与特性最佳实践：
+  - VK_KHR_16bit_storage：优先检测 core feature（Vulkan ≥ 1.1）与扩展声明；缺失时回退到 32-bit，并打印英文日志："does not support 16-bit storage, falling back to 32-bit mode"。
+  - VK_KHR_shader_non_semantic_info：仅在验证/调试场景且存在该扩展时启用（设备扩展列表中确实可用时才附加请求）。
+  - VK_KHR_shader_float16_int8：仅当设备报告支持且启用 FP16 计算时才附加请求，否则不附加，避免无效扩展导致的创建失败。
+  - 实例创建前的 loader/符号守护：在启用 `VULKAN_HPP_DISPATCH_LOADER_DYNAMIC` 时优先初始化 dispatcher；可选通过 `GGML_VK_LOADER_GUARD` 保护 `vkEnumerateInstanceVersion`/`vkCreateInstance` 可用性，不可用时直接跳过后端初始化（英文日志）。
+  - 设备枚举与回退：优先离散 GPU；无 GPU 时可回退到 CPU 设备（如 SwiftShader），打印完整设备列表便于诊断；若最终仍无设备，优雅跳过 Vulkan 后端。
+  - 日志规范：Vulkan 相关日志统一英文；Debug 级别信息不影响用户体验。
 
-+ 对齐上游落实与约束（本次调整）
-+ - 目前本地 ggml-vulkan.cpp 完全对齐上游 libs/llama.cpp-master/ggml/src/ggml-vulkan/ggml-vulkan.cpp，不保留任何“额外的保险”。
-+ - 本次核对的关键函数一致性：
-+   - ggml_vk_get_device_count / ggml_vk_get_device_description：保持上游的直接实现（仅调用 ggml_vk_instance_init 与查询设备），无自定义 try-catch 或附加日志。
-+   - ggml_backend_vk_buffer_type_alloc_buffer：保持上游用于 ggml_vk_create_buffer_device 的 try-catch（捕获 vk::SystemError 并返回 nullptr），这属于上游原生逻辑而非本地加固。
-+   - ggml_backend_vk_reg：保持上游在 ggml_vk_instance_init 外层的 try-catch（异常时返回 nullptr，并打印英文 Debug 日志）。
-+ - 先前为适配低版本 Vulkan 所做的“防御性”注入（非上游逻辑）已全部撤销；启用/禁用 Vulkan 的判定继续由 JNI 层的“版本闸门”负责，避免污染上游代码路径。
-+ - 目前没有应用任何 ggml-vulkan.patch（如后续确需差异化改动，务必以 patch 形式沉淀，避免直接改动上游源码副本）。
+对齐上游落实与约束（本次调整）
+- 直接使用上游 `ggml-vulkan.cpp` 进行编译；不保留“额外的保险”。
+- 关键函数遵循上游实现：
+  - `ggml_vk_get_device_count` / `ggml_vk_get_device_description`：仅调用 `ggml_vk_instance_init` 与查询设备，无自定义 try-catch 或额外日志。
+  - `ggml_backend_vk_buffer_type_alloc_buffer`：保留上游对 `vk::SystemError` 的捕获与返回 `nullptr` 的逻辑。
+  - `ggml_backend_vk_reg`：保留上游在 `ggml_vk_instance_init` 外层的异常保护与英文 Debug 日志。
+- 低版本 Vulkan 的“防御性注入”逻辑不进入上游文件；启停策略交由 JNI 层版本闸门与后端选择决定。
+- 最小化上游修复（本次新增）：`ggml_vk_instance_init()` 增加两点健壮性处理，以避免在模拟器/x86_64 等缺失 loader 或 API 版本不足时崩溃：
+  - 在任何 Vulkan-HPP 调用前初始化动态分发器：`VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr)`；初始化失败则打印英文告警并“跳过 Vulkan 后端初始化”。
+  - `vk::enumerateInstanceVersion()` 异常或 `api_version < 1.2` 时，不再 `GGML_ABORT`，改为英文日志并返回（标记 Vulkan 不可用），让上层安全回退到 CPU。
+  - 适用场景：Android 模拟器 x86_64、设备 loader/ICD 不完整、仅支持 1.1 的运行环境。
+ - 设备扩展选择最小化：仅在设备明确支持时附加 `VK_KHR_16bit_storage`、`VK_KHR_shader_float16_int8`、`VK_KHR_shader_non_semantic_info`，避免无效扩展导致的设备创建失败。
+ - Host pinned 内存回退：当 `ggml_vk_host_malloc()` 返回 `nullptr` 或出现 `vk::SystemError` 时，回退到 CPU 缓冲分配，避免崩溃（英文日志告警）。
 
 ---
 
@@ -120,24 +126,18 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
 - 实现细节与最佳实践：
   - 硬编码选项数组：在 SettingsFragment 中定义 BACKEND_OPTIONS 和 BACKEND_VALUES 数组，避免资源文件依赖。
   - 配置验证：getBackendPreference() 中使用 Arrays.asList().contains() 验证后端值有效性。
-  - 向后兼容：虽然移除了布尔值兼容性处理，但保持配置项名称不变，便于后续扩展。
-  - Java层简化：移除 mapBackendPreferenceToGpuLayers 方法，直接传递后端偏好字符串到JNI层。
-  - 英文日志：后端相关日志统一使用英文，如 "Backend preference: VULKAN"、"Using CPU backend"。
-- 构建验证：修改完成后通过 ./gradlew :app:assembleDebug -PKEYPSWD=abc-1234 验证构建成功，确保资源引用正确。
 
  变更补充（UI 精简与兼容性处理）
- - 设置页面的“后端偏好”下拉菜单已精简为仅包含：CPU、Vulkan、CANN。暂不在UI中提供 OpenCL 与 BLAS 选项。
- - 兼容性策略：如果已有配置中保存为 "OPENCL" 或 "BLAS"，在读取时将判定为无效并回退为 "CPU"，避免出现无法匹配导致的异常或错误显示。
- - 代码位置：`app/src/main/java/com/example/starlocalrag/SettingsFragment.java` 中的 `BACKEND_OPTIONS/BACKEND_VALUES` 为硬编码选项来源；`getBackendPreference(Context)` 会对读取到的值进行有效性校验并在无效时回退为 `"CPU"`。
- - 设计动因：
-   - OpenCL/BLAS 当前并未在移动端提供稳定可用的实现路径，展示会造成误导；CANN（昇腾）与 Vulkan（常见安卓GPU）为更现实可用路径。
-   - 精简选项降低用户选择成本，同时保持底层 JNI 对其他后端的向后兼容空间（如后续实现再放开UI）。
+- 设置页面的“后端偏好”下拉菜单已精简为仅包含：CPU、Vulkan。已从 UI 中移除 CANN；OpenCL 与 BLAS 仍不在 UI 提供。
+- 兼容性策略：
+  - 若已有配置保存为 "CANN"（历史值），在读取时将自动回退为 "CPU"，同时写回配置，避免不匹配导致的异常或错误显示。
+  - 若已有配置保存为 "OPENCL" 或 "BLAS"，同样在读取时判定为无效并回退为 "CPU"。
+- 代码位置：`app/src/main/java/com/example/starlocalrag/SettingsFragment.java` 中的 `BACKEND_OPTIONS/BACKEND_VALUES` 为硬编码选项来源；`getBackendPreference(Context)` 对读取值进行有效性校验与兼容映射（含 CANN→CPU 的回退）。
+- 设计动因：
+  - 当前移动端稳定可用路径以 CPU/Vulkan 为主；移除 CANN 选项可减少误导与维护成本。
+  - 精简选项降低用户选择成本，同时保持底层 JNI 对其他后端的向后兼容空间（如后续实现再放开 UI）。
 
----
-
-JNI接口重构与代码重复消除（本次优化）
-- 问题识别：原有 load_model_with_backend 和 new_context_with_backend 方法存在功能重复，两者都接收 backendPreference 参数并执行相似的后端选择逻辑，违反DRY原则。
-- 重构策略：
+// ...
   - **统一后端配置函数**: 新增 configure_backend_for_model() 函数，统一处理后端类型判断、GPU层数设置和后端加载逻辑。
   - **职责分离**: load_model_with_backend 负责模型加载和后端配置；new_context_with_backend 仅负责上下文创建，不再重复后端选择。
   - **接口简化**: 移除 new_context_with_backend 方法中的 backendPreference 参数，因为后端已在模型加载时确定。
