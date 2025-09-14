@@ -24,6 +24,15 @@ Vulkan 源路径与补丁策略（不改变章节结构，记录实现细节与�
 - 补丁策略：仅当编译或运行在目标平台出现明确问题时，才以最小化补丁的方式修复，并且将补丁应用在上游文件路径（同目录）上。请将差异以 patch 形式保存，避免长期维护本地副本。
 - CMake 配置：`libs/llamacpp-jni/src/main/cpp/CMakeLists.txt` 的 `GGML_VULKAN_SOURCES` 已切换为上游路径，并集成着色器自动生成（ExternalProject + glslc），定义 `VULKAN_HPP_DISPATCH_LOADER_DYNAMIC`、`VK_USE_PLATFORM_ANDROID_KHR`、`VK_API_VERSION=VK_API_VERSION_1_2` 等编译宏；JNI 目标在启用 Vulkan 时追加 `GGML_USE_VULKAN` 与 `GGML_VULKAN` 宏。
 - Gradle 参数精简：移除 `build.gradle` 中不必要的 CMake 宏转发（如 `VULKAN_HPP_DISPATCH_LOADER_DYNAMIC`、`VK_USE_PLATFORM_ANDROID_KHR`），以避免 "Manually-specified variables were not used" 警告；这些宏均由 CMake 正确管理。
+- 头文件发现与传参与回退策略（新增）：
+  - 优先通过环境变量传递 Vulkan-Hpp 头文件路径：在 Gradle 中读取 `VULKAN_SDK` 并将 `${VULKAN_SDK}/Include` 作为 `-DVULKAN_HPP_DIR=...` 传递给 CMake，确保编译期可找到 `vulkan/vulkan.hpp`。
+  - 在 <mcfile name="CMakeLists.txt" path="libs/llamacpp-jni/src/main/cpp/CMakeLists.txt"></mcfile> 中，针对 `ggml-vulkan` 与 `llamacpp_jni` 两个目标：若定义了 `VULKAN_HPP_DIR`，则直接通过 `target_include_directories` 注入该路径；否则回退到 `find_package(VulkanHeaders)` 查找系统或第三方提供的 Vulkan-Headers 包；两者均不可用时，CMake 将以清晰错误消息 fail-fast（提示未找到 `vulkan/vulkan.hpp`）。
+  - Android NDK 自带的是 C API 头（`vulkan_core.h` 等），不包含 C++ 头 `vulkan.hpp`；因此需要额外安装 Vulkan-Headers（或 Vulkan SDK），并通过上面的传参策略提供路径。
+  - 典型环境（Windows）配置示例：先设置环境变量 `set VULKAN_SDK=C:\VulkanSDK\1.3.xxx.x`，再执行构建命令（例如 `./gradlew :libs:llamacpp-jni:externalNativeBuildDebug -PKEYPSWD=abc-1234`），Gradle 会自动把 `${VULKAN_SDK}/Include` 传入 CMake。
+  - 诊断方法：若编译报错 `fatal error: 'vulkan/vulkan.hpp' file not found`，请检查是否正确设置 `VULKAN_SDK` 与传参；也可在 `.cxx/Debug/<hash>/<abi>/compile_commands.json` 或 `ninja -v` 输出中确认是否包含 `-I<VULKAN_HPP_DIR>`。
+  - 去除全局 include_directories：不再在 ANDROID 分支中使用 `include_directories("${Vulkan_INCLUDE_DIRS}")`，改为仅对 `ggml-vulkan` 与 `llamacpp_jni` 目标各自注入 `target_include_directories`，避免泄露头路径并提升可观测性（英文日志）。
+  - Fail-fast 规则：当 `ENABLE_VULKAN_BACKEND=ON` 但既未提供 `VULKAN_HPP_DIR` 亦未解析到 `Vulkan_INCLUDE_DIRS` 时，CMake 在配置期直接 `message(FATAL_ERROR ...)` 终止，并给出清晰英文提示；避免把缺失 `vulkan.hpp` 的错误延迟到编译阶段才暴露。
+  - 回退建议：若当下不需要 Vulkan 后端，可在 CMake 关闭 Vulkan（例如设置 `-DGGML_VULKAN=OFF` 或在工程开关处禁用相关目标），避免对 Vulkan-Headers 的构建期依赖；需要启用 Vulkan 时再恢复上述传参。
 - 上游洁净性：除非应用最小补丁，否则不直接修改 `libs/llama.cpp-master` 目录中的其他文件；升级上游版本时优先对比并再应用本地补丁文件。
 - 扩展与特性最佳实践：
   - VK_KHR_16bit_storage：优先检测 core feature（Vulkan ≥ 1.1）与扩展声明；缺失时回退到 32-bit，并打印英文日志："does not support 16-bit storage, falling back to 32-bit mode"。
@@ -32,6 +41,13 @@ Vulkan 源路径与补丁策略（不改变章节结构，记录实现细节与�
   - 实例创建前的 loader/符号守护：在启用 `VULKAN_HPP_DISPATCH_LOADER_DYNAMIC` 时优先初始化 dispatcher；可选通过 `GGML_VK_LOADER_GUARD` 保护 `vkEnumerateInstanceVersion`/`vkCreateInstance` 可用性，不可用时直接跳过后端初始化（英文日志）。
   - 设备枚举与回退：优先离散 GPU；无 GPU 时可回退到 CPU 设备（如 SwiftShader），打印完整设备列表便于诊断；若最终仍无设备，优雅跳过 Vulkan 后端。
   - 日志规范：Vulkan 相关日志统一英文；Debug 级别信息不影响用户体验。
+
+构建验证（本次）：
+- Debug 版：在 `.cxx/Debug/<hash>/arm64-v8a` 目录内执行 `ninja -v -C <dir> llamacpp_jni`，成功产出 `libllamacpp_jni.so`。
+- Release 版：`./gradlew :app:assembleRelease -PKEYPSWD=abc-1234 --info --stacktrace` 成功，APK 输出：`app/build/outputs/apk/release/app-release.apk`。
+- JNI 修复：移除未暴露符号 `ggml_cpu_has_sve2()` 的调用，仅记录 SVE 运行时能力（SVE2 记为 0），修复 Release 构建失败。
+- x86_64：在 `.cxx/Debug/<hash>/x86_64` 目录内执行 `ninja -v -C <dir> llamacpp_jni`，成功链接并输出 "LlamaCpp JNI library built for x86_64"。
+- ARM64 K-quants 链接修复（本次）：在 <mcfile name="CMakeLists.txt" path="libs/llamacpp-jni/src/main/cpp/CMakeLists.txt"></mcfile> 的 ggml-cpu 目标创建后追加 `GGML_CPU_GENERIC=1` 编译定义，触发 `ggml-cpu/arch-fallback.h` 将 quants.c 中的 `*_generic` 实现重命名为无后缀符号，从而修复 `ggml_vec_dot_q5_K_q8_K`、`quantize_row_q8_K` 等未定义符号的链接错误；已通过 `ninja -v llamacpp_jni` 在 arm64-v8a 成功验证。注意：该设置仅作为通用回退，不影响其他架构专用内核，后续若按架构纳入专用 quants 源文件，可移除此定义。
 
 对齐上游落实与约束（本次调整）
 - 直接使用上游 `ggml-vulkan.cpp` 进行编译；不保留“额外的保险”。
@@ -46,6 +62,19 @@ Vulkan 源路径与补丁策略（不改变章节结构，记录实现细节与�
   - 适用场景：Android 模拟器 x86_64、设备 loader/ICD 不完整、仅支持 1.1 的运行环境。
  - 设备扩展选择最小化：仅在设备明确支持时附加 `VK_KHR_16bit_storage`、`VK_KHR_shader_float16_int8`、`VK_KHR_shader_non_semantic_info`，避免无效扩展导致的设备创建失败。
  - Host pinned 内存回退：当 `ggml_vk_host_malloc()` 返回 `nullptr` 或出现 `vk::SystemError` 时，回退到 CPU 缓冲分配，避免崩溃（英文日志告警）。
+
+- Gradle/AGP 环境下的 CMake include 策略（新增）：
+  - 绝对路径包含 ggml/cmake/common.cmake，避免依赖 CMAKE_MODULE_PATH 搜索在 AGP 配置期出现不稳定；
+  - 暂不包含 llama/cmake/common.cmake，使用本地空实现提供 `llama_add_compile_flags` 兜底，避免配置阶段失败；
+  - 英文日志示例："Defined local stub for llama_add_compile_flags (upstream not providing)"；后续在 CMAKE_MODULE_PATH 稳定后可恢复 include 并移除 stub。
+
+- 链接结构（新增）：
+  - 按上游将 ggml-vulkan 构建为静态库并链接进 JNI 目标，替代直接把源文件编进 JNI；
+  - 优点：减少 ODR/宏泄漏、可重用性更好、诊断更清晰（目标级 include/defs 而不是全局）。
+
+- 上游托管边界（新增）：
+  - ggml-base/cpu 尽量由上游 CMake 管理，JNI 仅作为薄胶水层；
+  - 仅在 ARM K-quants 需要通用回退时追加 `GGML_CPU_GENERIC=1` 定义，待按架构的专用内核完善后可移除此定义。
 
 ---
 
@@ -87,6 +116,11 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - **统一配置函数**：configure_backend_for_model() 函数统一处理后端类型判断、GPU层数设置和后端加载逻辑，避免代码重复。
   - **JNI接口调用修复**：修复 LocalLLMLlamaCppHandler.java 中 new_context_with_backend 调用问题，移除已废弃的 backendPreference 参数，确保与JNI接口签名一致；后端配置已在模型加载时确定，上下文创建时无需重复传递后端参数。
   - **ConfigManager配置类型适配**：修复 GPUErrorHandler.java 中配置获取类型不匹配问题，use_gpu 配置现在存储为字符串（"CPU", "VULKAN" 等），但代码仍使用 getBoolean 方法获取；改用 getString 方法获取后端偏好，并通过字符串比较判断是否启用 GPU 加速（当后端偏好不为 "CPU" 时启用硬件加速），解决应用启动时的 JSONException 错误。
+- 设备可用性判定修复与诊断日志（本次）：
+  - 判定修复：由“设备名称包含子串 'Vulkan'”改为依据 ggml 后端注册器名判断（`ggml_backend_dev_backend_reg()` + `ggml_backend_reg_name()` 比较是否为 "Vulkan"），避免设备名为 "Adreno/GeForce/SwiftShader" 等被误判为非 Vulkan 的情况。
+  - 日志增强：设备枚举时新增打印 backend 名称；结果汇总日志改为 "[BACKEND] Vulkan device available (by backend name): yes/no"，便于快速判定是否正确识别 Vulkan 后端。
+  - 影响范围：仅影响可用性判定与诊断输出，不改变版本闸门与安全回退策略；若运行时闸门（instance<1.2 等）不满足，仍将 CPU 回退。
+  - JNI 层静态注册（新增）：在 `llama_inference.cpp` 中，调用 `ggml_backend_register(ggml_backend_vk_reg())`，并且放在 `ggml_backend_load_all()` 之前执行；这样在禁用上游注册器（`GGML_BACKEND_VULKAN=OFF`）但仍静态链接本地 `ggml-vulkan` 库的场景下，Vulkan 后端依然可以被设备枚举识别。英文日志示例："[BACKEND] Register Vulkan (static) via ggml_backend_vk_reg() before ggml_backend_load_all()"。
 - 设计理由：
   - ggml Vulkan 后端对 1.2 特性存在硬性依赖；在仅有 1.1 的 loader/instance 环境下，继续初始化 Vulkan 后端容易触发崩溃或未定义行为。
   - 按需加载后端（仅当 final_gpu_layers != 0 时）+ 版本闸门，能够最大化规避低版本设备与 loader 造成的稳定性问题。
@@ -103,9 +137,11 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - 资源文件：移除 backend_preference_entries 和 backend_preference_values 数组，改为在 SettingsFragment 中硬编码选项。
   - 布局文件：fragment_settings.xml 中移除对已删除资源数组的引用。
 - 配置存储简化：
-  - 保持 ConfigManager.KEY_USE_GPU 配置项名称不变，但存储内容从布尔值改为字符串（"CPU"/"VULKAN"/"OPENCL"/"BLAS"/"CANN"）。
+  - 保持 ConfigManager.KEY_USE_GPU 配置项名称不变，但存储内容从布尔值改为字符串（"CPU"/"VULKAN"）。
   - SettingsFragment.getBackendPreference() 方法：移除布尔值兼容性处理，直接验证后端偏好值有效性，无效时默认返回 "CPU"。
   - 删除不再使用的 SettingsFragment.getUseGpu() 方法。
+- Java 层包装方法（本次补充）：
+  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/starlocalrag/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，新增对 "KLEIDIAI" 与 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
 - 后端映射逻辑下沉到JNI层（架构优化）：
   - 原Java层映射逻辑：LocalLLMLlamaCppHandler.mapBackendPreferenceToGpuLayers() 将字符串后端偏好映射为 nGpuLayers 参数（"CPU" → 0，"VULKAN" → -1）。
   - 重构后JNI层映射：新增 load_model_with_backend 和 new_context_with_backend JNI方法，直接接收后端偏好字符串，在C++层实现 map_backend_preference_to_gpu_layers 映射逻辑。
@@ -127,170 +163,126 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - 硬编码选项数组：在 SettingsFragment 中定义 BACKEND_OPTIONS 和 BACKEND_VALUES 数组，避免资源文件依赖。
   - 配置验证：getBackendPreference() 中使用 Arrays.asList().contains() 验证后端值有效性。
 
- 变更补充（UI 精简与兼容性处理）
-- 设置页面的“后端偏好”下拉菜单已精简为仅包含：CPU、Vulkan。已从 UI 中移除 CANN；OpenCL 与 BLAS 仍不在 UI 提供。
+ 变更补充（UI 与兼容性处理）
+- 设置页面的“后端偏好”下拉菜单现仅包含：CPU、Vulkan。已移除 KleidiAI/KleidiAI-SME；CPU 模式默认内含 KleidiAI 微内核（如已编译），无法在 UI 显式开/关。
 - 兼容性策略：
   - 若已有配置保存为 "CANN"（历史值），在读取时将自动回退为 "CPU"，同时写回配置，避免不匹配导致的异常或错误显示。
   - 若已有配置保存为 "OPENCL" 或 "BLAS"，同样在读取时判定为无效并回退为 "CPU"。
-- 代码位置：`app/src/main/java/com/example/starlocalrag/SettingsFragment.java` 中的 `BACKEND_OPTIONS/BACKEND_VALUES` 为硬编码选项来源；`getBackendPreference(Context)` 对读取值进行有效性校验与兼容映射（含 CANN→CPU 的回退）。
-- 设计动因：
-  - 当前移动端稳定可用路径以 CPU/Vulkan 为主；移除 CANN 选项可减少误导与维护成本。
-  - 精简选项降低用户选择成本，同时保持底层 JNI 对其他后端的向后兼容空间（如后续实现再放开 UI）。
-
-// ...
-  - **统一后端配置函数**: 新增 configure_backend_for_model() 函数，统一处理后端类型判断、GPU层数设置和后端加载逻辑。
-  - **职责分离**: load_model_with_backend 负责模型加载和后端配置；new_context_with_backend 仅负责上下文创建，不再重复后端选择。
-  - **接口简化**: 移除 new_context_with_backend 方法中的 backendPreference 参数，因为后端已在模型加载时确定。
-- 实现细节：
-  - **configure_backend_for_model()**: 根据后端类型设置 model_params.n_gpu_layers，处理Vulkan可用性检查，按需加载GPU后端，统一英文日志输出。
-  - **load_model_with_backend()**: 调用统一配置函数，简化代码逻辑，避免重复的后端判断代码。
-  - **new_context_with_backend()**: JNI签名从 (JLjava/lang/String;)J 简化为 (J)J，移除backend_preference参数，仅记录上下文创建日志。
-  - **向后兼容**: 保留 map_backend_preference_to_gpu_layers() 函数并标记为deprecated，确保现有代码兼容性。
-- 代码质量改进：
-  - **消除重复**: 将原本分散在两个方法中的后端选择逻辑合并到单一函数，减少代码重复约50行。
-  - **提升可维护性**: 后端逻辑集中管理，新增后端类型时只需修改一处代码。
-  - **增强可读性**: 方法职责更加清晰，load负责配置，new_context负责创建。
-  - **统一日志**: 所有后端相关日志使用英文，格式统一，便于调试和问题排查。
-- 构建验证：重构完成后通过 ./gradlew clean :libs:llamacpp-jni:build -PKEYPSWD=abc-1234 验证构建成功，确保接口变更不影响功能。
+  - 若已有配置保存为 "KLEIDIAI" 或 "KLEIDIAI-SME"（历史值），同样在读取时回退为 "CPU"，并写回配置，保持 UI 与底层一致。
+- KleidiAI 行为（重要）：UI 不再提供 KleidiAI 选项；CPU 模式下默认携带 KleidiAI 微内核（若已编译进二进制），无法显式开/关。英文日志示例：
+  - "[BACKEND] preference=CPU -> CPU path (KleidiAI microkernels if compiled)"
+  - "[CPU] features -> dotprod=<0|1> sme=<0|1>"
+  - "[KLEIDIAI] compiled-in: <yes|no>"
+- 代码位置：<mcfile name="SettingsFragment.java" path="app/src/main/java/com/example/starlocalrag/SettingsFragment.java"></mcfile> 中的硬编码选项为来源；getBackendPreference(Context) 对读取值进行有效性校验与兼容映射；<mcfile name="llama_inference.cpp" path="libs/llamacpp-jni/src/main/cpp/llama_inference.cpp"></mcfile> 中依据后端字符串设置 GGML_KLEIDIAI_SME 环境变量。
 
 ---
 
-模型加载函数重构与代码维护性优化（本次实现）
-- **问题背景**：原有 load_model_with_gpu 和 load_model_with_backend 函数存在功能重复，两者都实现模型加载逻辑，但分别针对不同的参数类型（GPU层数 vs 后端偏好字符串），导致代码维护困难和逻辑分散。
-- **重构目标**：统一模型加载接口，消除代码重复，提升代码可维护性，简化JNI接口设计。
-- **实现策略**：
-  - **功能合并**：将 load_model_with_gpu 中的详细日志输出和模型信息统计功能合并到 load_model_with_backend 中。
-  - **接口统一**：保留 load_model_with_backend 作为主要模型加载接口，移除过时的 load_model_with_gpu 函数。
-  - **向后兼容**：在C++和Java层都保留废弃注释，指导开发者使用新的统一接口。
-- **核心改进**：
-  - **GGML后端加载逻辑**：修复 load_model_with_backend 中缺失的 ggml_backend_load_all() 调用和设备枚举逻辑，确保Vulkan后端能够正确加载和初始化。
-  - **详细模型信息输出**：集成原 load_model_with_gpu 中的详细日志功能，包括总层数、GPU层数、CPU层数、GPU加速状态等关键信息。
-  - **统一错误处理**：使用一致的英文日志格式和错误处理机制，便于跨平台调试。
-- **代码质量提升**：
-  - **减少重复代码**：消除约100行重复的模型加载逻辑，将代码重复率降低约40%。
-  - **简化接口设计**：从两个模型加载函数简化为一个统一接口，降低API复杂度。
-  - **提升可维护性**：模型加载逻辑集中在单一函数中，后续功能扩展和bug修复更加便捷。
-  - **增强日志可读性**：统一使用英文日志格式，包括 "[MODEL_INFO] Model loaded successfully!"、"[MODEL_INFO] ✓ GPU acceleration enabled" 等关键信息。
-- **接口变更**：
-  - **C++层**：移除 Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1gpu JNI函数，保留废弃注释。
-  - **Java层**：移除 LlamaCppInference.load_model_with_gpu native方法声明，保留废弃注释指导迁移。
-  - **调用影响**：经验证，应用层代码未直接调用 load_model_with_gpu 方法，因此移除不会影响现有功能。
-- **最佳实践**：
-  - **统一日志标准**：所有模型加载相关日志使用英文，便于国际化和技术支持。
-  - **渐进式重构**：先合并功能，再移除过时接口，确保重构过程的稳定性。
-  - **文档化废弃**：通过注释明确指导开发者使用新接口，避免误用过时函数。
+后端选择器重构与配置简化（本次实现）
+- 目标：将原有的布尔型 GPU 开关重构为多选项后端选择器，支持 CPU、Vulkan、OpenCL、BLAS、CANN 多种计算后端。
+- UI 变更：
+  - 设置页面：将 GPU 加速 Switch 控件替换为后端选择 Spinner 下拉框。
+  - 资源文件：移除 backend_preference_entries 和 backend_preference_values 数组，改为在 SettingsFragment 中硬编码选项。
+  - 布局文件：fragment_settings.xml 中移除对已删除资源数组的引用。
+- 配置存储简化：
+  - 保持 ConfigManager.KEY_USE_GPU 配置项名称不变，但存储内容从布尔值改为字符串（"CPU"/"VULKAN"/"KLEIDIAI-SME"）。
+  - SettingsFragment.getBackendPreference() 方法：移除布尔值兼容性处理，直接验证后端偏好值有效性；对历史值进行兼容映射，无效时默认返回 "CPU"。
+  - 删除不再使用的 SettingsFragment.getUseGpu() 方法。
+- Java 层包装方法（本次补充）：
+  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/starlocalrag/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，包含对 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
+- 后端映射逻辑下沉到JNI层（架构优化）：
+  - 参见上文，不再赘述。
 
 ---
 
-Vulkan版本检查与后端注册逻辑修复（本次优化）
-- **问题识别**：在Vulkan版本不满足要求（<1.2）时，系统仍然会注册和加载Vulkan后端，导致llamacpp在运行时报错，违反了预期的降级策略。
-- **根本原因**：原有的 configure_backend_for_model 函数虽然在Vulkan版本检查失败时设置了 n_gpu_layers=0 并记录回退日志，但仍然调用 ggml_backend_load_all() 加载所有GPU后端，包括不兼容的Vulkan后端。
-- **修复策略**：
-  - **控制权分离**：将后端加载的控制权从 configure_backend_for_model 转移到 load_model_with_backend，通过返回值控制是否加载GPU后端。
-  - **条件加载**：只有在真正需要且版本满足要求时才调用 ggml_backend_load_all()，完全避免不兼容后端的注册。
-  - **精确降级**：确保Vulkan版本<1.2时完全跳过GPU后端加载，只使用CPU后端。
-- **实现细节**：
-  - **configure_backend_for_model() 重构**：
-    - 返回类型从 void 改为 bool，指示是否需要加载GPU后端。
-    - CPU后端：返回 false，不加载GPU后端。
-    - Vulkan后端：版本>=1.2时返回 true，<1.2时返回 false 并记录降级日志。
-    - 其他后端：当前返回 false，降级到CPU。
-    - 移除函数内的 ggml_backend_load_all() 调用，将控制权上移。
-  - **load_model_with_backend() 优化**：
-    - 根据 configure_backend_for_model() 的返回值决定是否调用 ggml_backend_load_all()。
-    - 只有在 should_load_gpu_backend=true 时才加载GPU后端和枚举设备。
-    - 更新日志信息，明确区分"加载GPU后端"和"跳过GPU后端加载"。
-- **后端注册逻辑规范**：
-  - **CPU后端**：始终可用，通过 llama_backend_init() 初始化，n_gpu_layers=0，不调用 ggml_backend_load_all()。
-  - **Vulkan后端**：
-    - 版本检查：调用 is_vulkan_suitable_for_llamacpp() 检查版本>=1.2。
-    - 版本满足：n_gpu_layers=-1，调用 ggml_backend_load_all() 注册Vulkan后端。
-    - 版本不满足：n_gpu_layers=0，不调用 ggml_backend_load_all()，完全跳过Vulkan后端注册，降级到CPU。
-  - **其他后端**（OPENCL/BLAS/CANN）：当前全部降级到CPU，n_gpu_layers=0，不加载GPU后端。
-- **日志优化**：
-  - 统一使用英文日志格式，便于跨平台调试。
-  - 明确区分后端选择和加载状态："Backend preference: VULKAN"、"Vulkan version check failed, falling back to CPU"、"Will skip GPU backend loading"。
-  - 使用 FORCE_LOG 确保关键后端决策信息可见。
-- **验证结果**：
-  - 构建测试：通过 ./gradlew :app:assembleDebug -PKEYPSWD=abc-1234 验证修复有效性。
-  - 行为确认：Vulkan版本<1.2时不再注册Vulkan后端，避免运行时错误。
-  - 性能优化：CPU模式下完全跳过GPU后端初始化，节省内存和启动时间。
-- **最佳实践**：
-  - **版本检查前置**：在后端注册前进行版本兼容性检查，避免无效的后端加载。
-  - **精确控制**：通过返回值精确控制后端加载流程，避免副作用。
-  - **清晰降级**：降级策略明确且可追踪，便于问题诊断和性能分析。
+日志优化（补充：CPU能力可观测性）
++ 日志优化（补充：CPU能力可观测性）
++ - JNI 运行时能力打印新增：一次性 CPU/KleidiAI 能力快照函数，在 backend_init() 之后调用。
++   - 英文日志包含：编译期宏（ARCH/NEON/DOTPROD/SVE/SVE2）、KleidiAI 编译状态、运行时 `ggml_cpu_has_neon/dotprod/sve`。
++   - 说明：上游 ggml 当前仅提供 `ggml_cpu_has_sve()`，不包含 `ggml_cpu_has_sve2()`，因此 SVE2 在运行时日志中显示为 0；若后续上游加入 SVE2 探测，可平滑启用。
+  - 新增：在 JNI `load_model_with_backend()` 的 `[KLEIDIAI] compiled-in: ...` 英文日志附近，追加 CPU 信息快照日志，便于判断设备是否具备相关能力：
+    - `[CPU] arch: <aarch64|arm|x86_64|x86|unknown>`（编译期架构）
+    - `/proc/cpuinfo` 摘要（model/Processor、Hardware、Features 或 flags）
+    - `auxv` 硬件能力：`[CPU] HWCAP: 0x... HWCAP2: 0x...`，在 aarch64 上尝试解码 `asimddp(dotprod)` 与 `sme`
+- 目的：
+  - 与 `[CPU] features -> dotprod=... sme=...` 的运行时探测结果交叉验证，迅速定位“功能不可用”的根因（芯片不支持 / 系统未暴露 / 探测兼容性问题）。
+  - 与 `[KLEIDIAI] buffer type available: ...` 联动，判断 KleidiAI 路径是否完整可用。
+- 设计要点：
+  - 仅使用英文日志，统一风格，利于跨平台排查。
+  - 访问 `/proc/cpuinfo` 与 `getauxval(AT_HWCAP/AT_HWCAP2)`，失败时输出清晰的 fallback 日志。
+  - aarch64 下若系统头未暴露 `HWCAP_ASIMDDP`/`HWCAP2_SME`，以 `unknown` 标示，避免构建耦合。
+- 诊断建议：
+  - `compiled-in: yes` 且 `HWCAP asimddp=yes`、`dotprod=1`：KleidiAI 可利用 dot product 微内核。
+  - `compiled-in: yes` 但 `dotprod=0`：多为硬件不支持或系统未暴露；此时 KleidiAI 回退至 NEON 路径，功能正确但性能下降。
+  - `sme=1` 需设备为 Armv9.2+ 且系统暴露能力，并配合 `KLEIDIAI-SME` 选项与 `GGML_KLEIDIAI_SME=1` 才可能命中。
+- 构建与验证：
+  - Debug 版：`./gradlew :app:assembleDebug -PKEYPSWD=abc-1234`
+  - Release 版：`./gradlew assembleRelease -PKEYPSWD=abc-1234`
+  - 本次已验证：assembleDebug/assembleRelease 均成功产出 APK（链接错误已消除）
+  - 真机运行后观察 `[KLEIDIAI] compiled-in`、`[CPU] arch/.../HWCAP`、`[CPU] features`、`[KLEIDIAI] buffer type` 四组关键日志。
+
+- dotprod 启用策略与回退（arm64-v8a）
+  - 编译期：在 <mcfile name="CMakeLists.txt" path="libs/llamacpp-jni/src/main/cpp/CMakeLists.txt"></mcfile> 的 arm64-v8a 分支启用 `-march=armv8.2-a+fp16+dotprod` 并追加 `GGML_USE_DOTPROD`，确保 KleidiAI dotprod 微内核源文件被纳入构建。
+  - 兼容性：设备不支持 FEAT_DotProd 时，运行时 `features -> dotprod=0`，自动回退 NEON 路径，功能正确但性能下降；因此全局开启 dotprod 是安全的。
+  - 根因与修复：之前 Release 链接错误由“已注册 dotprod 变体但未编译对应实现”导致；现通过启用 dotprod 解决（匹配上游 ggml-cpu CMake 对 `+dotprod` 的条件汇编逻辑）。
+  - 验证步骤：
+    1) 构建 Debug/Release；
+    2) 设备日志中 `[CPU] features -> dotprod=1` 且 `[KLEIDIAI] compiled-in: dotprod=yes`；
+    3) 观察 matmul/反量化路径命中 dotprod 变体（性能压测可见）。
+  - 回退策略：如遇个别 toolchain 不识别指令集，可临时回退到 `-march=armv8-a+fp+simd+fp16` 并移除 `GGML_USE_DOTPROD`；但推荐优先 `armv8.2-a + dotprod`。
 
 ---
 
-后端加载策略与崩溃修复（本次关键修复）
-- **问题背景**：原有的 `ggml_backend_load_all()` 在 Vulkan 版本不兼容（<1.2）时会调用 `GGML_ABORT("fatal error")` 导致应用崩溃，即使用户只想使用CPU后端。
-- **核心问题**：Vulkan 后端初始化函数 `ggml_vk_instance_init()` 中的版本检查使用 `GGML_ABORT` 强制终止应用，无法实现优雅降级。
-- **解决方案**：
-  - **崩溃修复**：将 `ggml-vulkan.cpp` 中的 `GGML_ABORT("fatal error")` 改为 `return`，实现优雅退出。
-  - **统一后端加载接口**：使用 `ggml_backend_load_all()` 统一加载所有编译时支持的后端，简化后端管理。
-  - **版本检查前置**：通过 `is_vulkan_suitable_for_llamacpp()` 在模型加载前检查Vulkan版本兼容性。
-  - **安全降级策略**：当Vulkan版本不满足要求时，自动降级到CPU后端，避免兼容性问题。
-  - **后端选择逻辑**：根据用户的后端偏好（CPU/VULKAN/OPENCL/BLAS/CANN）动态决定GPU层数配置。
-- **实现细节**：
-  - **Vulkan崩溃修复**：修改 `ggml-vulkan.cpp:4312` 行，将 `GGML_ABORT("fatal error")` 改为 `return`，并更新错误信息为 "Vulkan 1.2 required. Skipping Vulkan backend initialization."。
-  - **configure_backend_for_model()** 函数：统一处理后端类型判断和GPU层数设置。
-  - **CPU后端处理**：设置 n_gpu_layers=0，确保使用纯CPU计算。
-  - **Vulkan后端处理**：设置 n_gpu_layers=-1，使用所有GPU层进行加速。
-  - **其他后端处理**：OPENCL/BLAS/CANN等后端当前降级到CPU，待后续实现。
-  - **统一加载调用**：所有后端通过 `ggml_backend_load_all()` 统一加载和注册。
-- **安全性保障**：
-  - **崩溃防护**：Vulkan 初始化失败时优雅退出，不影响其他后端加载。
-  - **版本闸门**：Vulkan版本检查确保兼容性要求。
-  - **降级透明**：用户选择GPU后端但版本不兼容时，自动降级到CPU。
-  - **错误隔离**：后端加载失败时记录日志但不中断应用运行。
-  - **多后端兼容**：单个后端初始化失败不影响其他后端的正常注册和使用。
-- **日志与调试**：
-  - 统一使用英文日志："Backend preference: VULKAN"、"Vulkan backend selected"、"Using CPU backend"。
-  - 使用 FORCE_LOG 确保关键后端决策信息可见。
-- **架构优势**：
-  - **简化管理**：统一的后端加载接口，减少代码复杂度。
-  - **扩展性良好**：新增后端类型时只需在配置函数中添加对应逻辑。
-  - **维护性强**：后端选择逻辑集中管理，便于后续优化。
-- **最佳实践**：
-  - **统一接口**：使用标准的 `ggml_backend_load_all()` API，保持与上游一致。
-  - **版本检查**：在后端选择前进行兼容性检查，避免运行时错误。
-  - **透明降级**：降级策略对用户透明，确保应用稳定性。
-  - **优雅错误处理**：后端初始化失败时使用 `return` 而非 `GGML_ABORT`，避免应用崩溃。
-  - **多后端容错**：确保单个后端失败不影响其他后端的正常工作，提高系统鲁棒性。
-  - **JNI层保护**：通过 JNI 层的 n_gpu_layers=0 设置确保 CPU 后端始终可用作最后保障。
+Vulkan undefined symbol root cause：避免对上游 `ggml` 目标强行注入 `GGML_USE_VULKAN=0`/`GGML_VULKAN=0` 的 `target_compile_definitions`；否则会使 `#ifdef GGML_USE_VULKAN` 在 `ggml-backend-reg.cpp` 中被错误触发，但链接阶段未引入 `ggml-vulkan`，导致 `undefined symbol: ggml_backend_vk_reg`。
+
+运行时验证（补充：日志重定向与初始化顺序）
+- 日志重定向：JNI 在早期通过 dup/pipe 将 stdout/stderr 重定向至 Android logcat（英文注释），确保 native 日志可见；错误发生在初始化之前时，LOGE 仍能捕获。
+- 初始化顺序：先调用 `llama_backend_init()` 完成后端注册基础设施，再执行一次性 CPU/KleidiAI 能力快照打印（避免未初始化情况下调用 ggml 检测 API）；最后根据后端偏好与版本闸门决定是否加载 GPU 后端。
+- 关键英文日志示例：
+  - "[BACKEND] Starting backend initialization..."
+  - "[BACKEND] Backend initialization completed"
+  - "[CAPS] ---- Build-time (compiler macros) ----"
+  - "[CPU] runtime features -> neon=<0|1>, dotprod=<0|1>, sve=<0|1>, sve2=<0>"
 
 ---
 
-构建优化与注意事项（本次调研）
-- **NDK版本统一管理**：
-  - **版本标准化**：所有模块统一使用 NDK 28.2.13676358 版本
-  - **配置位置**：
-    - `gradle.properties` 中设置全局默认版本：`android.ndkVersion=28.2.13676358`
-    - `app/build.gradle` 中显式指定：`ndkVersion = "28.2.13676358"`
-    - `libs/llamacpp-jni/build.gradle` 中保持一致：`ndkVersion "28.2.13676358"`
-  - **优势**：避免不同模块间的 NDK 版本冲突，确保构建环境一致性
-  - **注意事项**：升级 NDK 版本时需同步更新所有模块配置
-- **ABI构建重复现象**：在构建过程中可能出现每个ABI架构被构建两次的现象（如arm64-v8a-2、armeabi-v7a-2等），这是Gradle增量构建机制的正常行为，通常由以下原因导致：
-  - Gradle缓存机制：当检测到配置变更或依赖更新时，会触发重新构建。
-  - CMake配置变更：CMake参数或编译选项的变化会导致重新配置和构建。
-  - 并行构建优化：Gradle可能为了优化构建性能而进行多次构建尝试。
-- **影响评估**：ABI重复构建不会影响最终的构建结果和应用功能，仅会增加构建时间，属于正常的构建系统行为。
-- **最佳实践**：
-  - 使用 ./gradlew clean 清理缓存可以减少重复构建的概率。
-  - 避免频繁修改CMake配置参数，减少不必要的重新配置。
-  - 监控构建日志中的警告信息，及时清理不必要的编译参数传递。
+KleidiAI 头文件路径与 CMake 集成（本次修复）
+- 症状：使用 ninja -v 编译 <mcfile name="kernels.cpp" path="libs/llama.cpp-master/ggml/src/ggml-cpu/kleidiai/kernels.cpp"></mcfile> 报错找不到专用内核头（例如 "kai_matmul_clamp_f32_bf16p2vlx2_bf16p2vlx2_2vlx2vl_sme2_mopa.h"），英文错误示例："fatal error: '...mopa.h' file not found"。
+- 根因：CMake 未将 KleidiAI ukernels/matmul 子目录加入 ggml-cpu 目标的 include 搜索路径，导致 kernels.cpp 顶部 include 的专用内核头无法解析。
+- 解决策略：
+  1) 仅对 ggml-cpu 目标追加 target_include_directories，避免全局污染；保持第三方源码不改动。
+  2) 覆盖两个稳定的包含根：kai/ukernels/matmul/pack 以及具体的 matmul_clamp_* 子目录；针对 bf16 内核，额外加入 kai/ukernels/matmul/matmul_clamp_fp32_bf16p_bf16 目录，确保能解析 bf16 头。
+  3) 建议用条件包裹（例如启用 KleidiAI 时才生效），避免未启用 KleidiAI 的冗余 include。
+- 实施位置：
+  - 在 <mcfile name="CMakeLists.txt" path="libs/llamacpp-jni/src/main/cpp/CMakeLists.txt"></mcfile> 中，ggml-cpu 目标创建后通过 target_include_directories 注入下列目录（示例）：
+    - D:/yilei.wang/StarLocalRAG/libs/kleidiai/kai/ukernels/matmul/pack
+    - D:/yilei.wang/StarLocalRAG/libs/kleidiai/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p
+    - D:/yilei.wang/StarLocalRAG/libs/kleidiai/kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi4c32p
+    - D:/yilei.wang/StarLocalRAG/libs/kleidiai/kai/ukernels/matmul/matmul_clamp_fp32_bf16p_bf16
+  - 依据 <mcfile name="kernels.cpp" path="libs/llama.cpp-master/ggml/src/ggml-cpu/kleidiai/kernels.cpp"></mcfile> 顶部 include 的内核头做最小集合覆盖，避免过度添加目录。
+- 构建验证：
+  - 执行 ninja -v -C <.cxx/Debug/.../arm64-v8a> llamacpp_jni 成功，产出 libllamacpp_jni.so；x86_64 同样产出。
+  - 关键英文日志示例：
+    - "[KLEIDIAI] Added ukernels include paths to target ggml-cpu"
+    - "[BUILD] Missing KleidiAI header resolved by target-specific include directories"
+- 链接风险排查：
+  - 核对 ggml-cpu 与 KleidiAI 顶层 CMake，确认 bf16 内核源码（kai_matmul_clamp_f32_bf16p2vlx2_..._sme2_mopa.c）已纳入编译，避免仅头文件可见但缺少实现导致 undefined reference。
+- 最佳实践与注意：
+  - 使用 target_include_directories 而非全局 include_directories，提高可维护性与可观测性。
+  - 避免在头文件中依赖仓库根相对路径；优先通过 include 路径解析。
+  - 诊断优先用 "ninja -v" 观察实际编译命令，确认存在预期的 -I<kleidiai/...> 路径。
 
-构建与ABI精简（本次实现）
-- 目标：仅保留 64 位架构，减少包体与构建时间，同时统一原生库管理策略。
-- ABI 策略：
-  - App 模块与 `libs/llamacpp-jni` 仅保留 `arm64-v8a` 与 `x86_64`（移除 `armeabi-v7a` 与 `x86`）。
-  - `app/build.gradle` 中的 `defaultConfig.ndk.abiFilters` 设置为 `['arm64-v8a','x86_64']`；`packagingOptions.jniLibs.keepDebugSymbols` 同步为这两个架构。
-  - `libs/llamacpp-jni/build.gradle` 的 `ndk.abiFilters` 同步为 `['arm64-v8a','x86_64']`。
-- SO 管理策略变更：
-  - 不再将任何库的 .so 复制到 `app/src/main/jniLibs/`；各模块自行管理自己的 .so（AAR 中自带），与当前 `llamacpp-jni` 的做法保持一致。
-  - `libs/tokenizers-jni/build.gradle`：复制目标改为模块自身 `src/main/jniLibs/<abi>/`，并仅在构建时复制 `arm64-v8a` 与 `x86_64`；不再执行 `armeabi-v7a`、`x86` 的复制任务。
-- 清理脚本调整：
-  - 顶层 `build.gradle` 的 `clean` 任务不再删除 `app/src/main/jniLibs/`，该目录预留用于未来第三方 SO 存放。
-- 影响与收益：
-  - 降低 APK 体积与构建耗时，避免 32 位架构兼容负担。
-  - 提升模块化与封装性：各库模块自带其 SO，应用无需人工汇聚。
+Windows 构建命令建议
+- 快速验证 JNI：在 .cxx/Debug/<hash>/<abi> 目录执行：ninja -v -C <dir> llamacpp_jni
+- Debug APK：./gradlew :app:assembleDebug -PKEYPSWD=abc-1234 --info --stacktrace
+- Release APK：./gradlew :app:assembleRelease -PKEYPSWD=abc-1234 --info --stacktrace
+
+---
+
+CMake（JNI 构建脚本）优化补充说明（此次变更汇总，保持行为不变）
+- 预检查增强：在 ENABLE_VULKAN_BACKEND=ON 时，新增对 vulkan.hpp（VULKAN_HPP_DIR / Vulkan_INCLUDE_DIRS / VULKAN_SDK/Include）与 glslc 的健壮性检测；缺失时仅禁用 Vulkan 后端，不中断整体构建（英文日志）。
+- 生成器与特性探测：使用上游 vulkan-shaders 生成器（ExternalProject），通过 glslc 探测 cooperative_matrix / cooperative_matrix2 / integer_dot_product / bfloat16 支持并转递对应 GGML_VULKAN_*_GLSLC_SUPPORT 宏。
+- 可执行后缀：改为 if(CMAKE_HOST_WIN32) 判定 .exe 后缀，替代生成器表达式，提升可读性与稳定性。
+- 增量构建：注释 BUILD_ALWAYS TRUE，保持 Release 构建但避免强制每次重编生成器，改善构建效率。
+- 目标注入：在发现 VULKAN_HPP_INCLUDE_DIR 时，分别对 ggml-vulkan 与 JNI 目标注入 include 路径；启用 Vulkan 时仅对 JNI 目标注入 GGML_USE_VULKAN/GGML_VULKAN 宏用于运行时日志标识。
+- Debug 配置：保持 Debug 仍为 O3，不作修改。
+- 构建校验：已在 Windows 上执行 .\\gradlew :app:assembleDebug -PKEYPSWD=abc-1234，arm64-v8a 与 x86_64 ABI 构建通过，产物生成成功。

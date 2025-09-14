@@ -4,3 +4,6 @@
 [submodule "libs/tokenizers-rust"]
 	path = libs/tokenizers-rust
 	url = git@github.com:huggingface/tokenizers.git
+[submodule "libs/kleidiai"]
+	path = libs/kleidiai
+	url = git@github.com:ARM-software/kleidiai.git

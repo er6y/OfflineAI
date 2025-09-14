@@ -42,9 +42,10 @@ import java.io.File;
 public class SettingsFragment extends Fragment {
     private static final String TAG = "SettingsFragment";
     
-    // Backend preference options (hardcoded to avoid resource file complexity)
-    private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan"};
-    private static final String[] BACKEND_VALUES = {"CPU", "VULKAN"};
+    // Backend preference options: expose CPU, Vulkan and KleidiAI-SME in UI
+    // English: Select 'KleidiAI-SME' to toggle SME ON in JNI via GGML_KLEIDIAI_SME=1
+    private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan", "KleidiAI-SME"};
+    private static final String[] BACKEND_VALUES = {"CPU", "VULKAN", "KLEIDIAI-SME"};
     
     // UI组件
     private SeekBar seekBarChunkSize;
@@ -524,6 +525,14 @@ public class SettingsFragment extends Fragment {
             int selectedIndex = spinnerUseGpu.getSelectedItemPosition();
             String backendPreference = (selectedIndex >= 0 && selectedIndex < BACKEND_VALUES.length) ? 
                 BACKEND_VALUES[selectedIndex] : "CPU";
+            // English logs for backend selection intent
+            if ("KLEIDIAI-SME".equals(backendPreference)) {
+                LogManager.logI(TAG, "Backend selected: KLEIDIAI-SME (SME will be toggled ON in JNI)");
+            } else if ("VULKAN".equals(backendPreference)) {
+                LogManager.logI(TAG, "Backend selected: VULKAN (Vulkan GPU path will be attempted)");
+            } else {
+                LogManager.logI(TAG, "Backend selected: CPU (CPU path; KleidiAI microkernels if compiled)");
+            }
             
             // ONNX引擎设置获取已移除
             
@@ -764,15 +773,23 @@ public class SettingsFragment extends Fragment {
      */
     public static String getBackendPreference(Context context) {
         String backendPreference = ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
-        // Compatibility: map deprecated CANN to CPU
-        if ("CANN".equals(backendPreference)) {
-            LogManager.logW(TAG, "Detected deprecated backend 'CANN' in config. Using 'CPU' instead.");
+        // Compatibility: map deprecated values to CPU and write back
+        if ("CANN".equals(backendPreference)
+                || "OPENCL".equals(backendPreference)
+                || "BLAS".equals(backendPreference)
+                || "KLEIDIAI".equals(backendPreference)
+                || "KLEIDIAI-SME".equals(backendPreference)) {
+            LogManager.logW(TAG, "Deprecated or hidden backend '" + backendPreference + "' detected. Falling back to 'CPU' and updating config.");
             backendPreference = "CPU";
             ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
         }
-        // 验证后端偏好值是否有效，无效则使用CPU
+        // Validate value
         for (String validValue : BACKEND_VALUES) {
             if (validValue.equals(backendPreference)) {
+                if ("KLEIDIAI-SME".equals(backendPreference)) {
+                    // English: KLEIDIAI-SME is valid and will toggle SME ON at JNI side
+                    LogManager.logD(TAG, "KLEIDIAI-SME backend is valid; SME will be toggled ON in JNI");
+                }
                 return backendPreference;
             }
         }

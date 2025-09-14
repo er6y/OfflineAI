@@ -272,6 +272,8 @@ public class LlamaCppInference {
             case "BLAS":
             case "OPENCL":
             case "CANN":
+            case "KLEIDIAI":
+            case "KLEIDIAI-SME":
                 Log.i(TAG, "Setting backend preference to: " + normalizedPreference);
                 set_backend_preference(normalizedPreference);
                 break;

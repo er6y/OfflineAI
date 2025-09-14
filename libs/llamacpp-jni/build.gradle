@@ -1,5 +1,15 @@
 apply plugin: 'com.android.library'
 
+// Resolve VULKAN_HPP_DIR from VULKAN_SDK for CMake (if available)
+// NOTE: We intentionally do not rely on global include directories.
+//       We pass CMake argument per-target to keep dependencies explicit.
+def vulkanSdkEnv = System.getenv('VULKAN_SDK')
+if (vulkanSdkEnv) {
+    println "CMake: Will pass VULKAN_HPP_DIR=${vulkanSdkEnv}/Include (from VULKAN_SDK)"
+} else {
+    println "CMake: VULKAN_SDK not set; will rely on Vulkan-Headers or CMake discovery for vulkan.hpp"
+}
+
 // Vulkan 着色器预构建任务（默认禁用，避免与 CMake ExternalProject 重复生成导致头/源不一致）
 // 如需使用 Gradle 侧生成，请以 -PUSE_GRADLE_VK_SHADERS=true 显式开启
 def useGradleVkShaders = project.hasProperty('USE_GRADLE_VK_SHADERS') && project.property('USE_GRADLE_VK_SHADERS').toString().toBoolean()
@@ -80,6 +90,11 @@ android {
             cmake {
                 cppFlags "-std=c++17 -frtti -fexceptions"
                 arguments "-DANDROID_STL=c++_static", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_USE_VULKAN=1", "-DGGML_VULKAN=ON", "-DANDROID_PLATFORM=android-28"
+                if (vulkanSdkEnv) {
+                    // Pass Vulkan-Hpp include path down to CMake for consistent header discovery
+                    println "CMake: defaultConfig passing -DVULKAN_HPP_DIR=${vulkanSdkEnv}/Include"
+                    arguments "-DVULKAN_HPP_DIR=${vulkanSdkEnv}/Include"
+                }
             }
         }
     }
@@ -94,14 +109,23 @@ android {
                 cmake {
                     cppFlags "-std=c++17 -frtti -fexceptions -O3 -DNDEBUG"
                     arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_VULKAN=ON", "-DGGML_USE_VULKAN=1", "-DANDROID_PLATFORM=android-28"
+                    if (vulkanSdkEnv) {
+                        println "CMake: release passing -DVULKAN_HPP_DIR=${vulkanSdkEnv}/Include"
+                        arguments "-DVULKAN_HPP_DIR=${vulkanSdkEnv}/Include"
+                    }
                 }
             }
         }
         debug {
             externalNativeBuild {
                 cmake {
-                    cppFlags "-std=c++17 -frtti -fexceptions -O3 -DNDEBUG"
-                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Release", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_VULKAN=ON", "-DGGML_USE_VULKAN=1", "-DGGML_VULKAN_DEBUG=1", "-DANDROID_PLATFORM=android-28"
+                    // 调整为 Debug：开启符号、移除 Release 优化，使用 Debug 构建目录
+                    cppFlags "-std=c++17 -frtti -fexceptions -g"
+                    arguments "-DANDROID_STL=c++_static", "-DCMAKE_BUILD_TYPE=Debug", "-DGGML_F16C=0", "-DGGML_USE_F16C=0", "-DGGML_VULKAN=ON", "-DGGML_USE_VULKAN=1", "-DGGML_VULKAN_DEBUG=1", "-DANDROID_PLATFORM=android-28"
+                    if (vulkanSdkEnv) {
+                        println "CMake: debug passing -DVULKAN_HPP_DIR=${vulkanSdkEnv}/Include"
+                        arguments "-DVULKAN_HPP_DIR=${vulkanSdkEnv}/Include"
+                    }
                 }
             }
         }

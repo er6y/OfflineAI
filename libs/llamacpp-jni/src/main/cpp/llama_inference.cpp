@@ -15,15 +15,27 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <sys/auxv.h>
+#include <fstream>
+#include <sstream>
 #include "llama.h"
 #include "common.h"
 #include "vulkan_version_patch.h"
 #include "vulkan_runtime_detector.h"
 #include "ggml-backend.h"
- 
+#include "ggml-backend-impl.h" // for ggml_backend_register()
+#if defined(GGML_USE_VULKAN) || defined(GGML_VULKAN)
+#include "ggml-vulkan.h" // for ggml_backend_vk_reg()
+#endif
+// Probes for CPU features and KleidiAI build
+#include "ggml-cpu.h"
+#if defined(GGML_CPU_KLEIDIAI) || defined(GGML_USE_CPU_KLEIDIAI)
+#include "ggml-cpu/kleidiai/kleidiai.h"
+#endif
+
 // 在使用日志宏之前的前向声明，避免未声明标识符错误
 void call_log_manager_print(const char* message);
- 
+
 // JNI全局引用，用于调用LogManager.print方法
 static JavaVM* g_jvm = nullptr;
 static jclass g_log_manager_class = nullptr;
@@ -72,6 +84,81 @@ static jmethodID g_log_manager_print_method = nullptr;
     std::string formatted_message = std::string(buffer) + "\n"; \
     call_log_manager_print(formatted_message.c_str()); \
 } while(0)
+
+// One-shot CPU/KleidiAI capability logging (prints build-time macros and runtime features)
+static void log_cpu_kleidiai_capabilities_once() {
+    static std::once_flag once_flag_caps;
+    std::call_once(once_flag_caps, [](){
+        // Print build-time architecture macro summary
+        const char* arch =
+        #if defined(__aarch64__)
+            "aarch64";
+        #elif defined(__arm__)
+            "arm";
+        #elif defined(__x86_64__)
+            "x86_64";
+        #elif defined(__i386__)
+            "x86";
+        #else
+            "unknown";
+        #endif
+
+        // Print compiled-in KleidiAI status (based on compile-time macros)
+        bool kleidiai_compiled = false;
+        #if defined(GGML_CPU_KLEIDIAI) || defined(GGML_USE_CPU_KLEIDIAI)
+            kleidiai_compiled = true;
+        #endif
+
+        // Collect build-time ARM feature macros (presence implies 1)
+        int m_dotprod = 0;
+        #if defined(__ARM_FEATURE_DOTPROD)
+            m_dotprod = 1;
+        #endif
+        int m_fp16_vec = 0;
+        #if defined(__ARM_FEATURE_FP16_VECTOR_ARITHMETIC)
+            m_fp16_vec = 1;
+        #endif
+        int m_fp16_scalar = 0;
+        #if defined(__ARM_FEATURE_FP16_SCALAR_ARITHMETIC)
+            m_fp16_scalar = 1;
+        #endif
+        int m_neon = 0;
+        #if defined(__ARM_NEON)
+            m_neon = 1;
+        #endif
+        int m_aarch64 = 0;
+        #if defined(__aarch64__)
+            m_aarch64 = 1;
+        #endif
+        int m_sve = 0;
+        #if defined(__ARM_FEATURE_SVE)
+            m_sve = 1;
+        #endif
+        int m_sve2 = 0;
+        #if defined(__ARM_FEATURE_SVE2)
+            m_sve2 = 1;
+        #endif
+
+        // Runtime detection via ggml CPU feature probes
+        const bool has_neon  = ggml_cpu_has_neon();
+        const bool has_dp    = ggml_cpu_has_dotprod();
+        const bool has_sve_  = ggml_cpu_has_sve();
+        // NOTE: ggml does not expose ggml_cpu_has_sve2(); we only log SVE as a whole at runtime.
+        const bool has_sve2_ = 0;
+
+        // Print build-time macros
+        FORCE_LOG("llama-android.cpp", "[CAPS] ---- Build-time (compiler macros) ----");
+        FORCE_LOG("llama-android.cpp", "[CAPS] ARCH=%s", arch);
+        FORCE_LOG("llama-android.cpp", "[CAPS] __ARM_FEATURE_DOTPROD=%d, __ARM_FEATURE_FP16_VECTOR_ARITHMETIC=%d, __ARM_FEATURE_FP16_SCALAR_ARITHMETIC=%d", m_dotprod, m_fp16_vec, m_fp16_scalar);
+        FORCE_LOG("llama-android.cpp", "[CAPS] __ARM_NEON=%d, __aarch64__=%d, __ARM_FEATURE_SVE=%d, __ARM_FEATURE_SVE2=%d", m_neon, m_aarch64, m_sve, m_sve2);
+
+        // Print compiled-in KleidiAI state
+        FORCE_LOG("llama-android.cpp", "[KLEIDIAI] compiled-in: %s", kleidiai_compiled ? "true" : "false");
+
+        // Print runtime CPU features
+        FORCE_LOG("llama-android.cpp", "[CPU] runtime features -> neon=%d, dotprod=%d, sve=%d, sve2=%d", has_neon, has_dp, has_sve_, has_sve2_);
+    });
+}
 
 // 全局停止标志，用于中断推理
 static std::atomic<bool> g_should_stop{false};
@@ -444,6 +531,15 @@ static bool configure_backend_for_model(const std::string& backend, llama_model_
         FORCE_LOG(TAG, "[BACKEND] Vulkan backend selected: n_gpu_layers=-1 (all layers)");
         return true; // Load GPU backends
         
+    } else if (backend == "KLEIDIAI") {
+        // KleidiAI preference means: prefer CPU backend with Arm-optimized microkernels
+        // Equivalent to CLI "--device none" while keeping GPU backends compiled-in.
+        model_params.n_gpu_layers = 0;
+        FORCE_LOG(TAG, "[BACKEND] KleidiAI preference selected -> forcing CPU-only path (n_gpu_layers=0)");
+        FORCE_LOG(TAG, "[BACKEND] Note: Vulkan backend remains compiled and loadable, but will not be used for this session");
+        // Important: KleidiAI runtime performance depends on build flag GGML_CPU_KLEIDIAI=ON
+        return false; // Do not load GPU backends for this model
+        
     } else if (backend == "OPENCL" || backend == "BLAS" || backend == "CANN") {
         // Other backends: TBD implementation, fallback to CPU for now
         model_params.n_gpu_layers = 0;
@@ -481,10 +577,92 @@ static int map_backend_preference_to_gpu_layers(const char* backend_preference) 
 
 
 
+// === CPU info logging helper (English logs) ===
+static void log_cpu_info_brief() {
+    // Print compile-time architecture
+#if defined(__aarch64__)
+    const char* arch = "aarch64";
+#elif defined(__arm__)
+    const char* arch = "arm";
+#elif defined(__x86_64__)
+    const char* arch = "x86_64";
+#elif defined(__i386__)
+    const char* arch = "x86";
+#else
+    const char* arch = "unknown";
+#endif
+    FORCE_LOG(TAG, "[CPU] arch: %s", arch);
+
+    // Read a brief summary from /proc/cpuinfo (model/hardware/features)
+    std::ifstream fin("/proc/cpuinfo");
+    if (fin.good()) {
+        std::string line;
+        std::string model, hardware, features;
+        int lines_read = 0;
+        while (std::getline(fin, line) && lines_read < 200) {
+            ++lines_read;
+            if (line.rfind("model name", 0) == 0 || line.rfind("Processor", 0) == 0) {
+                model = line;
+            } else if (line.rfind("Hardware", 0) == 0) {
+                hardware = line;
+            } else if (line.rfind("Features", 0) == 0 || line.rfind("flags", 0) == 0) {
+                features = line;
+            }
+        }
+        if (!model.empty())    FORCE_LOG(TAG, "[CPU] %s", model.c_str());
+        if (!hardware.empty()) FORCE_LOG(TAG, "[CPU] %s", hardware.c_str());
+        if (!features.empty()) FORCE_LOG(TAG, "[CPU] %s", features.c_str());
+    } else {
+        FORCE_LOG(TAG, "[CPU] /proc/cpuinfo not accessible");
+    }
+
+    // Read auxv hwcap values (numeric) and optionally decode well-known bits
+#ifdef AT_HWCAP
+    unsigned long hwcap = getauxval(AT_HWCAP);
+#else
+    unsigned long hwcap = 0;
+#endif
+#ifdef AT_HWCAP2
+    unsigned long hwcap2 = getauxval(AT_HWCAP2);
+#else
+    unsigned long hwcap2 = 0;
+#endif
+    FORCE_LOG(TAG, "[CPU] HWCAP: 0x%lx HWCAP2: 0x%lx", hwcap, hwcap2);
+
+#if defined(__aarch64__)
+    // Decode aarch64-relevant bits if headers expose them
+#ifdef HWCAP_ASIMDDP
+    const char* has_asimddp = (hwcap & HWCAP_ASIMDDP) ? "yes" : "no";
+#else
+    const char* has_asimddp = "unknown";
+#endif
+#ifdef HWCAP2_SME
+    const char* has_sme_aux = (hwcap2 & HWCAP2_SME) ? "yes" : "no";
+#else
+    const char* has_sme_aux = "unknown";
+#endif
+    FORCE_LOG(TAG, "[CPU] auxv -> asimddp(dotprod)=%s sme=%s", has_asimddp, has_sme_aux);
+#endif
+}
+
 // 新增：带后端偏好参数的模型加载方法
 extern "C"
 JNIEXPORT jlong JNICALL
 Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1backend(JNIEnv *env, jobject, jstring filename, jstring backend_preference) {
+    // Ensure llama/ggml logs are captured early (Android log + file sink)
+    llama_log_set(log_callback, NULL);
+
+#if defined(GGML_USE_VULKAN)
+    FORCE_LOG(TAG, "[VULKAN] compiled-in: yes");
+#else
+    FORCE_LOG(TAG, "[VULKAN] compiled-in: no");
+#endif
+#ifdef GGML_VULKAN
+    FORCE_LOG(TAG, "[VULKAN] GGML_VULKAN macro is defined (legacy)");
+#endif
+    // Proactively probe Vulkan runtime and print summary
+    bool runtime_ok = is_vulkan_suitable_for_llamacpp();
+
     // 获取后端偏好字符串
     const char* backend_pref_cstr = env->GetStringUTFChars(backend_preference, nullptr);
     if (!backend_pref_cstr) {
@@ -495,6 +673,39 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1backend(JNIE
     
     std::string backend(backend_pref_cstr);
     FORCE_LOG(TAG, "[BACKEND] Loading model with backend preference: %s", backend.c_str());
+    // Control SME microkernels via env before configuring backends
+    if (backend == "KLEIDIAI-SME") {
+        // Enable SME microkernels for KleidiAI-capable builds
+        setenv("GGML_KLEIDIAI_SME", "1", 1); // Enable SME
+        FORCE_LOG(TAG, "[BACKEND] SME microkernels enabled via GGML_KLEIDIAI_SME=1");
+    } else if (backend == "CPU") {
+        // CPU implies KleidiAI path with SME disabled
+        setenv("GGML_KLEIDIAI_SME", "0", 1); // Disable SME
+        FORCE_LOG(TAG, "[BACKEND] SME microkernels disabled via GGML_KLEIDIAI_SME=0 (CPU mode)");
+    } else {
+        // Do not touch env for other backends; default behavior applies
+        FORCE_LOG(TAG, "[BACKEND] SME env untouched for backend: %s", backend.c_str());
+    }
+
+    // === KleidiAI/CPU feature probes (English logs) ===
+#if defined(GGML_CPU_KLEIDIAI) || defined(GGML_USE_CPU_KLEIDIAI)
+    FORCE_LOG(TAG, "[KLEIDIAI] compiled-in: yes");
+#else
+    FORCE_LOG(TAG, "[KLEIDIAI] compiled-in: no");
+#endif
+    // Print CPU info snapshot to help judge runtime feature support
+    log_cpu_info_brief();
+    {
+        int has_dotprod = ggml_cpu_has_dotprod();
+        int has_sme     = ggml_cpu_has_sme();
+        FORCE_LOG(TAG, "[CPU] features -> dotprod=%d sme=%d", has_dotprod, has_sme);
+    }
+#if defined(GGML_CPU_KLEIDIAI) || defined(GGML_USE_CPU_KLEIDIAI)
+    {
+        ggml_backend_buffer_type_t bt = ggml_backend_cpu_kleidiai_buffer_type();
+        FORCE_LOG(TAG, "[KLEIDIAI] buffer type available: %s", bt ? "yes" : "no");
+    }
+#endif
     
     // 释放字符串资源
     env->ReleaseStringUTFChars(backend_preference, backend_pref_cstr);
@@ -518,6 +729,12 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1backend(JNIE
     if (!already_loaded) {
         FORCE_LOG(TAG, "[BACKEND] Loading all available backends...");
         
+#if defined(GGML_USE_VULKAN) || defined(GGML_VULKAN)
+        // Register statically-linked Vulkan backend before dynamic discovery
+        FORCE_LOG(TAG, "[BACKEND] Register Vulkan (static) via ggml_backend_vk_reg() before ggml_backend_load_all()");
+        ggml_backend_register(ggml_backend_vk_reg());
+#endif
+        
         // Use unified backend loading - this loads all compiled backends
         ggml_backend_load_all();
         
@@ -531,12 +748,25 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1backend(JNIE
             auto dev = ggml_backend_dev_get(i);
             const char * dev_name = ggml_backend_dev_name(dev);
             int dev_type_val = (int) ggml_backend_dev_type(dev);
-            FORCE_LOG(TAG, "[BACKEND] Device #%zu: name=%s, type=%d", i, dev_name ? dev_name : "(null)", dev_type_val);
-            if (dev_name && (strstr(dev_name, "Vulkan") || strstr(dev_name, "vulkan"))) {
+            // Fix: determine Vulkan by backend registry name, not device name
+            ggml_backend_reg_t dev_reg = ggml_backend_dev_backend_reg(dev);
+            const char * reg_name = ggml_backend_reg_name(dev_reg);
+            FORCE_LOG(TAG, "[BACKEND] Device #%zu: name=%s, type=%d, backend=%s", i,
+                      dev_name ? dev_name : "(null)",
+                      dev_type_val,
+                      reg_name ? reg_name : "(null)");
+            if (reg_name && (strcmp(reg_name, "Vulkan") == 0 || strcmp(reg_name, "vulkan") == 0)) {
                 found_vulkan = true;
             }
         }
-        FORCE_LOG(TAG, "[BACKEND] Vulkan device available: %s", found_vulkan ? "yes" : "no");
+        FORCE_LOG(TAG, "[BACKEND] Vulkan device available (by backend name): %s", found_vulkan ? "yes" : "no");
+        
+        // If Vulkan was explicitly requested but runtime unsuitable or no device, force CPU fallback
+        if (backend == std::string("VULKAN") && (!found_vulkan || !runtime_ok)) {
+            model_params.n_gpu_layers = 0; // force CPU-only
+            should_load_gpu_backends = false;
+            FORCE_LOG(TAG, "[BACKEND] Vulkan requested but unavailable/unsuitable -> fallback to CPU (n_gpu_layers=0)");
+        }
         
         if (!should_load_gpu_backends) {
             FORCE_LOG(TAG, "[BACKEND] Note: GPU backends loaded but will be avoided due to safety settings");
@@ -1204,6 +1434,9 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1init(JNIEnv *env, jobj
     
     // 初始化后端
     llama_backend_init();
+
+    // Print CPU/KleidiAI capabilities once for diagnostics (build-time macros + runtime features)
+    log_cpu_kleidiai_capabilities_once();
     
     // 跳过在此处加载所有后端，避免在 use_gpu=false 时触发 Vulkan 加载
     FORCE_LOG(TAG, "[BACKEND] Skipping ggml_backend_load_all(); will load backends on-demand if GPU is requested");

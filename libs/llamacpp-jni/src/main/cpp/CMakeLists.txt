@@ -27,12 +27,15 @@ if(ANDROID)
     # 根据ABI设置优化选项
     if(ANDROID_ABI STREQUAL "arm64-v8a")
         # ARM64架构优化 - ARM64本身支持NEON，启用fp16指令
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}  -march=armv8-a+fp+simd+fp16 -fno-limit-debug-info")
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv8-a+fp+simd+fp16")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}  -march=armv8.2-a+fp16+dotprod -fno-limit-debug-info")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv8.2-a+fp16+dotprod")
         # 启用ARM的fp16支持
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DGGML_USE_FP16_VA=1 -D__ARM_FEATURE_FP16_VECTOR_ARITHMETIC=1")
         set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DGGML_USE_FP16_VA=1 -D__ARM_FEATURE_FP16_VECTOR_ARITHMETIC=1")
-        message(STATUS "Android ${ANDROID_ABI} - ARM fp16 instructions enabled")
+        # 启用dotprod（KleidiAI/ggml 将据此纳入 dotprod 内核与路径）
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DGGML_USE_DOTPROD=1")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DGGML_USE_DOTPROD=1")
+        message(STATUS "Android ${ANDROID_ABI} - ARM fp16 + dotprod instructions enabled")
     elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
         # ARMv7架构优化 - 检查是否支持fp16
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}  -march=armv7-a -mfpu=neon-fp16")
@@ -97,23 +100,19 @@ if(NOT DEFINED BUILD_TARGET)
 endif()
 
 # Try to include build-info.cmake from llama.cpp if it exists
-set(BUILD_INFO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../../../llama.cpp-master/cmake/build-info.cmake")
+set(BUILD_INFO_CMAKE_PATH "${LLAMA_CPP_DIR}/cmake/build-info.cmake")
 if(EXISTS ${BUILD_INFO_CMAKE_PATH})
     include(${BUILD_INFO_CMAKE_PATH})
 endif()
 
-# Create build-info.cpp file with build information
-set(BUILD_INFO_FILE "${CMAKE_CURRENT_BINARY_DIR}/build-info.cpp")
-file(WRITE ${BUILD_INFO_FILE}
-    "#include <cstdint>\n"
-    "int LLAMA_BUILD_NUMBER = ${BUILD_NUMBER};\n"
-    "const char * LLAMA_COMMIT = \"${BUILD_COMMIT}\";\n"
-    "const char * LLAMA_COMPILER = \"${BUILD_COMPILER}\";\n"
-    "const char * LLAMA_BUILD_TARGET = \"${BUILD_TARGET}\";\n"
-)
-
-# Add the generated file to the sources
-list(APPEND LLAMA_SOURCES ${BUILD_INFO_FILE})
+# Map build info for upstream common/build-info.cpp (no local build-info.cpp here)
+if(NOT DEFINED LLAMA_BUILD_NUMBER)
+    set(LLAMA_BUILD_NUMBER ${BUILD_NUMBER})
+endif()
+if(NOT DEFINED LLAMA_BUILD_COMMIT)
+    set(LLAMA_BUILD_COMMIT ${BUILD_COMMIT})
+endif()
+# Upstream common/build-info.cpp.in also uses BUILD_COMPILER and BUILD_TARGET which we already set via build-info.cmake
 
 # 包含llama.cpp头文件
 include_directories("${LLAMA_CPP_DIR}")
@@ -133,19 +132,25 @@ set(GGML_USE_OPENCL OFF CACHE BOOL "Enable OpenCL backend" FORCE)
 if(NOT DEFINED GGML_USE_VULKAN)
     set(GGML_USE_VULKAN ON CACHE BOOL "Enable Vulkan backend")
 endif()
-if(NOT DEFINED GGML_VULKAN)
-    set(GGML_VULKAN ON CACHE BOOL "Enable Vulkan runtime")
-endif()
+# NOTE(maintainability): Removed duplicated default block for GGML_USE_VULKAN (runtime)
+# if(NOT DEFINED GGML_USE_VULKAN)
+#     set(GGML_USE_VULKAN ON CACHE BOOL "Enable Vulkan runtime")
+# endif()
 set(GGML_USE_CUDA OFF CACHE BOOL "Enable CUDA backend" FORCE)
 set(GGML_NO_ACCELERATE ON CACHE BOOL "Disable other acceleration methods" FORCE)
 message(STATUS "GGML_USE_VULKAN: ${GGML_USE_VULKAN}, GGML_VULKAN: ${GGML_VULKAN}")
+# Alias: keep one switch name in logs/conditions (English log only)
+set(ENABLE_VULKAN_BACKEND ${GGML_USE_VULKAN})
+message(STATUS "ENABLE_VULKAN_BACKEND (alias of GGML_USE_VULKAN): ${ENABLE_VULKAN_BACKEND}")
 
 # 处理Vulkan相关的CMake版本兼容性问题
 # 如果启用Vulkan，需要确保CMake版本满足要求
 if(GGML_USE_VULKAN)
-    # Vulkan backend需要CMake 3.19+，当前版本已满足
+    # Vulkan backend requires CMake 3.19+. If not satisfied, gracefully downgrade to CPU-only.
     if(CMAKE_VERSION VERSION_LESS "3.19")
-        message(FATAL_ERROR "Vulkan backend requires CMake 3.19 or higher, current version: ${CMAKE_VERSION}")
+        message(WARNING "Vulkan backend requires CMake 3.19 or higher (current: ${CMAKE_VERSION}). Disabling Vulkan backend and building CPU only.")
+        set(GGML_USE_VULKAN OFF)
+        set(ENABLE_VULKAN_BACKEND OFF)
     endif()
     
     # 设置Vulkan相关的CMake策略
@@ -184,8 +189,7 @@ if(GGML_USE_VULKAN)
             message(STATUS "Using NDK Vulkan headers: ${Vulkan_INCLUDE_DIRS}")
         endif()
         
-        # 添加Vulkan头文件路径
-        include_directories("${Vulkan_INCLUDE_DIRS}")
+        # Avoid global include_directories for Vulkan headers; use per-target target_include_directories instead (English logs only)
     else()
         # 非Android平台使用标准查找
         find_package(Vulkan COMPONENTS glslc)
@@ -194,6 +198,12 @@ if(GGML_USE_VULKAN)
             set(GGML_USE_VULKAN OFF CACHE BOOL "Enable Vulkan backend")
         endif()
     endif()
+endif()
+
+# Resolve ENABLE_VULKAN_BACKEND from GGML_USE_VULKAN (English logs only)
+if(NOT DEFINED ENABLE_VULKAN_BACKEND)
+    set(ENABLE_VULKAN_BACKEND ${GGML_USE_VULKAN})
+    message(STATUS "Resolve ENABLE_VULKAN_BACKEND=${ENABLE_VULKAN_BACKEND}")
 endif()
 
 # 根据架构设置指令集支持
@@ -214,8 +224,19 @@ set(GGML_USE_SYCL OFF CACHE BOOL "Enable SYCL backend" FORCE)
 set(GGML_USE_KOMPUTE OFF CACHE BOOL "Enable Kompute backend" FORCE)
 set(GGML_USE_NNAPI OFF CACHE BOOL "Enable NNAPI backend" FORCE)
 
+# Define upstream ggml integration switch early so it affects build graph
+# English note: Default OFF to use locally split ggml (ggml-base/ggml-cpu)
+option(USE_UPSTREAM_GGML "Use upstream ggml CMake (CPU/KleidiAI) and keep local Vulkan" OFF)
+message(STATUS "USE_UPSTREAM_GGML: ${USE_UPSTREAM_GGML}")
+# Force local ggml on Android path to avoid missing ggml::ggml-base target (English logs)
+if(USE_UPSTREAM_GGML)
+    message(WARNING "Forcing USE_UPSTREAM_GGML=OFF to use local ggml-base/ggml-cpu integration for JNI build")
+    set(USE_UPSTREAM_GGML OFF CACHE BOOL "Use upstream ggml CMake (CPU/KleidiAI) and keep local Vulkan" FORCE)
+endif()
+
 # 创建模块化的ggml库架构
 # 1. 创建ggml-base库（核心功能）
+if(NOT USE_UPSTREAM_GGML)
 set(GGML_BASE_SOURCES
     "${LLAMA_CPP_DIR}/ggml/src/ggml.c"
     "${LLAMA_CPP_DIR}/ggml/src/ggml.cpp"
@@ -245,6 +266,7 @@ target_compile_definitions(ggml-base PUBLIC
     GGML_VERSION="unknown"
     GGML_COMMIT="unknown"
     GGML_USE_CPU=1
+    GGML_USE_K_QUANTS=1
 )
 
 # 2. 创建ggml-cpu库
@@ -260,81 +282,223 @@ set(GGML_CPU_SOURCES
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/unary-ops.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/vec.cpp"
     "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/ops.cpp"
-    # 某些 x86 专用源码包含 AMX/IMMINTRIN 接口，原始仓库无条件加入并通过宏保护
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/amx/amx.cpp"
-    "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/amx/mmq.cpp"
+    # x86 AMX 源文件仅在 x86/x86_64 下加入，避免在 ARM 工具链无谓编译
+    # "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/amx/amx.cpp"
+    # "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/amx/mmq.cpp"
 )
-
-# 按架构补充 arch 特定实现
-if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
+# Guard x86 AMX sources by ABI (English note)
+if(ANDROID_ABI STREQUAL "x86_64" OR ANDROID_ABI STREQUAL "x86")
     list(APPEND GGML_CPU_SOURCES
-        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/quants.c"
-        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/arm/repack.cpp"
-    )
-elseif(ANDROID_ABI STREQUAL "x86_64" OR ANDROID_ABI STREQUAL "x86")
-    list(APPEND GGML_CPU_SOURCES
-        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/quants.c"
-        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/arch/x86/repack.cpp"
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/amx/amx.cpp"
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/amx/mmq.cpp"
     )
 endif()
 
+# === KleidiAI integration (arm64-v8a only) ===
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    set(ENABLE_KLEIDIAI ON)
+    # 追加 ggml KleidiAI glue 源（适配 ggml 与 KleidiAI ukernels）
+    list(APPEND GGML_CPU_SOURCES
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp"
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu/kleidiai/kernels.cpp"
+    )
+    # 使用本地 KleidiAI 子模块（libs/kleidiai）中的最小内核与打包实现（NEON + dotprod）
+    set(KLEIDIAI_SRC "${CMAKE_CURRENT_SOURCE_DIR}/../../../../kleidiai")
+    if(EXISTS "${KLEIDIAI_SRC}")
+        message(STATUS "KleidiAI: using local submodule at ${KLEIDIAI_SRC}")
+        list(APPEND GGML_CPU_SOURCES
+            # packers
+            "${KLEIDIAI_SRC}/kai/ukernels/matmul/pack/kai_lhs_quant_pack_qsi8d32p_f32.c"
+            "${KLEIDIAI_SRC}/kai/ukernels/matmul/pack/kai_rhs_pack_nxk_qsi4c32pscalef16_qsu4c32s16s0.c"
+            # optional NEON-specific packers to improve coverage
+            "${KLEIDIAI_SRC}/kai/ukernels/matmul/pack/kai_lhs_quant_pack_qsi8d32p_f32_neon.c"
+            # dotprod matmul variants (qsi8d32p x qsi4c32p)
+            "${KLEIDIAI_SRC}/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p1x4_qsi4c32p4x4_1x4_neon_dotprod.c"
+            "${KLEIDIAI_SRC}/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p1x8_qsi4c32p4x8_1x4x32_neon_dotprod.c"
+            "${KLEIDIAI_SRC}/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p/kai_matmul_clamp_f32_qsi8d32p4x4_qsi4c32p4x4_16x4_neon_dotprod.c"
+        )
+        set(HAVE_LOCAL_KLEIDIAI TRUE)
+    else()
+        message(WARNING "KleidiAI submodule not found at ${KLEIDIAI_SRC}; continuing without KleidiAI ukernels (CPU fallback)")
+        set(ENABLE_KLEIDIAI OFF)
+    endif()
+endif()
+
 add_library(ggml-cpu STATIC ${GGML_CPU_SOURCES})
-# 确保包含 ggml-cpu 目录头文件
-target_include_directories(ggml-cpu PUBLIC ggml-base
+
+# English note: enable generic-to-symbol fallback to satisfy K-quants symbols on ARM/Android when arch-specific quants are not compiled
+message(STATUS "ggml-cpu: Enabling GGML_CPU_GENERIC fallback (map *_generic -> expected symbols)")
+# This makes arch-fallback.h remap *_generic implementations to non-suffixed names (e.g., ggml_vec_dot_q4_K_q8_K)
+# avoiding undefined references when only ggml-cpu/quants.c is built
+# KleidiAI: also propagate GGML_USE_CPU_KLEIDIAI when enabled
+if(ENABLE_KLEIDIAI)
+    target_compile_definitions(ggml-cpu PRIVATE GGML_CPU_KLEIDIAI=1 GGML_USE_CPU_KLEIDIAI=1 GGML_USE_DOTPROD=1)
+endif()
+
+target_compile_definitions(ggml-cpu PRIVATE GGML_CPU_GENERIC=1)
+
+# 正确设置 ggml-cpu 的包含目录（不要将目标名作为包含目录）
+target_include_directories(ggml-cpu
     PRIVATE
         "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu"
         "${LLAMA_CPP_DIR}/ggml/src"
 )
+if(ENABLE_KLEIDIAI AND HAVE_LOCAL_KLEIDIAI)
+    target_include_directories(ggml-cpu PRIVATE "${KLEIDIAI_SRC}" "${KLEIDIAI_SRC}/kai")
+    # Add ukernels subdirectories so headers like kai_matmul_* can be found
+    target_include_directories(ggml-cpu PRIVATE "${KLEIDIAI_SRC}/kai/ukernels/matmul/pack")
+    target_include_directories(ggml-cpu PRIVATE "${KLEIDIAI_SRC}/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p")
+    # Add bf16 matmul headers directory to satisfy includes in kleidiai/kernels.cpp
+    target_include_directories(ggml-cpu PRIVATE "${KLEIDIAI_SRC}/kai/ukernels/matmul/matmul_clamp_fp32_bf16p_bf16p")
+endif()
 # 维护依赖顺序：ggml-cpu 依赖 ggml-base
 target_link_libraries(ggml-cpu PUBLIC ggml-base)
 
+# Create ggml interface alias for upstream llama compatibility  
+if(NOT TARGET ggml)
+    add_library(ggml INTERFACE)
+    # Propagate ggml include dirs to consumers (like upstream llama)
+    target_include_directories(ggml INTERFACE
+        "${LLAMA_CPP_DIR}/ggml/include"
+        "${LLAMA_CPP_DIR}/ggml/src"
+        "${LLAMA_CPP_DIR}/ggml/src/ggml-cpu"
+    )
+    # Link our local ggml components so transitive link works
+    target_link_libraries(ggml INTERFACE ggml-base ggml-cpu)
+    message(STATUS "Created ggml interface alias linking to ggml-base and ggml-cpu with include dirs")
+endif()
+
+# Provide imported namespace aliases for robustness when external code expects ggml::ggml-base or ggml::ggml
+if(NOT TARGET ggml::ggml-base)
+    add_library(ggml::ggml-base INTERFACE IMPORTED)
+    set_target_properties(ggml::ggml-base PROPERTIES
+        INTERFACE_LINK_LIBRARIES ggml-base
+        INTERFACE_INCLUDE_DIRECTORIES "$<BUILD_INTERFACE:${LLAMA_CPP_DIR}/ggml/include;${LLAMA_CPP_DIR}/ggml/src;${LLAMA_CPP_DIR}/ggml/src/ggml-cpu>"
+    )
+    message(STATUS "Created imported alias ggml::ggml-base -> ggml-base")
+endif()
+if(NOT TARGET ggml::ggml)
+    add_library(ggml::ggml INTERFACE IMPORTED)
+    set_target_properties(ggml::ggml PROPERTIES
+        INTERFACE_LINK_LIBRARIES ggml
+        INTERFACE_INCLUDE_DIRECTORIES "$<BUILD_INTERFACE:${LLAMA_CPP_DIR}/ggml/include;${LLAMA_CPP_DIR}/ggml/src;${LLAMA_CPP_DIR}/ggml/src/ggml-cpu>"
+    )
+    message(STATUS "Created imported alias ggml::ggml -> ggml")
+endif()
+endif()
+
+# Make upstream ggml module includes resolvable via CMAKE_MODULE_PATH (English log)
+list(APPEND CMAKE_MODULE_PATH "${LLAMA_CPP_DIR}")
+message(STATUS "CMAKE_MODULE_PATH += ${LLAMA_CPP_DIR} for ggml/cmake/common.cmake and cmake/common.cmake")
+# Load upstream cmake utilities required for compile flags/macros
+# 1) Include ggml's common first for ggml-specific helpers
+include("${LLAMA_CPP_DIR}/ggml/cmake/common.cmake")
+# 2) Then include llama's top-level common for llama_add_compile_flags used by src/CMakeLists.txt
+# Disabled to avoid include(ggml/cmake/common.cmake) via CMAKE_MODULE_PATH which may fail under AGP cmake
+# if(EXISTS "${LLAMA_CPP_DIR}/cmake/common.cmake")
+#     include("${LLAMA_CPP_DIR}/cmake/common.cmake")
+#     message(STATUS "Included llama top-level cmake/common.cmake (defines llama_add_compile_flags)")
+# endif()
+# 2b) If still missing, provide a local stub to avoid configuration failure
+if(NOT COMMAND llama_add_compile_flags)
+    function(llama_add_compile_flags)
+        # no-op: safe fallback for JNI build
+    endfunction()
+    message(STATUS "Defined local stub for llama_add_compile_flags (upstream not providing)")
+endif()
+
+# Add llama core library from upstream source (ensure this runs after common.cmake)
+add_subdirectory("${LLAMA_CPP_DIR}/src" "${CMAKE_CURRENT_BINARY_DIR}/llama-src")
+message(STATUS "Added upstream llama source from: ${LLAMA_CPP_DIR}/src")
+# 新增：引入上游 common 以提供 common_tokenize/common_batch_* 实现（English log only）
+add_subdirectory("${LLAMA_CPP_DIR}/common" "${CMAKE_CURRENT_BINARY_DIR}/llama-common")
+message(STATUS "Added upstream llama common from: ${LLAMA_CPP_DIR}/common")
+
 # 4. 如果启用Vulkan，创建ggml-vulkan库
 if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
-    # 确保核心库在编译时包含Vulkan后端注册代码
-    target_compile_definitions(ggml-base PUBLIC GGML_USE_VULKAN=1 GGML_VULKAN=1)
-
-    # 禁用预生成着色器路径，强制使用宿主生成器 (ExternalProject)
-
-    # ========== 生成 ggml-vulkan 着色器（使用上游生成器） ==========
-    if(TRUE)
-        # 引入 ExternalProject 模块（修复：之前未包含导致 ExternalProject_Add 未定义）
-        include(ExternalProject)
-
-        # 定义生成器源码/构建/安装目录变量（修复：之前未定义 _vkgen_* 导致变量未展开）
-        set(_vkgen_source_dir  "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders")
-        if(CMAKE_HOST_WIN32)
-            set(_vkgen_build_dir   "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders-build-vs")
-        else()
-            set(_vkgen_build_dir   "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders-build-ninja")
+    # 如果使用外部工具链，确保参数被正确引用，避免Windows反斜杠产生转义问题
+    if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
+        # 传递给vulkan-shaders-gen的toolchain参数需要加引号
+        if(GGML_VULKAN_SHADERS_GEN_TOOLCHAIN)
+            list(APPEND _vkgen_cmake_args "-DCMAKE_TOOLCHAIN_FILE=${GGML_VULKAN_SHADERS_GEN_TOOLCHAIN}")
         endif()
-        set(_vkgen_install_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders-install")
-        set(_vkgen_toolchain_arg "")
-
-        if(NOT EXISTS "${_vkgen_source_dir}")
-            message(FATAL_ERROR "vulkan-shaders source directory not found: ${_vkgen_source_dir}")
+    
+        # Ninja 检测和提示（仅提示，不中断构建）
+        if(NOT CMAKE_MAKE_PROGRAM)
+            find_program(NINJA_EXE NAMES ninja ninja.exe)
+            if(NINJA_EXE)
+                message(STATUS "Found Ninja: ${NINJA_EXE}")
+            else()
+                message(WARNING "Ninja not found. ExternalProject for Vulkan shader generation requires Ninja on host. Please install Ninja or set CMAKE_MAKE_PROGRAM.")
+            endif()
         endif()
+    endif()
+endif()
 
-        # glslc 可执行文件（优先使用环境变量 VULKAN_SDK，其次使用常见安装路径提示；在 Android 构建下也尝试从 NDK 中寻找）
-        set(_glslc_hints
-            $ENV{VULKAN_SDK}/Bin
-            "D:/tools/VulkanSDK/1.4.321.1/Bin"
-            $ENV{ANDROID_NDK}/shader-tools
-            $ENV{ANDROID_NDK_HOME}/shader-tools
-            $ENV{ANDROID_NDK_ROOT}/shader-tools
-            $ENV{NDK_ROOT}/shader-tools
-            $ENV{ANDROID_NDK}/toolchains/llvm/prebuilt/windows-x86_64/bin
-            $ENV{ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/windows-x86_64/bin
-            $ENV{ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/windows-x86_64/bin
-            $ENV{NDK_ROOT}/toolchains/llvm/prebuilt/windows-x86_64/bin
-        )
-        find_program(Vulkan_GLSLC_EXECUTABLE NAMES glslc glslc.exe
-            HINTS ${_glslc_hints}
-            REQUIRED)
+# 禁用预生成着色器路径，强制使用宿主生成器 (ExternalProject)
+
+# Pre-check Vulkan-Hpp availability (English logs only)
+set(HAVE_VULKAN_HPP FALSE)
+if(ENABLE_VULKAN_BACKEND)
+    unset(VULKAN_HPP_INCLUDE_DIR)
+    if(DEFINED VULKAN_HPP_DIR AND EXISTS "${VULKAN_HPP_DIR}/vulkan/vulkan.hpp")
+        set(VULKAN_HPP_INCLUDE_DIR "${VULKAN_HPP_DIR}")
+        set(HAVE_VULKAN_HPP TRUE)
+        message(STATUS "ggml-vulkan: Using VULKAN_HPP_DIR=${VULKAN_HPP_DIR}")
+    elseif(DEFINED Vulkan_INCLUDE_DIRS AND EXISTS "${Vulkan_INCLUDE_DIRS}/vulkan/vulkan.hpp")
+        set(VULKAN_HPP_INCLUDE_DIR "${Vulkan_INCLUDE_DIRS}")
+        set(HAVE_VULKAN_HPP TRUE)
+        message(STATUS "ggml-vulkan: Using Vulkan_INCLUDE_DIRS=${Vulkan_INCLUDE_DIRS}")
+    elseif(EXISTS "$ENV{VULKAN_SDK}/Include/vulkan/vulkan.hpp")
+        set(VULKAN_HPP_INCLUDE_DIR "$ENV{VULKAN_SDK}/Include")
+        set(HAVE_VULKAN_HPP TRUE)
+        message(STATUS "ggml-vulkan: Using VULKAN_SDK include: $ENV{VULKAN_SDK}/Include")
+    else()
+        message(WARNING "Vulkan backend enabled but no valid vulkan.hpp found; disabling Vulkan backend for JNI build")
+        set(ENABLE_VULKAN_BACKEND OFF CACHE BOOL "Enable Vulkan backend" FORCE)
+    endif()
+endif()
+
+# ========== Generate ggml-vulkan shaders (use upstream generator) ==========
+if(ENABLE_VULKAN_BACKEND)
+    include(ExternalProject)
+
+    set(_vkgen_source_dir  "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders")
+    if(CMAKE_HOST_WIN32)
+        set(_vkgen_build_dir   "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders-build-vs")
+    else()
+        set(_vkgen_build_dir   "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders-build-ninja")
+    endif()
+    set(_vkgen_install_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders-install")
+
+    if(NOT EXISTS ${_vkgen_source_dir})
+        message(WARNING "vulkan-shaders: source directory not found: ${_vkgen_source_dir} - Vulkan backend disabled")
+        set(ENABLE_VULKAN_BACKEND OFF)
+    endif()
+
+    # glslc discovery hints (English logs only)
+    set(_glslc_hints
+        $ENV{VULKAN_SDK}/Bin
+        "D:/tools/VulkanSDK/1.4.321.1/Bin"
+        $ENV{ANDROID_NDK}/shader-tools
+        $ENV{ANDROID_NDK_HOME}/shader-tools
+        $ENV{ANDROID_NDK_ROOT}/shader-tools
+        $ENV{NDK_ROOT}/shader-tools
+        $ENV{ANDROID_NDK}/toolchains/llvm/prebuilt/windows-x86_64/bin
+        $ENV{ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/windows-x86_64/bin
+        $ENV{ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/windows-x86_64/bin
+        $ENV{NDK_ROOT}/toolchains/llvm/prebuilt/windows-x86_64/bin
+    )
+    if(NOT Vulkan_GLSLC_EXECUTABLE)
+        find_program(Vulkan_GLSLC_EXECUTABLE NAMES glslc glslc.exe HINTS ${_glslc_hints})
+    endif()
+    if(NOT Vulkan_GLSLC_EXECUTABLE)
+        message(WARNING "Vulkan backend enabled but glslc not found; disabling Vulkan backend for JNI build")
+        set(ENABLE_VULKAN_BACKEND OFF CACHE BOOL "Enable Vulkan backend" FORCE)
+    else()
         message(STATUS "glslc found at: ${Vulkan_GLSLC_EXECUTABLE}")
 
-        # 检测 glslc 对关键扩展的支持并将结果传递给生成器
         set(_vkgen_cmake_args)
-        # GL_KHR_cooperative_matrix
         execute_process(
             COMMAND "${Vulkan_GLSLC_EXECUTABLE}" -o - -fshader-stage=compute --target-env=vulkan1.3 "${_vkgen_source_dir}/test_coopmat_support.comp"
             OUTPUT_VARIABLE _vkgen_out
@@ -346,7 +510,7 @@ if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
         else()
             message(STATUS "GL_KHR_cooperative_matrix not supported by glslc")
         endif()
-        # GL_NV_cooperative_matrix2
+
         execute_process(
             COMMAND "${Vulkan_GLSLC_EXECUTABLE}" -o - -fshader-stage=compute --target-env=vulkan1.3 "${_vkgen_source_dir}/test_coopmat2_support.comp"
             OUTPUT_VARIABLE _vkgen_out
@@ -358,7 +522,7 @@ if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
         else()
             message(STATUS "GL_NV_cooperative_matrix2 not supported by glslc")
         endif()
-        # GL_EXT_integer_dot_product
+
         execute_process(
             COMMAND "${Vulkan_GLSLC_EXECUTABLE}" -o - -fshader-stage=compute --target-env=vulkan1.3 "${_vkgen_source_dir}/test_integer_dot_support.comp"
             OUTPUT_VARIABLE _vkgen_out
@@ -370,7 +534,7 @@ if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
         else()
             message(STATUS "GL_EXT_integer_dot_product not supported by glslc")
         endif()
-        # GL_EXT_bfloat16
+
         execute_process(
             COMMAND "${Vulkan_GLSLC_EXECUTABLE}" -o - -fshader-stage=compute --target-env=vulkan1.3 "${_vkgen_source_dir}/test_bfloat16_support.comp"
             OUTPUT_VARIABLE _vkgen_out
@@ -383,78 +547,95 @@ if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
             message(STATUS "GL_EXT_bfloat16 not supported by glslc")
         endif()
 
-        # 准备 host 工具链（交叉编译时用于生成器工程）
-        set(_vkgen_toolchain_arg "")
-        if(GGML_VULKAN_SHADERS_GEN_TOOLCHAIN)
-            set(_vkgen_toolchain_arg "-DCMAKE_TOOLCHAIN_FILE=${GGML_VULKAN_SHADERS_GEN_TOOLCHAIN}")
-        endif()
-
+        # Determine host suffix for generator (English note)
         if(CMAKE_HOST_WIN32)
-            # 在 Windows 主机上直接使用 Visual Studio 生成器，避免 Ninja + vcvars 环境传递问题
-            ExternalProject_Add(vulkan-shaders-gen-ext
-                SOURCE_DIR "${_vkgen_source_dir}"
-                BINARY_DIR "${_vkgen_build_dir}"
-                CMAKE_GENERATOR "Visual Studio 17 2022"
-                CMAKE_GENERATOR_PLATFORM "x64"
-                CMAKE_ARGS
-                           -DCMAKE_INSTALL_PREFIX=${_vkgen_install_dir}
-                           -DCMAKE_INSTALL_BINDIR=.
-                           -DCMAKE_BUILD_TYPE=Release
-                           ${_vkgen_toolchain_arg}
-                           ${_vkgen_cmake_args}
-                BUILD_COMMAND     ${CMAKE_COMMAND} --build . --config Release
-                BUILD_ALWAYS TRUE
-                INSTALL_COMMAND   ${CMAKE_COMMAND} -E env --unset=DESTDIR "${CMAKE_COMMAND}" --install . --config Release
-            )
+            set(_ggml_vk_host_suffix ".exe")
         else()
-            ExternalProject_Add(vulkan-shaders-gen-ext
-                SOURCE_DIR "${_vkgen_source_dir}"
-                BINARY_DIR "${_vkgen_build_dir}"
-                CMAKE_ARGS -G Ninja
-                           -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
-                           -DCMAKE_INSTALL_PREFIX=${_vkgen_install_dir}
-                           -DCMAKE_INSTALL_BINDIR=.
-                           -DCMAKE_BUILD_TYPE=Release
-                           ${_vkgen_toolchain_arg}
-                           ${_vkgen_cmake_args}
-                BUILD_COMMAND     ${CMAKE_COMMAND} --build .
-                BUILD_ALWAYS TRUE
-                INSTALL_COMMAND   ${CMAKE_COMMAND} -E env --unset=DESTDIR "${CMAKE_COMMAND}" --install .
-            )
+            set(_ggml_vk_host_suffix "")
         endif()
-        # 生成的头/源路径
-        set(_ggml_vk_header "${CMAKE_CURRENT_BINARY_DIR}/ggml-vulkan-shaders.hpp")
-        set(_ggml_vk_source "${CMAKE_CURRENT_BINARY_DIR}/ggml-vulkan-shaders.cpp")
-        set(_ggml_vk_input_dir  "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders")
-        set(_ggml_vk_output_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders.spv")
+    endif() # Vulkan_GLSLC_EXECUTABLE
+endif() # ENABLE_VULKAN_BACKEND
 
-        # 主机生成器可执行文件路径
-        set(_ggml_vk_host_suffix $<IF:$<STREQUAL:${CMAKE_HOST_SYSTEM_NAME},Windows>,.exe,>)
-        set(_ggml_vk_genshaders_cmd "${_vkgen_install_dir}/vulkan-shaders-gen${_ggml_vk_host_suffix}")
+if(ENABLE_VULKAN_BACKEND)
+    set(_vkgen_toolchain_arg "")
+    if(GGML_VULKAN_SHADERS_GEN_TOOLCHAIN)
+        set(_vkgen_toolchain_arg "-DCMAKE_TOOLCHAIN_FILE=${GGML_VULKAN_SHADERS_GEN_TOOLCHAIN}")
+    endif()
 
-        add_custom_command(
-            OUTPUT ${_ggml_vk_header} ${_ggml_vk_source}
-            COMMAND ${_ggml_vk_genshaders_cmd}
-                    --glslc      ${Vulkan_GLSLC_EXECUTABLE}
-                    --input-dir  ${_ggml_vk_input_dir}
-                    --output-dir ${_ggml_vk_output_dir}
-                    --target-hpp ${_ggml_vk_header}
-                    --target-cpp ${_ggml_vk_source}
-                    --no-clean
-            DEPENDS vulkan-shaders-gen-ext
-            COMMENT "Generate vulkan shaders (ggml-vulkan)"
+    if(CMAKE_HOST_WIN32)
+        ExternalProject_Add(vulkan-shaders-gen-ext
+            SOURCE_DIR "${_vkgen_source_dir}"
+            BINARY_DIR "${_vkgen_build_dir}"
+            CMAKE_GENERATOR "Visual Studio 17 2022"
+            CMAKE_GENERATOR_PLATFORM "x64"
+            CMAKE_ARGS
+                       -DCMAKE_INSTALL_PREFIX=${_vkgen_install_dir}
+                       -DCMAKE_INSTALL_BINDIR=.
+                       -DCMAKE_BUILD_TYPE=Release
+                       ${_vkgen_toolchain_arg}
+                       ${_vkgen_cmake_args}
+            BUILD_COMMAND     ${CMAKE_COMMAND} --build . --config Release
+            # BUILD_ALWAYS TRUE  # disabled to improve incremental builds
+            INSTALL_COMMAND   ${CMAKE_COMMAND} -E env --unset=DESTDIR "${CMAKE_COMMAND}" --install . --config Release
+        )
+    else()
+        ExternalProject_Add(vulkan-shaders-gen-ext
+            SOURCE_DIR "${_vkgen_source_dir}"
+            BINARY_DIR "${_vkgen_build_dir}"
+            CMAKE_ARGS -G Ninja
+                       -DCMAKE_MAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
+                       -DCMAKE_INSTALL_PREFIX=${_vkgen_install_dir}
+                       -DCMAKE_INSTALL_BINDIR=.
+                       -DCMAKE_BUILD_TYPE=Release
+                       ${_vkgen_toolchain_arg}
+                       ${_vkgen_cmake_args}
+            BUILD_COMMAND     ${CMAKE_COMMAND} --build .
+            # BUILD_ALWAYS TRUE  # disabled to improve incremental builds
+            INSTALL_COMMAND   ${CMAKE_COMMAND} -E env --unset=DESTDIR "${CMAKE_COMMAND}" --install .
         )
     endif()
 
-    # ========== 创建 ggml-vulkan 静态库（切换为本地 ggml-vulkan.cpp + 生成的 shaders） ==========
-    # Use locally maintained ggml-vulkan.cpp to decouple from upstream edits
+    set(_ggml_vk_header "${CMAKE_CURRENT_BINARY_DIR}/ggml-vulkan-shaders.hpp")
+    set(_ggml_vk_source "${CMAKE_CURRENT_BINARY_DIR}/ggml-vulkan-shaders.cpp")
+    set(_ggml_vk_input_dir  "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders")
+    set(_ggml_vk_output_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders.spv")
+
+    set(_ggml_vk_genshaders_cmd "${_vkgen_install_dir}/vulkan-shaders-gen${_ggml_vk_host_suffix}")
+
+    add_custom_command(
+        OUTPUT ${_ggml_vk_header} ${_ggml_vk_source}
+        COMMAND ${_ggml_vk_genshaders_cmd}
+                --glslc      "${Vulkan_GLSLC_EXECUTABLE}"
+                --input-dir  "${_ggml_vk_input_dir}"
+                --output-dir "${_ggml_vk_output_dir}"
+                --target-hpp "${_ggml_vk_header}"
+                --target-cpp "${_ggml_vk_source}"
+                --no-clean
+        DEPENDS vulkan-shaders-gen-ext
+        COMMENT "Generate vulkan shaders (ggml-vulkan)"
+    )
+endif()
+# ========== 创建 ggml-vulkan 静态库（使用本地 ggml-vulkan.cpp + 生成的 shaders） ==========
+if(ENABLE_VULKAN_BACKEND AND HAVE_VULKAN_HPP)
     set(GGML_VULKAN_SOURCES
         "${CMAKE_CURRENT_SOURCE_DIR}/ggml-vulkan.cpp"
         ${_ggml_vk_source}
     )
     add_library(ggml-vulkan STATIC ${GGML_VULKAN_SOURCES})
     add_dependencies(ggml-vulkan vulkan-shaders-gen-ext)
-    target_link_libraries(ggml-vulkan PUBLIC ggml-base)
+
+    # Ensure ABI alignment and PIC for static lib linkage into shared JNI
+    set_target_properties(ggml-vulkan PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON)
+
+    # Link ggml-vulkan against proper ggml base depending on backend choice
+    if(USE_UPSTREAM_GGML)
+        target_link_libraries(ggml-vulkan PUBLIC ggml::ggml-base)
+    else()
+        target_link_libraries(ggml-vulkan PUBLIC ggml-base)
+    endif()
 
     # 设置Vulkan编译定义
     target_compile_definitions(ggml-vulkan PRIVATE 
@@ -470,118 +651,72 @@ if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
         "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_BINARY_DIR}"
     )
-    if(_use_pregenerated_shaders)
-        target_include_directories(ggml-vulkan PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/generated")
+    if(DEFINED VULKAN_HPP_INCLUDE_DIR)
+        target_include_directories(ggml-vulkan PRIVATE "${VULKAN_HPP_INCLUDE_DIR}")
     endif()
+endif()
 
-    # 链接Vulkan库到ggml-vulkan（Android 使用 NDK Vulkan）
+# Ensure ggml-vulkan links to Vulkan loader library on Android and non-Android
+if(ENABLE_VULKAN_BACKEND AND HAVE_VULKAN_HPP)
     if(ANDROID)
-        target_link_libraries(ggml-vulkan PRIVATE vulkan android log)
-    else()
-        target_link_libraries(ggml-vulkan PRIVATE Vulkan::Vulkan)
+        target_link_libraries(ggml-vulkan PUBLIC ${Vulkan_LIBRARIES})
+    elseif(Vulkan_FOUND)
+        target_link_libraries(ggml-vulkan PUBLIC ${Vulkan_LIBRARIES})
     endif()
-
-    message(STATUS "ggml-vulkan backend included (with shader auto-generation)")
-else()
-    message(STATUS "Vulkan backend disabled; skipping ggml-vulkan")
 endif()
 
-# 仅当启用了 Vulkan 时才定义相关宏
-if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
-    set(ENABLE_VULKAN_BACKEND ON)
-    message(STATUS "Vulkan backend enabled: ${Vulkan_LIBRARIES}")
-else()
-    set(ENABLE_VULKAN_BACKEND OFF)
-    message(STATUS "Vulkan backend disabled")
-endif()
-
-# Android平台特定宏
-if(ANDROID)
-    add_definitions(-DANDROID)
-    add_definitions(-D__ANDROID__)
-    add_definitions(-DVK_USE_PLATFORM_ANDROID_KHR=1)
-endif()
-
-# 收集llama.cpp源文件（避免重复包含 ggml 源码）
-file(GLOB LLAMA_SOURCES
-    "${LLAMA_CPP_DIR}/src/*.cpp"
-    "${LLAMA_CPP_DIR}/src/*.c"
-    "${LLAMA_CPP_DIR}/common/*.cpp"
-    "${LLAMA_CPP_DIR}/common/*.c"
-)
-
-# 排除不需要的文件
-list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*main\\.cpp$")
-list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*test.*")
-list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*example.*")
-# llama.cpp 的 common/build-info.cpp 由其自身 CMake 生成，这里不使用，避免找不到文件或重复符号
-list(FILTER LLAMA_SOURCES EXCLUDE REGEX ".*/common/build-info\\.cpp$")
-# 追加本项目生成的 build-info.cpp，提供 LLAMA_BUILD_NUMBER/LLAMA_COMMIT 等符号
-list(APPEND LLAMA_SOURCES ${BUILD_INFO_FILE})
-
-# 创建JNI共享库，使用模块化的ggml库
+# ========== JNI shared library ==========
 add_library(llamacpp_jni SHARED
-    llama_inference.cpp
-    ggml-backend-opencl-stub.cpp
-    vulkan_symbol_keeper.cpp
-    vulkan_runtime_detector.cpp
-    ${LLAMA_SOURCES}
+     "${CMAKE_CURRENT_SOURCE_DIR}/llama_inference.cpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_runtime_detector.cpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_symbol_keeper.cpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/ggml-backend-opencl-stub.cpp"
 )
 
-
-# 设置目标属性
-set_target_properties(llamacpp_jni PROPERTIES
-    POSITION_INDEPENDENT_CODE ON
-    CXX_STANDARD 17
-    CXX_STANDARD_REQUIRED ON
+target_include_directories(llamacpp_jni PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${CMAKE_CURRENT_BINARY_DIR}"
 )
 
-# 链接库：使用模块化的 ggml 静态库 + Android NDK 库
-# 统一改为 keyword 风格，避免与后续 PRIVATE 混用导致 CMake 报错
-target_link_libraries(llamacpp_jni
-    PRIVATE
-        ggml-base
-        ggml-cpu
-        ${log-lib}
-        android
-        m
-)
-
-# 如果ggml-vulkan目标存在，为JNI目标补充必要的宏定义并链接Vulkan
-if (TARGET ggml-vulkan)
-    target_compile_definitions(llamacpp_jni PRIVATE
-        GGML_USE_VULKAN=1
-        GGML_VULKAN=1
-        VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1
-    )
-    if (ANDROID)
-        target_compile_definitions(llamacpp_jni PRIVATE VK_USE_PLATFORM_ANDROID_KHR=1)
-    endif()
-
-    target_link_libraries(llamacpp_jni PRIVATE ggml-vulkan)
-    if (ANDROID)
-        target_link_libraries(llamacpp_jni PRIVATE vulkan)
-        message(STATUS "Linking Android NDK Vulkan library: vulkan")
-    else()
-        target_link_libraries(llamacpp_jni PRIVATE Vulkan::Vulkan)
-    endif()
-    message(STATUS "Linking ggml-vulkan static library into llamacpp_jni")
+if(ENABLE_VULKAN_BACKEND AND VULKAN_HPP_INCLUDE_DIR)
+    target_include_directories(llamacpp_jni PRIVATE "${VULKAN_HPP_INCLUDE_DIR}")
+    message(STATUS "llamacpp_jni: Injected Vulkan headers include path -> ${VULKAN_HPP_INCLUDE_DIR}")
 endif()
 
-    # 让 Android Gradle Plugin 自行管理 .so 输出与打包
-    # 移除将产物写入 app/src/main/jniLibs 的做法，避免跨模块写入
+target_compile_definitions(llamacpp_jni PRIVATE
+    VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1
+    VK_USE_PLATFORM_ANDROID_KHR=1
+)
 
-    # 打印配置信息
-    message(STATUS "LlamaCpp JNI Configuration:")
-    message(STATUS "  CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
-    message(STATUS "  ANDROID_ABI: ${ANDROID_ABI}")
-    message(STATUS "  CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
-    message(STATUS "  CMAKE_C_FLAGS: ${CMAKE_C_FLAGS}")
-    message(STATUS "  LLAMA_CPP_DIR: ${LLAMA_CPP_DIR}")
-    message(STATUS "  LLAMA_SOURCES count: ${LLAMA_SOURCES}")
-    message(STATUS "  GGML backends: ggml-base, ggml-cpu, ggml-vulkan (if enabled)")
+if(USE_UPSTREAM_GGML)
+    target_link_libraries(llamacpp_jni PRIVATE ggml-cpu ggml::ggml-base common)
+else()
+    target_link_libraries(llamacpp_jni PRIVATE ggml-cpu ggml-base llama common)
+endif()
 
-    # 编译后处理
-    add_custom_command(TARGET llamacpp_jni POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E echo "LlamaCpp JNI library built for ${ANDROID_ABI}"
-    )
+if(ENABLE_VULKAN_BACKEND AND HAVE_VULKAN_HPP)
+    target_link_libraries(llamacpp_jni PRIVATE ggml-vulkan)
+    # Ensure JNI sees Vulkan as compiled-in for logging (do not inject into ggml targets)
+    target_compile_definitions(llamacpp_jni PRIVATE GGML_USE_VULKAN=1 GGML_VULKAN=1)
+endif()
+
+# === Bridge KleidiAI compile definitions to JNI target (for runtime logs) ===
+if(ENABLE_KLEIDIAI)
+    target_compile_definitions(llamacpp_jni PRIVATE GGML_CPU_KLEIDIAI=1 GGML_USE_CPU_KLEIDIAI=1)
+    message(STATUS "llamacpp_jni: Propagated KleidiAI macros -> GGML_CPU_KLEIDIAI=1, GGML_USE_CPU_KLEIDIAI=1")
+endif()
+if(ANDROID)
+    target_link_libraries(llamacpp_jni PRIVATE ${log-lib} ${android-lib} dl)
+endif()
+
+# Friendly summary (English logs only)
+message(STATUS "llamacpp_jni: ENABLE_VULKAN_BACKEND=${ENABLE_VULKAN_BACKEND}")
+if(ENABLE_VULKAN_BACKEND)
+    if(DEFINED VULKAN_HPP_INCLUDE_DIR)
+        message(STATUS "llamacpp_jni: Using Vulkan headers from ${VULKAN_HPP_INCLUDE_DIR}")
+    else()
+        message(STATUS "llamacpp_jni: No explicit Vulkan headers directory provided")
+    endif()
+else()
+    message(STATUS "llamacpp_jni: Vulkan backend disabled at build-time (GGML_USE_VULKAN=0)")
+endif()
