@@ -29,6 +29,7 @@ import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.BaseAdapter;
@@ -141,6 +142,11 @@ public class RagQaFragment extends Fragment {
     
     // 全局停止标志 - 用于统一控制所有模型的停止
     private volatile boolean globalStopFlag = false;
+
+    // keep screen on flag
+    private boolean isKeepScreenOn = false;
+    // track battery optimization status
+    private boolean batteryOptimizationDisabled = false;
     
     // 【重要修复】线程池职责分离：
     // 1. stopCheckExecutor - 专门用于停止检查任务，不应触发模型操作
@@ -886,9 +892,42 @@ public class RagQaFragment extends Fragment {
         }
     }
 
+    private void enableKeepScreenOn(boolean enable) {
+        if (getActivity() == null) {
+            return;
+        }
+
+        try {
+            if (enable) {
+                // enable keep screen on
+                getActivity().getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                isKeepScreenOn = true;
+                LogManager.logD(TAG, "Keep screen on enabled");
+            } else {
+                // disable keep screen on
+                getActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                isKeepScreenOn = false;
+                LogManager.logD(TAG, "Keep screen on disabled");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to set keep screen on state: " + e.getMessage(), e);
+        }
+    }
+
     private void handleSendStopClick() {
         // 使用原子操作检查并设置发送状态，防止并发点击
         if (isSending.compareAndSet(false, true)) {
+            // --- 开始发送 --- 
+            // request to ignore battery optimizations
+            if (getActivity() instanceof MainActivity) {
+                batteryOptimizationDisabled = ((MainActivity) getActivity()).requestIgnoreBatteryOptimizationIfNeeded();
+                if (batteryOptimizationDisabled) {
+                    Utils.showToastSafely(requireContext(), getString(R.string.toast_battery_optimization_requested), Toast.LENGTH_SHORT);
+                }
+            }
+
+            // enable keep screen on
+            enableKeepScreenOn(true);
             // --- 开始发送 --- 
             String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
             String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
@@ -954,6 +993,21 @@ public class RagQaFragment extends Fragment {
             });
 
         } else if (isSending.compareAndSet(true, false)) {
+            // --- 停止发送 --- 
+            // restore battery optimization settings
+            if (batteryOptimizationDisabled) {
+                if (getActivity() instanceof MainActivity) {
+                    ((MainActivity) getActivity()).restoreBatteryOptimization();
+                    batteryOptimizationDisabled = false;
+                    LogManager.logD(TAG, "Restored battery optimization settings on task cancellation");
+                }
+            }
+
+            // disable keep screen on
+            if (isKeepScreenOn) {
+                enableKeepScreenOn(false);
+                LogManager.logD(TAG, "Disabled keep screen on on task cancellation");
+            }
             // --- 停止发送 --- 
             LogManager.logD(TAG, "User clicked stop button");
             LogManager.logD(TAG, "Current state - isSending: " + isSending.get() + ", isTaskRunning: " + isTaskRunning + ", isTaskCancelled: " + isTaskCancelled);
@@ -3720,6 +3774,27 @@ public class RagQaFragment extends Fragment {
             
             // 使用统一的状态重置方法
             resetSendingState();
+        } finally {
+            // 无论成功或失败，都重置状态
+            mainHandler.post(() -> {
+                // restore battery optimization settings
+                if (batteryOptimizationDisabled) {
+                    if (getActivity() instanceof MainActivity) {
+                        ((MainActivity) getActivity()).restoreBatteryOptimization();
+                        batteryOptimizationDisabled = false;
+                        LogManager.logD(TAG, "Restored battery optimization settings on task completion");
+                    }
+                }
+
+                // disable keep screen on
+                if (isKeepScreenOn) {
+                    enableKeepScreenOn(false);
+                    LogManager.logD(TAG, "Disabled keep screen on on task completion");
+                }
+
+                // 使用统一的状态重置方法
+                resetSendingState();
+            });
         }
     }
     

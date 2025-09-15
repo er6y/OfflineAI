@@ -217,6 +217,24 @@ public class LlamaCppInference {
      */
     public static native long new_sampler_with_full_params(float temperature, float topP, int topK, float repeatPenalty);
     
+    // ========= Context Shift (KV-Cache sliding) configuration =========
+    /**
+     * Enable/disable context shift and set n_keep prefix tokens to preserve.
+     * English: When enabled, if current position reaches n_ctx, JNI will shift KV-Cache to keep only the first n_keep tokens
+     * and continue generation, effectively enabling a sliding window.
+     */
+    public static native void set_context_shift(boolean enable, int nKeep);
+
+    /**
+     * English: Returns whether context shift is enabled in JNI.
+     */
+    public static native boolean get_context_shift_enabled();
+
+    /**
+     * English: Returns the configured n_keep value in JNI.
+     */
+    public static native int get_context_shift_n_keep();
+    
     /**
      * 注意：参数设置已改为通过采样器实现
      * 使用 new_sampler_with_params() 代替单独的参数设置方法

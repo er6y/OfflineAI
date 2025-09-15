@@ -515,7 +515,7 @@
 
     <string name="toast_max_seq_length_range">Maximum sequence length should be between 100–8192</string>
     <string name="toast_inference_threads_range">Inference threads should be between 1–16</string>
-    <string name="toast_max_output_tokens_range">Maximum output tokens should be between 512–4096</string>
+    <string name="toast_max_output_tokens_range">Maximum output tokens should be between 512–16384</string>
     <string name="toast_temperature_range">Manual temperature parameter should be between 0.0–2.0</string>
     <string name="toast_top_p_range">Manual Top–P parameter should be between 0.0–1.0</string>
     <string name="toast_top_k_range">Manual Top–K parameter should be between 1–100</string>

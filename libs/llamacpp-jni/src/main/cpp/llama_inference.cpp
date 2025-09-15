@@ -18,6 +18,7 @@
 #include <sys/auxv.h>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 #include "llama.h"
 #include "common.h"
 #include "vulkan_version_patch.h"
@@ -158,6 +159,37 @@ static void log_cpu_kleidiai_capabilities_once() {
         // Print runtime CPU features
         FORCE_LOG("llama-android.cpp", "[CPU] runtime features -> neon=%d, dotprod=%d, sve=%d, sve2=%d", has_neon, has_dp, has_sve_, has_sve2_);
     });
+}
+
+// Global log tag for JNI logs
+static const char* TAG = "LlamaCppJNI";
+
+// ===== Context shift (KV-Cache sliding) config (JNI configurable) =====
+static std::atomic<bool> g_ctx_shift_enabled{false};
+static std::atomic<int>  g_ctx_shift_n_keep{1024};
+
+// ===== JNI: context shift configuration setters/getters =====
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_set_1context_1shift(
+        JNIEnv *, jclass, jboolean enable, jint n_keep) {
+    g_ctx_shift_enabled.store(enable);
+    g_ctx_shift_n_keep.store(std::max(0, (int)n_keep));
+    FORCE_LOG(TAG, "[CTX_SHIFT] set_context_shift: enable=%s, n_keep=%d", enable ? "true" : "false", (int)n_keep);
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1context_1shift_1enabled(
+        JNIEnv *, jclass) {
+    return g_ctx_shift_enabled.load();
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1context_1shift_1n_1keep(
+        JNIEnv *, jclass) {
+    return g_ctx_shift_n_keep.load();
 }
 
 // 全局停止标志，用于中断推理
@@ -1518,35 +1550,20 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1init(
     auto n_ctx = llama_n_ctx(context);
     auto n_batch = llama_n_batch(context);
     
-    // 计算输入token允许的最大数量：总上下文长度 - 输出token预留
-    int max_input_tokens = n_ctx - n_len;
-    if (max_input_tokens <= 0) {
-        LOGe("error: n_len(%d) >= n_ctx(%d), no space for input tokens", n_len, n_ctx);
-        env->ReleaseStringUTFChars(jtext, text);
-        return -1;
-    }
-    
-    // 如果输入token数量超过允许的最大值，进行截断
+    // English: Do NOT reserve n_len ahead of time. With context shift, output length is decoupled from n_ctx.
+    // Allow the prompt to fit into the current context window directly.
+    int max_input_tokens = std::max(1, (int)n_ctx - 1);
     std::vector<llama_token> final_tokens = tokens_list;
-    if (tokens_list.size() > (size_t)max_input_tokens) {
-        LOGi("Input tokens(%zu) exceed max_input_tokens(%d), truncating to fit", 
-             tokens_list.size(), max_input_tokens);
+    if ((int)final_tokens.size() > max_input_tokens) {
+        LOGi("Input tokens(%zu) exceed context window(%d), truncating to fit", 
+             final_tokens.size(), max_input_tokens);
         final_tokens.resize(max_input_tokens);
     }
     
-    auto n_kv_req = final_tokens.size() + n_len;
+    LOGi("n_len = %d, n_ctx = %d, n_batch = %d, input_tokens = %zu, max_input_tokens = %d", 
+         n_len, n_ctx, n_batch, final_tokens.size(), max_input_tokens);
 
-    LOGi("n_len = %d, n_ctx = %d, n_batch = %d, n_kv_req = %zu, input_tokens = %zu, max_input_tokens = %d", 
-         n_len, n_ctx, n_batch, n_kv_req, final_tokens.size(), max_input_tokens);
-
-    // KV cache大小检查 - 现在应该总是满足条件
-    if (n_kv_req > n_ctx) {
-        LOGe("error: n_kv_req(%zu) > n_ctx(%d), the required KV cache size is not big enough", n_kv_req, n_ctx);
-        env->ReleaseStringUTFChars(jtext, text);
-        return -1;
-    }
-    
-    // 检查输入token数量是否超过batch大小
+    // Check batch capacity to avoid ggml transpose errors
     if (final_tokens.size() > (size_t)n_batch) {
         LOGe("input_tokens(%zu) > n_batch(%d), this may cause ggml_compute_forward_transpose error", 
              final_tokens.size(), n_batch);
@@ -1920,7 +1937,31 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1loop(
     if (g_should_stop.load()) {
         return nullptr;
     }
-    
+
+    // ===== Context Shift (KV sliding) =====
+    // English: If enabled and current position reaches/exceeds n_ctx, shift KV to preserve n_keep tokens
+    if (g_ctx_shift_enabled.load()) {
+        const uint32_t n_ctx_now = llama_n_ctx(context);
+        // fetch updated current position after inc()
+        jint post_ncur = env->GetIntField(intvar_ncur, la_int_var_value);
+        if ((uint32_t)post_ncur >= n_ctx_now) {
+            llama_memory_t mem = llama_get_memory(context);
+            if (llama_memory_can_shift(mem)) {
+                const int n_keep = std::max(0, g_ctx_shift_n_keep.load());
+                const int delta = std::max(0, post_ncur - n_keep);
+                // Remove tail range to reduce pressure and then shift remaining positions
+                llama_memory_seq_rm(mem, /*seq_id*/ 0, /*p0*/ n_keep, /*p1*/ -1);
+                llama_memory_seq_add(mem, /*seq_id*/ 0, /*p0*/ n_keep, /*p1*/ -1, /*delta*/ -delta);
+                // Reset Java-side current position so next token is appended at n_keep
+                env->SetIntField(intvar_ncur, la_int_var_value, n_keep);
+                TRACE_LOG(TAG, "[CTX_SHIFT] applied after decode: n_ctx=%u, n_keep=%d, pre_ncur=%d, delta=%d, new_ncur=%d",
+                          n_ctx_now, n_keep, post_ncur, delta, n_keep);
+            } else {
+                TRACE_LOG(TAG, "[CTX_SHIFT] memory backend cannot shift; skipping");
+            }
+        }
+    }
+
     // Completion loop decode success logging removed
 
     return new_token;

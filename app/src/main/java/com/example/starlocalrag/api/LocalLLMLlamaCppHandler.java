@@ -880,6 +880,18 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
             
             LogManager.logI(TAG, String.format("推理参数 - MaxTokens: %d", maxTokens));
             
+            // Enable context shift (KV sliding) with a reasonable n_keep
+            // English: We decouple output limit from context window by enabling KV-Cache sliding.
+            // n_keep preserves system prompt and conversation backbone to mitigate quality drop.
+            int nCtxConfigured = ConfigManager.getMaxSequenceLength(context);
+            int nKeep = Math.max(256, Math.min(1024, nCtxConfigured / 2));
+            try {
+                LlamaCppInference.set_context_shift(true, nKeep);
+                LogManager.logI(TAG, String.format("[CTX_SHIFT] enabled=true, n_keep=%d (n_ctx=%d)", nKeep, nCtxConfigured));
+            } catch (Throwable t) {
+                LogManager.logW(TAG, "[CTX_SHIFT] JNI set_context_shift failed; sliding may be disabled at runtime");
+            }
+
             // 应用chat template和thinking模式处理
             boolean thinkingMode = params != null ? params.isThinkingMode() : true;
             String processedPrompt = applyLlamaCppTemplate(prompt, thinkingMode);
@@ -972,7 +984,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                     // UTF-8容错处理：区分真正的推理结束和字符累积中的临时null
                     if (token == null) {
                         // JNI返回null可能是因为UTF-8字符正在累积中，继续等待下一个token
-                        LogManager.logD(TAG, "JNI returned null, continuing to wait for UTF-8 sequence completion");
+                        LogManager.logD(TAG, "[STREAM] Waiting for valid UTF-8 token chunk");
                         continue;
                     }
                     

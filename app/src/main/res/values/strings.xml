@@ -521,7 +521,7 @@
 
     <string name="toast_max_seq_length_range">最大序列长度应在100-8192之间</string>
     <string name="toast_inference_threads_range">推理线程数应在1-16之间</string>
-    <string name="toast_max_output_tokens_range">最大输出token数应在512-4096之间</string>
+    <string name="toast_max_output_tokens_range">最大输出token数应在512-16384之间</string>
     <string name="toast_temperature_range">手动温度参数应在0.0-2.0之间</string>
     <string name="toast_top_p_range">手动Top-P参数应在0.0-1.0之间</string>
     <string name="toast_top_k_range">手动Top-K参数应在1-100之间</string>

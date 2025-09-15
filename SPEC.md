@@ -280,9 +280,54 @@ Windows 构建命令建议
 
 CMake（JNI 构建脚本）优化补充说明（此次变更汇总，保持行为不变）
 - 预检查增强：在 ENABLE_VULKAN_BACKEND=ON 时，新增对 vulkan.hpp（VULKAN_HPP_DIR / Vulkan_INCLUDE_DIRS / VULKAN_SDK/Include）与 glslc 的健壮性检测；缺失时仅禁用 Vulkan 后端，不中断整体构建（英文日志）。
-- 生成器与特性探测：使用上游 vulkan-shaders 生成器（ExternalProject），通过 glslc 探测 cooperative_matrix / cooperative_matrix2 / integer_dot_product / bfloat16 支持并转递对应 GGML_VULKAN_*_GLSLC_SUPPORT 宏。
-- 可执行后缀：改为 if(CMAKE_HOST_WIN32) 判定 .exe 后缀，替代生成器表达式，提升可读性与稳定性。
-- 增量构建：注释 BUILD_ALWAYS TRUE，保持 Release 构建但避免强制每次重编生成器，改善构建效率。
-- 目标注入：在发现 VULKAN_HPP_INCLUDE_DIR 时，分别对 ggml-vulkan 与 JNI 目标注入 include 路径；启用 Vulkan 时仅对 JNI 目标注入 GGML_USE_VULKAN/GGML_VULKAN 宏用于运行时日志标识。
-- Debug 配置：保持 Debug 仍为 O3，不作修改。
-- 构建校验：已在 Windows 上执行 .\\gradlew :app:assembleDebug -PKEYPSWD=abc-1234，arm64-v8a 与 x86_64 ABI 构建通过，产物生成成功。
+- 生成器与特性探测：使用上游 vulkan-shaders 生成器（ExternalProject），通过 glslc 探测 cooperative_matrix / cooperative_matrix2 / integer_dot_product / bfloat16 支持并转递对应 GGML_VULKAN_*_GLSLC_SUPPORT 宏.
+- 可执行后缀：改为 if(CMAKE_HOST_WIN32) 判定 .exe 后缀，替代生成器表达式，提升可读性与稳定性.
+- 增量构建：注释 BUILD_ALWAYS TRUE，保持 Release 构建但避免强制每次重编生成器，改善构建效率.
+- 目标注入：在发现 VULKAN_HPP_INCLUDE_DIR 时，分别对 ggml-vulkan 与 JNI 目标注入 include 路径；启用 Vulkan 时仅对 JNI 目标注入 GGML_USE_VULKAN/GGML_VULKAN 宏用于运行时日志标识.
+- Debug 配置：保持 Debug 仍为 O3，不作修改.
+- 构建校验：已在 Windows 上执行 .\\gradlew :app:assembleDebug -PKEYPSWD=abc-1234，arm64-v8a 与 x86_64 ABI 构建通过，产物生成成功.
+
+---
+
+本地 LLM 输出能力扩展与上下文滑动（Context Shift）实现（本次变更）
+- 需求与设计要点：
+  - 解耦“最大输出 token 数”与“最大序列长度（n_ctx）”。最大输出仅作为输出软上限，不再反向限制 n_ctx 或输入窗口.
+  - 支持 KV-Cache 滑动（Context Shift）：当生成位置逼近 n_ctx 边界时滑动 KV，保留前缀 n_keep，继续生成，实现“滚动窗口”。
+  - 目标：在移动端资源有限条件下，提升长/超长输出的可持续性与稳定性.
+
+- UI/配置变更：
+  - `fragment_settings.xml`：将“最大输出 token 数”SeekBar 范围扩展为 512–16384（步进 512）。
+  - `SettingsFragment.java`：
+    - 校验放宽为 512–16384；移除“n_ctx > max_new_tokens + 256”的强耦合校验.
+    - 英文提示日志保持：范围越界时只提示本项，不再耦合 n_ctx.
+
+- 引擎与 JNI 实现：
+  - Java 层（`LlamaCppInference.java`）：新增上下文滑动配置接口（static native）：
+    - `set_context_shift(boolean enable, int nKeep)`
+    - `get_context_shift_enabled()`、`get_context_shift_n_keep()`
+  - C++ 层（`llama_inference.cpp`）：
+    - 新增全局配置 `g_ctx_shift_enabled`、`g_ctx_shift_n_keep`；JNI 对应导出函数.
+    - 在 `completion_loop(...)` 中，当当前位置到达或超过 `n_ctx` 时：
+      - 使用 `llama_get_memory()` 获取 memory；若 `llama_memory_can_shift()` 为 true：
+        - 通过 `llama_memory_seq_rm(mem, 0, n_keep, -1)` 移除可舍弃的尾段；
+        - 通过 `llama_memory_seq_add(mem, 0, n_keep, -1, -delta)` 平移剩余位置；
+        - 重置 `ncur` 使下一 token 追加到 `n_keep` 位置；
+        - 以英文 TRACE 日志记录滑动详情（n_ctx/n_keep/delta/new_ncur 等）.
+  - 引擎层（`LocalLLMLlamaCppHandler.java`）：
+    - 在生成开始前启用滑动：`LlamaCppInference.set_context_shift(true, nKeep)`；
+    - 默认 `n_keep = clamp(n_ctx/2, 256, 1024)` 以保留系统提示词与会话骨干；
+    - 保留“最大输出 token 数”为生成循环软上限（UI 可设至 16384）。
+
+- 最佳实践与注意事项：
+  - n_keep 推荐范围：256–1024；对较小 n_ctx 使用相对更小的 n_keep，以平衡保留信息与可用窗口.
+  - 上下文滑动不是长上下文扩展（不改变 n_ctx），而是“滚动窗口”；如需更长上下文，请结合 RoPE scaling（YaRN/Linear）.
+  - 长时间生成对功耗与发热敏感，建议结合软停止条件（时长/字符数/停止词）与手动“停止”按钮；英文日志会标注滑动触发与停止原因，便于诊断.
+
+- 兼容性与风险控制：
+  - 若 `llama_memory_can_shift()` 返回 false，则降级为不滑动（英文 TRACE 日志），仍可按软上限生成.
+  - 初期默认启用滑动；如需关闭，可在 Java 层 `set_context_shift(false, 0)` 关闭（留作内部开关）。
+
+- 构建与验证：
+  - Windows 调试构建：`./gradlew :app:assembleDebug -PKEYPSWD=abc-1234`；
+  - Release 构建：`./gradlew assembleRelease -PKEYPSWD=abc-1234`；
+  - 运行观察英文日志包含 `[CTX_SHIFT]`、`[STREAM]` 与 KV 操作调用；确认在 n_ctx 边界处能够继续输出且不中断.

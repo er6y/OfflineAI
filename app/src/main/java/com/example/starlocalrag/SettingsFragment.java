@@ -569,7 +569,7 @@ public class SettingsFragment extends Fragment {
                 return;
             }
             
-            if (maxNewTokens < 512 || maxNewTokens > 4096) {
+            if (maxNewTokens < 512 || maxNewTokens > 16384) {
                 Toast.makeText(context, getString(R.string.toast_max_output_tokens_range), Toast.LENGTH_SHORT).show();
                 return;
             }
@@ -595,13 +595,7 @@ public class SettingsFragment extends Fragment {
                 return;
             }
             
-            // 验证最大序列长度与最大输出token数的关系
-            // maxSequenceLength是总的上下文长度，maxNewTokens是最大输出token数
-        // 输入token数 = maxSequenceLength - maxNewTokens，需要预留一定缓冲区
-        if (maxSequenceLength <= maxNewTokens + 256) {
-            Toast.makeText(context, getString(R.string.toast_max_seq_length_must_be_greater, maxNewTokens + 256), Toast.LENGTH_LONG).show();
-                return;
-            }
+            // 取消“最大序列长度必须大于最大输出token数+缓冲区”的强耦合校验，改为解耦使用
             
             // 保存设置到ConfigManager
             ConfigManager.setChunkSize(context, chunkSize);
