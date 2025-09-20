@@ -1043,7 +1043,11 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                 releaseSampler(sampler);
             }
             
-            if (!shouldStop.get() && callback != null) {
+            if (callback != null) {
+                // If stopped by user or global flag, still finalize with onComplete (consistency for upper state machine)
+                if (shouldStop.get() || GlobalStopManager.isGlobalStopRequested()) {
+                    LogManager.logI(TAG, "[STREAM] Generation stopped, finalizing with onComplete");
+                }
                 // 计算统计信息
                 long duration = System.currentTimeMillis() - generationStartTime;
                 int tokens = totalTokensGenerated.get();
@@ -1202,7 +1206,11 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                 }
                 
                 // 生成完成
-                if (callback != null && !shouldStop.get()) {
+                if (callback != null) {
+                    // If stopped by user or global flag, still finalize with onComplete (consistency for upper state machine)
+                    if (shouldStop.get() || GlobalStopManager.isGlobalStopRequested()) {
+                        LogManager.logI(TAG, "[STREAM] Traditional generation stopped, finalizing with onComplete");
+                    }
                     // 计算统计信息
                     long duration = System.currentTimeMillis() - generationStartTime;
                     int tokens = totalTokensGenerated.get();

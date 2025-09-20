@@ -331,3 +331,9 @@ CMake（JNI 构建脚本）优化补充说明（此次变更汇总，保持行�
   - Windows 调试构建：`./gradlew :app:assembleDebug -PKEYPSWD=abc-1234`；
   - Release 构建：`./gradlew assembleRelease -PKEYPSWD=abc-1234`；
   - 运行观察英文日志包含 `[CTX_SHIFT]`、`[STREAM]` 与 KV 操作调用；确认在 n_ctx 边界处能够继续输出且不中断.
+
+- 回调语义与状态一致性（补充）
+  - 停止行为：无论用户点击“停止”或触发全局停止标志，Java 引擎在 generateWithLlamaCpp 与 generateWithTraditionalStreaming 结束时都会回调 onComplete；停止时追加英文日志 "[STREAM] ... finalizing with onComplete" 以便诊断。
+  - 目的：确保 LocalLlmHandler/LocalLlmAdapter 的上层状态机能稳定复位 READY/清理调用态，避免 UI 悬挂或下次调用被占用。
+  - 异常路径：超时/错误仍走 onError，不改变既有语义。
+  - 代码位置：<mcfile name="LocalLLMLlamaCppHandler.java" path="app/src/main/java/com/example/starlocalrag/api/LocalLLMLlamaCppHandler.java"></mcfile>
