@@ -20,6 +20,9 @@ import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -56,6 +59,10 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
     private long modelHandle = 0;
     private long contextHandle = 0;
     private ExecutorService executorService;
+    // Add dedicated scheduler for monitors (timeout/watchdog)
+    private final ScheduledExecutorService monitorScheduler = Executors.newSingleThreadScheduledExecutor();
+    private volatile ScheduledFuture<?> inferenceTimeoutFuture = null;
+    private volatile ScheduledFuture<?> watchdogFuture = null;
     
     // 状态管理
     private final AtomicBoolean isInitialized = new AtomicBoolean(false);
@@ -91,6 +98,8 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
     private final AtomicInteger currentSessionTokens = new AtomicInteger(0);
     private long generationStartTime = 0;
     private long inferenceStartTime = 0;
+    // Lightweight watchdog needs last token timestamp
+    private volatile long lastTokenTime = 0;
     
     // 内存监控
     private long memoryBeforeInference = 0;
@@ -813,6 +822,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         }
         
         // 在后台线程执行推理
+        LogManager.logI(TAG, "[ASYNC] Scheduling inference runAsync - promptLen=" + (prompt != null ? prompt.length() : 0) + ", engine=" + getEngineType());
         currentInferenceTask = CompletableFuture.runAsync(() -> {
             try {
                 // 记录当前推理线程
@@ -821,11 +831,34 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                 lastThreadHealthCheckTime = System.currentTimeMillis();
                 
                 LogManager.logD(TAG, "推理线程启动 [线程ID: " + currentInferenceThread.getId() + "]");
+                LogManager.logI(TAG, "[ASYNC] Runnable started - thread=" + currentInferenceThread.getName() + ", id=" + currentInferenceThread.getId());
+                
+                // [SNAPSHOT][BG_START] pre-reset-stop snapshot (English log)
+                try {
+                    Thread worker = currentInferenceThread;
+                    boolean init = isInitialized.get();
+                    boolean generating = isGenerating.get();
+                    boolean stopFlag = shouldStop.get();
+                    boolean globalStop = GlobalStopManager.isGlobalStopRequested();
+                    LogManager.logI(
+                        TAG,
+                        "[SNAPSHOT][BG_START] pre-reset-stop, engine=" + getEngineType()
+                            + ", isInitialized=" + init
+                            + ", isGenerating=" + generating
+                            + ", shouldStop=" + stopFlag
+                            + ", GlobalStopManager=" + globalStop
+                            + ", thread=" + (worker != null ? worker.getName() : "null")
+                    );
+                } catch (Throwable th) {
+                    LogManager.logE(TAG, "Error collecting BG_START snapshot (engine)", th);
+                }
                 
                 isGenerating.set(true);
                 
                 // 启动超时监控线程
                 startInferenceTimeoutMonitor(callback);
+                
+                LogManager.logI(TAG, "[STREAM] onStart - preparing (will reset stop flags)");
                 
                 // 推理开始时必须重置停止标志
                 // 停止调试日志已移除
@@ -838,15 +871,61 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                 } catch (Exception e) {
                     LogManager.logE(TAG, "重置JNI停止标志失败: " + e.getMessage(), e);
                 }
+                
+                // [STREAM] onStart after stop flags reset (English log)
+                try {
+                    int promptLen = (prompt != null ? prompt.length() : 0);
+                    Thread worker = currentInferenceThread;
+                    LogManager.logI(
+                        TAG,
+                        "[STREAM] onStart - engine=" + getEngineType()
+                            + ", promptLen=" + promptLen
+                            + ", thread=" + (worker != null ? worker.getName() : "null")
+                    );
+                } catch (Throwable th) {
+                    LogManager.logE(TAG, "Error logging [STREAM] onStart (engine)", th);
+                }
                 generationStartTime = System.currentTimeMillis();
                 inferenceStartTime = System.currentTimeMillis();
                 totalTokensGenerated.set(0);
                 
                 // 重置当前会话统计
                 currentSessionTokens.set(0);
+                // init last token time for watchdog
+                lastTokenTime = System.currentTimeMillis();
                 
                 // 开始内存监控
                 startMemoryMonitoring();
+                // Start lightweight watchdog via scheduler (no common pool, cancellable)
+                try {
+                    if (watchdogFuture != null && !watchdogFuture.isDone()) {
+                        watchdogFuture.cancel(false);
+                    }
+                    final long TOKEN_STALL_WARN_MS = 15_000; // 15s without token => warn
+                    final long FIRST_TOKEN_WARN_MS = 15_000; // 15s to first token => warn
+                    watchdogFuture = monitorScheduler.scheduleWithFixedDelay(() -> {
+                        if (!isGenerating.get() || shouldStop.get() || GlobalStopManager.isGlobalStopRequested()) {
+                            LogManager.logD(TAG, "[WD] Lightweight watchdog stopped by condition");
+                            ScheduledFuture<?> f = watchdogFuture;
+                            if (f != null && !f.isDone()) {
+                                f.cancel(false);
+                            }
+                            return;
+                        }
+                        long now = System.currentTimeMillis();
+                        int tokens = totalTokensGenerated.get();
+                        if (tokens == 0 && (now - generationStartTime) > FIRST_TOKEN_WARN_MS) {
+                            LogManager.logW(TAG, "[WD] Slow first token (>15s). Model may be heavy or CPU constrained; consider lowering context or sampling params.");
+                        }
+                        long sinceLastToken = now - lastTokenTime;
+                        if (sinceLastToken > TOKEN_STALL_WARN_MS) {
+                            Thread.State state = currentInferenceThread != null ? currentInferenceThread.getState() : null;
+                            LogManager.logW(TAG, "[WD] No token for " + sinceLastToken + "ms (stall suspected). threadState=" + state + ", mem=" + getMemoryStats());
+                        }
+                    }, 3, 3, TimeUnit.SECONDS);
+                } catch (Throwable t) {
+                    LogManager.logW(TAG, "[WD] Failed to start watchdog via scheduler", t);
+                }
                 
                 LogManager.logI(TAG, "开始LlamaCpp流式生成文本");
                 
@@ -866,8 +945,28 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                 }
             } finally {
                 isGenerating.set(false);
+                // Cancel monitors and clear references to avoid leaks
+                try {
+                    if (inferenceTimeoutFuture != null) {
+                        boolean cancelled = inferenceTimeoutFuture.cancel(false);
+                        LogManager.logD(TAG, "[TIMEOUT] Cancel scheduled timeout monitor in finally: " + cancelled);
+                        inferenceTimeoutFuture = null;
+                    }
+                    if (watchdogFuture != null) {
+                        boolean cancelled = watchdogFuture.cancel(false);
+                        LogManager.logD(TAG, "[WD] Cancel watchdog in finally: " + cancelled);
+                        watchdogFuture = null;
+                    }
+                } catch (Throwable t) {
+                    LogManager.logW(TAG, "[MONITOR] Cancel monitors in finally error", t);
+                }
+                long elapsed = System.currentTimeMillis() - inferenceStartTime;
+                int tokens = totalTokensGenerated.get();
+                Thread worker = currentInferenceThread;
+                LogManager.logI(TAG, "[ASYNC] Runnable finished - elapsed=" + elapsed + "ms, tokens=" + tokens + ", thread=" + (worker != null ? worker.getName() : "null"));
             }
-        });
+        }, executorService);
+        LogManager.logI(TAG, "[ASYNC] runAsync submitted - future=" + (currentInferenceTask != null));
     }
     
     /**
@@ -932,6 +1031,10 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                 int tokenCount = LlamaCppInference.completion_init(contextHandle, batch, processedPrompt, maxTokens, false);
                 if (tokenCount < 0) {
                     LogManager.logE(TAG, "初始化完成失败");
+                    if (callback != null) {
+                        LogManager.logE(TAG, "[STREAM][ERROR] completion_init failed, aborting generation");
+                        callback.onError("Initialization failed: completion_init returned negative token count");
+                    }
                     return;
                 }
                 
@@ -955,6 +1058,10 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                         LogManager.logW(TAG, "线程健康检查失败，尝试强制终止");
                         if (forceTerminateInferenceThread()) {
                             LogManager.logI(TAG, "推理线程已被强制终止");
+                            if (callback != null) {
+                                LogManager.logE(TAG, "[STREAM][ERROR] Inference thread force-terminated, aborting");
+                                callback.onError("Inference aborted: thread force-terminated");
+                            }
                             return;
                         } else {
                             LogManager.logE(TAG, "强制终止推理线程失败，继续执行");
@@ -1000,6 +1107,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                         // 输出截断提示
                         fullResponse.append(token);
                         if (callback != null) {
+                            lastTokenTime = System.currentTimeMillis();
                             callback.onToken(token);
                         }
                         // 下一次循环将收到空字符串并正确结束
@@ -1034,6 +1142,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                     updateMemoryMonitoring();
                     
                     if (callback != null) {
+                        lastTokenTime = System.currentTimeMillis();
                         callback.onToken(fixedToken);
                     }
                 }
@@ -1167,6 +1276,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                         // 输出截断提示
                         fullResponse.append(token);
                         if (callback != null) {
+                            lastTokenTime = System.currentTimeMillis();
                             callback.onToken(token);
                         }
                         // 下一次循环将收到空字符串并正确结束
@@ -1201,6 +1311,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                     updateMemoryMonitoring();
                     
                     if (callback != null) {
+                        lastTokenTime = System.currentTimeMillis();
                         callback.onToken(fixedToken);
                     }
                 }
@@ -1428,6 +1539,22 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         LogManager.logD(TAG, "[停止调试] 停止标志当前状态: " + shouldStop.get());
         shouldStop.set(true);
         
+        // Cancel monitors to avoid leaving sleeping tasks running
+        try {
+            if (inferenceTimeoutFuture != null) {
+                boolean cancelled = inferenceTimeoutFuture.cancel(false);
+                LogManager.logD(TAG, "[TIMEOUT] Cancel scheduled timeout monitor: " + cancelled);
+                inferenceTimeoutFuture = null;
+            }
+            if (watchdogFuture != null) {
+                boolean cancelled = watchdogFuture.cancel(false);
+                LogManager.logD(TAG, "[WD] Cancel watchdog: " + cancelled);
+                watchdogFuture = null;
+            }
+        } catch (Throwable t) {
+            LogManager.logW(TAG, "[MONITOR] Cancel monitors error", t);
+        }
+        
         // 同时设置JNI层的停止标志
         try {
             boolean currentJniState = LlamaCppInference.get_should_stop();
@@ -1470,6 +1597,16 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         
         // 注意：不要在这里设置isGenerating为false
         // 让推理循环检查shouldStop标志后自然结束，然后在finally块中设置isGenerating为false
+        
+        // Also attempt to cancel current inference future to accelerate stop
+        try {
+            if (currentInferenceTask != null && !currentInferenceTask.isDone()) {
+                boolean cancelled = currentInferenceTask.cancel(true);
+                LogManager.logD(TAG, "[ASYNC] Cancel currentInferenceTask in stopInference: " + cancelled);
+            }
+        } catch (Throwable t) {
+            LogManager.logW(TAG, "[ASYNC] Cancel currentInferenceTask error", t);
+        }
     }
     
 
@@ -1734,6 +1871,33 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         // 释放预分配资源
         releasePreallocatedResources();
         
+        // Cancel monitors and shutdown monitor scheduler
+        try {
+            if (inferenceTimeoutFuture != null) {
+                boolean cancelled = inferenceTimeoutFuture.cancel(false);
+                LogManager.logD(TAG, "[TIMEOUT] Cancel scheduled timeout monitor in release: " + cancelled);
+                inferenceTimeoutFuture = null;
+            }
+            if (watchdogFuture != null) {
+                boolean cancelled = watchdogFuture.cancel(false);
+                LogManager.logD(TAG, "[WD] Cancel watchdog in release: " + cancelled);
+                watchdogFuture = null;
+            }
+        } catch (Throwable t) {
+            LogManager.logW(TAG, "[MONITOR] Cancel monitors in release error", t);
+        }
+        if (monitorScheduler != null && !monitorScheduler.isShutdown()) {
+            monitorScheduler.shutdown();
+            try {
+                if (!monitorScheduler.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                    monitorScheduler.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                monitorScheduler.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+        
         // 关闭线程池
         if (executorService != null && !executorService.isShutdown()) {
             executorService.shutdown();
@@ -1847,42 +2011,44 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
      * 启动推理超时监控
      */
     private void startInferenceTimeoutMonitor(LocalLlmHandler.StreamingCallback callback) {
-        CompletableFuture.runAsync(() -> {
+        // Use dedicated scheduler instead of common pool to avoid sleeping tasks occupying workers
+        if (inferenceTimeoutFuture != null && !inferenceTimeoutFuture.isDone()) {
+            inferenceTimeoutFuture.cancel(false);
+        }
+        if (INFERENCE_TIMEOUT_MS <= 0) {
+            LogManager.logD(TAG, "[TIMEOUT] disabled");
+            inferenceTimeoutFuture = null;
+            return;
+        }
+        inferenceTimeoutFuture = monitorScheduler.schedule(() -> {
             try {
-                Thread.sleep(INFERENCE_TIMEOUT_MS);
-                
-                // 检查推理是否仍在进行
+                // After delay, check conditions once
                 if (isGenerating.get() && currentInferenceThread != null) {
-                    LogManager.logW(TAG, "推理超时检测：推理已运行 " + INFERENCE_TIMEOUT_MS + "ms，强制终止");
-                    
-                    // 设置停止标志
+                    LogManager.logW(TAG, "[TIMEOUT] Inference exceeded " + INFERENCE_TIMEOUT_MS + "ms, requesting stop and force terminate if needed");
                     shouldStop.set(true);
-                    
                     try {
                         LlamaCppInference.set_should_stop(true);
                     } catch (Exception e) {
-                        LogManager.logE(TAG, "设置JNI停止标志失败: " + e.getMessage());
+                        LogManager.logE(TAG, "[TIMEOUT] Failed to set JNI stop flag: " + e.getMessage());
                     }
-                    
-                    // 强制终止推理线程
                     if (forceTerminateInferenceThread()) {
-                        LogManager.logI(TAG, "推理超时：成功终止推理线程");
+                        LogManager.logI(TAG, "[TIMEOUT] Inference thread terminated successfully");
                         if (callback != null) {
                             callback.onError("推理超时：推理时间超过 " + (INFERENCE_TIMEOUT_MS / 1000) + " 秒，已自动终止");
                         }
                     } else {
-                        LogManager.logE(TAG, "推理超时：无法终止推理线程");
+                        LogManager.logE(TAG, "[TIMEOUT] Unable to terminate inference thread");
                         if (callback != null) {
                             callback.onError("推理超时：无法终止推理线程，请重启应用");
                         }
                     }
+                } else {
+                    LogManager.logD(TAG, "[TIMEOUT] monitor skipped: not generating or thread missing");
                 }
-            } catch (InterruptedException e) {
-                LogManager.logD(TAG, "推理超时监控线程被中断");
-            } catch (Exception e) {
-                LogManager.logE(TAG, "推理超时监控异常: " + e.getMessage(), e);
+            } catch (Throwable t) {
+                LogManager.logE(TAG, "[TIMEOUT] monitor exception: " + t.getMessage(), t);
             }
-        });
+        }, INFERENCE_TIMEOUT_MS, TimeUnit.MILLISECONDS);
     }
     
     /**

@@ -84,13 +84,40 @@ public class LlmApiAdapter {
     public void callLlmApi(String apiUrl, String apiKey, String model, String prompt, ApiCallback callback) {
         ApiType apiType = detectApiType(apiUrl);
         LogManager.logD(TAG, "检测到API类型: " + apiType.name());
+        // [STREAM] onStart at unified entry (English log)
+        LogManager.logD(TAG, "[STREAM] onStart - source=" + (apiType == ApiType.LOCAL ? "local" : "api")
+                + ", model=" + model
+                + ", thread=" + Thread.currentThread().getName());
         
         try {
             // 如果是本地模型，使用本地适配器
             if (apiType == ApiType.LOCAL) {
                 LogManager.logD(TAG, "使用本地模型: " + model);
+                // [STREAM] Use proxy callback to inject streaming logs for local model
                 LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(context);
-                localAdapter.callLocalModel(model, prompt, callback);
+                ApiCallback proxyCb = new ApiCallback() {
+                    @Override
+                    public void onSuccess(String response) {
+                        int len = response != null ? response.length() : 0;
+                        LogManager.logD(TAG, "[STREAM] onComplete - source=local, len=" + len + ", thread=" + Thread.currentThread().getName());
+                        callback.onSuccess(response);
+                    }
+                    
+                    @Override
+                    public void onStreamingData(String chunk) {
+                        int size = chunk != null ? chunk.length() : 0;
+                        String preview = (chunk != null) ? chunk.substring(0, Math.min(40, chunk.length())).replace("\n", "\\n") : "";
+                        LogManager.logD(TAG, "[STREAM] onToken - source=local, size=" + size + (size > 0 ? (", preview=\"" + preview + "\"") : "") + ", thread=" + Thread.currentThread().getName());
+                        callback.onStreamingData(chunk);
+                    }
+                    
+                    @Override
+                    public void onError(String errorMessage) {
+                        LogManager.logD(TAG, "[STREAM] onError - source=local, msg=" + errorMessage + ", thread=" + Thread.currentThread().getName());
+                        callback.onError(errorMessage);
+                    }
+                };
+                localAdapter.callLocalModel(model, prompt, proxyCb);
                 return;
             }
             
@@ -105,16 +132,22 @@ public class LlmApiAdapter {
             streamingClient.streamRequest(fullApiUrl, apiKey, model, prompt, new StreamingApiClient.StreamingCallback() {
                 @Override
                 public void onToken(String token) {
+                    int size = token != null ? token.length() : 0;
+                    String preview = (token != null) ? token.substring(0, Math.min(40, token.length())).replace("\n", "\\n") : "";
+                    LogManager.logD(TAG, "[STREAM] onToken - source=api, apiType=" + apiType.name() + ", size=" + size + (size > 0 ? (", preview=\"" + preview + "\"") : "") + ", thread=" + Thread.currentThread().getName());
                     callback.onStreamingData(token);
                 }
                 
                 @Override
                 public void onComplete(String fullResponse) {
+                    int len = fullResponse != null ? fullResponse.length() : 0;
+                    LogManager.logD(TAG, "[STREAM] onComplete - source=api, apiType=" + apiType.name() + ", len=" + len + ", thread=" + Thread.currentThread().getName());
                     callback.onSuccess(fullResponse);
                 }
                 
                 @Override
                 public void onError(String errorMessage) {
+                    LogManager.logD(TAG, "[STREAM] onError - source=api, apiType=" + apiType.name() + ", msg=" + errorMessage + ", thread=" + Thread.currentThread().getName());
                     callback.onError(errorMessage);
                 }
             });
@@ -253,23 +286,33 @@ public class LlmApiAdapter {
                 localAdapter.callLocalModel(model, prompt, new ApiCallback() {
                     @Override
                     public void onSuccess(String response) {
+                        int len = response != null ? response.length() : 0;
+                        LogManager.logD(TAG, "[STREAM][SYNC] onComplete (local) - len=" + len + ", thread=" + Thread.currentThread().getName());
                         result.append(response);
                         latch.countDown();
                     }
                     
                     @Override
                     public void onStreamingData(String chunk) {
+                        int size = chunk != null ? chunk.length() : 0;
+                        String preview = (chunk != null) ? chunk.substring(0, Math.min(40, chunk.length())).replace("\n", "\\n") : "";
+                        LogManager.logD(TAG, "[STREAM][SYNC] onToken (local) - size=" + size + (size > 0 ? (", preview=\"" + preview + "\"") : "") + ", thread=" + Thread.currentThread().getName());
                         result.append(chunk);
                     }
                     
                     @Override
                     public void onError(String errorMessage) {
+                        LogManager.logD(TAG, "[STREAM][SYNC] onError (local) - msg=" + errorMessage + ", thread=" + Thread.currentThread().getName());
                         error.append(errorMessage);
                         latch.countDown();
                     }
                 });
                 
+                long startMs = System.currentTimeMillis();
+                LogManager.logD(TAG, "[STREAM][SYNC] waiting - source=local, timeout=60s, thread=" + Thread.currentThread().getName());
                 boolean completed = latch.await(60, TimeUnit.SECONDS);
+                long elapsed = System.currentTimeMillis() - startMs;
+                LogManager.logD(TAG, "[STREAM][SYNC] done waiting - source=local, completed=" + completed + ", elapsedMs=" + elapsed + ", thread=" + Thread.currentThread().getName());
                 if (!completed) {
                     return "本地模型调用超时";
                 }
@@ -292,17 +335,23 @@ public class LlmApiAdapter {
         callLlmApi(apiUrl, apiKey, model, prompt, new ApiCallback() {
             @Override
             public void onSuccess(String response) {
+                int len = response != null ? response.length() : 0;
+                LogManager.logD(TAG, "[STREAM][SYNC] onComplete (api) - len=" + len + ", thread=" + Thread.currentThread().getName());
                 result.append(response);
                 latch.countDown();
             }
             
             @Override
             public void onStreamingData(String chunk) {
+                int size = chunk != null ? chunk.length() : 0;
+                String preview = (chunk != null) ? chunk.substring(0, Math.min(40, chunk.length())).replace("\n", "\\n") : "";
+                LogManager.logD(TAG, "[STREAM][SYNC] onToken (api) - size=" + size + (size > 0 ? (", preview=\"" + preview + "\"") : "") + ", thread=" + Thread.currentThread().getName());
                 result.append(chunk);
             }
             
             @Override
             public void onError(String errorMessage) {
+                LogManager.logD(TAG, "[STREAM][SYNC] onError (api) - msg=" + errorMessage + ", thread=" + Thread.currentThread().getName());
                 error.append(errorMessage);
                 latch.countDown();
             }
@@ -310,12 +359,17 @@ public class LlmApiAdapter {
         
         try {
             // 等待响应，最多60秒
+            long startMs = System.currentTimeMillis();
+            LogManager.logD(TAG, "[STREAM][SYNC] waiting - source=api, timeout=60s, thread=" + Thread.currentThread().getName());
             boolean completed = latch.await(60, TimeUnit.SECONDS);
+            long elapsed = System.currentTimeMillis() - startMs;
+            LogManager.logD(TAG, "[STREAM][SYNC] done waiting - source=api, completed=" + completed + ", elapsedMs=" + elapsed + ", thread=" + Thread.currentThread().getName());
             if (!completed) {
                 return "API调用超时";
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            LogManager.logD(TAG, "[STREAM][SYNC] wait interrupted - thread=" + Thread.currentThread().getName() + ", msg=" + e.getMessage());
             return "API调用被中断: " + e.getMessage();
         }
         

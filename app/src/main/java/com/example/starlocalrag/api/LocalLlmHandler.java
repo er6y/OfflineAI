@@ -473,168 +473,78 @@ public class LocalLlmHandler {
      */
     @Deprecated
     public void loadModel(String modelName, final LocalLlmCallback callback) {
+
+        
         LogManager.logI(TAG, "DEBUG: Load model request: " + modelName + ", thread: " + Thread.currentThread().getName());
-        
-        // 检查当前状态
+         
+         // 发送后台启动快照（重置停止标志之前）
         ModelState currentState = modelState.get();
-        LogManager.logI(TAG, "DEBUG: Current state: " + currentState + ", current model: " + currentModelName + ", target model: " + modelName);
+        LogManager.logD(TAG, "[SNAPSHOT][BG_START] pre-reset-stop, state=" + currentState
+                + ", shouldStop=" + shouldStopInference.get()
+                + ", GlobalStopManager=" + GlobalStopManager.isGlobalStopRequested()
+                + ", thread=" + Thread.currentThread().getName());
         
-        // 如果已经加载了相同的模型，直接返回
-        if ((currentState == ModelState.READY || currentState == ModelState.BUSY) && modelName.equals(currentModelName)) {
-            LogManager.logI(TAG, "DEBUG: Model already loaded, skipping: " + modelName);
-            if (callback != null) {
-                callback.onComplete("Model already loaded: " + modelName);
-            }
-            return;
-        }
+        // 重置停止标志，并发送 [STREAM] onStart 日志
+        resetStopFlag();
+        LogManager.logD(TAG, "[STREAM] onStart - engine=unknown, model=" + modelName);
         
-        // 检查是否已经在加载相同模型
-        if (currentState == ModelState.LOADING && modelName.equals(currentModelName)) {
-            LogManager.logW(TAG, "DEBUG: Model is already loading, rejecting duplicate request: " + modelName);
-            if (callback != null) {
-                callback.onError("Model is already loading: " + modelName);
-            }
-            return;
-        }
-        
-        // 简化状态转换：直接设置为LOADING
-        LogManager.logI(TAG, "DEBUG: Setting model state to LOADING for: " + modelName);
-        forceSetModelState(ModelState.LOADING);
-        currentModelName = modelName;
-        
-        // 异步加载模型
+        // 在后台线程执行模型加载
         executorService.submit(() -> {
             try {
-                LogManager.logI(TAG, "Start loading model: " + modelName);
-                
-                // 释放之前的资源
-                if (inferenceEngine != null) {
-                    inferenceEngine.release();
+                ModelState st = modelState.get();
+                if (st == ModelState.BUSY) {
+                    callback.onError("Model is busy, cannot load now");
+                    return;
                 }
                 
-                // 1. 确保模型文件存在
-                String modelPath = ConfigManager.getModelPath(context);
-                File modelDir = new File(modelPath, modelName);
+                forceSetModelState(ModelState.LOADING);
                 
+                String baseModelPath = ConfigManager.getModelPath(context);
+                File modelDir = new File(baseModelPath, modelName);
                 if (!modelDir.exists() || !modelDir.isDirectory()) {
-                    throw new IOException("Model file does not exist: " + modelDir.getAbsolutePath());
+                    forceSetModelState(ModelState.UNLOADED);
+                    callback.onError("Model directory not found: " + modelDir.getAbsolutePath());
+                    return;
                 }
                 
-                // 2. 选择推理引擎（只支持LlamaCpp）
-                InferenceEngine selectedEngine = selectInferenceEngine(modelDir);
-                if (selectedEngine == null) {
-                    throw new IOException("Unsupported model format: " + modelDir.getAbsolutePath());
+                InferenceEngine engine = selectInferenceEngine(modelDir);
+                if (engine == null) {
+                    forceSetModelState(ModelState.UNLOADED);
+                    callback.onError("No suitable inference engine for model: " + modelName);
+                    return;
                 }
                 
-                inferenceEngine = selectedEngine;
+                // 选择一个 .gguf 模型文件
+                File[] files = modelDir.listFiles();
+                String ggufPath = null;
+                if (files != null) {
+                    for (File f : files) {
+                        if (f.isFile() && f.getName().toLowerCase().endsWith(".gguf")) {
+                            ggufPath = f.getAbsolutePath();
+                            break;
+                        }
+                    }
+                }
+                if (ggufPath == null) {
+                    forceSetModelState(ModelState.UNLOADED);
+                    callback.onError("No .gguf model file found in: " + modelDir.getAbsolutePath());
+                    return;
+                }
                 
-                // 3. 创建模型配置
-                ModelConfig modelConfig = createBasicModelConfig(modelDir.getAbsolutePath());
+                ModelConfig config = createBasicModelConfig(ggufPath);
+                engine.initialize(ggufPath, config);
                 
-                // 4. 初始化推理引擎
-                inferenceEngine.initialize(modelDir.getAbsolutePath(), modelConfig);
-                
-                // 5. 设置状态为READY
+                setInferenceEngine(engine);
+                currentModelName = modelName;
                 forceSetModelState(ModelState.READY);
-                
-                LogManager.logI(TAG, "✓ Model loaded successfully: " + modelName + " (engine: " + inferenceEngine.getEngineType() + ")");
-                
-                if (callback != null) {
-                    callback.onComplete("Model loaded successfully: " + modelName);
-                }
+                LogManager.logI(TAG, "Model loaded successfully: " + modelName + ", engine=" + engine.getEngineType());
+                callback.onComplete("Loaded");
             } catch (Exception e) {
-                LogManager.logE(TAG, "Model loading failed: " + e.getMessage(), e);
-                
-                // 加载失败时重置状态为UNLOADED
                 forceSetModelState(ModelState.UNLOADED);
-                currentModelName = null;
-                
-                if (callback != null) {
-                    callback.onError("Model loading failed: " + e.getMessage());
-                }
+                LogManager.logE(TAG, "Error loading model: " + modelName, e);
+                callback.onError("Error loading model: " + e.getMessage());
             }
         });
-    }
-    
-    /**
-     * 执行推理（简化版接口）
-     * @param prompt 输入提示词
-     * @param callback 流式回调
-     */
-    public void inference(String prompt, StreamingCallback callback) {
-        InferenceParams params = new InferenceParams();
-        // 从配置中获取参数
-        params.setThinkingMode(!ConfigManager.getNoThinking(context));
-        
-        inference(prompt, params, callback);
-    }
-    
-    /**
-     * 执行推理（简化版本）
-     * @param prompt 输入提示词
-     * @param params 推理参数
-     * @param callback 流式回调
-     */
-    public void inference(String prompt, InferenceParams params, StreamingCallback callback) {
-        LogManager.logD(TAG, "Inference start, thread: " + Thread.currentThread().getName());
-        
-        // 检查全局停止标志
-        if (GlobalStopManager.isGlobalStopRequested()) {
-            LogManager.logD(TAG, "Detected global stop flag, interrupting inference");
-            callback.onError("Inference interrupted by global stop flag");
-            return;
-        }
-        
-        // 检查模型状态
-        ModelState currentState = modelState.get();
-        LogManager.logD(TAG, "Current state: " + currentState);
-        
-        if (currentState != ModelState.READY) {
-            String errorMsg = "Model not ready, current state: " + currentState;
-            LogManager.logW(TAG, errorMsg);
-            callback.onError(errorMsg);
-            return;
-        }
-        
-        if (inferenceEngine == null) {
-            LogManager.logE(TAG, "Inference engine not initialized");
-            callback.onError("Inference engine not initialized");
-            return;
-        }
-        
-        // 简化状态转换：直接设置为BUSY
-        forceSetModelState(ModelState.BUSY);
-        LogManager.logI(TAG, "State set to BUSY, start inference");
-        
-        // 重置停止标志
-        resetStopFlag();
-        
-        LogManager.logD(TAG, "Start inference, engine: " + inferenceEngine.getEngineType() + ", prompt length: " + prompt.length());
-        
-        // 创建包装回调，在推理完成时重置状态
-        StreamingCallback wrappedCallback = new StreamingCallback() {
-            @Override
-            public void onToken(String token) {
-                callback.onToken(token);
-            }
-            
-            @Override
-            public void onComplete(String fullResponse) {
-                // 推理完成，设置状态回READY
-                forceSetModelState(ModelState.READY);
-                callback.onComplete(fullResponse);
-            }
-            
-            @Override
-            public void onError(String errorMessage) {
-                // 推理出错，设置状态回READY
-                forceSetModelState(ModelState.READY);
-                callback.onError(errorMessage);
-            }
-        };
-        
-        // 执行推理
-        inferenceEngine.inference(prompt, params, wrappedCallback);
     }
     
     /**
@@ -644,9 +554,110 @@ public class LocalLlmHandler {
      */
     @Deprecated
     public void inference(String prompt, LocalLlmCallback callback) {
-        inference(prompt, (StreamingCallback) callback);
+        // 使用包装以适配 StreamingCallback，避免非法类型转换
+        StreamingCallback wrapper = new StreamingCallback() {
+            @Override
+            public void onToken(String token) { callback.onToken(token); }
+            @Override
+            public void onComplete(String fullResponse) { callback.onComplete(fullResponse); }
+            @Override
+            public void onError(String errorMessage) { callback.onError(errorMessage); }
+        };
+        inference(prompt, wrapper);
     }
 
+    // 新增：执行推理（主用接口，支持流式回调）
+    public void inference(String prompt, final StreamingCallback callback) {
+        if (prompt == null) {
+            LogManager.logE(TAG, "Inference prompt is null");
+            if (callback != null) callback.onError("Prompt is null");
+            return;
+        }
+
+        LogManager.logI(TAG, "DEBUG: Inference request received, thread=" + Thread.currentThread().getName() + ", promptLen=" + prompt.length());
+
+        // 发送后台启动快照（重置停止标志之前）
+        ModelState currentState = modelState.get();
+        LogManager.logD(TAG, "[SNAPSHOT][BG_START] pre-reset-stop, state=" + currentState
+                + ", shouldStop=" + shouldStopInference.get()
+                + ", GlobalStopManager=" + GlobalStopManager.isGlobalStopRequested()
+                + ", thread=" + Thread.currentThread().getName());
+
+        // 重置停止标志，并发送 [STREAM] onStart 日志
+        resetStopFlag();
+        String engineType = (inferenceEngine != null) ? inferenceEngine.getEngineType() : "unknown";
+        String modelName = (currentModelName != null) ? currentModelName : "unknown";
+        LogManager.logD(TAG, "[STREAM] onStart - engine=" + engineType + ", model=" + modelName + ", promptLen=" + prompt.length());
+
+        // 前置检查
+        if (inferenceEngine == null) {
+            LogManager.logE(TAG, "Inference engine is null, cannot start inference");
+            if (callback != null) callback.onError("Inference engine not initialized");
+            return;
+        }
+        if (!isModelReady()) {
+            LogManager.logW(TAG, "Model is not ready: state=" + modelState.get());
+            if (callback != null) callback.onError("Model is not ready");
+            return;
+        }
+
+        // 设置状态为 BUSY
+        forceSetModelState(ModelState.BUSY);
+
+        // 构造默认推理参数（如需从配置细化可后续扩展）
+        InferenceParams params = new InferenceParams();
+
+        // 轻量统计：记录开始时间与token数
+        final long startNs = System.nanoTime();
+        final java.util.concurrent.atomic.AtomicInteger tokenCount = new java.util.concurrent.atomic.AtomicInteger(0);
+
+        // 委托调用前日志
+        LogManager.logI(TAG, "[DELEGATE] submitting engine.inference task - engine=" + engineType + ", thread=" + Thread.currentThread().getName());
+
+        // 在后台线程发起推理，底层引擎内部也会切线程，但此处保持与加载一致的异步行为
+        executorService.submit(() -> {
+            LogManager.logD(TAG, "[ASYNC] delegate worker started - thread=" + Thread.currentThread().getName());
+            try {
+                LogManager.logD(TAG, "[DELEGATE] calling engine.inference(...), promptLen=" + prompt.length());
+                inferenceEngine.inference(prompt, params, new StreamingCallback() {
+                    @Override
+                    public void onToken(String token) {
+                        int c = tokenCount.incrementAndGet();
+                        if (callback != null) callback.onToken(token);
+                        if (c == 1 || c % 50 == 0) {
+                            LogManager.logD(TAG, "[STREAM] onToken - count=" + c);
+                        }
+                    }
+
+                    @Override
+                    public void onComplete(String fullResponse) {
+                        long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+                        LogManager.logD(TAG, "[STREAM] onComplete - tokens=" + tokenCount.get() + ", elapsedMs=" + elapsedMs);
+                        LogManager.logD(TAG, "DEBUG: Inference completed, responseLen=" + (fullResponse != null ? fullResponse.length() : 0));
+                        forceSetModelState(ModelState.READY);
+                        if (callback != null) callback.onComplete(fullResponse);
+                    }
+
+                    @Override
+                    public void onError(String errorMessage) {
+                        long elapsedMs = (System.nanoTime() - startNs) / 1_000_000L;
+                        LogManager.logE(TAG, "[STREAM] onError - tokens=" + tokenCount.get() + ", elapsedMs=" + elapsedMs + ", error=" + errorMessage);
+                        LogManager.logE(TAG, "DEBUG: Inference failed: " + errorMessage);
+                        forceSetModelState(ModelState.READY);
+                        if (callback != null) callback.onError(errorMessage);
+                    }
+                });
+                LogManager.logD(TAG, "[DELEGATE] engine.inference returned (streaming ongoing if no error)");
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to start inference", e);
+                forceSetModelState(ModelState.READY);
+                if (callback != null) callback.onError("Failed to start inference: " + e.getMessage());
+            } finally {
+                LogManager.logD(TAG, "[ASYNC] delegate worker finished - thread=" + Thread.currentThread().getName());
+            }
+        });
+    }
+    
     /**
      * 批处理推理 - 支持多序列并行推理
      * @param inputTexts 输入文本数组
@@ -739,6 +750,7 @@ public class LocalLlmHandler {
      */
     public void resetStopFlag() {
         shouldStopInference.set(false);
+        LogManager.logD(TAG, "[STOP] resetStopFlag -> false");
     }
     
     /**

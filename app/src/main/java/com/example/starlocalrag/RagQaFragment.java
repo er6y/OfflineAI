@@ -142,6 +142,7 @@ public class RagQaFragment extends Fragment {
     
     // 全局停止标志 - 用于统一控制所有模型的停止
     private volatile boolean globalStopFlag = false;
+    private volatile Future<?> ragTaskFuture; // Track RAG task future for cancellation
 
     // keep screen on flag
     private boolean isKeepScreenOn = false;
@@ -937,28 +938,88 @@ public class RagQaFragment extends Fragment {
             String systemPrompt = editTextSystemPrompt.getText().toString();
             String userPrompt = editTextUserPrompt.getText().toString();
             
+            LogManager.logI(TAG, "[SEND][CLICK] Enter handleSendStopClick - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
+            LogManager.logD(TAG, "[SEND][PARAM] apiUrl=" + apiUrl + ", model=" + model + ", kb=" + knowledgeBase + ", sys.len=" + (systemPrompt==null?0:systemPrompt.length()) + ", user.len=" + (userPrompt==null?0:userPrompt.length()) + ", apiKey.len=" + (apiKey==null?0:apiKey.length()));
             LogManager.logD(TAG, "User clicked send button, preparing to send request");
             LogManager.logD(TAG, "Request parameters: API URL=" + apiUrl + ", Model=" + model + ", Knowledge Base=" + knowledgeBase);
+            // Debug snapshot at send click (English log)
+            try {
+                boolean ui_isSending = isSending.get();
+                boolean ui_isTaskRunning = isTaskRunning;
+                boolean ui_isTaskCancelled = isTaskCancelled;
+                boolean ui_globalStopFlag = globalStopFlag;
+                boolean ui_globalStopRequested = GlobalStopManager.isGlobalStopRequested();
+                String ragFutureState = (ragTaskFuture == null ? "null" : (ragTaskFuture.isDone() ? "done" : "not_done"));
+                Thread uiThread = Thread.currentThread();
+
+                LocalLlmAdapter adapter = LocalLlmAdapter.getInstance(requireContext());
+                String modelState = String.valueOf(adapter.getModelState());
+                boolean llmBusy = adapter.isModelBusy();
+                boolean llmRunning = adapter.isInferenceRunning();
+                boolean llmShouldStop = adapter.getShouldStop();
+
+                LogManager.logI(
+                        TAG,
+                        "[SNAPSHOT][SEND] isSending=" + ui_isSending
+                            + ", isTaskRunning=" + ui_isTaskRunning
+                            + ", isTaskCancelled=" + ui_isTaskCancelled
+                            + ", globalStopFlag=" + ui_globalStopFlag
+                            + ", GlobalStopManager=" + ui_globalStopRequested
+                            + ", ragTaskFuture=" + ragFutureState
+                            + ", modelState=" + modelState
+                            + ", llmBusy=" + llmBusy
+                            + ", llmRunning=" + llmRunning
+                            + ", llmShouldStop=" + llmShouldStop
+                            + ", uiThread=" + uiThread.getName()
+                    );
+            } catch (Throwable th) {
+                LogManager.logE(TAG, "Error collecting send-click snapshot", th);
+            }
+
+            // Cancel any pending stop-check and cleanup leftover RAG Future before new send (English log)
+            try {
+                if (needsStopCheck) {
+                    LogManager.logD(TAG, "Cancel any pending stop-check before new send");
+                }
+                needsStopCheck = false;
+                if (ragTaskFuture != null) {
+                    if (!ragTaskFuture.isDone()) {
+                        boolean cancelBeforeSend = ragTaskFuture.cancel(true);
+                        LogManager.logW(TAG, "Found leftover RAG Future before new send, cancel issued -> " + cancelBeforeSend);
+                    }
+                    ragTaskFuture = null;
+                    LogManager.logD(TAG, "Cleared ragTaskFuture reference (before new send)");
+                }
+            } catch (Throwable th) {
+                LogManager.logE(TAG, "Error while cleaning previous state before new send", th);
+            }
 
             // 基本验证
             if (userPrompt.trim().isEmpty()) {
+                LogManager.logW(TAG, "[SEND][VALIDATION] Failed: empty user prompt");
+                restoreSendStateAfterValidationFailure("empty user prompt");
                 Toast.makeText(requireContext(), getString(R.string.toast_enter_user_question), Toast.LENGTH_SHORT).show();
                 return;
             }
             
             if (apiUrl.trim().isEmpty() || 
                 StateDisplayManager.isModelStatusDisplayText(requireContext(), model)) {
+                LogManager.logW(TAG, "[SEND][VALIDATION] Failed: invalid api url or model status placeholder");
+                restoreSendStateAfterValidationFailure("invalid api url or model status placeholder");
                 Toast.makeText(requireContext(), getString(R.string.toast_ensure_api_model_set), Toast.LENGTH_SHORT).show();
                 return;
             }
             
             // 如果不是本地模型，需要检查API Key
             if (!AppConstants.ApiUrl.LOCAL.equals(apiUrl) && apiKey.trim().isEmpty()) {
+                LogManager.logW(TAG, "[SEND][VALIDATION] Failed: empty api key for non-local model");
+                restoreSendStateAfterValidationFailure("empty api key for non-local model");
                 Toast.makeText(requireContext(), getString(R.string.toast_enter_api_key), Toast.LENGTH_SHORT).show();
                 return;
             }
 
             // 保存当前配置
+            LogManager.logD(TAG, "[SEND] Persisting configuration selection to storage");
             saveConfig();
             
             // 更新按钮状态（isSending已经在compareAndSet中设置为true）
@@ -971,7 +1032,35 @@ public class RagQaFragment extends Fragment {
             
             // 【重要修复】使用专门的RAG查询线程池执行查询任务
             // 避免在停止检查线程中执行模型操作，消除并发冲突
-            ragQueryExecutor.execute(() -> {
+            LogManager.logI(TAG, "[SEND] Submitting RAG task to executor - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
+            ragTaskFuture = ragQueryExecutor.submit(() -> {
+                // Background thread snapshot at RAG task start (English log)
+                try {
+                    Thread worker = Thread.currentThread();
+                    boolean globalStopRequested = GlobalStopManager.isGlobalStopRequested();
+                    boolean allModulesStopped = GlobalStopManager.areAllModulesStopped();
+
+                    LocalLlmAdapter adapter = LocalLlmAdapter.getInstance(requireContext());
+                    String modelState = String.valueOf(adapter.getModelState());
+                    boolean llmBusy = adapter.isModelBusy();
+                    boolean llmRunning = adapter.isInferenceRunning();
+                    boolean llmShouldStop = adapter.getShouldStop();
+
+                    LogManager.logI(
+                        TAG,
+                        "[SNAPSHOT][BG_START] RAG-task start - thread=" + worker.getName()
+                            + ", interrupted=" + worker.isInterrupted()
+                            + ", GlobalStopManager=" + globalStopRequested
+                            + ", allModulesStopped=" + allModulesStopped
+                            + ", modelState=" + modelState
+                            + ", llmBusy=" + llmBusy
+                            + ", llmRunning=" + llmRunning
+                            + ", llmShouldStop=" + llmShouldStop
+                    );
+                } catch (Throwable th) {
+                    LogManager.logE(TAG, "Error collecting RAG-task start snapshot", th);
+                }
+
                 // 【修复】只重置本地LLM的停止标志，不重置全局停止标志
                 // 全局停止标志只能在确认停止流程完成后被重置
                 String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
@@ -1010,6 +1099,7 @@ public class RagQaFragment extends Fragment {
             }
             // --- 停止发送 --- 
             LogManager.logD(TAG, "User clicked stop button");
+            LogManager.logI(TAG, "[STOP][CLICK] Enter stop flow - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
             LogManager.logD(TAG, "Current state - isSending: " + isSending.get() + ", isTaskRunning: " + isTaskRunning + ", isTaskCancelled: " + isTaskCancelled);
             
             // 设置全局停止标志和任务取消标志
@@ -1018,6 +1108,7 @@ public class RagQaFragment extends Fragment {
             
             // 使用GlobalStopManager设置全局停止标志
             GlobalStopManager.setGlobalStopFlag(true);
+            LogManager.logI(TAG, "[STOP] Global stop requested - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isTaskRunning=" + isTaskRunning + ", ragFuture=" + (ragTaskFuture==null?"null":(ragTaskFuture.isDone()?"done":"not_done")));
             
             LogManager.logD(TAG, "Set global stop flag and task cancellation flag to true");
             
@@ -1082,6 +1173,14 @@ public class RagQaFragment extends Fragment {
             
             LogManager.logI(TAG, "所有组件停止信号已发送");
             
+            // Request cancellation for RAG Future if still running (English log)
+            if (ragTaskFuture != null && !ragTaskFuture.isDone()) {
+                boolean cancelResult = ragTaskFuture.cancel(true);
+                LogManager.logI(TAG, "Requested cancellation for RAG task Future, result=" + cancelResult);
+            } else {
+                LogManager.logD(TAG, "No active RAG task Future to cancel");
+            }
+            
             // 启动停止完成检查机制（防呆机制）
             // 智能检查：只在真正需要时启动（当任务可能仍在运行时）
             if (isTaskRunning || !globalStopFlag) {
@@ -1094,6 +1193,7 @@ public class RagQaFragment extends Fragment {
             Toast.makeText(requireContext(), getString(R.string.toast_request_stopped), Toast.LENGTH_SHORT).show();
             appendToResponse("\n" + getString(R.string.toast_request_stopped) + "。");
             LogManager.logD(TAG, "Stop processing initiated, waiting for completion check");
+            LogManager.logD(TAG, "[STOP] Waiting for completion check, needsStopCheck=" + needsStopCheck);
         } else {
             // 防止重复点击
             LogManager.logD(TAG, "Button click ignored - operation already in progress or completed");
@@ -1111,6 +1211,7 @@ public class RagQaFragment extends Fragment {
         isTaskCancelled = false;
         // 【重要】不重置全局停止标志，保持之前的停止状态
         LogManager.logD(TAG, "Initializing sending state - task running: " + isTaskRunning + ", cancelled: " + isTaskCancelled + ", global stop flag unchanged: " + globalStopFlag);
+        LogManager.logI(TAG, "[STATE] initializeSendingState - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
     }
     
     /**
@@ -1119,6 +1220,7 @@ public class RagQaFragment extends Fragment {
      * 【修复】只在确认所有任务真正停止后才重置全局停止标志
      */
     private void resetSendingState() {
+        LogManager.logI(TAG, "[STATE] resetSendingState enter - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isSending=" + isSending.get() + ", isTaskRunning=" + isTaskRunning + ", isTaskCancelled=" + isTaskCancelled + ", globalStopFlag=" + globalStopFlag);
         isTaskRunning = false;
         isTaskCancelled = false;
         
@@ -1128,6 +1230,16 @@ public class RagQaFragment extends Fragment {
         globalStopFlag = false;
         GlobalStopManager.setGlobalStopFlag(false);
         LogManager.logD(TAG, "Global stop flag reset to false after confirming all tasks stopped");
+        
+        // Ensure RAG task future is cleaned up and not leaking (English log)
+        if (ragTaskFuture != null) {
+            if (!ragTaskFuture.isDone()) {
+                LogManager.logW(TAG, "RAG task Future not done during reset, forcing cancel");
+                ragTaskFuture.cancel(true);
+            }
+            ragTaskFuture = null;
+            LogManager.logD(TAG, "Cleared ragTaskFuture reference");
+        }
         
         isSending.set(false); // 使用原子操作重置发送状态
         
@@ -1149,6 +1261,32 @@ public class RagQaFragment extends Fragment {
         }
     }
     
+    // Restore UI/flags/state when validation fails before actual send (English log)
+    private void restoreSendStateAfterValidationFailure(String reason) {
+        try {
+            LogManager.logW(TAG, "[SEND][VALIDATION] Restore state due to validation failure - reason=" + reason + ", thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isKeepScreenOn=" + isKeepScreenOn + ", batteryOptimizationDisabled=" + batteryOptimizationDisabled + ", isSending=" + isSending.get());
+            // rollback keep screen on
+            if (isKeepScreenOn) {
+                enableKeepScreenOn(false);
+            }
+            // rollback battery optimization request
+            if (batteryOptimizationDisabled) {
+                if (getActivity() instanceof MainActivity) {
+                    ((MainActivity) getActivity()).restoreBatteryOptimization();
+                }
+                batteryOptimizationDisabled = false;
+            }
+            // reset sending state and button
+            isSending.set(false);
+            if (buttonSendStop != null) {
+                buttonSendStop.setText(getString(R.string.button_send));
+            }
+            LogManager.logW(TAG, "Validation failed, restored send state - reason=" + reason);
+        } catch (Throwable th) {
+            LogManager.logE(TAG, "Error restoring state after validation failure", th);
+        }
+    }
+
     // 智能检查标志 - 只在真正需要时启动防呆检查
     private volatile boolean needsStopCheck = false;
     
@@ -1161,6 +1299,7 @@ public class RagQaFragment extends Fragment {
         // 智能检查：只在真正需要时启动
         if (!needsStopCheck) {
             LogManager.logD(TAG, "[防呆机制] 无需启动检查，任务状态正常");
+            LogManager.logD(TAG, "[STOP][CHECK] Skip check as not required");
             return;
         }
         
@@ -1216,6 +1355,11 @@ public class RagQaFragment extends Fragment {
         // 检查RAG查询任务是否还在运行
         if (isTaskRunning && !isTaskCancelled) {
             LogManager.logD(TAG, "[防呆机制] RAG任务仍在运行");
+            return false;
+        }
+        // Check Future status to ensure task has fully stopped (English log)
+        if (ragTaskFuture != null && !ragTaskFuture.isDone()) {
+            LogManager.logD(TAG, "Safety check: RAG Future still running");
             return false;
         }
         
@@ -1315,6 +1459,7 @@ public class RagQaFragment extends Fragment {
         
         // 获取检索数
         final int searchDepth = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
+        LogManager.logD(TAG, "[RAG] Params saved - kb=" + knowledgeBase + ", searchDepth=" + searchDepth + ", sys.len=" + (systemPrompt==null?0:systemPrompt.length()) + ", user.len=" + (userPrompt==null?0:userPrompt.length()));
         
         // 更新UI，显示开始查询
         mainHandler.post(() -> {
@@ -1504,6 +1649,7 @@ public class RagQaFragment extends Fragment {
         List<String> relevantDocs = new ArrayList<>();
 
         try {
+            LogManager.logI(TAG, "[CALL][KB] enter queryKnowledgeBase - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", kb=" + knowledgeBase + ", query.len=" + (query==null?0:query.length()));
             // 检查全局停止标志
             if (globalStopFlag) {
                 LogManager.logD(TAG, "Global stop flag is set, aborting knowledge base query");
@@ -1902,6 +2048,7 @@ public class RagQaFragment extends Fragment {
                 // 在onSuccess方法中，进行一次完整的Markdown渲染
                 @Override
                 public void onSuccess(String response) {
+                    LogManager.logI(TAG, "[CALL][LLM] onSuccess enter - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
                     // 处理完整响应
                     LogManager.logD(TAG, "API call successful, duration: " + (System.currentTimeMillis() - startTime) + "ms");
                     LogManager.logD(TAG, "Response length: " + response.length() + " characters");
@@ -1977,6 +2124,7 @@ public class RagQaFragment extends Fragment {
                 // 在onStreamingData方法中，使用简单的setText方法
                 @Override
                 public void onStreamingData(final String chunk) {
+                    LogManager.logI(TAG, "[CALL][STREAM] onStreamingData enter - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", chunk.len=" + (chunk==null?0:chunk.length()));
                     // 检查Fragment生命周期状态
                     if (getActivity() == null || !isAdded() || isDetached()) {
                         LogManager.logW(TAG, "Cannot handle streaming data, Fragment not attached to Activity");
@@ -2242,6 +2390,7 @@ public class RagQaFragment extends Fragment {
                 
                 @Override
                 public void onError(String errorMessage) {
+                    LogManager.logI(TAG, "[CALL][LLM] onError enter - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", err.len=" + (errorMessage==null?0:errorMessage.length()));
                     // 处理错误
                     LogManager.logE(TAG, "API call failed, duration: " + (System.currentTimeMillis() - startTime) + "ms, error: " + errorMessage);
                     
@@ -2621,7 +2770,7 @@ public class RagQaFragment extends Fragment {
         
         if (AppConstants.ApiUrl.LOCAL.equals(selectedApi)) {
             // 在后台线程中执行本地模型重置操作
-            ragQueryExecutor.execute(() -> {
+            ragTaskFuture = ragQueryExecutor.submit(() -> {
                 try {
                     LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(getContext());
                     if (localAdapter != null) {

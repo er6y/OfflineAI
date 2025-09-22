@@ -17,11 +17,14 @@ public class GlobalStopManager {
      * @param stop 是否停止
      */
     public static void setGlobalStopFlag(boolean stop) {
+        boolean before = globalStopFlag.get();
+        long ts = System.currentTimeMillis();
+        String thread = Thread.currentThread().getName();
         globalStopFlag.set(stop);
         if (stop) {
-            LogManager.logD(TAG, "Global stop flag set to true");
+            LogManager.logI(TAG, "[GLOBAL_STOP] set true - thread=" + thread + ", ts=" + ts + ", before=" + before + ", after=" + stop);
         } else {
-            LogManager.logD(TAG, "Global stop flag reset to false");
+            LogManager.logI(TAG, "[GLOBAL_STOP] set false - thread=" + thread + ", ts=" + ts + ", before=" + before + ", after=" + stop);
         }
     }
     
@@ -37,7 +40,9 @@ public class GlobalStopManager {
      * 重置全局停止标志
      */
     public static void resetGlobalStopFlag() {
-        setGlobalStopFlag(false);
+        boolean before = globalStopFlag.get();
+        globalStopFlag.set(false);
+        LogManager.logI(TAG, "[GLOBAL_STOP] resetGlobalStopFlag - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", before=" + before + ", after=" + globalStopFlag.get());
     }
     
     /**

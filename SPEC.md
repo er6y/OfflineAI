@@ -44,7 +44,7 @@ Vulkan 源路径与补丁策略（不改变章节结构，记录实现细节与�
 
 构建验证（本次）：
 - Debug 版：在 `.cxx/Debug/<hash>/arm64-v8a` 目录内执行 `ninja -v -C <dir> llamacpp_jni`，成功产出 `libllamacpp_jni.so`。
-- Release 版：`./gradlew :app:assembleRelease -PKEYPSWD=abc-1234 --info --stacktrace` 成功，APK 输出：`app/build/outputs/apk/release/app-release.apk`。
+- Release 版：`./gradlew :app:assembleRelease -PKEYPSWD=abc-1234`。
 - JNI 修复：移除未暴露符号 `ggml_cpu_has_sve2()` 的调用，仅记录 SVE 运行时能力（SVE2 记为 0），修复 Release 构建失败。
 - x86_64：在 `.cxx/Debug/<hash>/x86_64` 目录内执行 `ninja -v -C <dir> llamacpp_jni`，成功链接并输出 "LlamaCpp JNI library built for x86_64"。
 - ARM64 K-quants 链接修复（本次）：在 <mcfile name="CMakeLists.txt" path="libs/llamacpp-jni/src/main/cpp/CMakeLists.txt"></mcfile> 的 ggml-cpu 目标创建后追加 `GGML_CPU_GENERIC=1` 编译定义，触发 `ggml-cpu/arch-fallback.h` 将 quants.c 中的 `*_generic` 实现重命名为无后缀符号，从而修复 `ggml_vec_dot_q5_K_q8_K`、`quantize_row_q8_K` 等未定义符号的链接错误；已通过 `ninja -v llamacpp_jni` 在 arm64-v8a 成功验证。注意：该设置仅作为通用回退，不影响其他架构专用内核，后续若按架构纳入专用 quants 源文件，可移除此定义。
@@ -141,7 +141,7 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - SettingsFragment.getBackendPreference() 方法：移除布尔值兼容性处理，直接验证后端偏好值有效性，无效时默认返回 "CPU"。
   - 删除不再使用的 SettingsFragment.getUseGpu() 方法。
 - Java 层包装方法（本次补充）：
-  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/starlocalrag/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，新增对 "KLEIDIAI" 与 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
+  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/example/starlocalrag/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，新增对 "KLEIDIAI" 与 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
 - 后端映射逻辑下沉到JNI层（架构优化）：
   - 原Java层映射逻辑：LocalLLMLlamaCppHandler.mapBackendPreferenceToGpuLayers() 将字符串后端偏好映射为 nGpuLayers 参数（"CPU" → 0，"VULKAN" → -1）。
   - 重构后JNI层映射：新增 load_model_with_backend 和 new_context_with_backend JNI方法，直接接收后端偏好字符串，在C++层实现 map_backend_preference_to_gpu_layers 映射逻辑。
@@ -331,9 +331,265 @@ CMake（JNI 构建脚本）优化补充说明（此次变更汇总，保持行�
   - Windows 调试构建：`./gradlew :app:assembleDebug -PKEYPSWD=abc-1234`；
   - Release 构建：`./gradlew assembleRelease -PKEYPSWD=abc-1234`；
   - 运行观察英文日志包含 `[CTX_SHIFT]`、`[STREAM]` 与 KV 操作调用；确认在 n_ctx 边界处能够继续输出且不中断.
+  - 本次补充（Windows 本地验证）：
+    - 已执行 `./gradlew :app:assembleDebug -PKEYPSWD=abc-1234`，构建成功（exitCode=0）。
+    - 新增英文日志未引入编译错误，产物生成正常（app-debug.apk / mapping 无变更）。
+    - 若遇到 NDK/CMake 报错，优先检查 ANDROID_NDK 版本、CMake 版本与 AGP 兼容矩阵；必要时执行 `./gradlew clean` 后重试。
+    - 建议在首次运行后通过 `adb logcat | findstr "[CALL]\|[STREAM]\|[SNAPSHOT]\|[GLOBAL_STOP]"` 聚合关键英文日志，便于回归验证。
 
 - 回调语义与状态一致性（补充）
   - 停止行为：无论用户点击“停止”或触发全局停止标志，Java 引擎在 generateWithLlamaCpp 与 generateWithTraditionalStreaming 结束时都会回调 onComplete；停止时追加英文日志 "[STREAM] ... finalizing with onComplete" 以便诊断。
   - 目的：确保 LocalLlmHandler/LocalLlmAdapter 的上层状态机能稳定复位 READY/清理调用态，避免 UI 悬挂或下次调用被占用。
   - 异常路径：超时/错误仍走 onError，不改变既有语义。
   - 代码位置：<mcfile name="LocalLLMLlamaCppHandler.java" path="app/src/main/java/com/example/starlocalrag/api/LocalLLMLlamaCppHandler.java"></mcfile>
+  
+  - 状态快照日志（发送前/后台线程启动）
+    - 目的：在用户点击“发送”与 RAG 后台任务启动两处关键时机，输出一帧“状态快照”英文日志，快速定位“推理未完全停止/卡死/状态错乱”等问题根因。
+    - 记录时机：
+      - 发送前快照：位于发送按钮点击分支、参数日志之后，RAG 任务提交之前。
+      - 后台线程启动快照：位于 ragQueryExecutor 提交的 Runnable 入口处（后台线程）。
+    - 涉及代码：
+      - UI 层：<mcfile name="RagQaFragment.java" path="app/src/main/java/com/example/starlocalrag/ui/RagQaFragment.java"></mcfile>
+      - 全局停止与模块状态：<mcfile name="GlobalStopManager.java" path="app/src/main/java/com/example/starlocalrag/core/GlobalStopManager.java"></mcfile>
+      - 本地 LLM 状态：<mcfile name="LocalLlmAdapter.java" path="app/src/main/java/com/example/starlocalrag/api/LocalLlmAdapter.java"></mcfile>
+    - 字段清单（发送前）：
+      - UI/任务编排：isSending、isTaskRunning、isTaskCancelled、ragTaskFuture（isDone/isCancelled/非空）
+      - 全局停止：GlobalStopManager.isGlobalStopRequested()、areAllModulesStopped()、isModuleStopped(...)（LLM/Embedding/Reranker/Tokenizer）
+      - LLM 适配器：getModelState()、isModelReady()、isModelBusy()、isInferenceRunning()、getShouldStop()
+    - 字段清单（后台线程启动）：
+      - 线程：Thread.currentThread().getName()、isInterrupted()
+      - 全局停止与模块：isGlobalStopRequested()、各模块 is...Stopped()
+      - LLM 适配器：getModelState()/isModelReady()/isModelBusy()/isInferenceRunning()/getShouldStop()
+    - 日志格式（英文，统一 LogManager）：
+      - "[SNAPSHOT][SEND] ..." — 发送前快照
+      - "[SNAPSHOT][BG_START] ..." — 后台线程启动快照
+      - 包含键值对，如 taskRunning=true, modelState=READY, globalStop=false 等，避免 PII 与长文本
+    - 注意事项：
+      - 日志级别使用 DEBUG/INFO，生产构建可按需要降噪。
+      - 保证读取字段为原子/线程安全，避免在日志本身引入竞态。
+      - 避免频繁/循环打印，严格限定在上述两个时机。
+      - 与回调语义对齐：停止/异常路径仍应最终走 onComplete/onError，快照日志仅用于诊断，不改变控制流。
+
+  - 英文日志补充（本次）：
+    - RagQaFragment：
+      - 在 callLLMApi 入口输出 "[CALL][LLM] enter callLLMApi - thread=..., ts=..., url=..., model=..., prompt.len=..."；
+      - 在回调 onStreamingData/onSuccess/onError 入口分别输出：
+        - "[CALL][STREAM] onStreamingData enter - thread=..., ts=..., chunk.len=..."
+        - "[CALL][LLM] onSuccess enter - thread=..., ts=..."
+        - "[CALL][LLM] onError enter - thread=..., ts=..., err.len=..."；
+      - 均不改变控制流，仅用于可观测性。
+    - GlobalStopManager：
+      - setGlobalStopFlag：统一关键英文日志，打印 before/after、线程名与时间戳；
+      - resetGlobalStopFlag：新增关键英文日志 "[GLOBAL_STOP] resetGlobalStopFlag - thread=..., ts=..., before=..., after=..."。
+
+
+- Future 取消机制（补充说明，不新增章节）：
+  - 目的：确保当用户点击“停止”时，RAG 查询后台任务能够被线程中断信号感知并尽快退出，避免 stop-check 长期判定“RAG 任务仍在运行”。
+  - 实施要点：
+    - ragQueryExecutor 统一使用 submit(...)，持有 Future<?> ragTaskFuture；
+    - 停止分支在发出模块停止信号后，若 ragTaskFuture 未完成则 cancel(true) 请求中断；英文日志 "Requested cancellation for RAG task Future, result=..."；
+    - resetSendingState() 清理 ragTaskFuture（未完成则强制 cancel(true)），并置空引用；
+    - checkAllTasksStopped() 加入 ragTaskFuture.isDone() 守护判断；
+    - 新增英文日志使用 LogManager.logD/I/W 统一风格。
+  - 配合状态快照：
+    - 在 "[SNAPSHOT][SEND]" 与 "[SNAPSHOT][BG_START]" 中增加 ragTaskFuture 的 isDone()/isCancelled()，排查取消前后即时性；
+    - 如全局停止已置位而 LLM 仍 isInferenceRunning=true，可据快照定位卡点。
+  - 影响范围：限定于 RagQaFragment 的任务编排，不改变 LocalLlmAdapter/Handler 回调语义；与 GlobalStopManager 配合。
+  - 验证建议：
+    - 连续“发送-停止-发送”流程不应出现按钮卡停与“RAG 任务仍在运行”长期滞留；
+    - 停止后观察到 Future 取消相关英文日志；
+    - 本地与在线模型均可正常恢复与再次调用。
+
+// ... existing code ...
+
+- 日志增强（不改变章节，仅补充到现有“日志规范/状态快照日志/停止行为”相关段落）
+  - [STREAM] onStart（统一入口）：在 LlmApiAdapter.callLlmApi 一开始输出
+    - 示例：`[STREAM] onStart - source=local|api, model=<name>, thread=<threadName>`
+    - 作用：快速判断请求来源路径（本地/远程），定位线程与模型。
+  - [SNAPSHOT][BG_START]（本地推理前快照）：在 LocalLlmHandler.inference 中读取 currentState 后立即输出
+    - 示例：`[SNAPSHOT][BG_START] pre-reset-stop, state=<READY|BUSY|...>, shouldStop=<bool>, GlobalStopManager=<bool>, thread=<threadName>`
+    - 作用：在重置停止标志之前记录现场，排查“旧的停止标志导致的早停”。
+  - [STREAM] onStart（重置停止标志之后）：在 LocalLlmHandler.inference 调用 resetStopFlag() 之后输出
+    - 示例：`[STREAM] onStart - engine=<engineType>, promptLen=<n>`
+    - 作用：与 BG_START 配合，确认已清除 stop flag 后真正进入推理。
+  - 引擎侧兜底：在 LocalLLMLlamaCppHandler 的 generateText/inference 中，同样输出 [SNAPSHOT][BG_START] 与 [STREAM] onStart（含 engine、promptLen、thread），用于绕过中间层调用差异带来的日志缺失。
+  - 发送前快照标签统一：RagQaFragment 的发送前日志统一使用 "[SNAPSHOT][SEND]"（已替换原 "[SNAPSHOT] send-click"），便于检索与规则对齐。
+  - 以上日志均为英文，遵循既有 [STREAM]/[SNAPSHOT] 约定，不改变控制流，仅作可观测性增强。
+
+- 日志规范：Vulkan 相关日志统一英文；Debug 级别信息不影响用户体验。
+
+构建验证（本次）：
+- Debug 版：在 `.cxx/Debug/<hash>/arm64-v8a` 目录内执行 `ninja -v -C <dir> llamacpp_jni`，成功产出 `libllamacpp_jni.so`。
+- Release 版：`./gradlew :app:assembleRelease -PKEYPSWD=abc-1234`。
+- JNI 修复：移除未暴露符号 `ggml_cpu_has_sve2()` 的调用，仅记录 SVE 运行时能力（SVE2 记为 0），修复 Release 构建失败。
+- x86_64：在 `.cxx/Debug/<hash>/x86_64` 目录内执行 `ninja -v -C <dir> llamacpp_jni`，成功链接并输出 "LlamaCpp JNI library built for x86_64"。
+- ARM64 K-quants 链接修复（本次）：在 <mcfile name="CMakeLists.txt" path="libs/llamacpp-jni/src/main/cpp/CMakeLists.txt"></mcfile> 的 ggml-cpu 目标创建后追加 `GGML_CPU_GENERIC=1` 编译定义，触发 `ggml-cpu/arch-fallback.h` 将 quants.c 中的 `*_generic` 实现重命名为无后缀符号，从而修复 `ggml_vec_dot_q5_K_q8_K`、`quantize_row_q8_K` 等未定义符号的链接错误；已通过 `ninja -v llamacpp_jni` 在 arm64-v8a 成功验证。注意：该设置仅作为通用回退，不影响其他架构专用内核，后续若按架构纳入专用 quants 源文件，可移除此定义。
+
+对齐上游落实与约束（本次调整）
+- 直接使用上游 `ggml-vulkan.cpp` 进行编译；不保留“额外的保险”。
+- 关键函数遵循上游实现：
+  - `ggml_vk_get_device_count` / `ggml_vk_get_device_description`：仅调用 `ggml_vk_instance_init` 与查询设备，无自定义 try-catch 或额外日志。
+  - `ggml_backend_vk_buffer_type_alloc_buffer`：保留上游对 `vk::SystemError` 的捕获与返回 `nullptr` 的逻辑。
+  - `ggml_backend_vk_reg`：保留上游在 `ggml_vk_instance_init` 外层的异常保护与英文 Debug 日志。
+- 低版本 Vulkan 的“防御性注入”逻辑不进入上游文件；启停策略交由 JNI 层版本闸门与后端选择决定。
+- 最小化上游修复（本次新增）：`ggml_vk_instance_init()` 增加两点健壮性处理，以避免在模拟器/x86_64 等缺失 loader 或 API 版本不足时崩溃：
+  - 在任何 Vulkan-HPP 调用前初始化动态分发器：`VULKAN_HPP_DEFAULT_DISPATCHER.init(vkGetInstanceProcAddr)`；初始化失败则打印英文告警并“跳过 Vulkan 后端初始化”。
+  - `vk::enumerateInstanceVersion()` 异常或 `api_version < 1.2` 时，不再 `GGML_ABORT`，改为英文日志并返回（标记 Vulkan 不可用），让上层安全回退到 CPU。
+  - 适用场景：Android 模拟器 x86_64、设备 loader/ICD 不完整、仅支持 1.1 的运行环境。
+ - 设备扩展选择最小化：仅在设备明确支持时附加 `VK_KHR_16bit_storage`、`VK_KHR_shader_float16_int8`、`VK_KHR_shader_non_semantic_info`，避免无效扩展导致的设备创建失败。
+ - Host pinned 内存回退：当 `ggml_vk_host_malloc()` 返回 `nullptr` 或出现 `vk::SystemError` 时，回退到 CPU 缓冲分配，避免崩溃（英文日志告警）。
+
+- Gradle/AGP 环境下的 CMake include 策略（新增）：
+  - 绝对路径包含 ggml/cmake/common.cmake，避免依赖 CMAKE_MODULE_PATH 搜索在 AGP 配置期出现不稳定；
+  - 暂不包含 llama/cmake/common.cmake，使用本地空实现提供 `llama_add_compile_flags` 兜底，避免配置阶段失败；
+  - 英文日志示例："Defined local stub for llama_add_compile_flags (upstream not providing)"；后续在 CMAKE_MODULE_PATH 稳定后可恢复 include 并移除 stub。
+
+- 链接结构（新增）：
+  - 按上游将 ggml-vulkan 构建为静态库并链接进 JNI 目标，替代直接把源文件编进 JNI；
+  - 优点：减少 ODR/宏泄漏、可重用性更好、诊断更清晰（目标级 include/defs 而不是全局）。
+
+- 上游托管边界（新增）：
+  - ggml-base/cpu 尽量由上游 CMake 管理，JNI 仅作为薄胶水层；
+  - 仅在 ARM K-quants 需要通用回退时追加 `GGML_CPU_GENERIC=1` 定义，待按架构的专用内核完善后可移除此定义。
+
+---
+
+Git LFS 管理补充说明（不改变章节结构）
+- 目的：将体积巨大的自动生成着色器源文件纳入 Git LFS 管理，避免普通 Git 对仓库体积和 clone/checkout 性能的影响。
+- 受管文件：libs/llamacpp-jni/src/main/cpp/generated/ggml-vulkan-shaders.cpp（当前已加入 LFS 追踪规则，并从索引中以 LFS 形式重新加入）。
+- 版本控制建议：
+  1) 开发前请确保已安装 Git LFS 并执行一次 git lfs install。
+  2) 拉取本仓库时，建议开启 LFS：git clone 后首次执行 git lfs pull，保证大文件按需拉取。
+  3) 若需要替换或重新生成该文件，请在提交前确认 .gitattributes 中仍包含该路径规则；提交时无需特殊操作，按普通 git add/commit 流程即可，Git LFS 会自动接管。
+- 注意事项：
+  - 若历史上该文件曾以普通 Git 形式提交过，需要在后续版本中逐步清理历史（如有必要可使用 BFG Repo-Cleaner 或 git filter-repo，由于历史重写会影响协作成员，需另行评估与安排）。
+  - 本项目已经将该文件从索引中移除并以 LFS 形式重新加入，后续首次 push 将会将该对象上传至 LFS 存储端。
+
+---
+
+Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实现细化与最佳实践）
+- 检测器位置：libs/llamacpp-jni/src/main/cpp/vulkan_runtime_detector.cpp 与 vulkan_runtime_detector.h，采用动态加载与最小调用集检测 Vulkan 运行时能力。
+- 判定标准（JNI 层简单闸门）：要求满足以下全部条件，才允许启用 GPU 加速；否则强制 CPU 回退（gpu_layers=0）：
+  1) Vulkan 动态库可用（library_available=true）；
+  2) 能成功创建 Instance（instance_creation_works=true）；
+  3) 能枚举到至少一个物理设备（physical_devices_available=true）；
+  4) Vulkan 实例 API 版本 >= 1.2（detected_api_version>=1.2）；
+  5) 基础 1.1 API 可用（vulkan_1_1_apis_available=true）。
+- GPU 回退实现要点：在 JNI 的模型加载方法中，当判定"不适合"时将 final_gpu_layers 直接置 0，并打印英文日志；CPU-only 模式下跳过 ggml_backend_load_all()，避免 Vulkan 后端被动初始化带来的副作用。
+  - 核心英文日志示例：
+    - "[GPU] Vulkan is not suitable for llama.cpp, falling back to CPU-only mode"
+    - "[BACKEND] CPU-only mode: skip loading GPU backends"
+    - "[VULKAN] Simple version gate: require >= 1.2"
+- 诊断增强：检测器新增记录首个物理设备的 apiVersion（device_api_version），用于识别"设备显示 1.2.x 但实例/loader 仅 1.1"的常见错配场景；并在实例版本 < 1.2 时打印回退提示。
+  - 示例英文日志：
+    - "First device apiVersion: 1.2.231 (deviceName=...)"
+    - "Vulkan instance version < 1.2; will force CPU fallback in JNI if GPU was requested"
+- 后端选择逻辑细化（本次优化）：
+  - **模型加载前确定后端**：真正的后端配置在模型加载时已确定，因此上层后端偏好选项必须在模型加载前决定使用哪个后端配置。
+  - **CPU后端处理**：注册初始化CPU后端，设置 n_gpu_layers=0，确保使用纯CPU计算。
+  - **Vulkan后端处理**：检查Vulkan版本是否>=1.2，满足条件时注册初始化Vulkan后端并设置 n_gpu_layers=-1（使用所有GPU层），不注册CPU后端；版本不满足时降级到CPU，注册初始化CPU后端，设置 n_gpu_layers=0。
+  - **其他后端处理**：OPENCL/BLAS/CANN等后端目前为TBD实现，全部降级到CPU，注册初始化CPU后端，设置 n_gpu_layers=0。
+  - **统一配置函数**：configure_backend_for_model() 函数统一处理后端类型判断、GPU层数设置和后端加载逻辑，避免代码重复。
+  - **JNI接口调用修复**：修复 LocalLLMLlamaCppHandler.java 中 new_context_with_backend 调用问题，移除已废弃的 backendPreference 参数，确保与JNI接口签名一致；后端配置已在模型加载时确定，上下文创建时无需重复传递后端参数。
+  - **ConfigManager配置类型适配**：修复 GPUErrorHandler.java 中配置获取类型不匹配问题，use_gpu 配置现在存储为字符串（"CPU", "VULKAN" 等），但代码仍使用 getBoolean 方法获取；改用 getString 方法获取后端偏好，并通过字符串比较判断是否启用 GPU 加速（当后端偏好不为 "CPU" 时启用硬件加速），解决应用启动时的 JSONException 错误。
+- 设备可用性判定修复与诊断日志（本次）：
+  - 判定修复：由“设备名称包含子串 'Vulkan'”改为依据 ggml 后端注册器名判断（`ggml_backend_dev_backend_reg()` + `ggml_backend_reg_name()` 比较是否为 "Vulkan"），避免设备名为 "Adreno/GeForce/SwiftShader" 等被误判为非 Vulkan 的情况。
+  - 日志增强：设备枚举时新增打印 backend 名称；结果汇总日志改为 "[BACKEND] Vulkan device available (by backend name): yes/no"，便于快速判定是否正确识别 Vulkan 后端。
+  - 影响范围：仅影响可用性判定与诊断输出，不改变版本闸门与安全回退策略；若运行时闸门（instance<1.2 等）不满足，仍将 CPU 回退。
+  - JNI 层静态注册（新增）：在 `llama_inference.cpp` 中，调用 `ggml_backend_register(ggml_backend_vk_reg())`，并且放在 `ggml_backend_load_all()` 之前执行；这样在禁用上游注册器（`GGML_BACKEND_VULKAN=OFF`）但仍静态链接本地 `ggml-vulkan` 库的场景下，Vulkan 后端依然可以被设备枚举识别。英文日志示例："[BACKEND] Register Vulkan (static) via ggml_backend_vk_reg() before ggml_backend_load_all()"。
+- 设计理由：
+  - ggml Vulkan 后端对 1.2 特性存在硬性依赖；在仅有 1.1 的 loader/instance 环境下，继续初始化 Vulkan 后端容易触发崩溃或未定义行为。
+  - 按需加载后端（仅当 final_gpu_layers != 0 时）+ 版本闸门，能够最大化规避低版本设备与 loader 造成的稳定性问题。
+- 最佳实践：
+  - 若第三方工具显示设备支持 1.2，但本检测得到的实例版本 < 1.2，多半是系统 Vulkan loader/ICD 不匹配或厂商实现限制，保持 CPU 回退策略，后续再评估替换/升级 loader 才考虑启用。
+  - 统一使用英文日志，便于跨端排查与外部 issue 同步。
+
+---
+
+后端选择器重构与配置简化（本次实现）
+- 目标：将原有的布尔型 GPU 开关重构为多选项后端选择器，支持 CPU、Vulkan、OpenCL、BLAS、CANN 等多种计算后端。
+- UI 变更：
+  - 设置页面：将 GPU 加速 Switch 控件替换为后端选择 Spinner 下拉框。
+  - 资源文件：移除 backend_preference_entries 和 backend_preference_values 数组，改为在 SettingsFragment 中硬编码选项。
+  - 布局文件：fragment_settings.xml 中移除对已删除资源数组的引用。
+- 配置存储简化：
+  - 保持 ConfigManager.KEY_USE_GPU 配置项名称不变，但存储内容从布尔值改为字符串（"CPU"/"VULKAN"）。
+  - SettingsFragment.getBackendPreference() 方法：移除布尔值兼容性处理，直接验证后端偏好值有效性，无效时默认返回 "CPU"。
+  - 删除不再使用的 SettingsFragment.getUseGpu() 方法。
+- Java 层包装方法（本次补充）：
+  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/example/starlocalrag/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，新增对 "KLEIDIAI" 与 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
+- 后端映射逻辑下沉到JNI层（架构优化）：
+  - 原Java层映射逻辑：LocalLLMLlamaCppHandler.mapBackendPreferenceToGpuLayers() 将字符串后端偏好映射为 nGpuLayers 参数（"CPU" → 0，"VULKAN" → -1）。
+  - 重构后JNI层映射：新增 load_model_with_backend 和 new_context_with_backend JNI方法，直接接收后端偏好字符串，在C++层实现 map_backend_preference_to_gpu_layers 映射逻辑。
+  - 架构优势：减少Java-JNI调用开销，将后端选择逻辑统一在底层处理，便于后续扩展更多后端类型；CPU模式下避免不必要的GPU后端加载，节省内存和启动时间；解决了将"CPU"字符串错误传递给llamacpp的问题，确保后端正确注册；按需加载GPU后端，提升应用启动速度。
+  - MainActivity.onSettingsChanged()：从获取布尔值改为获取字符串类型的后端偏好设置。
+  - LocalLLMLlamaCppHandler.getStatistics()：根据后端偏好显示相应的后端信息，包括 Vulkan 版本获取。
+- JNI层实现细节：
+  - 新增JNI方法：llama_inference.cpp 中实现 load_model_with_backend 和 new_context_with_backend，直接接收 jstring 类型的后端偏好参数。
+  - 后端注册与映射逻辑：
+    - **CPU后端处理**: 确保 n_gpu_layers=0，强制使用CPU；避免加载GPU后端，节省资源；确保CPU后端已正确注册（通过 llama_backend_init()）；**关键修复**: 不再将"CPU"字符串传递给llamacpp，而是正确设置参数。
+    - **Vulkan后端处理**: 运行时检查Vulkan可用性（is_vulkan_suitable_for_llamacpp()）；可用时设置 n_gpu_layers=999（使用所有GPU层）；按需加载GPU后端（ggml_backend_load_all()）；不可用时自动回退到CPU。
+    - **其他后端**: OPENCL/BLAS/CANN暂时回退到CPU；未知后端默认使用CPU。
+  - 后端加载策略：**延迟加载**: 只在需要GPU时加载GPU后端；**资源优化**: CPU模式下避免不必要的GPU后端初始化；**状态跟踪**: 使用 g_ggml_backends_loaded 原子变量跟踪后端加载状态。
+  - 映射函数（向后兼容）：map_backend_preference_to_gpu_layers() 保留用于向后兼容（"CPU" → 0，"VULKAN" → 999，其他 → 0）。
+  - 模型加载优化：load_model_with_backend 直接集成模型参数设置和Vulkan兼容性检查，避免多次JNI调用。
+  - 上下文创建优化：new_context_with_backend 直接创建 llama_context，简化调用链路。
+  - 错误处理：统一使用英文日志输出，便于跨平台调试，如 "Backend preference: VULKAN"、"Mapping backend to GPU layers"；使用 FORCE_LOG 确保关键后端选择信息可见。
+- 实现细节与最佳实践：
+  - 硬编码选项数组：在 SettingsFragment 中定义 BACKEND_OPTIONS 和 BACKEND_VALUES 数组，避免资源文件依赖。
+  - 配置验证：getBackendPreference() 中使用 Arrays.asList().contains() 验证后端值有效性。
+
+ 变更补充（UI 与兼容性处理）
+- 设置页面的“后端偏好”下拉菜单现仅包含：CPU、Vulkan。已移除 KleidiAI/KleidiAI-SME；CPU 模式默认内含 KleidiAI 微内核（如已编译），无法在 UI 显式开/关。
+- 兼容性策略：
+  - 若已有配置保存为 "CANN"（历史值），在读取时将自动回退为 "CPU"，同时写回配置，避免不匹配导致的异常或错误显示。
+  - 若已有配置保存为 "OPENCL" 或 "BLAS"，同样在读取时判定为无效并回退为 "CPU"。
+  - 若已有配置保存为 "KLEIDIAI" 或 "KLEIDIAI-SME"（历史值），同样在读取时回退为 "CPU"，并写回配置，保持 UI 与底层一致。
+- KleidiAI 行为（重要）：UI 不再提供 KleidiAI 选项；CPU 模式下默认携带 KleidiAI 微内核（若已编译进二进制），无法显式开/关。英文日志示例：
+  - "[BACKEND] preference=CPU -> CPU path (KleidiAI microkernels if compiled)"
+  - "[CPU] features -> dotprod=<0|1> sme=<0|1>"
+  - "[KLEIDIAI] compiled-in: <yes|no>"
+- 代码位置：<mcfile name="SettingsFragment.java" path="app/src/main/java/com/example/starlocalrag/SettingsFragment.java"></mcfile> 中的硬编码选项为来源；getBackendPreference(Context) 对读取值进行有效性校验与兼容映射；<mcfile name="llama_inference.cpp" path="libs/llamacpp-jni/src/main/cpp/llama_inference.cpp"></mcfile> 中依据后端字符串设置 GGML_KLEIDIAI_SME 环境变量。
+
+---
+
+后端选择器重构与配置简化（本次实现）
+- 目标：将原有的布尔型 GPU 开关重构为多选项后端选择器，支持 CPU、Vulkan、OpenCL、BLAS、CANN 多种计算后端。
+- UI 变更：
+  - 设置页面：将 GPU 加速 Switch 控件替换为后端选择 Spinner 下拉框。
+  - 资源文件：移除 backend_preference_entries 和 backend_preference_values 数组，改为在 SettingsFragment 中硬编码选项。
+  - 布局文件：fragment_settings.xml 中移除对已删除资源数组的引用。
+- 配置存储简化：
+  - 保持 ConfigManager.KEY_USE_GPU 配置项名称不变，但存储内容从布尔值改为字符串（"CPU"/"VULKAN"/"KLEIDIAI-SME"）。
+  - SettingsFragment.getBackendPreference() 方法：移除布尔值兼容性处理，直接验证后端偏好值有效性；对历史值进行兼容映射，无效时默认返回 "CPU"。
+  - 删除不再使用的 SettingsFragment.getUseGpu() 方法。
+- Java 层包装方法（本次补充）：
+  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/starlocalrag/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，包含对 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
+- 后端映射逻辑下沉到JNI层（架构优化）：
+  - 参见上文，不再赘述。
+
+---
+
+日志优化（补充：CPU能力可观测性）
++ 日志优化（补充：CPU能力可观测性）
++ - JNI 运行时能力打印新增：一次性 CPU/KleidiAI 能力快照函数，在 backend_init() 之后调用。
++   - 英文日志包含：编译期宏（ARCH/NEON/DOTPROD/SVE/SVE2）、KleidiAI 编译状态、运行时 `ggml_cpu_has_neon/dotprod/sve`。
++   - 说明：上游 ggml 当前仅提供 `ggml_cpu_has_sve()`，不包含 `ggml_cpu_has_sve2()`，因此 SVE2 在运行时日志中显示为 0；若后续上游加入 SVE2 探测，可平滑启用。
+  - 新增：在 JNI `load_model_with_backend()` 的 `[KLEIDIAI] compiled-in: ...` 英文日志附近，追加 CPU 信息快照日志，便于判断设备是否具备相关能力：
+    - `[CPU] arch: <aarch64|arm|x86_64|x86|unknown>`（编译期架构）
+    - `/proc/cpuinfo` 摘要（model/Processor、Hardware、Features 或 flags）
+    - `auxv` 硬件能力：`[CPU] HWCAP: 0x... HWCAP2: 0x...`，在 aarch64 上尝试解码 `asimddp(dotprod)` 与 `sme`
+- 目的：
+  - 与 `[CPU] features -> dotprod=... sme=...` 的运行时探测结果交叉验证，迅速定位“功能不可用”的根因（芯片不支持 / 系统未暴露 / 探测兼容性问题）。
+  - 与 `[KLEIDIAI] buffer type available: ...` 联动，判断 KleidiAI 路径是否完整可用。
+- 设计要点：
+  - 仅使用英文日志，统一风格，利于跨平台排查。
+  - 访问 `/proc/cpuinfo` 与 `getauxval(AT_HWCAP/AT_HWCAP2)`，失败时输出清晰的 fallback 日志。
+  - aarch64 下若系统头未暴露 `HWCAP_ASIMDDP`/`HWCAP2_SME`，以 `unknown` 标示，避免构建耦合。
+- 诊断建议：
+  - `compiled-in: yes` 且 `HWCAP asimddp=yes`、`dotprod=1`：KleidiAI 可利用 dot product 微内核。
+  - `compiled-in: yes` 但 `dotprod=0`：多为硬件不支持或系统未暴露；此时 KleidiAI 回退至 NEON 路径，功能正确但性能下降。
+  - `sme=1` 需设备为 Armv9.2+ 且系统暴露能力，并配合 `KLEIDIAI-SME` 选项与 `GGML_KLEIDIAI_SME=1` 才可能命中。
+- 构建与验证：
+  - Debug 版：`./gradlew :app:assembleDebug -PKEYPSWD=abc-1234`
+  - Release 版：`.
