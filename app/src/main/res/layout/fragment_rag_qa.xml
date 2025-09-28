@@ -28,7 +28,7 @@
         android:id="@+id/textViewApiKeyLabel"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="4dp"
         android:text="@string/label_llm_api_key"
         app:layout_constraintTop_toBottomOf="@+id/spinnerApiUrl" 
         app:layout_constraintStart_toStartOf="parent" />
@@ -59,7 +59,7 @@
         android:id="@+id/textViewApiModelLabel"
         android:layout_width="50dp"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="4dp"
         android:text="@string/label_llm_model"
         app:layout_constraintTop_toBottomOf="@+id/editTextApiKey"
         app:layout_constraintStart_toStartOf="parent" />
@@ -79,7 +79,7 @@
         android:id="@+id/textViewKnowledgeBaseLabel"
         android:layout_width="50dp"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="4dp"
         android:text="@string/label_knowledge_base"
         app:layout_constraintTop_toBottomOf="@+id/spinnerApiModel"
         app:layout_constraintStart_toStartOf="parent" />
@@ -141,7 +141,7 @@
         android:id="@+id/textViewSystemPromptLabel"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="4dp"
         android:text="@string/label_system_prompt"
         app:layout_constraintTop_toBottomOf="@+id/spinnerKnowledgeBase"
         app:layout_constraintStart_toStartOf="parent" />
@@ -162,8 +162,8 @@
         android:id="@+id/scrollViewResponse"
         android:layout_width="0dp"
         android:layout_height="0dp"
-        android:layout_marginTop="8dp"
-        android:layout_marginBottom="8dp"
+        android:layout_marginTop="4dp"
+        android:layout_marginBottom="4dp"
         android:background="@android:color/darker_gray"
         app:layout_constraintTop_toBottomOf="@+id/editTextSystemPrompt"
         app:layout_constraintBottom_toTopOf="@+id/textViewUserPromptLabel" 
@@ -187,7 +187,7 @@
         android:id="@+id/textViewUserPromptLabel"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp" 
+        android:layout_marginTop="2dp" 
         android:text="@string/label_user_prompt"
         app:layout_constraintBottom_toTopOf="@+id/editTextUserPrompt"
         app:layout_constraintStart_toStartOf="parent" />
@@ -199,7 +199,7 @@
         android:inputType="text"
         android:singleLine="true"
         android:imeOptions="actionSend"
-        android:layout_marginBottom="8dp"
+        android:layout_marginBottom="2dp"
         app:layout_constraintBottom_toTopOf="@+id/buttonSendStop"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" /> 
