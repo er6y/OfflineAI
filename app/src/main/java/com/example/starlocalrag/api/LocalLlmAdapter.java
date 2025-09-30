@@ -63,8 +63,24 @@ public class LocalLlmAdapter {
      * - BUSY: 强制重置并重新处理
      * - UNLOADED: 直接加载
      */
-    public void callLocalModel(String modelName, String prompt, LlmApiAdapter.ApiCallback callback) {
-        LogManager.logI(TAG, "DEBUG: Call local model request: " + modelName + ", thread: " + Thread.currentThread().getName());
+    public void callLocalModel(String modelName, String prompt, java.util.List<String> imagePaths, LlmApiAdapter.ApiCallback callback) {
+        LogManager.logI(TAG, "DEBUG: Call local model request: " + modelName + ", images: " + 
+                        (imagePaths != null ? imagePaths.size() : 0) + ", thread: " + Thread.currentThread().getName());
+        
+        // Store imagePaths for later use in inference
+        final java.util.List<String> finalImagePaths = imagePaths;
+        
+        // Process multimodal prompt if images are provided
+        if (imagePaths != null && !imagePaths.isEmpty()) {
+            LogManager.logI(TAG, "[MULTIMODAL] Processing prompt with " + imagePaths.size() + " images");
+            
+            // Note: Image markers are automatically added by the JNI layer (C++)
+            // The mtmd_tokenize function will:
+            // 1. Get the correct marker from the model (via mtmd_default_marker)
+            // 2. Prepend markers before the prompt
+            // 3. This ensures compatibility with different models (Qwen2-VL, LLaVA, etc.)
+            LogManager.logI(TAG, "[MULTIMODAL] Image markers will be added automatically by JNI layer");
+        }
         
         long currentTime = System.currentTimeMillis();
         
@@ -98,10 +114,10 @@ public class LocalLlmAdapter {
                     // 模型已就绪，检查是否为目标模型
                     if (modelName.equals(currentModelName)) {
                         LogManager.logI(TAG, "DEBUG: Model ready and matches, execute inference directly: " + modelName);
-                        executeInference(prompt, callback);
+                        executeInference(prompt, finalImagePaths, callback);
                     } else {
                         LogManager.logI(TAG, "DEBUG: Model mismatch, need to load target model: " + modelName + " (current: " + currentModelName + ")");
-                        loadModelAndInference(modelName, prompt, callback);
+                        loadModelAndInference(modelName, prompt, finalImagePaths, callback);
                     }
                     break;
                     
@@ -109,13 +125,13 @@ public class LocalLlmAdapter {
                     // 模型正在加载，检查是否为目标模型
                     if (modelName.equals(currentModelName)) {
                         LogManager.logI(TAG, "DEBUG: Target model is already loading, wait for completion: " + modelName);
-                        waitForModelReadyWithHandler(modelName, prompt, callback);
+                        waitForModelReadyWithHandler(modelName, prompt, finalImagePaths, callback);
                     } else {
                         LogManager.logW(TAG, "DEBUG: Different model is loading (current: " + currentModelName + ", target: " + modelName + "), force reset and retry!");
                         forceResetCallFlag("Different model loading conflict");
                         // 强制重置状态并重新尝试
                         localLlmHandler.forceSetModelState(LocalLlmHandler.ModelState.UNLOADED);
-                        loadModelAndInference(modelName, prompt, callback);
+                        loadModelAndInference(modelName, prompt, null, callback);
                     }
                     break;
                     
@@ -125,14 +141,14 @@ public class LocalLlmAdapter {
                     // 强制停止当前推理
                     localLlmHandler.stopInference();
                     // 等待推理停止后重新开始
-                    waitForModelStoppedAndRestart(modelName, prompt, callback);
+                    waitForModelStoppedAndRestart(modelName, prompt, finalImagePaths, callback);
                     break;
                     
                 case UNLOADED:
                 default:
                     // 模型未加载，直接加载
                     LogManager.logI(TAG, "DEBUG: Model unloaded, start loading: " + modelName);
-                    loadModelAndInference(modelName, prompt, callback);
+                    loadModelAndInference(modelName, prompt, finalImagePaths, callback);
                     break;
             }
         } catch (Exception e) {
@@ -175,7 +191,7 @@ public class LocalLlmAdapter {
      * @param prompt 提示词
      * @param callback 回调接口
      */
-    private void waitForModelStoppedAndRestart(String modelName, String prompt, LlmApiAdapter.ApiCallback callback) {
+    private void waitForModelStoppedAndRestart(String modelName, String prompt, java.util.List<String> imagePaths, LlmApiAdapter.ApiCallback callback) {
         LogManager.logD(TAG, "Waiting for model to stop before restarting: " + modelName);
         
         // 在后台线程中等待模型停止
@@ -196,16 +212,16 @@ public class LocalLlmAdapter {
                         
                         if (modelName.equals(currentModel)) {
                             LogManager.logI(TAG, "Model stopped and matches, executing new inference: " + modelName);
-                            executeInference(prompt, callback);
+                            executeInference(prompt, imagePaths, callback);
                             return;
                         } else {
                             LogManager.logW(TAG, "Model stopped but mismatch, need to load target model: " + modelName + " (current: " + currentModel + ")");
-                            loadModelAndInference(modelName, prompt, callback);
+                            loadModelAndInference(modelName, prompt, imagePaths, callback);
                             return;
                         }
                     } else if (currentState == LocalLlmHandler.ModelState.UNLOADED) {
                         LogManager.logI(TAG, "Model unloaded after stop, loading target model: " + modelName);
-                        loadModelAndInference(modelName, prompt, callback);
+                        loadModelAndInference(modelName, prompt, imagePaths, callback);
                         return;
                     }
                     
@@ -221,9 +237,9 @@ public class LocalLlmAdapter {
                 // 检查模型匹配并执行推理
                 String currentModel = localLlmHandler.getCurrentModelName();
                 if (modelName.equals(currentModel)) {
-                    executeInference(prompt, callback);
+                    executeInference(prompt, imagePaths, callback);
                 } else {
-                    loadModelAndInference(modelName, prompt, callback);
+                    loadModelAndInference(modelName, prompt, imagePaths, callback);
                 }
                 
             } catch (InterruptedException e) {
@@ -244,7 +260,7 @@ public class LocalLlmAdapter {
      * @param prompt 提示词
      * @param callback 回调接口
      */
-    private void waitForModelReadyWithHandler(String modelName, String prompt, LlmApiAdapter.ApiCallback callback) {
+    private void waitForModelReadyWithHandler(String modelName, String prompt, java.util.List<String> imagePaths, LlmApiAdapter.ApiCallback callback) {
         LogManager.logD(TAG, "Model is loading, waiting for ready state: " + modelName);
         LogManager.logI(TAG, "DEBUG: Entering waitForModelReadyWithHandler for model: " + modelName);
         
@@ -266,7 +282,7 @@ public class LocalLlmAdapter {
                         
                         if (modelName.equals(currentModel)) {
                             LogManager.logI(TAG, "Model ready and matches, executing inference: " + modelName);
-                            executeInference(prompt, callback);
+                            executeInference(prompt, imagePaths, callback);
                             return;
                         } else {
                             LogManager.logE(TAG, "Model ready but mismatch, expected: " + modelName + ", current: " + currentModel + ". This should not happen during wait!");
@@ -309,7 +325,7 @@ public class LocalLlmAdapter {
      * @param prompt 提示词
      * @param callback 回调接口
      */
-    private void loadModelAndInference(String modelName, String prompt, LlmApiAdapter.ApiCallback callback) {
+    private void loadModelAndInference(String modelName, String prompt, java.util.List<String> imagePaths, LlmApiAdapter.ApiCallback callback) {
         LogManager.logI(TAG, "DEBUG: Starting loadModelAndInference for: " + modelName);
         
         try {
@@ -322,7 +338,7 @@ public class LocalLlmAdapter {
                 @Override
                 public void onComplete(String fullResponse) {
                     LogManager.logI(TAG, "DEBUG: Model loaded successfully, proceeding to inference: " + modelName);
-                    executeInference(prompt, callback);
+                    executeInference(prompt, imagePaths, callback);
                 }
                 
                 @Override
@@ -342,12 +358,14 @@ public class LocalLlmAdapter {
     /**
      * 执行推理
      * @param prompt 提示词
+     * @param imagePaths 图片路径列表（可为null）
      * @param callback 回调接口
      */
-    private void executeInference(String prompt, LlmApiAdapter.ApiCallback callback) {
-        LogManager.logD(TAG, "Execute local LLM inference, prompt length: " + prompt.length());
+    private void executeInference(String prompt, java.util.List<String> imagePaths, LlmApiAdapter.ApiCallback callback) {
+        LogManager.logD(TAG, "Execute local LLM inference, prompt length: " + prompt.length() + 
+                        ", images: " + (imagePaths != null ? imagePaths.size() : 0));
         
-        localLlmHandler.inference(prompt, new LocalLlmHandler.StreamingCallback() {
+        localLlmHandler.inference(prompt, imagePaths, new LocalLlmHandler.StreamingCallback() {
             @Override
             public void onToken(String token) {
                 LogManager.print(token);
@@ -516,5 +534,29 @@ public class LocalLlmAdapter {
             localLlmHandler.unloadModel();
         }
         instance = null;
+    }
+    
+    /**
+     * Check if current model supports multimodal (vision) input
+     * @return true if model supports images, false if text-only
+     */
+    public boolean isMultimodalModel() {
+        return localLlmHandler.isMultimodalModel();
+    }
+    
+    /**
+     * Get the target image size for the multimodal model
+     * @return image size in pixels, or 336 if not available
+     */
+    public int getModelImageSize() {
+        return localLlmHandler.getModelImageSize();
+    }
+    
+    /**
+     * Get the model architecture name
+     * @return architecture name or null if not available
+     */
+    public String getModelArchitecture() {
+        return localLlmHandler.getModelArchitecture();
     }
 }

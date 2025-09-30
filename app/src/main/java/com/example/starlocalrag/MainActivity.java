@@ -36,8 +36,7 @@ import android.util.Log;
 import com.example.starlocalrag.LogManager;
 import com.example.starlocalrag.EmbeddingModelManager;
 import com.example.starlocalrag.api.LocalLlmAdapter;
-import com.example.starlocalrag.GPUConfigChecker;
-import com.example.starlocalrag.GPUDiagnosticTool;
+import com.example.starlocalrag.AcceleratorDiagnostics;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
@@ -103,8 +102,8 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
     
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        // 初始化GPU错误处理
-        GPUErrorHandler.init(getApplicationContext(), getWindow());
+        // Initialize GPU/NPU handling
+        AcceleratorDiagnostics.initializeGPUHandling(getApplicationContext(), getWindow());
         
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main_tabbed);
@@ -141,8 +140,8 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         // 初始化配置
         initializeConfig();
         
-        // 执行GPU配置检查
-        performGPUConfigCheck();
+        // Execute accelerator configuration check
+        performAcceleratorConfigCheck();
         
         // 初始化ViewPager2和BottomNavigationView
         viewPager = findViewById(R.id.viewPager);
@@ -669,44 +668,34 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
     protected void onDestroy() {
         super.onDestroy();
         LogManager.logD(TAG, "MainActivity.onDestroy()");
-        
         // 解绑知识库构建服务
         unbindKnowledgeBaseBuilderService();
     }
     
     /**
-     * 执行GPU配置检查
+     * Perform GPU/NPU configuration check
      */
-    private void performGPUConfigCheck() {
-        // 检测是否为华为设备
-        boolean isHuawei = Build.MANUFACTURER.toLowerCase().contains("huawei") || 
-                           Build.BRAND.toLowerCase().contains("huawei") ||
-                           Build.BRAND.toLowerCase().contains("honor");
-        
-        if (isHuawei) {
-            // 华为设备跳过GPU检查，避免启动卡顿
-            LogManager.logI(TAG, "检测到华为设备，跳过GPU配置检查以避免启动卡顿");
-            return;
-        }
-        
-        // 在后台线程执行GPU配置检查，避免阻塞主线程
+    private void performAcceleratorConfigCheck() {
+        // Run diagnostics in background thread to avoid blocking main thread
         new Thread(() -> {
             try {
-                // 检查GPU配置是否有效
-                boolean isConfigValid = GPUConfigChecker.isGPUConfigValid(this);
+                // Generate comprehensive diagnostic report
+                AcceleratorDiagnostics.DiagnosticReport report = AcceleratorDiagnostics.generateReport(this);
+                
+                // Log complete report
+                LogManager.logI(TAG, "Hardware Accelerator Diagnostic Report:\n" + report.toString());
+                
+                // Quick configuration validation
+                boolean isConfigValid = AcceleratorDiagnostics.isConfigurationValid(this);
                 
                 if (isConfigValid) {
-                    LogManager.logI(TAG, "GPU配置检查: 配置有效，支持GPU加速");
+                    LogManager.logI(TAG, "Accelerator configuration: Valid, GPU/NPU acceleration supported");
                 } else {
-                    LogManager.logW(TAG, "GPU配置检查: 配置可能存在问题，建议查看详细报告");
-                    
-                    // 生成详细的配置检查报告
-                    String configReport = GPUConfigChecker.performConfigCheck(this);
-                    LogManager.logI(TAG, "GPU配置详细报告:\n" + configReport);
+                    LogManager.logW(TAG, "Accelerator configuration: May have issues, check detailed report above");
                 }
                 
             } catch (Exception e) {
-                LogManager.logE(TAG, "GPU配置检查失败: " + e.getMessage(), e);
+                LogManager.logE(TAG, "Accelerator configuration check failed: " + e.getMessage(), e);
             }
         }).start();
     }

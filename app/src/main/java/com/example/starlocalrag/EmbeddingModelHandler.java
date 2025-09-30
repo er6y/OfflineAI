@@ -582,14 +582,14 @@ public class EmbeddingModelHandler {
             if (!gpuEnabled) {
                  LogManager.logW(TAG, "EmbeddingModel: 所有GPU加速方式均失败，将使用CPU模式");
                  
-                 // 执行GPU诊断（仅在第一次失败时执行，避免重复日志）
+                 // Execute accelerator diagnostics (only on first failure to avoid duplicate logs)
                  try {
                      if (context != null) {
-                         String diagnosticReport = com.example.starlocalrag.GPUDiagnosticTool.performFullDiagnosis(context);
-                         LogManager.logI(TAG, "EmbeddingModel GPU诊断报告:\n" + diagnosticReport);
+                         AcceleratorDiagnostics.DiagnosticReport report = AcceleratorDiagnostics.generateReport(context);
+                         LogManager.logI(TAG, "EmbeddingModel Accelerator Diagnostic Report:\n" + report.toString());
                      }
                  } catch (Exception e) {
-                     LogManager.logE(TAG, "EmbeddingModel GPU诊断失败: " + e.getMessage(), e);
+                     LogManager.logE(TAG, "EmbeddingModel accelerator diagnostics failed: " + e.getMessage(), e);
                  }
                  
                  // 提供针对性建议

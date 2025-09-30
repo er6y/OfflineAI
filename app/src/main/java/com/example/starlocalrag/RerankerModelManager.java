@@ -314,12 +314,12 @@ public class RerankerModelManager {
         try {
             LogManager.logI(TAG, "Starting to load reranker model: " + modelPath);
             
-            // 通知加载开始
+            // Notify loading start
             if (loadListener != null) {
                 mainHandler.post(() -> loadListener.onLoadStart());
             }
             
-            // 检查模型文件是否存在
+            // Check if model file exists
             File modelFile = new File(modelPath);
             if (!modelFile.exists()) {
                 String error = "Reranker model file does not exist: " + modelPath;
@@ -330,7 +330,7 @@ public class RerankerModelManager {
                 return null;
             }
             
-            // 通知加载进度
+            // Notify loading progress
             if (loadListener != null) {
                 mainHandler.post(() -> loadListener.onLoadProgress("Initializing reranker model..."));
             }
@@ -352,7 +352,7 @@ public class RerankerModelManager {
             
             LogManager.logI(TAG, "Reranker model loaded successfully: " + modelPath);
             
-            // 通知加载完成
+            // Notify loading completion
             if (loadListener != null) {
                 mainHandler.post(() -> loadListener.onLoadComplete());
             }
@@ -460,15 +460,15 @@ public class RerankerModelManager {
     public void shutdown() {
         LogManager.logI(TAG, "Shutting down reranker model manager");
         
-        // 卸载模型
+        // Unload model
         unloadModel();
         
-        // 关闭线程池
+        // Shutdown thread pool
         if (executor != null && !executor.isShutdown()) {
             executor.shutdown();
         }
         
-        // 清理监听器
+        // Clear listener
         loadListener = null;
     }
     

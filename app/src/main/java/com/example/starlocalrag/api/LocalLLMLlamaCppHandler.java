@@ -43,33 +43,32 @@ import java.util.function.Consumer;
  */
 public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine {
     private static final String TAG = "LocalLLMLlamaCppHandler";
-    
-    // 上下文
+
+    // Context reference
     private final Context context;
     
     /**
-     * 获取上下文
-     * @return 上下文对象
+     * Get the context instance
      */
     private Context getContext() {
         return context;
     }
-    
-    // LlamaCpp推理引擎句柄
+
+    // LlamaCpp handles
     private long modelHandle = 0;
     private long contextHandle = 0;
     private ExecutorService executorService;
-    // Add dedicated scheduler for monitors (timeout/watchdog)
+    // Monitoring and timeout management
     private final ScheduledExecutorService monitorScheduler = Executors.newSingleThreadScheduledExecutor();
     private volatile ScheduledFuture<?> inferenceTimeoutFuture = null;
     private volatile ScheduledFuture<?> watchdogFuture = null;
-    
-    // 状态管理
+
+    // State management
     private final AtomicBoolean isInitialized = new AtomicBoolean(false);
     private final AtomicBoolean isGenerating = new AtomicBoolean(false);
     private final AtomicBoolean shouldStop = new AtomicBoolean(false);
-    
-    // 线程异常检测和强制终止
+
+    // Thread monitoring configuration
     private static final long THREAD_TIMEOUT_MS = -1; // 禁用线程超时检查
     private static final long INFERENCE_TIMEOUT_MS = Long.MAX_VALUE; // 取消推理超时限制，允许长时间推理
     private static final long THREAD_CHECK_INTERVAL_MS = 5000; // 5秒检查间隔
@@ -81,43 +80,50 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
     private final AtomicBoolean threadHealthCheckEnabled = new AtomicBoolean(false); // 禁用线程健康检查
     private final AtomicInteger forceTerminationRetryCount = new AtomicInteger(0);
     private volatile CompletableFuture<?> currentInferenceTask = null;
-    
-    // 内存池管理 - 预分配策略
+
+    // Resource management
     private long preallocatedBatch = 0;
     private long preallocatedSampler = 0;
     private final AtomicBoolean batchInUse = new AtomicBoolean(false);
     private final AtomicBoolean samplerInUse = new AtomicBoolean(false);
     private int preallocatedBatchSize; // 预分配的batch大小，从配置获取
-    
-    // 生命周期管理
+
+    // Model lifecycle management
     private final AtomicBoolean shouldKeepModelLoaded = new AtomicBoolean(true);
     private long lastUsedTime = System.currentTimeMillis();
-    
-    // 统计信息
+
+    // Statistics and performance monitoring
     private final AtomicInteger totalTokensGenerated = new AtomicInteger(0);
     private final AtomicInteger currentSessionTokens = new AtomicInteger(0);
     private long generationStartTime = 0;
     private long inferenceStartTime = 0;
     // Lightweight watchdog needs last token timestamp
     private volatile long lastTokenTime = 0;
-    
-    // 内存监控
+
+    // Memory monitoring
     private long memoryBeforeInference = 0;
     private long memoryMaxDuringInference = 0;
     private final Runtime runtime = Runtime.getRuntime();
     private ActivityManager activityManager;
     private ActivityManager.MemoryInfo memoryInfo;
-    
-    // 模型配置
+
+    // Model configuration
     private LocalLlmHandler.ModelConfig modelConfig;
     private String currentModelPath;
     private int maxTokens = 512; // 配置参数 - 从ConfigManager获取
-    
-    // 模型参数缓存
+
+    // Inference parameters
     private LocalLlmHandler.InferenceParams modelParams = null;
-    
-    // 实际使用的推理参数（用于性能统计显示）
+
+    // Actual parameters used in the last inference
     private volatile LocalLlmHandler.InferenceParams actualUsedParams = null;
+    
+    // Multimodal support (mtmd context)
+    private long mtmdContextHandle = 0;
+    private boolean isMultimodalModel = false;
+    private int modelImageSize = 336; // Default image size
+    private String modelArchitecture = null;
+    private String mmprojPath = null; // Path to mmproj file for multimodal models
     
     public LocalLLMLlamaCppHandler(Context context) {
         this.context = context;
@@ -130,9 +136,9 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         // 加载本地库
         try {
             NativeLibraryLoader.loadLibrary("llamacpp_jni");
-            LogManager.logI(TAG, "LlamaCpp本地库加载成功");
+            LogManager.logI(TAG, "Native library loaded successfully");
         } catch (Exception e) {
-            LogManager.logE(TAG, "加载llama.cpp本地库失败", e);
+            LogManager.logE(TAG, "Failed to load native library", e);
             throw new RuntimeException("Failed to load llama.cpp native libraries");
         }
         
@@ -140,13 +146,76 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
     }
     
     @Override
+    public void inference(String prompt, java.util.List<String> imagePaths, 
+                         LocalLlmHandler.InferenceParams params, LocalLlmHandler.StreamingCallback callback) {
+        // Convert List<String> to String[] for internal method
+        String[] imagePathsArray = null;
+        if (imagePaths != null && !imagePaths.isEmpty()) {
+            imagePathsArray = imagePaths.toArray(new String[0]);
+        }
+        inference(prompt, params, callback, imagePathsArray);
+    }
+
+    @Override
+    public String findModelFile(File modelDir) {
+        // Handle direct file path
+        if (modelDir.isFile() && modelDir.getName().toLowerCase().endsWith(".gguf")) {
+            return modelDir.getAbsolutePath();
+        }
+        
+        // Handle directory with multiple .gguf files
+        if (modelDir.isDirectory()) {
+            File[] files = modelDir.listFiles();
+            if (files != null) {
+                File mainModel = null;
+                File mmproj = null;
+                
+                // First pass: identify main model and mmproj
+                for (File file : files) {
+                    if (file.isFile() && file.getName().toLowerCase().endsWith(".gguf")) {
+                        String fileName = file.getName().toLowerCase();
+                        
+                        // Check if this is mmproj file
+                        if (fileName.contains("mmproj") || fileName.contains("mm_proj") || 
+                            fileName.contains("vision") || fileName.contains("clip")) {
+                            mmproj = file;
+                            LogManager.logD(TAG, "Found mmproj file: " + file.getName());
+                        } else {
+                            // This is likely the main model
+                            mainModel = file;
+                            LogManager.logD(TAG, "Found main model file: " + file.getName());
+                        }
+                    }
+                }
+                
+                // Save mmproj path if found
+                if (mmproj != null) {
+                    mmprojPath = mmproj.getAbsolutePath();
+                    LogManager.logI(TAG, "Saved mmproj path for multimodal support: " + mmprojPath);
+                }
+                
+                // Return main model if found, otherwise return any gguf (fallback)
+                if (mainModel != null) {
+                    LogManager.logI(TAG, "Selected main model: " + mainModel.getName());
+                    return mainModel.getAbsolutePath();
+                } else if (mmproj != null) {
+                    LogManager.logW(TAG, "Only mmproj found, using it as fallback: " + mmproj.getName());
+                    return mmproj.getAbsolutePath();
+                }
+            }
+        }
+        
+        return null;
+    }
+    
+    @Override
     public void initialize(String modelPath, LocalLlmHandler.ModelConfig config) throws Exception {
         if (isInitialized.get()) {
-            LogManager.logW(TAG, "推理引擎已经初始化");
+            LogManager.logI(TAG, "Handler already initialized, skipping");
             return;
         }
         
-        LogManager.logI(TAG, "开始初始化LlamaCpp推理引擎: " + modelPath);
+        LogManager.logI(TAG, "Initializing LocalLLMLlamaCppHandler with model: " + modelPath);
         
         this.modelConfig = config;
         this.currentModelPath = modelPath;
@@ -160,7 +229,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         initializeLlamaCpp(modelPath, config);
         
         isInitialized.set(true);
-        LogManager.logI(TAG, "LlamaCpp推理引擎初始化成功");
+        LogManager.logI(TAG, "LocalLLMLlamaCppHandler initialization completed");
         
         // 模型参数已在initializeLlamaCpp中提取，无需重复调用
     }
@@ -171,14 +240,15 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
     private void initializeLlamaCpp(String modelPath, LocalLlmHandler.ModelConfig config) throws Exception {
         LogManager.logI(TAG, "使用LlamaCpp API初始化...");
         
-        // 查找GGUF模型文件
+        // Use findModelFile to intelligently select main model (not mmproj)
         File modelFile = new File(modelPath);
-        File ggufFile = findGgufFile(modelFile);
-        if (ggufFile == null) {
-            throw new Exception("在目录中未找到GGUF模型文件: " + modelPath);
+        String ggufPath = findModelFile(modelFile);
+        if (ggufPath == null) {
+            throw new Exception("NoGGUF in Path:" + modelPath);
         }
         
-        LogManager.logI(TAG, "找到GGUF模型文件: " + ggufFile.getAbsolutePath());
+        File ggufFile = new File(ggufPath);
+        LogManager.logI(TAG, "Found GGUF: " + ggufFile.getAbsolutePath());
         
         // 从ConfigManager获取配置参数 - 参考OnnxRuntimeGenAI的做法
         int configMaxSeqLength = ConfigManager.getMaxSequenceLength(context);
@@ -231,41 +301,119 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         LogManager.logI(TAG, String.format("配置参数 - 最大序列长度: %d, 线程数: %d, 最大输出token数: %d, 后端偏好: %s", 
             configMaxSeqLength, actualThreads, configMaxNewTokens, backendPreference));
         LogManager.logI(TAG, "预分配资源完成 - batch: " + preallocatedBatch + ", sampler: " + preallocatedSampler);
+        
+        // Initialize mtmd context for multimodal support
+        initializeMtmdContext();
     }
     
+    /**
+     * Initialize mtmd context for multimodal support
+     */
+    private void initializeMtmdContext() {
+        try {
+            LogManager.logI(TAG, "[MTMD] Checking model multimodal support");
+            
+            // First check if model supports multimodal BEFORE initializing mtmd context
+            // This prevents crashes on text-only models
+            boolean modelSupportsMultimodal = LlamaCppInference.is_model_multimodal(modelHandle);
+            LogManager.logI(TAG, "[MTMD] Model multimodal support check: " + modelSupportsMultimodal);
+            
+            // Additional check: if mmproj file exists, treat as multimodal
+            // This handles cases like MiniCPM-V-4.5 which uses qwen3 arch but is multimodal
+            // GGUF conversion loses original model_type metadata, so we rely on mmproj file presence
+            if (!modelSupportsMultimodal && mmprojPath != null) {
+                LogManager.logI(TAG, "[MTMD] JNI check failed but mmproj file exists, assuming multimodal model");
+                modelSupportsMultimodal = true;
+            }
+            
+            if (!modelSupportsMultimodal) {
+                LogManager.logI(TAG, "[MTMD] Model is text-only, skipping mtmd context initialization");
+                isMultimodalModel = false;
+                mtmdContextHandle = 0;
+                return;
+            }
+            
+            // Model supports multimodal, proceed with mtmd context initialization
+            LogManager.logI(TAG, "[MTMD] Initializing mtmd context for multimodal model");
+            
+            // Log mmproj path status
+            if (mmprojPath != null) {
+                LogManager.logI(TAG, "[MTMD] Using external mmproj file: " + mmprojPath);
+            } else {
+                LogManager.logI(TAG, "[MTMD] No external mmproj file found, will try embedded mode");
+            }
+            
+            // Get backend preference and image encoding thread count from config
+            String backendPreference = SettingsFragment.getBackendPreference(context);
+            boolean useGpu = !backendPreference.equals("CPU");
+            int configImageThreads = ConfigManager.getImageEncodingThreads(context);
+            int availableProcessors = Runtime.getRuntime().availableProcessors();
+            int actualImageThreads = Math.min(configImageThreads, availableProcessors);
+
+            LogManager.logI(TAG, String.format("[MTMD] Image encoding config: threads=%d, useGpu=%b, backend=%s",
+                    actualImageThreads, useGpu, backendPreference));
+
+            // Initialize mtmd context with mmproj path (can be null for embedded models)
+            mtmdContextHandle = LlamaCppInference.init_mtmd_context(modelHandle, mmprojPath, useGpu, actualImageThreads);
+            
+            if (mtmdContextHandle == 0) {
+                LogManager.logW(TAG, "[MTMD] Failed to initialize mtmd context despite model claiming multimodal support");
+                isMultimodalModel = false;
+                return;
+            }
+            
+            LogManager.logI(TAG, "[MTMD] Context initialized successfully: " + mtmdContextHandle);
+            isMultimodalModel = true;
+            
+            // Get model image size
+            modelImageSize = LlamaCppInference.get_model_image_size(mtmdContextHandle);
+            LogManager.logI(TAG, "[MTMD] Model image size: " + modelImageSize);
+            
+            // Get model architecture
+            modelArchitecture = LlamaCppInference.get_model_architecture(modelHandle);
+            LogManager.logI(TAG, "[MTMD] Model architecture: " + modelArchitecture);
+            
+            LogManager.logI(TAG, "[MTMD] ✓ Multimodal model initialized successfully");
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[MTMD] Failed to initialize mtmd context", e);
+            mtmdContextHandle = 0;
+            isMultimodalModel = false;
+        }
+    }
 
     
     /**
-     * 预分配资源 - 内存池管理策略
+     * Preallocate batch and sampler resources for better performance
      */
     private void preallocateResources() {
         try {
-            // 使用maxSequenceLength作为批处理大小，统一配置
+            // Get batch size from configuration
             preallocatedBatchSize = ConfigManager.getMaxSequenceLength(getContext());
-            LogManager.logI(TAG, "使用maxSequenceLength作为批处理大小: " + preallocatedBatchSize);
+            LogManager.logI(TAG, "Preallocating resources with batch size: " + preallocatedBatchSize);
             
-            // 预分配batch - 使用配置的最大batch大小
+            // Preallocate batch
             preallocatedBatch = LlamaCppInference.new_batch(preallocatedBatchSize, 0, 1);
             if (preallocatedBatch == 0) {
-                LogManager.logW(TAG, "预分配batch失败，将使用动态分配");
+                LogManager.logW(TAG, "Preallocated failed, using dynamic alloc");
             } else {
-                LogManager.logI(TAG, "预分配batch成功: " + preallocatedBatch + ", 大小: " + preallocatedBatchSize);
+                LogManager.logI(TAG, "Preallocated batch: " + preallocatedBatch + ", Size: " + preallocatedBatchSize);
             }
             
-            // 预分配sampler - 使用默认参数
+            // Preallocate sampler with default parameters
             preallocatedSampler = LlamaCppInference.new_sampler();
             if (preallocatedSampler == 0) {
-                LogManager.logW(TAG, "预分配sampler失败，将使用动态分配");
+                LogManager.logW(TAG, "Preallocated failed:，using dynamic alloc");
             } else {
-                LogManager.logI(TAG, "预分配sampler成功: " + preallocatedSampler);
+                LogManager.logI(TAG, "Preallocated sampler: " + preallocatedSampler);
             }
         } catch (Exception e) {
-            LogManager.logE(TAG, "预分配资源失败", e);
+            LogManager.logW(TAG, "Failed to preallocate resources", e);
         }
     }
     
     /**
-     * 获取batch资源 - 内存池管理
+     * Acquire batch for inference, with size validation
      */
     private synchronized long acquireBatch(int requiredSize) {
         // 如果预分配的batch可用且大小足够，则复用
@@ -287,7 +435,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
     }
     
     /**
-     * 释放batch资源 - 内存池管理
+     * Release batch after inference
      */
     private synchronized void releaseBatch(long batch) {
         if (batch == 0) {
@@ -298,20 +446,20 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         if (batch == preallocatedBatch) {
             // 预分配的batch，标记为可用
             batchInUse.set(false);
-            LogManager.logD(TAG, "释放预分配batch回池: " + batch);
+            LogManager.logD(TAG, " Free non-preallocated batch: " + batch);
         } else {
             // 动态分配的batch，直接释放
             try {
                 LlamaCppInference.free_batch(batch);
-                LogManager.logD(TAG, "释放动态batch: " + batch);
+                LogManager.logD(TAG, "Freed temporary batch: " + batch);
             } catch (Exception e) {
-                LogManager.logE(TAG, "释放动态batch失败: " + batch, e);
+                LogManager.logW(TAG, "Error freeing batch: " + batch, e);
             }
         }
     }
     
     /**
-     * 模型加载完成后从模型目录文件中提取推理参数
+     * Extract and print model parameters for debugging
      */
     private void extractAndPrintModelParams() {
         LogManager.logI(TAG, "========== 模型参数提取开始 ==========");
@@ -333,8 +481,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
     }
     
     /**
-     * 从模型目录文件中提取推理参数
-     * @return 从模型目录文件中提取的推理参数，如果提取失败则返回null
+     * Extract inference parameters from model directory
      */
     private LocalLlmHandler.InferenceParams extractParamsFromModelDirectory() {
         try {
@@ -381,9 +528,8 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
     }
     
     /**
-     * 从模型目录读取推理参数
-     * @param modelDirPath 模型目录路径
-     * @return 推理参数对象，如果读取失败返回null
+     * Read inference parameters from model directory
+     * Supports multiple file formats: params.json, config.json, inference_params.txt
      */
     private static LocalLlmHandler.InferenceParams readInferenceParams(String modelDirPath) {
         if (modelDirPath == null || modelDirPath.isEmpty()) {
@@ -416,7 +562,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
     }
     
     /**
-     * 从params文件读取参数（支持JSON格式和简单键值对格式）
+     * Read parameters from a specific file
      */
     private static LocalLlmHandler.InferenceParams readFromParamsFile(File paramsFile) {
         try {
@@ -730,70 +876,131 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                     finalParams.getTopK(),
                     finalParams.getRepetitionPenalty()
                 ) : LlamaCppInference.new_sampler();
-            LogManager.logD(TAG, "动态分配sampler: " + sampler + 
+            LogManager.logD(TAG, "Dynamic sampler allocation: " + sampler + 
                 (finalParams != null ? String.format(" (temp=%.2f, top_p=%.2f, top_k=%d, repeat_penalty=%.2f)", 
-                    finalParams.getTemperature(), finalParams.getTopP(), finalParams.getTopK(), finalParams.getRepetitionPenalty()) : " (默认参数)"));
+                    finalParams.getTemperature(), finalParams.getTopP(), finalParams.getTopK(), finalParams.getRepetitionPenalty()) : " (default params)"));
             return sampler;
         } catch (Exception e) {
-            LogManager.logE(TAG, "动态分配sampler失败: " + e.getMessage(), e);
+            LogManager.logE(TAG, "Dynamic sampler allocation failed: " + e.getMessage(), e);
             return 0;
         }
     }
     
     /**
-     * 释放sampler资源 - 内存池管理
+     * Release sampler resources - memory pool management
      */
     private synchronized void releaseSampler(long sampler) {
         if (sampler == 0) {
-            LogManager.logW(TAG, "尝试释放无效的sampler句柄: 0");
+            LogManager.logW(TAG, "Attempting to release invalid sampler handle: 0");
             return;
         }
         
         if (sampler == preallocatedSampler) {
-            // 预分配的sampler，标记为可用
+            // Pre-allocated sampler, mark as available
             samplerInUse.set(false);
-            LogManager.logD(TAG, "释放预分配sampler回池: " + sampler);
+            LogManager.logD(TAG, "Released pre-allocated sampler back to pool: " + sampler);
         } else {
-            // 动态分配的sampler，直接释放
+            // Dynamically allocated sampler, release directly
             try {
                 LlamaCppInference.free_sampler(sampler);
-                LogManager.logD(TAG, "释放动态sampler: " + sampler);
+                LogManager.logD(TAG, "Released dynamic sampler: " + sampler);
             } catch (Exception e) {
-                LogManager.logE(TAG, "释放动态sampler失败: " + sampler, e);
+                LogManager.logE(TAG, "Failed to release dynamic sampler: " + sampler, e);
             }
         }
-    }
-    
-    /**
-     * 查找GGUF模型文件
-     */
-    private File findGgufFile(File modelDir) {
-        if (modelDir.isFile() && modelDir.getName().toLowerCase().endsWith(".gguf")) {
-            return modelDir;
-        }
-        
-        if (modelDir.isDirectory()) {
-            File[] files = modelDir.listFiles();
-            if (files != null) {
-                for (File file : files) {
-                    if (file.isFile() && file.getName().toLowerCase().endsWith(".gguf")) {
-                        return file;
-                    }
-                }
-            }
-        }
-        
-        return null;
     }
     
     @Override
     public void inference(String prompt, LocalLlmHandler.InferenceParams params, 
                          LocalLlmHandler.StreamingCallback callback) {
-        generateText(prompt, params, callback);
+        // Call unified generateText with null imagePaths
+        generateText(prompt, params, callback, null);
+    }
+    
+    // Overloaded inference method with multimodal support
+    public void inference(String prompt, LocalLlmHandler.InferenceParams params, 
+                         LocalLlmHandler.StreamingCallback callback, String[] imagePaths) {
+        // Call unified generateText with imagePaths
+        generateText(prompt, params, callback, imagePaths);
+    }
+    
+    /**
+     * Load images and return handles
+     * @param imagePaths Array of image file paths
+     * @return Array of image handles, or null if loading fails
+     */
+    private long[] loadImages(String[] imagePaths) {
+        if (imagePaths == null || imagePaths.length == 0) {
+            return null;
+        }
+        
+        LogManager.logI(TAG, "[MULTIMODAL] Loading " + imagePaths.length + " images");
+        
+        long[] imageHandles = new long[imagePaths.length];
+        try {
+            for (int i = 0; i < imagePaths.length; i++) {
+                String imagePath = imagePaths[i];
+                LogManager.logD(TAG, "[MULTIMODAL] Loading image: " + imagePath);
+                
+                // Check if image file exists
+                File imageFile = new File(imagePath);
+                if (!imageFile.exists() || !imageFile.isFile()) {
+                    throw new IOException("Image file not found or not accessible: " + imagePath);
+                }
+                
+                // Load image using LlamaCpp inference
+                long imageHandle = LlamaCppInference.load_image_bitmap(mtmdContextHandle, imagePath);
+                if (imageHandle == 0) {
+                    throw new RuntimeException("Failed to load image: " + imagePath);
+                }
+                
+                imageHandles[i] = imageHandle;
+                LogManager.logD(TAG, "[MULTIMODAL] Image loaded successfully: " + imagePath + " -> handle=" + imageHandle);
+            }
+            
+            LogManager.logI(TAG, "[MULTIMODAL] All images loaded successfully");
+            return imageHandles;
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[MULTIMODAL] Failed to load images", e);
+            // Clean up any loaded images
+            freeImages(imageHandles);
+            return null;
+        }
+    }
+
+    /**
+     * Free image handles
+     * @param imageHandles Array of image handles to free
+     */
+    private void freeImages(long[] imageHandles) {
+        if (imageHandles == null) {
+            return;
+        }
+        
+        LogManager.logD(TAG, "[MULTIMODAL] Freeing " + imageHandles.length + " image handles");
+        
+        for (int i = 0; i < imageHandles.length; i++) {
+            long handle = imageHandles[i];
+            if (handle != 0) {
+                try {
+                    LlamaCppInference.free_image_bitmap(handle);
+                    LogManager.logD(TAG, "[MULTIMODAL] Freed image handle: " + handle);
+                    imageHandles[i] = 0; // Mark as freed
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[MULTIMODAL] Failed to free image handle: " + handle, e);
+                }
+            }
+        }
     }
     
     public void generateText(String prompt, LocalLlmHandler.InferenceParams params, 
                            LocalLlmHandler.StreamingCallback callback) {
+        generateText(prompt, params, callback, null);
+    }
+    
+    public void generateText(String prompt, LocalLlmHandler.InferenceParams params, 
+                           LocalLlmHandler.StreamingCallback callback, String[] imagePaths) {
         // 检查全局停止标志
         if (GlobalStopManager.isGlobalStopRequested()) {
             LogManager.logD(TAG, "Detected global stop flag, interrupting text generation");
@@ -804,7 +1011,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         }
         
         if (!isInitialized.get()) {
-            String error = "推理引擎未初始化";
+            String error = "Inference engine not initialized";
             LogManager.logE(TAG, error);
             if (callback != null) {
                 callback.onError(error);
@@ -813,7 +1020,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         }
         
         if (isGenerating.get()) {
-            String error = "正在生成中，请等待当前任务完成";
+            String error = "Generation in progress, please wait for current task to complete";
             LogManager.logW(TAG, error);
             if (callback != null) {
                 callback.onError(error);
@@ -914,20 +1121,22 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                         }
                         long now = System.currentTimeMillis();
                         int tokens = totalTokensGenerated.get();
-                        if (tokens == 0 && (now - generationStartTime) > FIRST_TOKEN_WARN_MS) {
-                            LogManager.logW(TAG, "[WD] Slow first token (>15s). Model may be heavy or CPU constrained; consider lowering context or sampling params.");
-                        }
+                        // Disabled: too noisy, reduces log spam
+                        // if (tokens == 0 && (now - generationStartTime) > FIRST_TOKEN_WARN_MS) {
+                        //     LogManager.logW(TAG, "[WD] Slow first token (>15s). Model may be heavy or CPU constrained; consider lowering context or sampling params.");
+                        // }
                         long sinceLastToken = now - lastTokenTime;
-                        if (sinceLastToken > TOKEN_STALL_WARN_MS) {
-                            Thread.State state = currentInferenceThread != null ? currentInferenceThread.getState() : null;
-                            LogManager.logW(TAG, "[WD] No token for " + sinceLastToken + "ms (stall suspected). threadState=" + state + ", mem=" + getMemoryStats());
-                        }
-                    }, 3, 3, TimeUnit.SECONDS);
+                        // Disabled: too noisy, reduces log spam
+                        // if (sinceLastToken > TOKEN_STALL_WARN_MS) {
+                        //     Thread.State state = currentInferenceThread != null ? currentInferenceThread.getState() : null;
+                        //     LogManager.logW(TAG, "[WD] No token for " + sinceLastToken + "ms (stall suspected). threadState=" + state + ", mem=" + getMemoryStats());
+                        // }
+                    }, 5, 5, TimeUnit.SECONDS);
                 } catch (Throwable t) {
                     LogManager.logW(TAG, "[WD] Failed to start watchdog via scheduler", t);
                 }
                 
-                LogManager.logI(TAG, "开始LlamaCpp流式生成文本");
+                LogManager.logI(TAG, "Starting LlamaCpp streaming text generation");
                 
                 // 更新推理参数
                 if (params != null) {
@@ -936,12 +1145,43 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                 
                 StringBuilder fullResponse = new StringBuilder();
                 
-                generateWithLlamaCpp(prompt, params, callback, fullResponse);
+                // 直接传递给 JNI，让 JNI 层判断和容错
+                // 不在 Java 层检查 isMtmdContextReady()，避免阻止 JNI 层的容错逻辑
+                long[] imageHandles = null;
+                if (imagePaths != null && imagePaths.length > 0) {
+                    LogManager.logI(TAG, "[MULTIMODAL] Received " + imagePaths.length + " images, loading...");
+                    
+                    // 尝试加载图片（即使模型不支持多模态，也先加载）
+                    // JNI 层会自动判断是否使用这些图片
+                    if (isMtmdContextReady()) {
+                        imageHandles = loadImages(imagePaths);
+                        if (imageHandles != null) {
+                            LogManager.logI(TAG, "[MULTIMODAL] Successfully loaded " + imageHandles.length + " images");
+                        } else {
+                            LogManager.logW(TAG, "[MULTIMODAL] Failed to load images, JNI will use text-only mode");
+                        }
+                    } else {
+                        LogManager.logI(TAG, "[MULTIMODAL] Multimodal context not ready, JNI will use text-only mode");
+                    }
+                }
+                
+                // 统一调用 JNI（传递 imageHandles，可能为 null）
+                // JNI 层会自动判断：
+                // - 如果 imageHandles != null 且模型支持多模态 → 多模态推理
+                // - 否则 → 纯文本推理
+                try {
+                    generateWithLlamaCpp(prompt, params, callback, fullResponse, imageHandles);
+                } finally {
+                    // 释放图片资源（如果有）
+                    if (imageHandles != null) {
+                        freeImages(imageHandles);
+                    }
+                }
                 
             } catch (Exception e) {
-                LogManager.logE(TAG, "生成文本异常", e);
+                LogManager.logE(TAG, "Text generation exception", e);
                 if (callback != null) {
-                    callback.onError("生成文本时发生异常: " + e.getMessage());
+                    callback.onError("Exception occurred during text generation: " + e.getMessage());
                 }
             } finally {
                 isGenerating.set(false);
@@ -970,9 +1210,13 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
     }
     
     /**
-     * 使用LlamaCpp进行推理
+     * Perform inference using LlamaCpp
      */
     private void generateWithLlamaCpp(String prompt, LocalLlmHandler.InferenceParams params, LocalLlmHandler.StreamingCallback callback, StringBuilder fullResponse) {
+        generateWithLlamaCpp(prompt, params, callback, fullResponse, null);
+    }
+    
+    private void generateWithLlamaCpp(String prompt, LocalLlmHandler.InferenceParams params, LocalLlmHandler.StreamingCallback callback, StringBuilder fullResponse, long[] imageHandles) {
         try {
             // 从ConfigManager获取配置参数
             int maxTokens = ConfigManager.getMaxNewTokens(context);
@@ -1027,8 +1271,19 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                 
                 // 调试日志已移除
                 
-                // 初始化完成
-                int tokenCount = LlamaCppInference.completion_init(contextHandle, batch, processedPrompt, maxTokens, false);
+                // 初始化完成 - 支持多模态
+                int tokenCount;
+                if (imageHandles != null && imageHandles.length > 0) {
+                    // Use multimodal initialization
+                    LogManager.logI(TAG, "[MULTIMODAL] Using completion_init_with_images");
+                    tokenCount = LlamaCppInference.completion_init_with_images(
+                        contextHandle, batch, processedPrompt, maxTokens, true, 
+                        mtmdContextHandle, imageHandles);
+                } else {
+                    // Use text-only initialization
+                    tokenCount = LlamaCppInference.completion_init(contextHandle, batch, processedPrompt, maxTokens, true);
+                }
+                
                 if (tokenCount < 0) {
                     LogManager.logE(TAG, "初始化完成失败");
                     if (callback != null) {
@@ -1038,7 +1293,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                     return;
                 }
                 
-                // 生成循环
+                // 生成循环 - 统一的token生成流程
                 LlamaCppInference.IntVar currentPos = new LlamaCppInference.IntVar(tokenCount);
                 
                 for (int i = 0; i < maxTokens && !shouldStop.get() && !GlobalStopManager.isGlobalStopRequested(); i++) {
@@ -1158,7 +1413,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
                     LogManager.logI(TAG, "[STREAM] Generation stopped, finalizing with onComplete");
                 }
                 // 计算统计信息
-                long duration = System.currentTimeMillis() - generationStartTime;
+                long duration = generationStartTime > 0 ? System.currentTimeMillis() - generationStartTime : 0;
                 int tokens = totalTokensGenerated.get();
                 double tokensPerSecond = tokens > 0 && duration > 0 ? 
                     (tokens * 1000.0) / duration : 0.0;
@@ -1185,175 +1440,7 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         }
     }
     
-    /**
-     * 备用方法：使用传统流式生成（如果一站式API有问题）
-     */
-    private void generateWithTraditionalStreaming(String prompt, LocalLlmHandler.InferenceParams params, LocalLlmHandler.StreamingCallback callback, StringBuilder fullResponse) {
-        try {
-            // 使用底层JNI方法进行流式生成
-            int maxTokens = ConfigManager.getMaxNewTokens(context);
-            
-            // 动态创建批处理大小，支持超长prompt
-            // 首先估算prompt的token数量（粗略估算：字符数/4）
-            int estimatedTokens = Math.max(512, prompt.length() / 4 + 100);
-            // 限制最大batch大小避免内存问题，使用maxSequenceLength
-            int maxBatchSize = ConfigManager.getMaxSequenceLength(getContext());
-            int batchSize = Math.min(estimatedTokens, maxBatchSize);
-            
-            LogManager.logI(TAG, String.format("动态batch大小 - 估算tokens: %d, 使用batch大小: %d", estimatedTokens, batchSize));
-            
-            // 使用内存池管理获取资源
-            long batch = acquireBatch(batchSize);
-            long sampler = acquireSampler(params);
-            
-            // 更新最后使用时间
-            lastUsedTime = System.currentTimeMillis();
-            
-            try {
-                // 清空KV缓存 - 添加有效性检查
-                if (contextHandle != 0) {
-                    LlamaCppInference.kv_cache_clear(contextHandle);
-                } else {
-                    LogManager.logW(TAG, "contextHandle为0，跳过KV缓存清理");
-                    if (callback != null) {
-                        callback.onError("推理引擎未正确初始化");
-                    }
-                    return;
-                }
-                
-                // 调试日志已移除
-                
-                // 初始化完成
-                int tokenCount = LlamaCppInference.completion_init(contextHandle, batch, prompt, maxTokens, false);
-                if (tokenCount < 0) {
-                    LogManager.logE(TAG, "初始化完成失败");
-                    if (callback != null) {
-                        callback.onError("初始化完成失败");
-                    }
-                    return;
-                }
-                
-                // 生成循环
-                LlamaCppInference.IntVar currentPos = new LlamaCppInference.IntVar(tokenCount);
-                
-                for (int i = 0; i < maxTokens && !shouldStop.get() && !GlobalStopManager.isGlobalStopRequested(); i++) {
-                    // 检查全局停止标志
-                    if (GlobalStopManager.isGlobalStopRequested()) {
-                        LogManager.logD(TAG, "Detected global stop flag during traditional streaming loop, breaking");
-                        break;
-                    }
-                    
-                    if (shouldStop.get()) {
-                        // 停止调试日志已移除
-                        break;
-                    }
-                    
-                    // 注意：这个JNI调用可能会阻塞，无法被中断
-                    String token = LlamaCppInference.completion_loop(contextHandle, batch, sampler, maxTokens, currentPos);
-                    
-                    // JNI调用返回后再次检查停止标志
-                    if (shouldStop.get()) {
-                        // 停止调试日志已移除
-                        break;
-                    }
-                    
-                    // UTF-8容错处理：区分真正的推理结束和字符累积中的临时null
-                    if (token == null) {
-                        // JNI返回null可能是因为UTF-8字符正在累积中，继续等待下一个token
-                        LogManager.logD(TAG, "Traditional API: JNI returned null, continuing to wait for UTF-8 sequence completion");
-                        continue;
-                    }
-                    
-                    if (token.isEmpty()) {
-                        // 空字符串表示真正的推理结束
-                        LogManager.logD(TAG, "Traditional API: Received empty token, inference completed");
-                        break;
-                    }
-                    
-                    // 检查是否为长度限制截断提示
-                    if ("（已达输出上限，强行截断！）".equals(token)) {
-                        LogManager.logI(TAG, "Traditional API: Received length limit truncation notice");
-                        // 输出截断提示
-                        fullResponse.append(token);
-                        if (callback != null) {
-                            lastTokenTime = System.currentTimeMillis();
-                            callback.onToken(token);
-                        }
-                        // 下一次循环将收到空字符串并正确结束
-                        continue;
-                    }
-                    
-                    // 对从LlamaCpp返回的token进行Unicode修复
-                    String fixedToken = token;
-                    try {
-                        // 检查是否需要修复
-                        if (UnicodeDecoder.containsUnicodeEscapes(token)) {
-                            // 使用UnicodeDecoder进行多重修复，确保完全解码
-                            fixedToken = UnicodeDecoder.decodeUnicodeEscapes(token);
-                            // 如果仍然包含转义序列，再次修复
-                            while (fixedToken.contains("\\u") && !fixedToken.equals(token)) {
-                                token = fixedToken;
-                                fixedToken = UnicodeDecoder.decodeUnicodeEscapes(token);
-                            }
-                            // 只在实际修复时才打印日志
-                            LogManager.logD(TAG, String.format("传统API Token Unicode修复: '%s' -> '%s'", token, fixedToken));
-                        }
-                    } catch (Exception e) {
-                        LogManager.logW(TAG, "传统API Token Unicode修复失败: " + e.getMessage());
-                        fixedToken = token; // 回退到原始token
-                    }
-                    
-                    fullResponse.append(fixedToken);
-                    totalTokensGenerated.incrementAndGet();
-                    currentSessionTokens.incrementAndGet();
-                    
-                    // 更新内存监控
-                    updateMemoryMonitoring();
-                    
-                    if (callback != null) {
-                        lastTokenTime = System.currentTimeMillis();
-                        callback.onToken(fixedToken);
-                    }
-                }
-                
-                // 生成完成
-                if (callback != null) {
-                    // If stopped by user or global flag, still finalize with onComplete (consistency for upper state machine)
-                    if (shouldStop.get() || GlobalStopManager.isGlobalStopRequested()) {
-                        LogManager.logI(TAG, "[STREAM] Traditional generation stopped, finalizing with onComplete");
-                    }
-                    // 计算统计信息
-                    long duration = System.currentTimeMillis() - generationStartTime;
-                    int tokens = totalTokensGenerated.get();
-                    double tokensPerSecond = tokens > 0 && duration > 0 ? 
-                        (tokens * 1000.0) / duration : 0.0;
-                    
-                    LogManager.logI(TAG, String.format(
-                        "传统API生成完成 - 总tokens: %d, 耗时: %dms, 速率: %.2f tokens/s",
-                        tokens, duration, tokensPerSecond));
-                    
-                    // 生成性能统计报告并追加到响应中
-                    String performanceStats = getPerformanceStats();
-                    String finalResponse = fullResponse.toString() + performanceStats;
-                    
-                    // 单独发送统计信息token，确保UI能够正确显示
-                    callback.onToken(performanceStats);
-                    
-                    callback.onComplete(finalResponse);
-                }
-            } finally {
-                // 使用内存池管理释放资源
-                releaseBatch(batch);
-                releaseSampler(sampler);
-            }
-            
-        } catch (Exception e) {
-            LogManager.logE(TAG, "传统API推理失败: " + e.getMessage(), e);
-            if (callback != null) {
-                callback.onError("传统API推理失败: " + e.getMessage());
-            }
-        }
-    }
+
     
     /**
      * 应用LlamaCpp的thinking模式处理
@@ -1422,118 +1509,6 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
      * @param prompt 输入提示词
      * @return 生成的文本
      */
-    public CompletableFuture<String> generateTextAsync(String prompt) {
-        return CompletableFuture.supplyAsync(() -> {
-            if (!isInitialized.get()) {
-                Log.e(TAG, "推理引擎未初始化");
-                return "";
-            }
-            
-            if (isGenerating.getAndSet(true)) {
-                Log.w(TAG, "正在生成中，请等待当前任务完成");
-                return "";
-            }
-            
-            try {
-                Log.i(TAG, "开始生成文本: " + prompt.substring(0, Math.min(prompt.length(), 100)) + "...");
-                
-                // 使用底层JNI方法进行同步生成
-                int maxTokens = ConfigManager.getMaxNewTokens(context);
-                
-                // 动态创建批处理大小，支持超长prompt
-                // 首先估算prompt的token数量（粗略估算：字符数/4）
-                int estimatedTokens = Math.max(512, prompt.length() / 4 + 100);
-                // 限制最大batch大小避免内存问题，使用maxSequenceLength
-                int maxBatchSize = ConfigManager.getMaxSequenceLength(getContext());
-                int batchSize = Math.min(estimatedTokens, maxBatchSize);
-                
-                LogManager.logI(TAG, String.format("动态batch大小 - 估算tokens: %d, 使用batch大小: %d", estimatedTokens, batchSize));
-                
-                long batch = LlamaCppInference.new_batch(batchSize, 0, 1);
-                // 使用默认参数创建采样器
-                long sampler = LlamaCppInference.new_sampler_with_params(
-                    1.0f,  // 默认温度
-                    0.9f,  // 默认top_p
-                    40     // 默认top_k
-                );
-                
-                StringBuilder result = new StringBuilder();
-                
-                try {
-                    // 清空KV缓存 - 添加有效性检查
-                    if (contextHandle != 0) {
-                        LlamaCppInference.kv_cache_clear(contextHandle);
-                    } else {
-                        LogManager.logW(TAG, "contextHandle为0，跳过KV缓存清理");
-                        return "";
-                    }
-                
-                // 调试日志已移除
-                
-                // 初始化完成
-                int tokenCount = LlamaCppInference.completion_init(contextHandle, batch, prompt, maxTokens, false);
-                    if (tokenCount < 0) {
-                        LogManager.logE(TAG, "初始化完成失败");
-                        return "";
-                    }
-                    
-                    // 生成循环
-                    LlamaCppInference.IntVar currentPos = new LlamaCppInference.IntVar(tokenCount);
-                    
-                    for (int i = 0; i < maxTokens; i++) {
-                        String token = LlamaCppInference.completion_loop(contextHandle, batch, sampler, maxTokens, currentPos);
-                        if (token == null || token.isEmpty()) {
-                            break;
-                        }
-                        
-                        // 多重Unicode修复逻辑
-                        String originalToken = token;
-                        String fixedToken = token;
-                        
-                        // 检查是否需要修复
-                        if (UnicodeDecoder.containsUnicodeEscapes(token)) {
-                            int maxAttempts = 3;
-                            
-                            for (int attempt = 0; attempt < maxAttempts; attempt++) {
-                                String previousToken = fixedToken;
-                                fixedToken = UnicodeDecoder.decodeUnicodeEscapes(fixedToken);
-                                
-                                // 如果没有变化，说明已经完全解码
-                                if (fixedToken.equals(previousToken)) {
-                                    break;
-                                }
-                            }
-                            
-                            // 只在实际修复时才打印日志
-                            LogManager.logD(TAG, "Unicode修复: " + originalToken + " -> " + fixedToken);
-                        }
-                        
-                        result.append(fixedToken);
-                    }
-                } finally {
-                    // 清理资源
-                    LlamaCppInference.free_batch(batch);
-                    LlamaCppInference.free_sampler(sampler);
-                }
-                
-                String finalResult = result.toString();
-                
-                if (finalResult == null) {
-                    finalResult = "";
-                }
-                
-                Log.i(TAG, "文本生成完成，长度: " + (finalResult != null ? finalResult.length() : 0));
-                return finalResult != null ? finalResult : "";
-                
-            } catch (Exception e) {
-                Log.e(TAG, "生成文本异常", e);
-                return "";
-            } finally {
-                isGenerating.set(false);
-            }
-        }, executorService);
-    }
-    
     @Override
     public synchronized void stopInference() {
         LogManager.logD(TAG, "[停止调试] 停止标志当前状态: " + shouldStop.get());
@@ -1842,6 +1817,19 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         
         // 停止当前生成
         stopInference();
+        
+        // Release multimodal context if initialized
+        if (mtmdContextHandle != 0) {
+            long mtmdToFree = mtmdContextHandle;
+            mtmdContextHandle = 0; // Set to zero first to prevent double release
+            
+            try {
+                LlamaCppInference.free_mtmd_context(mtmdToFree);
+                LogManager.logI(TAG, "多模态上下文资源释放完成");
+            } catch (Exception e) {
+                LogManager.logW(TAG, "释放多模态上下文时发生异常: " + mtmdToFree, e);
+            }
+        }
         
         // 释放LlamaCpp句柄
         if (contextHandle != 0) {
@@ -2282,9 +2270,53 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
         return actualUsedParams;
     }
     
+    // Multimodal support public access methods
+    
+    /**
+     * Check if the current model supports multimodal functionality
+     * @return true if the model supports multimodal, false otherwise
+     */
+    public boolean isMultimodalSupported() {
+        return isMultimodalModel;
+    }
+    
+    /**
+     * Get the multimodal context handle
+     * @return the mtmd context handle, 0 if not initialized
+     */
+    public long getMtmdContextHandle() {
+        return mtmdContextHandle;
+    }
+    
+    /**
+     * Get the model's image size for multimodal processing
+     * @return the image size in pixels
+     */
+    public int getModelImageSize() {
+        return modelImageSize;
+    }
+    
+    /**
+     * Get the model architecture information
+     * @return the model architecture string, null if not available
+     */
+    public String getModelArchitecture() {
+        return modelArchitecture;
+    }
+    
+    /**
+     * Check if multimodal context is properly initialized
+     * @return true if mtmd context is initialized and ready for use
+     */
+    public boolean isMtmdContextReady() {
+        return mtmdContextHandle != 0 && isMultimodalModel;
+    }
+    
     /**
      * 流式回调接口
      */
+
+
     public interface StreamCallback {
         void onToken(String token);
         void onComplete(String fullText);

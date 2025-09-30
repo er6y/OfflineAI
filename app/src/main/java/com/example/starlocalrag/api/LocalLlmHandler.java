@@ -415,6 +415,14 @@ public class LocalLlmHandler {
     // ONNX引擎切换方法已移除
     
     /**
+     * 获取推理引擎实例
+     * @return 推理引擎实例，可能为null
+     */
+    public InferenceEngine getInferenceEngine() {
+        return inferenceEngine;
+    }
+    
+    /**
      * 获取当前推理引擎类型
      * @return 引擎类型名称
      */
@@ -514,25 +522,17 @@ public class LocalLlmHandler {
                     return;
                 }
                 
-                // 选择一个 .gguf 模型文件
-                File[] files = modelDir.listFiles();
-                String ggufPath = null;
-                if (files != null) {
-                    for (File f : files) {
-                        if (f.isFile() && f.getName().toLowerCase().endsWith(".gguf")) {
-                            ggufPath = f.getAbsolutePath();
-                            break;
-                        }
-                    }
-                }
-                if (ggufPath == null) {
+                // Let the engine find and validate the model file
+                // This delegates format-specific logic (e.g., .gguf, .onnx) to the engine
+                String modelPath = engine.findModelFile(modelDir);
+                if (modelPath == null) {
                     forceSetModelState(ModelState.UNLOADED);
-                    callback.onError("No .gguf model file found in: " + modelDir.getAbsolutePath());
+                    callback.onError("No valid model file found in: " + modelDir.getAbsolutePath());
                     return;
                 }
                 
-                ModelConfig config = createBasicModelConfig(ggufPath);
-                engine.initialize(ggufPath, config);
+                ModelConfig config = createBasicModelConfig(modelPath);
+                engine.initialize(modelPath, config);
                 
                 setInferenceEngine(engine);
                 currentModelName = modelName;
@@ -568,6 +568,11 @@ public class LocalLlmHandler {
 
     // 新增：执行推理（主用接口，支持流式回调）
     public void inference(String prompt, final StreamingCallback callback) {
+        inference(prompt, null, callback);
+    }
+    
+    // 新增：执行多模态推理（支持图片输入）
+    public void inference(String prompt, java.util.List<String> imagePaths, final StreamingCallback callback) {
         if (prompt == null) {
             LogManager.logE(TAG, "Inference prompt is null");
             if (callback != null) callback.onError("Prompt is null");
@@ -614,12 +619,17 @@ public class LocalLlmHandler {
         // 委托调用前日志
         LogManager.logI(TAG, "[DELEGATE] submitting engine.inference task - engine=" + engineType + ", thread=" + Thread.currentThread().getName());
 
+        // Log multimodal info
+        if (imagePaths != null && !imagePaths.isEmpty()) {
+            LogManager.logI(TAG, "[MULTIMODAL] Inference with " + imagePaths.size() + " images");
+        }
+        
         // 在后台线程发起推理，底层引擎内部也会切线程，但此处保持与加载一致的异步行为
         executorService.submit(() -> {
             LogManager.logD(TAG, "[ASYNC] delegate worker started - thread=" + Thread.currentThread().getName());
             try {
                 LogManager.logD(TAG, "[DELEGATE] calling engine.inference(...), promptLen=" + prompt.length());
-                inferenceEngine.inference(prompt, params, new StreamingCallback() {
+                inferenceEngine.inference(prompt, imagePaths, params, new StreamingCallback() {
                     @Override
                     public void onToken(String token) {
                         int c = tokenCount.incrementAndGet();
@@ -1249,6 +1259,15 @@ public class LocalLlmHandler {
      */
     public interface InferenceEngine {
         /**
+         * Find the main model file in the given directory
+         * This method handles format-specific logic (e.g., .gguf vs .onnx)
+         * and intelligently selects the correct file (e.g., main model vs mmproj)
+         * @param modelDir Model directory
+         * @return Absolute path to the main model file, or null if not found
+         */
+        String findModelFile(File modelDir);
+        
+        /**
          * 初始化推理引擎
          * @param modelPath 模型路径
          * @param config 模型配置
@@ -1263,6 +1282,15 @@ public class LocalLlmHandler {
          * @param callback 流式回调
          */
         void inference(String prompt, InferenceParams params, StreamingCallback callback);
+        
+        /**
+         * 执行多模态推理（支持图片输入）
+         * @param prompt 输入提示词
+         * @param imagePaths 图片路径列表（可为null）
+         * @param params 推理参数
+         * @param callback 流式回调
+         */
+        void inference(String prompt, java.util.List<String> imagePaths, InferenceParams params, StreamingCallback callback);
         
         /**
          * 停止推理
@@ -1341,5 +1369,38 @@ public class LocalLlmHandler {
          * @param errorMessage 错误信息
          */
         void onError(String errorMessage);
+    }
+    
+    /**
+     * Check if current model supports multimodal (vision) input
+     * @return true if model supports images, false if text-only
+     */
+    public boolean isMultimodalModel() {
+        if (inferenceEngine instanceof LocalLLMLlamaCppHandler) {
+            return ((LocalLLMLlamaCppHandler) inferenceEngine).isMultimodalSupported();
+        }
+        return false;
+    }
+    
+    /**
+     * Get the target image size for the multimodal model
+     * @return image size in pixels, or 336 if not available
+     */
+    public int getModelImageSize() {
+        if (inferenceEngine instanceof LocalLLMLlamaCppHandler) {
+            return ((LocalLLMLlamaCppHandler) inferenceEngine).getModelImageSize();
+        }
+        return 336; // default
+    }
+    
+    /**
+     * Get the model architecture name
+     * @return architecture name or null if not available
+     */
+    public String getModelArchitecture() {
+        if (inferenceEngine instanceof LocalLLMLlamaCppHandler) {
+            return ((LocalLLMLlamaCppHandler) inferenceEngine).getModelArchitecture();
+        }
+        return null;
     }
 }

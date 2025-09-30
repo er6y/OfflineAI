@@ -114,7 +114,6 @@ public class LlamaCppInference {
     /**
      * 初始化完成
      * @param contextHandle 上下文句柄
-     * @param batchHandle 批处理句柄
      * @param prompt 提示词
      * @param maxTokens 最大token数
      * @param addBos 是否添加BOS
@@ -122,6 +121,34 @@ public class LlamaCppInference {
      */
     public static native int completion_init(long contextHandle, long batchHandle, String prompt, int maxTokens, boolean addBos);
     
+    /**
+     * 初始化完成（支持多模态）
+     * 在原有 completion_init 基础上添加图片支持，复用所有现有逻辑
+     * 
+     * 工作流程：
+     * 1. 如果提供了图片，先处理图片 embedding 到 KV cache
+     * 2. 然后调用原有的 completion_init 处理文本
+     * 3. 之后使用相同的 completion_loop 生成 token
+     * 
+     * @param contextHandle 上下文句柄
+     * @param batchHandle 批处理句柄
+     * @param prompt 提示词
+     * @param maxTokens 最大token数
+     * @param addBos 是否添加BOS
+     * @param mtmdHandle mtmd context handle (0 表示纯文本)
+     * @param imageHandles 图片句柄数组 (null 或空数组表示纯文本)
+     * @return token数量（图片 + 文本）
+     */
+    public static native int completion_init_with_images(
+        long contextHandle, 
+        long batchHandle, 
+        String prompt, 
+        int maxTokens, 
+        boolean addBos,
+        long mtmdHandle,
+        long[] imageHandles
+    );
+
     /**
      * 完成循环
      * @param contextHandle 上下文句柄
@@ -489,4 +516,122 @@ public class LlamaCppInference {
     public static String getVersion() {
         return "LlamaCpp JNI v1.0";
     }
+    
+    // ========== 多模态支持 (Multimodal Support) ==========
+    
+    /**
+     * 检查模型是否支持多模态（图像+文本）
+     * @param modelHandle 模型句柄
+     * @return true if model supports multimodal, false otherwise
+     */
+    public static native boolean is_model_multimodal(long modelHandle);
+    
+    /**
+     * 获取模型的目标图片尺寸（从mtmd context获取）
+     * @param mtmdHandle mtmd context句柄
+     * @return 图片尺寸（像素），如果不可用则返回默认值336
+     */
+    public static native int get_model_image_size(long mtmdHandle);
+    
+    /**
+     * 获取模型架构名称
+     * @param modelHandle 模型句柄
+     * @return 架构名称字符串，如果不可用则返回null
+     */
+    public static native String get_model_architecture(long modelHandle);
+    
+    // ========== mtmd (Multimodal) Support ==========
+    
+    /**
+     * Initialize mtmd context for multimodal support
+     * @param modelHandle Model handle
+     * @param mmprojPath Path to mmproj file (can be null for embedded projectors)
+     * @param useGpu Whether to use GPU for image processing
+     * @param nThreads Number of threads for image processing
+     * @return mtmd context handle, or 0 on failure
+     */
+    public static native long init_mtmd_context(long modelHandle, String mmprojPath, boolean useGpu, int nThreads);
+    
+    /**
+     * Free mtmd context
+     * @param mtmdHandle The mtmd context handle
+     */
+    public static native void free_mtmd_context(long mtmdHandle);
+    
+    /**
+     * Load and preprocess an image file
+     * @param mtmdHandle The mtmd context handle
+     * @param imagePath Path to the image file
+     * @return bitmap handle, or 0 on failure
+     */
+    public static native long load_image_bitmap(long mtmdHandle, String imagePath);
+    
+    /**
+     * Free image bitmap
+     * @param bitmapHandle The bitmap handle
+     */
+    public static native void free_image_bitmap(long bitmapHandle);
+    
+    /**
+     * Get the default image marker for the model
+     * For Qwen2-VL, this returns the appropriate vision tokens
+     * @param mtmdHandle The mtmd context handle
+     * @return Image marker string (e.g., "<|vision_start|>" for Qwen2-VL)
+     */
+    public static native String get_image_marker(long mtmdHandle);
+    
+    /**
+     * Check if mtmd context requires non-causal attention mask
+     * @param mtmdHandle The mtmd context handle
+     * @return true if non-causal mask is required
+     */
+    public static native boolean mtmd_use_non_causal(long mtmdHandle);
+    
+    /**
+     * Test multimodal inference with image + text
+     * This is a simplified test function to verify mtmd functionality
+     * @param mtmdHandle The mtmd context handle
+     * @param llamaCtxHandle The llama context handle
+     * @param imagePath Path to the image file
+     * @param prompt Text prompt (should contain image marker)
+     * @return 0 on success, negative on error
+     */
+    public static native int test_multimodal_inference(long mtmdHandle, long llamaCtxHandle, String imagePath, String prompt);
+    
+    /**
+     * Create input chunks for multimodal tokenization
+     * @return Handle to input chunks, or 0 on failure
+     */
+    public static native long mtmd_create_input_chunks();
+    
+    /**
+     * Free input chunks
+     * @param chunksHandle The chunks handle to free
+     */
+    public static native void mtmd_free_input_chunks(long chunksHandle);
+    
+    /**
+     * Tokenize prompt with images
+     * @param mtmdContext The mtmd context handle
+     * @param chunksHandle The input chunks handle
+     * @param prompt The text prompt
+     * @param imageHandles Array of image bitmap handles
+     * @return 0 on success, negative on error
+     */
+    public static native int mtmd_tokenize_with_images(long mtmdContext, long chunksHandle, String prompt, long[] imageHandles);
+    
+    /**
+     * Evaluate chunks (process image embeddings and text)
+     * @param mtmdContext The mtmd context handle
+     * @param llamaContext The llama context handle
+     * @param chunksHandle The input chunks handle
+     * @param nPast Starting position in KV cache
+     * @param seqId Sequence ID
+     * @param nBatch Batch size
+     * @param logitsLast Whether to compute logits for last token only
+     * @param nPastOut Output array for new n_past value (length must be 1)
+     * @return 0 on success, negative on error
+     */
+    public static native int mtmd_eval_chunks(long mtmdContext, long llamaContext, long chunksHandle, 
+                                             int nPast, int seqId, int nBatch, boolean logitsLast, int[] nPastOut);
 }

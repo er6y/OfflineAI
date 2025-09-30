@@ -388,7 +388,7 @@
     <string name="label_search_depth">Search Count:</string>
     <string name="label_rerank_count">Rerank Count:</string>
     <string name="label_system_prompt">System Prompt:</string>
-    <string name="label_user_prompt">User Question:</string>
+    <string name="label_user_prompt">User Question:(Long press to browse images)</string>
     <string name="label_title">Title:</string>
     <string name="label_content">Content:</string>
     <string name="label_add_progress">Add Progress:</string>
@@ -843,6 +843,9 @@
     <string name="label_manual_top_k">Manual Top-K (10~100):</string>
     <string name="label_manual_repeat_penalty">Manual Repeat Penalty (0.0~2.0):</string>
     <string name="label_priority_manual_params">Prioritize Manual Parameters</string>
+    <string name="label_image_preprocess_size">Image Preprocess Size (112~MAX):</string>
+    <string name="text_image_preprocess_size_value">Image Preprocess Size: %s</string>
+    <string name="label_image_encoding_threads">Image Encoding Threads\n(1~16):</string>
     <string name="title_global_settings">Global Settings</string>
     <string name="label_debug_mode">Debug Mode</string>
     <string name="label_backend_preference">Backend Preference</string>
@@ -1011,4 +1014,12 @@
     <string name="clipboard_log_content">Log content</string>
     <string name="dialog_title_add_api_url_simple">Add API URL</string>
 
+    <!-- Multimodal UI strings -->
+    <string name="menu_pick_image">Image</string>
+    <string name="desc_image_thumbnail">Image thumbnail</string>
+    <string name="desc_delete_image">Delete image</string>
+    <string name="toast_image_pick_failed">Failed to pick image</string>
+    <string name="toast_image_compress_failed">Failed to compress image</string>
+    <string name="toast_image_too_many">Only 3 images can be selected</string>
+    <string name="dialog_title_image_preview">Image preview</string>
 </resources>

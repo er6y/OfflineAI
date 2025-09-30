@@ -81,7 +81,7 @@ public class LlmApiAdapter {
      * 根据API类型自动选择适当的实现
      * 所有API调用都使用统一的流式处理方式
      */
-    public void callLlmApi(String apiUrl, String apiKey, String model, String prompt, ApiCallback callback) {
+    public void callLlmApi(String apiUrl, String apiKey, String model, String prompt, java.util.List<String> imagePaths, ApiCallback callback) {
         ApiType apiType = detectApiType(apiUrl);
         LogManager.logD(TAG, "检测到API类型: " + apiType.name());
         // [STREAM] onStart at unified entry (English log)
@@ -105,9 +105,7 @@ public class LlmApiAdapter {
                     
                     @Override
                     public void onStreamingData(String chunk) {
-                        int size = chunk != null ? chunk.length() : 0;
-                        String preview = (chunk != null) ? chunk.substring(0, Math.min(40, chunk.length())).replace("\n", "\\n") : "";
-                        LogManager.logD(TAG, "[STREAM] onToken - source=local, size=" + size + (size > 0 ? (", preview=\"" + preview + "\"") : "") + ", thread=" + Thread.currentThread().getName());
+                        // Token-level logging removed to reduce log spam
                         callback.onStreamingData(chunk);
                     }
                     
@@ -117,7 +115,7 @@ public class LlmApiAdapter {
                         callback.onError(errorMessage);
                     }
                 };
-                localAdapter.callLocalModel(model, prompt, proxyCb);
+                localAdapter.callLocalModel(model, prompt, imagePaths, proxyCb);
                 return;
             }
             
@@ -283,7 +281,7 @@ public class LlmApiAdapter {
                 final StringBuilder error = new StringBuilder();
                 
                 LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(context);
-                localAdapter.callLocalModel(model, prompt, new ApiCallback() {
+                localAdapter.callLocalModel(model, prompt, null, new ApiCallback() {
                     @Override
                     public void onSuccess(String response) {
                         int len = response != null ? response.length() : 0;
@@ -332,7 +330,7 @@ public class LlmApiAdapter {
         final StringBuilder result = new StringBuilder();
         final StringBuilder error = new StringBuilder();
         
-        callLlmApi(apiUrl, apiKey, model, prompt, new ApiCallback() {
+        callLlmApi(apiUrl, apiKey, model, prompt, null, new ApiCallback() {
             @Override
             public void onSuccess(String response) {
                 int len = response != null ? response.length() : 0;

@@ -10,8 +10,8 @@ import com.example.starlocalrag.StateDisplayManager;
 import java.util.List;
 
 /**
- * 状态感知的Spinner适配器
- * 支持状态常量与显示文本的自动转换
+ * State-aware Spinner adapter
+ * Supports automatic conversion between state constants and display text
  */
 public class StateAwareSpinnerAdapter extends BaseAdapter {
     
@@ -22,10 +22,10 @@ public class StateAwareSpinnerAdapter extends BaseAdapter {
     private final LayoutInflater inflater;
     
     /**
-     * 构造函数
-     * @param context 上下文
-     * @param stateKeys 状态键列表
-     * @param stateType 状态类型（用于确定使用哪种显示方法）
+     * Constructor
+     * @param context Context
+     * @param stateKeys State key list
+     * @param stateType State type (used to determine which display method to use)
      */
     public StateAwareSpinnerAdapter(Context context, List<String> stateKeys, String stateType) {
         this.context = context;
@@ -80,7 +80,7 @@ public class StateAwareSpinnerAdapter extends BaseAdapter {
     }
     
     /**
-     * 根据状态键获取位置
+     * Get position by state key
      */
     public int getPositionByStateKey(String stateKey) {
         if (stateKeys != null && stateKey != null) {
@@ -90,7 +90,7 @@ public class StateAwareSpinnerAdapter extends BaseAdapter {
     }
     
     /**
-     * 根据位置获取状态键
+     * Get state key by position
      */
     public String getStateKeyByPosition(int position) {
         if (stateKeys != null && position >= 0 && position < stateKeys.size()) {
@@ -100,7 +100,7 @@ public class StateAwareSpinnerAdapter extends BaseAdapter {
     }
     
     /**
-     * 更新状态键列表
+     * Update state key list
      */
     public void updateStateKeys(List<String> newStateKeys) {
         this.stateKeys.clear();
@@ -111,14 +111,14 @@ public class StateAwareSpinnerAdapter extends BaseAdapter {
     }
     
     /**
-     * 获取状态类型
+     * Get state type
      */
     public String getStateType() {
         return stateType;
     }
     
     /**
-     * 获取所有状态键
+     * Get all state keys
      */
     public List<String> getStateKeys() {
         return stateKeys;

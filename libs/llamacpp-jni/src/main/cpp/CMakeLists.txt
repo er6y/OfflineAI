@@ -10,7 +10,6 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG -Wno-deprecated-declarations")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -DNDEBUG -Wno-deprecated-declarations")
 
-# 确保所有构建类型都使用O3优化
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O3")
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -O3")
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
@@ -20,6 +19,12 @@ set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3")
 if(ANDROID)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fPIC")
+    
+    # Android 15+ 16 KB page size support
+    # Add linker flags for 16 KB page alignment to support devices with 16 KB pages
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
+    message(STATUS "Android 16 KB page size support enabled")
     
     # Android NDK 默认使用静态链接，无需显式指定 -static-libstdc++
     # 移除该参数以避免编译器警告
@@ -224,6 +229,10 @@ set(GGML_USE_SYCL OFF CACHE BOOL "Enable SYCL backend" FORCE)
 set(GGML_USE_KOMPUTE OFF CACHE BOOL "Enable Kompute backend" FORCE)
 set(GGML_USE_NNAPI OFF CACHE BOOL "Enable NNAPI backend" FORCE)
 
+# Enable multimodal (image) support for vision models (LLaVA, etc.)
+set(LLAMA_BUILD_IMAGE ON CACHE BOOL "Enable image/multimodal support" FORCE)
+message(STATUS "Multimodal image support enabled: LLAMA_BUILD_IMAGE=ON")
+
 # Define upstream ggml integration switch early so it affects build graph
 # English note: Default OFF to use locally split ggml (ggml-base/ggml-cpu)
 option(USE_UPSTREAM_GGML "Use upstream ggml CMake (CPU/KleidiAI) and keep local Vulkan" OFF)
@@ -413,6 +422,16 @@ message(STATUS "Added upstream llama source from: ${LLAMA_CPP_DIR}/src")
 # 新增：引入上游 common 以提供 common_tokenize/common_batch_* 实现（English log only）
 add_subdirectory("${LLAMA_CPP_DIR}/common" "${CMAKE_CURRENT_BINARY_DIR}/llama-common")
 message(STATUS "Added upstream llama common from: ${LLAMA_CPP_DIR}/common")
+
+# Add mtmd (multimodal) library for vision support (English log only)
+if(EXISTS "${LLAMA_CPP_DIR}/tools/mtmd/CMakeLists.txt")
+    add_subdirectory("${LLAMA_CPP_DIR}/tools/mtmd" "${CMAKE_CURRENT_BINARY_DIR}/mtmd")
+    message(STATUS "Added mtmd (multimodal) library from: ${LLAMA_CPP_DIR}/tools/mtmd")
+    set(HAVE_MTMD_LIBRARY TRUE)
+else()
+    message(WARNING "mtmd library not found, multimodal features will be limited")
+    set(HAVE_MTMD_LIBRARY FALSE)
+endif()
 
 # 4. 如果启用Vulkan，创建ggml-vulkan库
 if(GGML_USE_VULKAN AND (ANDROID OR Vulkan_FOUND))
@@ -670,13 +689,19 @@ add_library(llamacpp_jni SHARED
      "${CMAKE_CURRENT_SOURCE_DIR}/llama_inference.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_runtime_detector.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/vulkan_symbol_keeper.cpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/opencl_detector.cpp"
      "${CMAKE_CURRENT_SOURCE_DIR}/ggml-backend-opencl-stub.cpp"
 )
 
 target_include_directories(llamacpp_jni PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_BINARY_DIR}"
 )
+
+# Add mtmd headers for multimodal support
+if(HAVE_MTMD_LIBRARY)
+    target_include_directories(llamacpp_jni PRIVATE "${LLAMA_CPP_DIR}/tools/mtmd")
+    message(STATUS "llamacpp_jni: Added mtmd headers for multimodal support")
+endif()
 
 if(ENABLE_VULKAN_BACKEND AND VULKAN_HPP_INCLUDE_DIR)
     target_include_directories(llamacpp_jni PRIVATE "${VULKAN_HPP_INCLUDE_DIR}")
@@ -691,7 +716,12 @@ target_compile_definitions(llamacpp_jni PRIVATE
 if(USE_UPSTREAM_GGML)
     target_link_libraries(llamacpp_jni PRIVATE ggml-cpu ggml::ggml-base common)
 else()
-    target_link_libraries(llamacpp_jni PRIVATE ggml-cpu ggml-base llama common)
+    if(HAVE_MTMD_LIBRARY)
+        target_link_libraries(llamacpp_jni PRIVATE ggml-cpu ggml-base llama common mtmd)
+        message(STATUS "llamacpp_jni: Linked with mtmd library for multimodal support")
+    else()
+        target_link_libraries(llamacpp_jni PRIVATE ggml-cpu ggml-base llama common)
+    endif()
 endif()
 
 if(ENABLE_VULKAN_BACKEND AND HAVE_VULKAN_HPP)

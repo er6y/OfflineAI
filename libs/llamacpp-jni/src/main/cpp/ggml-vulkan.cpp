@@ -4408,12 +4408,21 @@ static void ggml_vk_instance_init() {
 
     uint32_t api_version = vk::enumerateInstanceVersion();
 
-    if (api_version < VK_API_VERSION_1_2) {
-        // Lower than 1.2: skip Vulkan backend gracefully
-        std::cerr << "ggml_vulkan: Info: Vulkan 1.2 required; skipping Vulkan backend (api="
+    // PATCH: Lower requirement to Vulkan 1.1 for Mali G610 compatibility
+    // Note: Some features may not work, but basic compute should be fine
+    if (api_version < VK_API_VERSION_1_1) {
+        // Lower than 1.1: really too old
+        std::cerr << "ggml_vulkan: Info: Vulkan 1.1+ required; skipping Vulkan backend (api="
                   << VK_VERSION_MAJOR(api_version) << "." << VK_VERSION_MINOR(api_version) << ")" << std::endl;
         vk_instance_initialized = true;
         return;
+    }
+    
+    if (api_version < VK_API_VERSION_1_2) {
+        std::cerr << "ggml_vulkan: Warning: Using Vulkan " 
+                  << VK_VERSION_MAJOR(api_version) << "." << VK_VERSION_MINOR(api_version)
+                  << " (1.2+ recommended). Some features may not work." << std::endl;
+        // Continue anyway - many ops work fine on 1.1
     }
 
     vk::ApplicationInfo app_info{ "ggml-vulkan", 1, nullptr, 0, api_version };

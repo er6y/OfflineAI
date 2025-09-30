@@ -13,21 +13,21 @@ import java.io.FileReader;
 import java.io.IOException;
 
 /**
- * 工具类，提供通用的静态方法
+ * Utility class providing common static methods
  */
 public class Utils {
     private static final String TAG = "StarLocalRAG_Utils";
     
-    // 错误消息常量
+    // Error message constants
     private static final String ERROR_CONTEXT_NULL = "Unable to show Toast: Context is null";
     private static final String ERROR_SHOW_TOAST_FAILED = "Failed to show Toast";
     private static final String ERROR_START_TOAST_THREAD_FAILED = "Failed to start Toast thread";
     
     /**
-     * 读取文件内容
-     * @param file 文件
-     * @return 文件内容
-     * @throws IOException 如果读取失败
+     * Read file content
+     * @param file File to read
+     * @return File content
+     * @throws IOException If reading fails
      */
     public static String readFile(File file) throws IOException {
         StringBuilder content = new StringBuilder();
@@ -44,10 +44,10 @@ public class Utils {
     }
 
     /**
-     * 安全显示Toast，防止在Activity已销毁的情况下显示Toast导致崩溃
-     * @param context 上下文
-     * @param message 显示消息
-     * @param duration 显示时长
+     * Safely display Toast to prevent crashes when Activity is destroyed
+     * @param context Context
+     * @param message Message to display
+     * @param duration Display duration
      */
     public static void showToastSafely(final Context context, final String message, final int duration) {
         if (context == null) {
@@ -56,14 +56,14 @@ public class Utils {
         }
         
         try {
-            // 使用主线程Handler确保在UI线程显示
+            // Use main thread Handler to ensure display on UI thread
             new Handler(Looper.getMainLooper()).post(() -> {
                 try {
-                    // 使用Application Context避免内存泄漏和ActivityContext销毁问题
+                    // Use Application Context to avoid memory leaks and ActivityContext destruction issues
                     Context appContext = context.getApplicationContext();
                     Toast.makeText(appContext, message, duration).show();
                 } catch (Exception e) {
-                    // 捕获所有可能的异常，避免崩溃
+                    // Catch all possible exceptions to avoid crashes
                     LogManager.logE(TAG, ERROR_SHOW_TOAST_FAILED + ": " + e.getMessage());
                 }
             });

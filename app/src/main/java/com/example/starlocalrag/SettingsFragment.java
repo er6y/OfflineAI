@@ -88,6 +88,10 @@ public class SettingsFragment extends Fragment {
     private SeekBar seekBarManualRepeatPenalty;
     private TextView textViewManualRepeatPenaltyValue;
     private SwitchCompat switchPriorityManualParams; // 优先手动参数开关
+    private SeekBar seekBarImagePreprocessSize; // 图片预处理尺寸
+    private TextView textViewImagePreprocessSizeValue; // 图片预处理尺寸显示
+    private SeekBar seekBarImageEncodingThreads; // 图像编码线程数
+    private TextView textViewImageEncodingThreadsValue; // 图像编码线程数显示
     
     // Activity Result Launchers
     private ActivityResultLauncher<Intent> modelPathLauncher;
@@ -209,6 +213,10 @@ public class SettingsFragment extends Fragment {
         seekBarManualRepeatPenalty = view.findViewById(R.id.seekBarManualRepeatPenalty);
         textViewManualRepeatPenaltyValue = view.findViewById(R.id.textViewManualRepeatPenaltyValue);
         switchPriorityManualParams = view.findViewById(R.id.switchPriorityManualParams); // 优先手动参数开关
+        seekBarImagePreprocessSize = view.findViewById(R.id.seekBarImagePreprocessSize); // 图片预处理尺寸
+        textViewImagePreprocessSizeValue = view.findViewById(R.id.textViewImagePreprocessSizeValue); // 图片预处理尺寸显示
+        seekBarImageEncodingThreads = view.findViewById(R.id.seekBarImageEncodingThreads); // 图像编码线程数
+        textViewImageEncodingThreadsValue = view.findViewById(R.id.textViewImageEncodingThreadsValue); // 图像编码线程数显示
         
         // 设置后端偏好Spinner适配器
         ArrayAdapter<String> backendAdapter = new ArrayAdapter<>(requireContext(), 
@@ -293,6 +301,8 @@ public class SettingsFragment extends Fragment {
         setupManualTopPSeekBar();
         setupManualTopKSeekBar();
         setupManualRepeatPenaltySeekBar();
+        setupImagePreprocessSizeSeekBar();
+        setupImageEncodingThreadsSeekBar();
     }
     
     private void setupFontSizeSeekBar() {
@@ -468,6 +478,17 @@ public class SettingsFragment extends Fragment {
             updateManualRepeatPenaltyText((int)(manualRepeatPenalty * 10));
             switchPriorityManualParams.setChecked(priorityManualParams);
             
+            // Load image preprocess size
+            int imagePreprocessSize = ConfigManager.getImagePreprocessSize(context);
+            int imagePreprocessProgress = sizeToProgress(imagePreprocessSize);
+            seekBarImagePreprocessSize.setProgress(imagePreprocessProgress);
+            updateImagePreprocessSizeText(imagePreprocessProgress);
+            
+            // Load image encoding threads
+            int imageEncodingThreads = ConfigManager.getImageEncodingThreads(context);
+            seekBarImageEncodingThreads.setProgress(imageEncodingThreads - 1); // 1-16 -> 0-15
+            updateImageEncodingThreadsText(imageEncodingThreads);
+            
             LogManager.logD(TAG, "Settings loaded successfully");
         } catch (Exception e) {
             LogManager.logE(TAG, "Failed to load settings: " + e.getMessage(), e);
@@ -623,6 +644,15 @@ public class SettingsFragment extends Fragment {
             ConfigManager.setManualTopK(context, manualTopK);
             ConfigManager.setManualRepeatPenalty(context, manualRepeatPenalty);
             ConfigManager.setBoolean(context, ConfigManager.KEY_PRIORITY_MANUAL_PARAMS, priorityManualParams);
+            
+            // Save image preprocess size
+            int imagePreprocessProgress = seekBarImagePreprocessSize.getProgress();
+            int imagePreprocessSize = progressToSize(imagePreprocessProgress);
+            ConfigManager.setImagePreprocessSize(context, imagePreprocessSize);
+            
+            // Save image encoding threads
+            int imageEncodingThreads = seekBarImageEncodingThreads.getProgress() + 1; // 0-15 -> 1-16
+            ConfigManager.setImageEncodingThreads(context, imageEncodingThreads);
             
             // 创建JSON格式的设置摘要
             JSONObject settingsSummary = new JSONObject();
@@ -984,5 +1014,80 @@ public class SettingsFragment extends Fragment {
     private void updateManualRepeatPenaltyText(int progress) {
         float repeatPenalty = progress / 10.0f;
         textViewManualRepeatPenaltyValue.setText(String.format("%.1f", repeatPenalty));
+    }
+    
+    private void setupImagePreprocessSizeSeekBar() {
+        seekBarImagePreprocessSize.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateImagePreprocessSizeText(progress);
+            }
+            
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+    }
+    
+    private void updateImagePreprocessSizeText(int progress) {
+        // New preset-based mapping (all multiples of 28 for VL models)
+        int size = progressToSize(progress);
+        String displayText = (size == 0) ? "MAX" : String.valueOf(size);
+        textViewImagePreprocessSizeValue.setText(displayText);
+    }
+    
+    /**
+     * Convert SeekBar progress to image size
+     * Progress 0-7 maps to presets: 112, 280, 392, 504, 672, 896, 1008, MAX(0)
+     */
+    private int progressToSize(int progress) {
+        switch (progress) {
+            case 0: return ConfigManager.IMAGE_SIZE_MIN;       // 112
+            case 1: return ConfigManager.IMAGE_SIZE_SMALL;     // 280
+            case 2: return ConfigManager.IMAGE_SIZE_MEDIUM;    // 392
+            case 3: return ConfigManager.IMAGE_SIZE_DEFAULT;   // 504 (default)
+            case 4: return ConfigManager.IMAGE_SIZE_LARGE;     // 672
+            case 5: return ConfigManager.IMAGE_SIZE_XLARGE;    // 896
+            case 6: return ConfigManager.IMAGE_SIZE_MAX_RESIZE;// 1008
+            case 7: return ConfigManager.IMAGE_SIZE_ORIGINAL;  // 0 (MAX)
+            default: return ConfigManager.IMAGE_SIZE_DEFAULT;  // 504
+        }
+    }
+    
+    /**
+     * Convert image size to SeekBar progress
+     */
+    private int sizeToProgress(int size) {
+        if (size <= ConfigManager.IMAGE_SIZE_MIN) return 0;
+        if (size <= ConfigManager.IMAGE_SIZE_SMALL) return 1;
+        if (size <= ConfigManager.IMAGE_SIZE_MEDIUM) return 2;
+        if (size <= ConfigManager.IMAGE_SIZE_DEFAULT) return 3;
+        if (size <= ConfigManager.IMAGE_SIZE_LARGE) return 4;
+        if (size <= ConfigManager.IMAGE_SIZE_XLARGE) return 5;
+        if (size <= ConfigManager.IMAGE_SIZE_MAX_RESIZE) return 6;
+        return 7; // MAX or larger
+    }
+    
+    private void setupImageEncodingThreadsSeekBar() {
+        seekBarImageEncodingThreads.setMax(15); // 0-15 for 1-16 threads
+        seekBarImageEncodingThreads.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                int threads = progress + 1; // 0-15 -> 1-16
+                updateImageEncodingThreadsText(threads);
+            }
+            
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+    }
+    
+    private void updateImageEncodingThreadsText(int threads) {
+        textViewImageEncodingThreadsValue.setText(String.valueOf(threads));
     }
 }

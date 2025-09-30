@@ -394,7 +394,7 @@
     <string name="label_search_depth">检索数:</string>
     <string name="label_rerank_count">重排数:</string>
     <string name="label_system_prompt">系统提示词:</string>
-    <string name="label_user_prompt">用户提问:</string>
+    <string name="label_user_prompt">用户提问:（长按浏览图片）</string>
     <string name="label_title">标题:</string>
     <string name="label_content">内容:</string>
     <string name="label_add_progress">添加进度:</string>
@@ -849,6 +849,9 @@
     <string name="label_manual_top_k">手动Top-K参数(10~100):</string>
     <string name="label_manual_repeat_penalty">手动重复惩罚参数(0.0~2.0):</string>
     <string name="label_priority_manual_params">优先手动参数</string>
+    <string name="label_image_preprocess_size">图片预处理尺寸(112~MAX):</string>
+    <string name="text_image_preprocess_size_value">图片预处理尺寸: %s</string>
+    <string name="label_image_encoding_threads">图像编码线程数\n(1~16):</string>
     <string name="title_global_settings">全局设置</string>
     <string name="label_debug_mode">调试模式</string>
     <string name="label_backend_preference">后端偏好</string>
@@ -1016,5 +1019,13 @@
     <string name="comment_copy_all">复制全部文本</string>
     <string name="clipboard_log_content">日志内容</string>
     <string name="dialog_title_add_api_url_simple">添加API地址</string>
-
+    
+    <!-- Multimodal UI strings -->
+    <string name="menu_pick_image">图片</string>
+    <string name="desc_image_thumbnail">图片缩略图</string>
+    <string name="desc_delete_image">删除图片</string>
+    <string name="toast_image_pick_failed">选择图片失败</string>
+    <string name="toast_image_compress_failed">压缩图片失败</string>
+    <string name="toast_image_too_many">最多只能选择3张图片</string>
+    <string name="dialog_title_image_preview">图片预览</string>
 </resources>

@@ -189,15 +189,27 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="2dp" 
         android:text="@string/label_user_prompt"
-        app:layout_constraintBottom_toTopOf="@+id/editTextUserPrompt"
+        app:layout_constraintBottom_toTopOf="@+id/recyclerViewImageThumbnails"
         app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- Image thumbnails container -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/recyclerViewImageThumbnails"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:layout_marginBottom="4dp"
+        android:visibility="gone"
+        app:layout_constraintBottom_toTopOf="@+id/editTextUserPrompt"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
 
     <EditText
         android:id="@+id/editTextUserPrompt"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:inputType="text"
-        android:singleLine="true"
+        android:maxLines="4"
         android:imeOptions="actionSend"
         android:layout_marginBottom="2dp"
         app:layout_constraintBottom_toTopOf="@+id/buttonSendStop"

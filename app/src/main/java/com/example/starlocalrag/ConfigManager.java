@@ -101,6 +101,7 @@ public class ConfigManager {
     public static final String KEY_MAX_SEQUENCE_LENGTH = "maxSequenceLength"; // 最大序列长度
     public static final String KEY_NO_THINKING = "no_thinking"; // 是否禁用思考模式
     public static final String KEY_THREADS = "threads"; // ONNX推理线程数
+    public static final String KEY_IMAGE_ENCODING_THREADS = "image_encoding_threads"; // 图像编码线程数
     public static final String KEY_MAX_NEW_TOKENS = "max_new_tokens"; // 最大输出token数
     public static final String KEY_KV_CACHE_SIZE = "kv_cache_size"; // 兼容性保留，已废弃，使用max_new_tokens
     // ONNX相关配置项已移除
@@ -129,6 +130,7 @@ public class ConfigManager {
     public static final String KEY_MANUAL_TOP_K = "manual_top_k"; // 手动Top-K采样
     public static final String KEY_MANUAL_REPEAT_PENALTY = "manual_repeat_penalty"; // 手动重复惩罚
     public static final String KEY_PRIORITY_MANUAL_PARAMS = "priority_manual_params"; // 优先手动参数开关
+    public static final String KEY_IMAGE_PREPROCESS_SIZE = "image_preprocess_size"; // 图片预处理尺寸
     
     // 语言设置配置键
     public static final String KEY_LANGUAGE = "language"; // 语言设置
@@ -159,6 +161,7 @@ public class ConfigManager {
     public static final int DEFAULT_MAX_SEQUENCE_LENGTH = 4096;
     public static final boolean DEFAULT_NO_THINKING = false;
     public static final int DEFAULT_THREADS = 4;
+    public static final int DEFAULT_IMAGE_ENCODING_THREADS = 4; // 图像编码线程数默认值
     public static final int DEFAULT_MAX_NEW_TOKENS = 512; // 最大输出token数默认值
     
     // LlamaCpp 相关默认值
@@ -184,6 +187,17 @@ public class ConfigManager {
     public static final float DEFAULT_MANUAL_TOP_P = 0.95f;
     public static final int DEFAULT_MANUAL_TOP_K = 40;
     public static final float DEFAULT_MANUAL_REPEAT_PENALTY = 1.1f;
+    public static final int DEFAULT_IMAGE_PREPROCESS_SIZE = 504; // 图片预处理尺寸默认值（28的倍数）
+    
+    // Image preprocessing size presets (all multiples of 28 for VL models)
+    public static final int IMAGE_SIZE_MIN = 112;      // 28×4, ~16 tokens
+    public static final int IMAGE_SIZE_SMALL = 280;    // 28×10, ~100 tokens
+    public static final int IMAGE_SIZE_MEDIUM = 392;   // 28×14, ~196 tokens
+    public static final int IMAGE_SIZE_DEFAULT = 504;  // 28×18, ~324 tokens (recommended)
+    public static final int IMAGE_SIZE_LARGE = 672;    // 28×24, ~576 tokens
+    public static final int IMAGE_SIZE_XLARGE = 896;   // 28×32, ~1024 tokens
+    public static final int IMAGE_SIZE_MAX_RESIZE = 1008; // 28×36, ~1296 tokens
+    public static final int IMAGE_SIZE_ORIGINAL = 0;   // No resize (MAX mode)
     
     // 语言设置默认值
     public static final String DEFAULT_LANGUAGE = "CHN"; // 默认中文
@@ -1165,6 +1179,24 @@ public class ConfigManager {
     }
 
     /**
+     * 获取图像编码线程数
+     * @param context 上下文
+     * @return 图像编码线程数
+     */
+    public static int getImageEncodingThreads(Context context) {
+        return getInt(context, KEY_IMAGE_ENCODING_THREADS, DEFAULT_IMAGE_ENCODING_THREADS);
+    }
+    
+    /**
+     * 设置图像编码线程数
+     * @param context 上下文
+     * @param threads 图像编码线程数
+     */
+    public static void setImageEncodingThreads(Context context, int threads) {
+        setInt(context, KEY_IMAGE_ENCODING_THREADS, threads);
+    }
+
+    /**
      * 获取最大输出token数
      * @param context 上下文
      * @return 最大输出token数
@@ -1783,7 +1815,7 @@ public class ConfigManager {
 
     /**
      * 获取优先手动参数开关状态
-     * @param context 上下文
+     * @param context Context
      * @return 优先手动参数开关状态
      */
     public static boolean getPriorityManualParams(Context context) {
@@ -1792,11 +1824,29 @@ public class ConfigManager {
 
     /**
      * 设置优先手动参数开关状态
-     * @param context 上下文
+     * @param context Context
      * @param priorityManualParams 优先手动参数开关状态
      */
     public static void setPriorityManualParams(Context context, boolean priorityManualParams) {
         setBoolean(context, KEY_PRIORITY_MANUAL_PARAMS, priorityManualParams);
+    }
+
+    /**
+     * 获取图片预处理尺寸
+     * @param context Context
+     * @return 图片预处理尺寸
+     */
+    public static int getImagePreprocessSize(Context context) {
+        return getInt(context, KEY_IMAGE_PREPROCESS_SIZE, DEFAULT_IMAGE_PREPROCESS_SIZE);
+    }
+
+    /**
+     * 设置图片预处理尺寸
+     * @param context Context
+     * @param size 图片预处理尺寸
+     */
+    public static void setImagePreprocessSize(Context context, int size) {
+        setInt(context, KEY_IMAGE_PREPROCESS_SIZE, size);
     }
 
     /**
@@ -1905,6 +1955,7 @@ public class ConfigManager {
             config.put(KEY_MANUAL_TOP_P, DEFAULT_MANUAL_TOP_P);
             config.put(KEY_MANUAL_TOP_K, DEFAULT_MANUAL_TOP_K);
             config.put(KEY_MANUAL_REPEAT_PENALTY, DEFAULT_MANUAL_REPEAT_PENALTY);
+            config.put(KEY_IMAGE_PREPROCESS_SIZE, DEFAULT_IMAGE_PREPROCESS_SIZE);
             
             // 语言设置
             config.put(KEY_LANGUAGE, DEFAULT_LANGUAGE);

@@ -169,7 +169,6 @@ dependencies {
     implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.22.0'
     // 添加ONNX Runtime扩展（使用可用的最新版本0.13.0）
     implementation 'com.microsoft.onnxruntime:onnxruntime-extensions-android:0.13.0'
-    
     // ONNX Runtime GenAI 0.8.1 (本地AAR文件)
     //implementation files('libs/onnxruntime-genai-android-0.8.1.aar')
     // Tokenizers JNI - 现在作为Android库模块
@@ -184,8 +183,6 @@ dependencies {
     implementation 'org.apache.tika:tika-core:2.7.0'
     implementation 'com.itextpdf:itextpdf:5.5.13.3'
     implementation 'com.itextpdf:itext-pdfa:5.5.13.3'
-    
-    // 添加Apache POI库用于Office文档解析
     implementation('org.apache.poi:poi:5.2.3') {
         exclude group: 'xml-apis', module: 'xml-apis'
     }

@@ -4,50 +4,50 @@ import java.util.Arrays;
 import java.util.Random;
 
 /**
- * Vector Anomaly Handler - 向量异常处理工具类
- * 用于检测和修复各种类型的向量异常
+ * Vector Anomaly Handler - Vector anomaly processing utility class
+ * Used to detect and repair various types of vector anomalies
  */
 public class VectorAnomalyHandler {
     private static final String TAG = "StarLocalRAG_VectorAnomaly";
     
-    // 异常检测阈值
-    private static final float ZERO_THRESHOLD = 1e-8f;           // 零值阈值
-    private static final float NORM_MIN_THRESHOLD = 1e-6f;       // 最小范数阈值
-    private static final float NORM_MAX_THRESHOLD = 1e6f;        // 最大范数阈值
-    private static final float EXTREME_VALUE_THRESHOLD = 1e3f;   // 极值阈值
-    private static final float VARIANCE_MIN_THRESHOLD = 1e-6f;   // 最小方差阈值
-    private static final float VARIANCE_MAX_THRESHOLD = 1e3f;    // 最大方差阈值
-    private static final float SKEWNESS_THRESHOLD = 3.0f;        // 偏态阈值
+    // Anomaly detection thresholds
+    private static final float ZERO_THRESHOLD = 1e-8f;           // Zero value threshold
+    private static final float NORM_MIN_THRESHOLD = 1e-6f;       // Minimum norm threshold
+    private static final float NORM_MAX_THRESHOLD = 1e6f;        // Maximum norm threshold
+    private static final float EXTREME_VALUE_THRESHOLD = 1e3f;   // Extreme value threshold
+    private static final float VARIANCE_MIN_THRESHOLD = 1e-6f;   // Minimum variance threshold
+    private static final float VARIANCE_MAX_THRESHOLD = 1e3f;    // Maximum variance threshold
+    private static final float SKEWNESS_THRESHOLD = 3.0f;        // Skewness threshold
     
-    // 随机数生成器
+    // Random number generator
     private static final Random random = new Random();
     
     /**
-     * 向量异常类型枚举
+     * Vector anomaly type enumeration
      */
     public enum AnomalyType {
-        NONE,                    // 无异常
-        NAN_VALUES,             // NaN值
-        INFINITE_VALUES,        // 无穷大值
-        EXTREME_VALUES,         // 极值异常
-        ZERO_VECTOR,            // 零向量
-        DIMENSION_MISMATCH,     // 维度不匹配
-        DIMENSION_MISSING,      // 维度缺失
-        DIMENSION_REDUNDANT,    // 维度冗余
-        LOW_VARIANCE,           // 方差过小
-        HIGH_VARIANCE,          // 方差过大
-        HIGH_SKEWNESS,          // 偏态分布
-        ABNORMAL_CLUSTERING     // 异常聚集
+        NONE,                    // No anomaly
+        NAN_VALUES,             // NaN values
+        INFINITE_VALUES,        // Infinite values
+        EXTREME_VALUES,         // Extreme value anomaly
+        ZERO_VECTOR,            // Zero vector
+        DIMENSION_MISMATCH,     // Dimension mismatch
+        DIMENSION_MISSING,      // Dimension missing
+        DIMENSION_REDUNDANT,    // Dimension redundant
+        LOW_VARIANCE,           // Variance too small
+        HIGH_VARIANCE,          // Variance too large
+        HIGH_SKEWNESS,          // Skewed distribution
+        ABNORMAL_CLUSTERING     // Abnormal clustering
     }
     
     /**
-     * 向量异常检测结果
+     * Vector anomaly detection result
      */
     public static class AnomalyResult {
         public final AnomalyType type;
         public final String description;
         public final boolean isAnomalous;
-        public final float severity;  // 异常严重程度 (0-1)
+        public final float severity;  // Anomaly severity level (0-1)
         
         public AnomalyResult(AnomalyType type, String description, boolean isAnomalous, float severity) {
             this.type = type;
@@ -58,17 +58,17 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 综合向量异常检测
-     * @param vector 输入向量
-     * @param expectedDimension 期望维度（-1表示不检查维度）
-     * @return 异常检测结果
+     * Comprehensive vector anomaly detection
+     * @param vector Input vector
+     * @param expectedDimension Expected dimension (-1 means no dimension check)
+     * @return Anomaly detection result
      */
     public static AnomalyResult detectAnomalies(float[] vector, int expectedDimension) {
         if (vector == null) {
             return new AnomalyResult(AnomalyType.ZERO_VECTOR, "Vector is null", true, 1.0f);
         }
         
-        // 1. 检查维度异常
+        // 1. Check dimension anomalies
         if (expectedDimension > 0 && vector.length != expectedDimension) {
             if (vector.length < expectedDimension) {
                 String desc = String.format("Dimension missing: expected %d, got %d", expectedDimension, vector.length);
@@ -83,19 +83,19 @@ public class VectorAnomalyHandler {
             return new AnomalyResult(AnomalyType.ZERO_VECTOR, "Vector is empty", true, 1.0f);
         }
         
-        // 2. 检查数值异常
+        // 2. Check numerical anomalies
         AnomalyResult numericalResult = detectNumericalAnomalies(vector);
         if (numericalResult.isAnomalous) {
             return numericalResult;
         }
         
-        // 3. 检查分布异常
+        // 3. Check distribution anomalies
         AnomalyResult distributionResult = detectDistributionAnomalies(vector);
         if (distributionResult.isAnomalous) {
             return distributionResult;
         }
         
-        // 4. 检查异常聚集
+        // 4. Check abnormal clustering
         AnomalyResult clusteringResult = detectAbnormalClustering(vector);
         if (clusteringResult.isAnomalous) {
             return clusteringResult;
@@ -105,7 +105,7 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 检测数值异常
+     * Detect numerical anomalies
      */
     private static AnomalyResult detectNumericalAnomalies(float[] vector) {
         int nanCount = 0;
@@ -125,33 +125,33 @@ public class VectorAnomalyHandler {
             }
         }
         
-        // NaN值检测
+        // NaN value detection
         if (nanCount > 0) {
             float severity = Math.min(1.0f, (float) nanCount / vector.length);
             String desc = String.format("Found %d NaN values out of %d elements", nanCount, vector.length);
             return new AnomalyResult(AnomalyType.NAN_VALUES, desc, true, severity);
         }
         
-        // 无穷大值检测
+        // Infinite value detection
         if (infCount > 0) {
             float severity = Math.min(1.0f, (float) infCount / vector.length);
             String desc = String.format("Found %d infinite values out of %d elements", infCount, vector.length);
             return new AnomalyResult(AnomalyType.INFINITE_VALUES, desc, true, severity);
         }
         
-        // 极值异常检测
-        if (extremeCount > vector.length * 0.1) { // 超过10%的元素为极值
+        // Extreme value anomaly detection
+        if (extremeCount > vector.length * 0.1) { // More than 10% of elements are extreme values
             float severity = Math.min(1.0f, (float) extremeCount / vector.length);
             String desc = String.format("Found %d extreme values out of %d elements", extremeCount, vector.length);
             return new AnomalyResult(AnomalyType.EXTREME_VALUES, desc, true, severity);
         }
         
-        // 零向量检测
+        // Zero vector detection
         if (zeroCount == vector.length) {
             return new AnomalyResult(AnomalyType.ZERO_VECTOR, "All elements are zero", true, 1.0f);
         }
         
-        // 计算向量范数
+        // Calculate vector norm
         float norm = calculateL2Norm(vector);
         if (norm < NORM_MIN_THRESHOLD) {
             String desc = String.format("Vector norm too small: %.2e", norm);
@@ -162,27 +162,27 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 检测分布异常
+     * Detect distribution anomalies
      */
     private static AnomalyResult detectDistributionAnomalies(float[] vector) {
-        // 计算统计量
+        // Calculate statistics
         float mean = calculateMean(vector);
         float variance = calculateVariance(vector, mean);
         float skewness = calculateSkewness(vector, mean, variance);
         
-        // 方差过小检测
+        // Low variance detection
         if (variance < VARIANCE_MIN_THRESHOLD) {
             String desc = String.format("Variance too low: %.2e", variance);
             return new AnomalyResult(AnomalyType.LOW_VARIANCE, desc, true, 0.6f);
         }
         
-        // 方差过大检测
+        // High variance detection
         if (variance > VARIANCE_MAX_THRESHOLD) {
             String desc = String.format("Variance too high: %.2e", variance);
             return new AnomalyResult(AnomalyType.HIGH_VARIANCE, desc, true, 0.7f);
         }
         
-        // 偏态分布检测
+        // Skewed distribution detection
         if (Math.abs(skewness) > SKEWNESS_THRESHOLD) {
             String desc = String.format("High skewness: %.2f", skewness);
             return new AnomalyResult(AnomalyType.HIGH_SKEWNESS, desc, true, 0.5f);
@@ -192,19 +192,19 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 检测异常聚集
-     * 检测向量中是否存在某些维度值异常集中的情况
+     * Detect abnormal clustering
+     * Detect if there are abnormal concentrations of values in certain dimensions of the vector
      */
     private static AnomalyResult detectAbnormalClustering(float[] vector) {
         if (vector.length < 10) {
             return new AnomalyResult(AnomalyType.NONE, "Vector too short for clustering analysis", false, 0.0f);
         }
         
-        // 计算值的分布
+        // Calculate value distribution
         float[] sortedVector = Arrays.copyOf(vector, vector.length);
         Arrays.sort(sortedVector);
         
-        // 检查是否有过多相同或相近的值
+        // Check if there are too many identical or similar values
         int maxClusterSize = 0;
         int currentClusterSize = 1;
         float tolerance = 1e-6f;
@@ -219,7 +219,7 @@ public class VectorAnomalyHandler {
         }
         maxClusterSize = Math.max(maxClusterSize, currentClusterSize);
         
-        // 如果超过30%的值聚集在一起，认为是异常聚集
+        // If more than 30% of values cluster together, consider it abnormal clustering
         float clusterRatio = (float) maxClusterSize / vector.length;
         if (clusterRatio > 0.3f) {
             String desc = String.format("Abnormal clustering detected: %.1f%% values clustered", clusterRatio * 100);
@@ -230,21 +230,21 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 修复向量异常
-     * @param vector 输入向量
-     * @param anomalyType 异常类型
-     * @return 修复后的向量
+     * Repair vector anomalies
+     * @param vector Input vector
+     * @param anomalyType Anomaly type
+     * @return Repaired vector
      */
     public static float[] repairVector(float[] vector, AnomalyType anomalyType) {
         return repairVector(vector, anomalyType, -1);
     }
     
     /**
-     * 修复向量异常（带期望维度参数）
-     * @param vector 输入向量
-     * @param anomalyType 异常类型
-     * @param expectedDimension 期望维度
-     * @return 修复后的向量
+     * Repair vector anomalies (with expected dimension parameter)
+     * @param vector Input vector
+     * @param anomalyType Anomaly type
+     * @param expectedDimension Expected dimension
+     * @return Repaired vector
      */
     public static float[] repairVector(float[] vector, AnomalyType anomalyType, int expectedDimension) {
         if (vector == null) {
@@ -281,7 +281,7 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 修复NaN值
+     * Repair NaN values
      */
     private static float[] repairNaNValues(float[] vector) {
         float[] repaired = Arrays.copyOf(vector, vector.length);
@@ -301,12 +301,12 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 修复无穷大值
+     * Repair infinite values
      */
     private static float[] repairInfiniteValues(float[] vector) {
         float[] repaired = Arrays.copyOf(vector, vector.length);
         
-        // 找到非无穷大值的最大和最小值
+        // Find maximum and minimum values among non-infinite values
         float maxFinite = Float.NEGATIVE_INFINITY;
         float minFinite = Float.POSITIVE_INFINITY;
         
@@ -317,7 +317,7 @@ public class VectorAnomalyHandler {
             }
         }
         
-        // 如果没有有限值，使用默认值
+        // If no finite values exist, use default values
         if (!Float.isFinite(maxFinite)) {
             maxFinite = 1.0f;
             minFinite = -1.0f;
@@ -337,12 +337,12 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 修复极值异常
+     * Repair extreme value anomalies
      */
     private static float[] repairExtremeValues(float[] vector) {
         float[] repaired = Arrays.copyOf(vector, vector.length);
         
-        // 使用3σ原则进行钳制
+        // Use 3σ principle for clamping
         float mean = calculateMean(vector);
         float std = (float) Math.sqrt(calculateVariance(vector, mean));
         float upperBound = mean + 3 * std;
@@ -365,17 +365,17 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 修复零向量
+     * Repair zero vector
      */
     private static float[] repairZeroVector(float[] vector) {
         float[] repaired = new float[vector.length];
         
-        // 生成随机单位向量
+        // Generate random unit vector
         for (int i = 0; i < repaired.length; i++) {
-            repaired[i] = (float) (random.nextGaussian() * 0.1); // 小的随机值
+            repaired[i] = (float) (random.nextGaussian() * 0.1); // Small random values
         }
         
-        // 归一化为单位向量
+        // Normalize to unit vector
         float norm = calculateL2Norm(repaired);
         if (norm > NORM_MIN_THRESHOLD) {
             for (int i = 0; i < repaired.length; i++) {
@@ -389,15 +389,15 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 修复低方差
+     * Repair low variance
      */
     private static float[] repairLowVariance(float[] vector) {
         float[] repaired = Arrays.copyOf(vector, vector.length);
         float mean = calculateMean(vector);
         
-        // 添加小的随机噪声
+        // Add small random noise
         for (int i = 0; i < repaired.length; i++) {
-            float noise = (float) (random.nextGaussian() * 0.01); // 1%的噪声
+            float noise = (float) (random.nextGaussian() * 0.01); // 1% noise
             repaired[i] += noise;
         }
         
@@ -408,14 +408,14 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 修复高方差
+     * Repair high variance
      */
     private static float[] repairHighVariance(float[] vector) {
         float[] repaired = Arrays.copyOf(vector, vector.length);
         float mean = calculateMean(vector);
         float std = (float) Math.sqrt(calculateVariance(vector, mean));
         
-        // 将值压缩到合理范围内
+        // Compress values to reasonable range
         float compressionFactor = 0.5f;
         for (int i = 0; i < repaired.length; i++) {
             repaired[i] = mean + (repaired[i] - mean) * compressionFactor;
@@ -428,19 +428,19 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 修复维度冗余
-     * 对于维度冗余的情况，通过添加小的随机扰动来增加向量的多样性
+     * Repair dimension redundancy
+     * For dimension redundancy cases, add small random perturbations to increase vector diversity
      */
     private static float[] repairDimensionRedundant(float[] vector) {
         float[] repaired = Arrays.copyOf(vector, vector.length);
         
-        // 添加小的随机扰动来打破冗余
+        // Add small random perturbations to break redundancy
         for (int i = 0; i < repaired.length; i++) {
-            float noise = (float) (random.nextGaussian() * 0.005); // 0.5%的噪声
+            float noise = (float) (random.nextGaussian() * 0.005); // 0.5% noise
             repaired[i] += noise;
         }
         
-        // 重新归一化
+        // Renormalize
         float norm = calculateL2Norm(repaired);
         if (norm > NORM_MIN_THRESHOLD) {
             for (int i = 0; i < repaired.length; i++) {
@@ -453,8 +453,8 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 修复维度缺失
-     * 通过插值或填充来补充缺失的维度
+     * Repair dimension missing
+     * Supplement missing dimensions through interpolation or padding
      */
     private static float[] repairDimensionMissing(float[] vector, int expectedDimension) {
         if (expectedDimension <= 0 || vector.length >= expectedDimension) {
@@ -464,23 +464,23 @@ public class VectorAnomalyHandler {
         
         float[] repaired = new float[expectedDimension];
         
-        // 复制现有维度
+        // Copy existing dimensions
         System.arraycopy(vector, 0, repaired, 0, vector.length);
         
-        // 计算现有维度的统计信息
+        // Calculate statistics of existing dimensions
         float mean = calculateMean(vector);
         float std = (float) Math.sqrt(calculateVariance(vector, mean));
         
-        // 填充缺失的维度
+        // Fill missing dimensions
         for (int i = vector.length; i < expectedDimension; i++) {
-            // 使用基于现有数据的插值策略
+            // Use interpolation strategy based on existing data
             if (vector.length > 1) {
-                // 线性插值 + 随机噪声
+                // Linear interpolation + random noise
                 float interpolated = vector[i % vector.length];
                 float noise = (float) (random.nextGaussian() * std * 0.1);
                 repaired[i] = interpolated + noise;
             } else {
-                // 如果只有一个维度，使用均值 + 噪声
+                // If only one dimension exists, use mean + noise
                 float noise = (float) (random.nextGaussian() * 0.1);
                 repaired[i] = mean + noise;
             }
@@ -492,27 +492,27 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 修复异常聚集
-     * 通过添加差异化噪声来分散聚集的值
+     * Repair abnormal clustering
+     * Disperse clustered values by adding differentiated noise
      */
     private static float[] repairAbnormalClustering(float[] vector) {
         float[] repaired = Arrays.copyOf(vector, vector.length);
         
-        // 计算均值和标准差
+        // Calculate mean and standard deviation
         float mean = calculateMean(vector);
         float std = (float) Math.sqrt(calculateVariance(vector, mean));
         
-        // 对聚集的值添加差异化噪声
+        // Add differentiated noise to clustered values
         float[] sortedIndices = new float[vector.length];
         for (int i = 0; i < vector.length; i++) {
             sortedIndices[i] = i;
         }
         
-        // 为相似的值添加不同的噪声
+        // Add different noise to similar values
         for (int i = 0; i < repaired.length; i++) {
-            // 添加与位置相关的差异化噪声
-            float positionNoise = (float) (random.nextGaussian() * std * 0.02); // 2%的标准差作为噪声
-            float indexNoise = (float) (Math.sin(i * 0.1) * std * 0.01); // 基于索引的周期性噪声
+            // Add position-related differentiated noise
+            float positionNoise = (float) (random.nextGaussian() * std * 0.02); // 2% of standard deviation as noise
+            float indexNoise = (float) (Math.sin(i * 0.1) * std * 0.01); // Index-based periodic noise
             repaired[i] += positionNoise + indexNoise;
         }
         
@@ -521,10 +521,10 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 综合向量异常处理
-     * @param vector 输入向量
-     * @param expectedDimension 期望维度
-     * @return 处理后的向量
+     * Comprehensive vector anomaly processing
+     * @param vector Input vector
+     * @param expectedDimension Expected dimension
+     * @return Processed vector
      */
     public static float[] processVector(float[] vector, int expectedDimension) {
         if (vector == null) {
@@ -532,17 +532,17 @@ public class VectorAnomalyHandler {
             return null;
         }
         
-        // 检测异常
+        // Detect anomalies
         AnomalyResult result = detectAnomalies(vector, expectedDimension);
         
         if (result.isAnomalous) {
             LogManager.logW(TAG, String.format("Vector anomaly detected: %s (severity: %.2f) - %s", 
                     result.type.name(), result.severity, result.description));
             
-            // 修复异常
+            // Repair anomalies
             float[] repairedVector = repairVector(vector, result.type, expectedDimension);
             
-            // 验证修复结果
+            // Verify repair results
             AnomalyResult verifyResult = detectAnomalies(repairedVector, expectedDimension);
             if (verifyResult.isAnomalous) {
                 LogManager.logW(TAG, String.format("Vector still anomalous after repair: %s", 
@@ -558,7 +558,7 @@ public class VectorAnomalyHandler {
         }
     }
     
-    // 辅助计算方法
+    // Helper calculation methods
     private static float calculateL2Norm(float[] vector) {
         float sum = 0.0f;
         for (float value : vector) {
@@ -613,26 +613,26 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 生成随机单位向量
-     * @param dimension 向量维度
-     * @return 随机单位向量
+     * Generate random unit vector
+     * @param dimension Vector dimension
+     * @return Random unit vector
      */
     public static float[] generateRandomUnitVector(int dimension) {
         float[] vector = new float[dimension];
         
-        // 生成随机向量
+        // Generate random vector
         for (int i = 0; i < dimension; i++) {
             vector[i] = (float) (random.nextGaussian() * 0.1);
         }
         
-        // 归一化为单位向量
+        // Normalize to unit vector
         float norm = calculateL2Norm(vector);
         if (norm > NORM_MIN_THRESHOLD) {
             for (int i = 0; i < dimension; i++) {
                 vector[i] /= norm;
             }
         } else {
-            // 如果范数太小，生成标准单位向量
+            // If norm is too small, generate standard unit vector
             vector[0] = 1.0f;
             for (int i = 1; i < dimension; i++) {
                 vector[i] = 0.0f;
@@ -645,9 +645,9 @@ public class VectorAnomalyHandler {
     }
     
     /**
-     * 获取向量质量报告
-     * @param vector 输入向量
-     * @return 质量报告字符串
+     * Get vector quality report
+     * @param vector Input vector
+     * @return Quality report string
      */
     public static String getVectorQualityReport(float[] vector) {
         if (vector == null) {
@@ -658,7 +658,7 @@ public class VectorAnomalyHandler {
         report.append("=== Vector Quality Report ===\n");
         report.append(String.format("Dimension: %d\n", vector.length));
         
-        // 基本统计
+        // Basic statistics
         float mean = calculateMean(vector);
         float variance = calculateVariance(vector, mean);
         float norm = calculateL2Norm(vector);
@@ -667,7 +667,7 @@ public class VectorAnomalyHandler {
         report.append(String.format("Variance: %.6f\n", variance));
         report.append(String.format("L2 Norm: %.6f\n", norm));
         
-        // 异常检测
+        // Anomaly detection
         AnomalyResult result = detectAnomalies(vector, -1);
         report.append(String.format("Anomaly Status: %s\n", result.isAnomalous ? "ANOMALOUS" : "NORMAL"));
         if (result.isAnomalous) {

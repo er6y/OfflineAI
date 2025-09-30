@@ -33,6 +33,10 @@
 #if defined(GGML_CPU_KLEIDIAI) || defined(GGML_USE_CPU_KLEIDIAI)
 #include "ggml-cpu/kleidiai/kleidiai.h"
 #endif
+// Multimodal support headers
+#include "mtmd.h"
+#include "mtmd-helper.h"
+#include "clip.h"
 
 // 在使用日志宏之前的前向声明，避免未声明标识符错误
 void call_log_manager_print(const char* message);
@@ -501,12 +505,12 @@ static bool is_vulkan_suitable_for_llamacpp() {
     
     vulkan_runtime::VulkanRuntimeInfo info = vulkan_runtime::detect_vulkan_runtime();
     
-    // Simple gate: require Vulkan >= 1.2 and basic runtime availability
-    bool version_ok = VULKAN_VERSION_GE(info.detected_api_version, 1, 2, 0);
+    // PATCH: Lower requirement to Vulkan >= 1.1 for Mali G610 compatibility
+    bool version_ok = VULKAN_VERSION_GE(info.detected_api_version, 1, 1, 0);
     bool basic_ok = info.library_available && info.instance_creation_works && info.physical_devices_available;
     bool ok = basic_ok && version_ok;
 
-    FORCE_LOG(TAG, "[VULKAN] Simple version gate: require >= 1.2");
+    FORCE_LOG(TAG, "[VULKAN] PATCHED version gate: require >= 1.1 (was 1.2)");
     FORCE_LOG(TAG, "[VULKAN] Detected Vulkan API %u.%u.%u; version_ok=%s; basic_ok=%s; suitable=%s",
               VK_VERSION_MAJOR(info.detected_api_version),
               VK_VERSION_MINOR(info.detected_api_version),
@@ -762,9 +766,14 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1backend(JNIE
         FORCE_LOG(TAG, "[BACKEND] Loading all available backends...");
         
 #if defined(GGML_USE_VULKAN) || defined(GGML_VULKAN)
-        // Register statically-linked Vulkan backend before dynamic discovery
+    // Register statically-linked Vulkan backend before dynamic discovery
+    // Skip Vulkan registration in CPU-only mode to avoid initialization errors on emulators
+    if (backend == "VULKAN") {
         FORCE_LOG(TAG, "[BACKEND] Register Vulkan (static) via ggml_backend_vk_reg() before ggml_backend_load_all()");
         ggml_backend_register(ggml_backend_vk_reg());
+    } else {
+        FORCE_LOG(TAG, "[BACKEND] Skipping Vulkan registration (CPU-only mode)");
+    }
 #endif
         
         // Use unified backend loading - this loads all compiled backends
@@ -1488,6 +1497,9 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_system_1info(JNIEnv *env, jobje
     return env->NewStringUTF(llama_print_system_info());
 }
 
+// Forward declaration for chat template helper
+static std::string apply_chat_template(llama_context* context, const char* user_message);
+
 extern "C"
 JNIEXPORT jint JNICALL
 Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1init(
@@ -1538,11 +1550,21 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1init(
 
     // Prompt content logging removed
 
+    // Apply chat template if format_chat is true
+    std::string processed_text;
+    if (format_chat == JNI_TRUE) {
+        processed_text = apply_chat_template(context, text);
+        FORCE_LOG(TAG, "[COMPLETION_INIT] Chat template applied");
+    } else {
+        processed_text = text;
+        FORCE_LOG(TAG, "[COMPLETION_INIT] Using original text without template");
+    }
+
     bool parse_special = (format_chat == JNI_TRUE);
-    printf("[PRINTF_DEBUG] About to call common_tokenize with text length: %zu\n", strlen(text));
+    printf("[PRINTF_DEBUG] About to call common_tokenize with text length: %zu\n", processed_text.length());
     fflush(stdout);
     
-    const auto tokens_list = common_tokenize(context, text, true, parse_special);
+    const auto tokens_list = common_tokenize(context, processed_text, true, parse_special);
     
     printf("[PRINTF_DEBUG] common_tokenize completed, got %zu tokens\n", tokens_list.size());
     fflush(stdout);
@@ -2264,3 +2286,834 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1vulkan_1version(JNIEnv *en
     DEBUG_LOG(TAG, "[VULKAN_VERSION] Returning Vulkan version: %s", version_str);
     return env->NewStringUTF(version_str);
 }
+
+// ============================================================================
+// Multimodal Support (Image + Text)
+// ============================================================================
+
+/**
+ * Check if the loaded model supports multimodal (vision) capabilities
+ * Returns true if model has vision/image projection architecture
+ */
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_is_1model_1multimodal(JNIEnv *env, jobject, jlong model_handle) {
+    auto model = reinterpret_cast<llama_model*>(model_handle);
+    if (!model) {
+        ERROR_LOG(TAG, "[MULTIMODAL] is_model_multimodal: Invalid model handle");
+        return JNI_FALSE;
+    }
+    
+    // Check for common multimodal metadata keys
+    char buf[256];
+    
+    // Check for mmproj architecture (LLaVA, BakLLaVA, etc.)
+    int32_t result = llama_model_meta_val_str(model, "mmproj.arch", buf, sizeof(buf));
+    if (result >= 0) {
+        FORCE_LOG(TAG, "[MULTIMODAL] Model has mmproj.arch: %s", buf);
+        return JNI_TRUE;
+    }
+    
+    // Check for CLIP vision model
+    result = llama_model_meta_val_str(model, "clip.vision_model", buf, sizeof(buf));
+    if (result >= 0) {
+        FORCE_LOG(TAG, "[MULTIMODAL] Model has clip.vision_model: %s", buf);
+        return JNI_TRUE;
+    }
+    
+    // Check for vision architecture
+    result = llama_model_meta_val_str(model, "vision.arch", buf, sizeof(buf));
+    if (result >= 0) {
+        FORCE_LOG(TAG, "[MULTIMODAL] Model has vision.arch: %s", buf);
+        return JNI_TRUE;
+    }
+    
+    // Check for Qwen2-VL and other vision-language models by architecture name
+    result = llama_model_meta_val_str(model, "general.architecture", buf, sizeof(buf));
+    if (result >= 0) {
+        std::string arch(buf);
+        // Convert to lowercase for case-insensitive comparison
+        std::transform(arch.begin(), arch.end(), arch.begin(), ::tolower);
+        
+        // Check if architecture name contains vision/multimodal keywords
+        if (arch.find("vl") != std::string::npos ||           // qwen2vl, qwenvl, etc.
+            arch.find("vision") != std::string::npos ||       // vision models
+            arch.find("llava") != std::string::npos ||        // llava variants
+            arch.find("clip") != std::string::npos ||         // clip models
+            arch.find("multimodal") != std::string::npos ||   // explicit multimodal
+            arch.find("gemma3") != std::string::npos ||       // gemma3 (requires mtmd with mmproj)
+            arch.find("paligemma") != std::string::npos ||    // paligemma variants
+            arch.find("minicpm") != std::string::npos) {      // minicpm-v variants
+            FORCE_LOG(TAG, "[MULTIMODAL] Model has vision-capable architecture: %s", buf);
+            return JNI_TRUE;
+        }
+        
+        // Note: Some models (e.g., MiniCPM-V-4.5) use generic architectures like "qwen3"
+        // but are actually multimodal. GGUF conversion loses original model_type metadata.
+        // For these cases, Java layer should check if mmproj file exists as fallback.
+    }
+    
+    FORCE_LOG(TAG, "[MULTIMODAL] Model does not support multimodal capabilities");
+    return JNI_FALSE;
+}
+
+/**
+ * Get the target image size for the multimodal model from mtmd context
+ * Returns the image size in pixels, or -1 if not available
+ */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1model_1image_1size(JNIEnv *env, jobject, jlong mtmd_handle) {
+    auto mtmd_ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
+    if (!mtmd_ctx) {
+        ERROR_LOG(TAG, "[MULTIMODAL] get_model_image_size: Invalid mtmd context handle");
+        return -1;
+    }
+    
+    // Get image size from clip context (vision encoder)
+    if (mtmd_support_vision(mtmd_ctx)) {
+        // Access internal clip context to get image size
+        // Note: This requires accessing mtmd_context internals
+        // We use clip_get_image_size() from the clip API
+        struct clip_ctx * ctx_v = nullptr;
+        
+        // Get clip context pointer from mtmd context
+        // Since mtmd_context structure has ctx_v as public member, we can access it
+        // by casting mtmd_context to a struct with the same layout
+        struct mtmd_context_layout {
+            struct clip_ctx * ctx_v;
+            // ... other members we don't need
+        };
+        ctx_v = reinterpret_cast<mtmd_context_layout*>(mtmd_ctx)->ctx_v;
+        
+        if (ctx_v) {
+            int32_t size = clip_get_image_size(ctx_v);
+            if (size > 0) {
+                FORCE_LOG(TAG, "[MULTIMODAL] Model image size from clip context: %d", size);
+                return static_cast<jint>(size);
+            }
+        }
+    }
+    
+    // Default fallback
+    FORCE_LOG(TAG, "[MULTIMODAL] Model image size not found, using default: 336");
+    return 336;
+}
+
+/**
+ * Get the model architecture name
+ * Returns architecture string or null if not available
+ */
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1model_1architecture(JNIEnv *env, jobject, jlong model_handle) {
+    auto model = reinterpret_cast<llama_model*>(model_handle);
+    if (!model) {
+        ERROR_LOG(TAG, "[MULTIMODAL] get_model_architecture: Invalid model handle");
+        return nullptr;
+    }
+    
+    char buf[256];
+    int32_t result = llama_model_meta_val_str(model, "general.architecture", buf, sizeof(buf));
+    if (result < 0) {
+        FORCE_LOG(TAG, "[MULTIMODAL] Model architecture not found in metadata");
+        return nullptr;
+    }
+    
+    FORCE_LOG(TAG, "[MULTIMODAL] Model architecture: %s", buf);
+    return env->NewStringUTF(buf);
+}
+
+// ========== Multimodal (mtmd) Support ==========
+
+/**
+ * Initialize mtmd context for multimodal support
+ * 
+ * @param model_handle The llama model handle
+ * @param mmproj_path Path to mmproj file (can be null if embedded in model)
+ * @param use_gpu Whether to use GPU for image processing
+ * @param n_threads Number of threads for image processing (0 = auto, use 2)
+ * @return mtmd context handle, or 0 on failure
+ */
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_init_1mtmd_1context(
+    JNIEnv *env, jobject, jlong model_handle, jstring mmproj_path, jboolean use_gpu, jint n_threads) {
+    
+    auto model = reinterpret_cast<llama_model*>(model_handle);
+    if (!model) {
+        ERROR_LOG(TAG, "[MTMD] init_mtmd_context: Invalid model handle");
+        return 0;
+    }
+    
+    // Get mmproj path (can be null for embedded projectors)
+    const char* mmproj_cstr = nullptr;
+    if (mmproj_path != nullptr) {
+        mmproj_cstr = env->GetStringUTFChars(mmproj_path, nullptr);
+    }
+    
+    // Set up mtmd context parameters
+    struct mtmd_context_params ctx_params = mtmd_context_params_default();
+    ctx_params.use_gpu = use_gpu;
+    // Use provided thread count, default to 2 if 0 or negative
+    ctx_params.n_threads = (n_threads > 0) ? n_threads : 2;
+    ctx_params.verbosity = GGML_LOG_LEVEL_INFO;
+    ctx_params.print_timings = false;
+    
+    FORCE_LOG(TAG, "[MTMD] Image processing threads: %d (requested: %d)", 
+              ctx_params.n_threads, n_threads);
+    
+    FORCE_LOG(TAG, "[MTMD] Initializing mtmd context - use_gpu=%d, mmproj=%s", 
+              use_gpu, mmproj_cstr ? mmproj_cstr : "embedded");
+    
+    // Initialize mtmd context
+    // For Qwen2-VL with embedded mmproj, pass nullptr as mmproj_fname
+    mtmd_context* ctx = mtmd_init_from_file(mmproj_cstr, model, ctx_params);
+    
+    if (mmproj_cstr) {
+        env->ReleaseStringUTFChars(mmproj_path, mmproj_cstr);
+    }
+    
+    if (!ctx) {
+        ERROR_LOG(TAG, "[MTMD] Failed to initialize mtmd context");
+        return 0;
+    }
+    
+    FORCE_LOG(TAG, "[MTMD] mtmd context initialized successfully: %p", ctx);
+    return reinterpret_cast<jlong>(ctx);
+}
+
+/**
+ * Free mtmd context
+ */
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1mtmd_1context(
+    JNIEnv *env, jobject, jlong mtmd_handle) {
+    
+    auto ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
+    if (!ctx) {
+        ERROR_LOG(TAG, "[MTMD] free_mtmd_context: Invalid mtmd handle");
+        return;
+    }
+    
+    FORCE_LOG(TAG, "[MTMD] Freeing mtmd context: %p", ctx);
+    mtmd_free(ctx);
+}
+
+/**
+ * Load and preprocess an image file
+ * 
+ * @param mtmd_handle The mtmd context handle
+ * @param image_path Path to the image file
+ * @return bitmap handle, or 0 on failure
+ */
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1image_1bitmap(
+    JNIEnv *env, jobject, jlong mtmd_handle, jstring image_path) {
+    
+    auto ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
+    if (!ctx) {
+        ERROR_LOG(TAG, "[MTMD] load_image_bitmap: Invalid mtmd handle");
+        return 0;
+    }
+    
+    const char* path_cstr = env->GetStringUTFChars(image_path, nullptr);
+    if (!path_cstr) {
+        ERROR_LOG(TAG, "[MTMD] load_image_bitmap: Failed to get image path");
+        return 0;
+    }
+    
+    FORCE_LOG(TAG, "[MTMD] Loading image bitmap from: %s", path_cstr);
+    
+    // Load bitmap from file using helper function
+    mtmd_bitmap* bitmap = mtmd_helper_bitmap_init_from_file(ctx, path_cstr);
+    
+    env->ReleaseStringUTFChars(image_path, path_cstr);
+    
+    if (!bitmap) {
+        ERROR_LOG(TAG, "[MTMD] Failed to load image bitmap");
+        return 0;
+    }
+    
+    FORCE_LOG(TAG, "[MTMD] Image bitmap loaded successfully: %p", bitmap);
+    return reinterpret_cast<jlong>(bitmap);
+}
+
+/**
+ * Free image bitmap
+ */
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1image_1bitmap(
+    JNIEnv *env, jobject, jlong bitmap_handle) {
+    
+    auto bitmap = reinterpret_cast<mtmd_bitmap*>(bitmap_handle);
+    if (!bitmap) {
+        ERROR_LOG(TAG, "[MTMD] free_image_bitmap: Invalid bitmap handle");
+        return;
+    }
+    
+    FORCE_LOG(TAG, "[MTMD] Freeing image bitmap: %p", bitmap);
+    mtmd_bitmap_free(bitmap);
+}
+
+/**
+ * Get the default image marker for the model
+ * For Qwen2-VL, this should return the appropriate vision tokens
+ */
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1image_1marker(
+    JNIEnv *env, jobject, jlong mtmd_handle) {
+    
+    auto ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
+    if (!ctx) {
+        ERROR_LOG(TAG, "[MTMD] get_image_marker: Invalid mtmd handle");
+        return env->NewStringUTF("<image>");
+    }
+    
+    const char* marker = mtmd_default_marker();
+    FORCE_LOG(TAG, "[MTMD] Image marker: %s", marker);
+    
+    return env->NewStringUTF(marker);
+}
+
+/**
+ * Check if mtmd context requires non-causal attention mask
+ * This is important for some vision models
+ */
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1use_1non_1causal(
+    JNIEnv *env, jobject, jlong mtmd_handle) {
+    
+    auto ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
+    if (!ctx) {
+        ERROR_LOG(TAG, "[MTMD] mtmd_use_non_causal: Invalid mtmd handle");
+        return JNI_FALSE;
+    }
+    
+    bool use_non_causal = mtmd_decode_use_non_causal(ctx);
+    FORCE_LOG(TAG, "[MTMD] Use non-causal mask: %d", use_non_causal);
+    
+    return use_non_causal ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * Test multimodal inference with a simple image + text prompt
+ * This is a simplified test function to verify mtmd functionality
+ * 
+ * @param mtmd_handle The mtmd context handle
+ * @param llama_ctx_handle The llama context handle
+ * @param image_path Path to the image file
+ * @param prompt Text prompt (should contain image marker)
+ * @return 0 on success, negative on error
+ */
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_test_1multimodal_1inference(
+    JNIEnv *env, jobject, jlong mtmd_handle, jlong llama_ctx_handle, 
+    jstring image_path, jstring prompt) {
+    
+    auto mtmd_ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
+    auto llama_ctx = reinterpret_cast<llama_context*>(llama_ctx_handle);
+    
+    if (!mtmd_ctx || !llama_ctx) {
+        ERROR_LOG(TAG, "[MTMD] test_multimodal_inference: Invalid handles");
+        return -1;
+    }
+    
+    const char* img_path = env->GetStringUTFChars(image_path, nullptr);
+    const char* prompt_str = env->GetStringUTFChars(prompt, nullptr);
+    
+    if (!img_path || !prompt_str) {
+        ERROR_LOG(TAG, "[MTMD] test_multimodal_inference: Failed to get strings");
+        return -2;
+    }
+    
+    FORCE_LOG(TAG, "[MTMD] Starting multimodal inference - image: %s, prompt length: %d", 
+              img_path, (int)strlen(prompt_str));
+    
+    // Step 1: Load image bitmap
+    FORCE_LOG(TAG, "[MTMD] Step 1: Loading image bitmap from file");
+    mtmd_bitmap* bitmap = mtmd_helper_bitmap_init_from_file(mtmd_ctx, img_path);
+    if (!bitmap) {
+        ERROR_LOG(TAG, "[MTMD] Failed to load image from: %s", img_path);
+        env->ReleaseStringUTFChars(image_path, img_path);
+        env->ReleaseStringUTFChars(prompt, prompt_str);
+        return -3;
+    }
+    FORCE_LOG(TAG, "[MTMD] Image loaded successfully: %dx%d", 
+              mtmd_bitmap_get_nx(bitmap), mtmd_bitmap_get_ny(bitmap));
+    
+    // Step 2: Prepare input text
+    FORCE_LOG(TAG, "[MTMD] Step 2: Preparing input text");
+    mtmd_input_text text;
+    text.text = prompt_str;
+    text.add_special = true;
+    text.parse_special = true;
+    
+    // Step 3: Create input chunks
+    FORCE_LOG(TAG, "[MTMD] Step 3: Creating input chunks");
+    mtmd_input_chunks* chunks = mtmd_input_chunks_init();
+    if (!chunks) {
+        ERROR_LOG(TAG, "[MTMD] Failed to initialize chunks");
+        mtmd_bitmap_free(bitmap);
+        env->ReleaseStringUTFChars(image_path, img_path);
+        env->ReleaseStringUTFChars(prompt, prompt_str);
+        return -4;
+    }
+    
+    // Step 4: Tokenize (text + image)
+    FORCE_LOG(TAG, "[MTMD] Step 4: Tokenizing text and image");
+    const mtmd_bitmap* bitmaps_array[] = {bitmap};
+    int32_t tokenize_result = mtmd_tokenize(mtmd_ctx, chunks, &text, bitmaps_array, 1);
+    
+    if (tokenize_result != 0) {
+        ERROR_LOG(TAG, "[MTMD] Tokenize failed with code: %d", tokenize_result);
+        mtmd_input_chunks_free(chunks);
+        mtmd_bitmap_free(bitmap);
+        env->ReleaseStringUTFChars(image_path, img_path);
+        env->ReleaseStringUTFChars(prompt, prompt_str);
+        return -5;
+    }
+    
+    size_t n_chunks = mtmd_input_chunks_size(chunks);
+    FORCE_LOG(TAG, "[MTMD] Tokenize success, created %zu chunks", n_chunks);
+    
+    // Step 5: Evaluate chunks (this processes the image + text)
+    FORCE_LOG(TAG, "[MTMD] Step 5: Evaluating chunks (processing image and text)");
+    llama_pos new_n_past = 0;
+    int32_t eval_result = mtmd_helper_eval_chunks(
+        mtmd_ctx,
+        llama_ctx,
+        chunks,
+        0,          // n_past (starting position)
+        0,          // seq_id
+        512,        // n_batch
+        true,       // logits_last (get logits for last token)
+        &new_n_past
+    );
+    
+    if (eval_result != 0) {
+        ERROR_LOG(TAG, "[MTMD] Eval chunks failed with code: %d", eval_result);
+        mtmd_input_chunks_free(chunks);
+        mtmd_bitmap_free(bitmap);
+        env->ReleaseStringUTFChars(image_path, img_path);
+        env->ReleaseStringUTFChars(prompt, prompt_str);
+        return -6;
+    }
+    
+    FORCE_LOG(TAG, "[MTMD] Eval success! new_n_past: %d", new_n_past);
+    FORCE_LOG(TAG, "[MTMD] Multimodal inference completed successfully");
+    
+    // Cleanup
+    mtmd_input_chunks_free(chunks);
+    mtmd_bitmap_free(bitmap);
+    env->ReleaseStringUTFChars(image_path, img_path);
+    env->ReleaseStringUTFChars(prompt, prompt_str);
+    
+    return 0; // Success
+}
+
+// ==================== Multimodal Token Generation JNI Methods ====================
+
+extern "C"
+JNIEXPORT jlong JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1create_1input_1chunks(
+    JNIEnv* env, jclass clazz) {
+    
+    mtmd_input_chunks* chunks = mtmd_input_chunks_init();
+    if (!chunks) {
+        ERROR_LOG(TAG, "[MTMD] Failed to create input chunks");
+        return 0;
+    }
+    
+    FORCE_LOG(TAG, "[MTMD] Input chunks created: %p", chunks);
+    return reinterpret_cast<jlong>(chunks);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1free_1input_1chunks(
+    JNIEnv* env, jclass clazz, jlong chunks_handle) {
+    
+    if (chunks_handle == 0) {
+        return;
+    }
+    
+    mtmd_input_chunks* chunks = reinterpret_cast<mtmd_input_chunks*>(chunks_handle);
+    mtmd_input_chunks_free(chunks);
+    FORCE_LOG(TAG, "[MTMD] Input chunks freed: %p", chunks);
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1tokenize_1with_1images(
+    JNIEnv* env, jclass clazz, jlong mtmd_handle, jlong chunks_handle, 
+    jstring prompt, jlongArray image_handles) {
+    
+    if (mtmd_handle == 0 || chunks_handle == 0) {
+        ERROR_LOG(TAG, "[MTMD] Invalid handles for tokenization");
+        return -1;
+    }
+    
+    mtmd_context* mtmd_ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
+    mtmd_input_chunks* chunks = reinterpret_cast<mtmd_input_chunks*>(chunks_handle);
+    
+    // Get prompt string
+    const char* prompt_str = env->GetStringUTFChars(prompt, nullptr);
+    if (!prompt_str) {
+        ERROR_LOG(TAG, "[MTMD] Failed to get prompt string");
+        return -2;
+    }
+    
+    // Prepare input text
+    mtmd_input_text text;
+    text.text = prompt_str;
+    text.add_special = true;
+    text.parse_special = true;
+    
+    // Get image handles array
+    jsize num_images = env->GetArrayLength(image_handles);
+    jlong* image_handles_arr = env->GetLongArrayElements(image_handles, nullptr);
+    
+    FORCE_LOG(TAG, "[MTMD] Tokenizing with %d images, prompt length: %d", 
+              num_images, (int)strlen(prompt_str));
+    
+    // Convert image handles to bitmap pointers
+    std::vector<const mtmd_bitmap*> bitmaps;
+    for (int i = 0; i < num_images; i++) {
+        mtmd_bitmap* bitmap = reinterpret_cast<mtmd_bitmap*>(image_handles_arr[i]);
+        if (bitmap) {
+            bitmaps.push_back(bitmap);
+        }
+    }
+    
+    // Tokenize
+    int32_t result = mtmd_tokenize(mtmd_ctx, chunks, &text, bitmaps.data(), bitmaps.size());
+    
+    // Cleanup
+    env->ReleaseLongArrayElements(image_handles, image_handles_arr, JNI_ABORT);
+    env->ReleaseStringUTFChars(prompt, prompt_str);
+    
+    if (result != 0) {
+        ERROR_LOG(TAG, "[MTMD] Tokenization failed with code: %d", result);
+        return result;
+    }
+    
+    size_t n_chunks = mtmd_input_chunks_size(chunks);
+    FORCE_LOG(TAG, "[MTMD] Tokenization successful, created %zu chunks", n_chunks);
+    
+    return 0;
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1eval_1chunks(
+    JNIEnv* env, jclass clazz, jlong mtmd_handle, jlong llama_handle, 
+    jlong chunks_handle, jint n_past, jint seq_id, jint n_batch, 
+    jboolean logits_last, jintArray n_past_out) {
+    
+    if (mtmd_handle == 0 || llama_handle == 0 || chunks_handle == 0) {
+        ERROR_LOG(TAG, "[MTMD] Invalid handles for eval chunks");
+        return -1;
+    }
+    
+    mtmd_context* mtmd_ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
+    llama_context* llama_ctx = reinterpret_cast<llama_context*>(llama_handle);
+    mtmd_input_chunks* chunks = reinterpret_cast<mtmd_input_chunks*>(chunks_handle);
+    
+    FORCE_LOG(TAG, "[MTMD] Evaluating chunks: n_past=%d, seq_id=%d, n_batch=%d", 
+              n_past, seq_id, n_batch);
+    
+    llama_pos new_n_past = 0;
+    int32_t result = mtmd_helper_eval_chunks(
+        mtmd_ctx,
+        llama_ctx,
+        chunks,
+        n_past,
+        seq_id,
+        n_batch,
+        logits_last,
+        &new_n_past
+    );
+    
+    if (result != 0) {
+        ERROR_LOG(TAG, "[MTMD] Eval chunks failed with code: %d", result);
+        return result;
+    }
+    
+    // Return new n_past value
+    if (n_past_out != nullptr) {
+        jint* out_arr = env->GetIntArrayElements(n_past_out, nullptr);
+        if (out_arr) {
+            out_arr[0] = (jint)new_n_past;
+            env->ReleaseIntArrayElements(n_past_out, out_arr, 0);
+        }
+    }
+    
+    FORCE_LOG(TAG, "[MTMD] Eval chunks successful, new_n_past=%d", (int)new_n_past);
+    
+    return 0;
+}
+
+// Helper function: Apply chat template to text
+static std::string apply_chat_template(llama_context* context, const char* user_message) {
+    const llama_model* model = llama_get_model(context);
+    if (!model) {
+        ERROR_LOG(TAG, "[CHAT_TEMPLATE] Failed to get model");
+        return user_message; // Fallback to original text
+    }
+    
+    // Create chat message structure
+    llama_chat_message messages[1];
+    messages[0].role = "user";
+    messages[0].content = user_message;
+    
+    // First call to get required buffer size
+    int32_t required_size = llama_chat_apply_template(
+        nullptr,  // Use model's default template
+        messages,
+        1,        // Number of messages
+        true,     // add_ass (add assistant prompt)
+        nullptr,
+        0
+    );
+    
+    if (required_size <= 0) {
+        FORCE_LOG(TAG, "[CHAT_TEMPLATE] Failed to get template size, using original text");
+        return user_message;
+    }
+    
+    // Allocate buffer and apply template
+    std::vector<char> buffer(required_size + 1);
+    int32_t result = llama_chat_apply_template(
+        nullptr,
+        messages,
+        1,
+        true,
+        buffer.data(),
+        buffer.size()
+    );
+    
+    if (result <= 0) {
+        ERROR_LOG(TAG, "[CHAT_TEMPLATE] Failed to apply template");
+        return user_message;
+    }
+    
+    std::string formatted(buffer.data(), result);
+    FORCE_LOG(TAG, "[CHAT_TEMPLATE] Applied template: original_len=%zu, formatted_len=%zu", 
+              strlen(user_message), formatted.length());
+    
+    return formatted;
+}
+
+// Helper function: Process multimodal images and add to KV cache
+static int process_multimodal_images(JNIEnv* env, jlong mtmd_handle, jlong context_pointer, 
+                                   jlongArray image_handles, const char* text) {
+    FORCE_LOG(TAG, "[MTMD_INIT] Processing multimodal images");
+    
+    mtmd_context* mtmd_ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
+    llama_context* llama_ctx = reinterpret_cast<llama_context*>(context_pointer);
+    
+    if (!mtmd_ctx || !llama_ctx) {
+        ERROR_LOG(TAG, "[MTMD_INIT] Invalid context handles");
+        return -1;
+    }
+    
+    jsize num_images = env->GetArrayLength(image_handles);
+    FORCE_LOG(TAG, "[MTMD_INIT] Number of images: %d", num_images);
+    
+    // Step 1: Create input chunks
+    mtmd_input_chunks* chunks = mtmd_input_chunks_init();
+    if (!chunks) {
+        ERROR_LOG(TAG, "[MTMD_INIT] Failed to create input chunks");
+        return -1;
+    }
+    
+    // Step 2: Build multimodal prompt with ONLY image markers (no text yet)
+    // Text will be processed separately by completion_init
+    std::string multimodal_prompt;
+    const char* marker = mtmd_default_marker();
+    
+    for (int i = 0; i < num_images; i++) {
+        multimodal_prompt += marker;
+        // Don't add extra newline - let the model handle spacing
+    }
+    // DO NOT add text here - it will be processed by completion_init
+    
+    FORCE_LOG(TAG, "[MTMD_INIT] Using marker: %s, final prompt length: %d", 
+              marker, (int)multimodal_prompt.length());
+    
+    // Step 3: Tokenize with images
+    mtmd_input_text text_input;
+    text_input.text = multimodal_prompt.c_str();
+    text_input.add_special = true;
+    text_input.parse_special = true;
+    
+    jlong* image_handles_arr = env->GetLongArrayElements(image_handles, nullptr);
+    std::vector<const mtmd_bitmap*> bitmaps;
+    for (int i = 0; i < num_images; i++) {
+        mtmd_bitmap* bitmap = reinterpret_cast<mtmd_bitmap*>(image_handles_arr[i]);
+        if (bitmap) {
+            bitmaps.push_back(bitmap);
+        }
+    }
+    
+    int32_t tokenize_result = mtmd_tokenize(mtmd_ctx, chunks, &text_input, bitmaps.data(), bitmaps.size());
+    env->ReleaseLongArrayElements(image_handles, image_handles_arr, JNI_ABORT);
+    
+    if (tokenize_result != 0) {
+        ERROR_LOG(TAG, "[MTMD_INIT] Tokenization failed: %d", tokenize_result);
+        mtmd_input_chunks_free(chunks);
+        return -2;
+    }
+    
+    size_t n_chunks = mtmd_input_chunks_size(chunks);
+    FORCE_LOG(TAG, "[MTMD_INIT] Tokenization successful, created %zu chunks", n_chunks);
+    
+    // Step 4: Eval chunks (process image embeddings into KV cache)
+    FORCE_LOG(TAG, "[MTMD_INIT] Step 4: Starting to eval %zu chunks (this may take time for image encoding)...", n_chunks);
+    int64_t eval_start_time = ggml_time_ms();
+    
+    llama_pos new_n_past = 0;
+    int32_t eval_result = mtmd_helper_eval_chunks(
+        mtmd_ctx, llama_ctx, chunks,
+        0,      // n_past (starting position)
+        0,      // seq_id
+        512,    // n_batch
+        false,  // logits_last = false (we don't need logits yet)
+        &new_n_past
+    );
+    
+    int64_t eval_duration = ggml_time_ms() - eval_start_time;
+    FORCE_LOG(TAG, "[MTMD_INIT] Eval chunks completed in %" PRId64 " ms", eval_duration);
+    
+    mtmd_input_chunks_free(chunks);
+    
+    if (eval_result != 0) {
+        ERROR_LOG(TAG, "[MTMD_INIT] Eval chunks failed: %d", eval_result);
+        return -3;
+    }
+    
+    FORCE_LOG(TAG, "[MTMD_INIT] Images processed successfully, n_past=%d", (int)new_n_past);
+    FORCE_LOG(TAG, "[MTMD_INIT] KV cache now contains image embeddings, ready for text tokenization");
+    
+    return (int)new_n_past;
+}
+
+// Main function: completion_init with optional image support
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1init_1with_1images(
+    JNIEnv* env, jclass clazz,
+    jlong context_pointer,
+    jlong batch_pointer,
+    jstring jtext,
+    jint n_len,
+    jboolean format_chat,
+    jlong mtmd_handle,
+    jlongArray image_handles
+) {
+    FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Entry");
+    
+    const char* text = env->GetStringUTFChars(jtext, 0);
+    
+    // Step 1: If images provided, process them first
+    int image_tokens = 0;
+    if (mtmd_handle != 0 && image_handles != nullptr) {
+        jsize num_images = env->GetArrayLength(image_handles);
+        if (num_images > 0) {
+            FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Processing %d images first", num_images);
+            image_tokens = process_multimodal_images(env, mtmd_handle, context_pointer, image_handles, text);
+            
+            if (image_tokens < 0) {
+                ERROR_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Image processing failed: %d", image_tokens);
+                env->ReleaseStringUTFChars(jtext, text);
+                return image_tokens;
+            }
+            
+            FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Images processed, %d tokens in KV cache", image_tokens);
+        }
+    }
+    
+    // Step 2: Process text tokens manually (starting from image_tokens position)
+    FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Now processing text tokens from position %d", image_tokens);
+    
+    llama_context* context = reinterpret_cast<llama_context*>(context_pointer);
+    llama_batch* batch = reinterpret_cast<llama_batch*>(batch_pointer);
+    
+    if (!context || !batch) {
+        ERROR_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Invalid context or batch pointer");
+        env->ReleaseStringUTFChars(jtext, text);
+        return -1;
+    }
+    
+    // Apply chat template if format_chat is true
+    std::string processed_text;
+    if (format_chat == JNI_TRUE) {
+        processed_text = apply_chat_template(context, text);
+        FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Chat template applied");
+    } else {
+        processed_text = text;
+        FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Using original text without template");
+    }
+    
+    // Tokenize text
+    bool parse_special = (format_chat == JNI_TRUE);
+    FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Text to tokenize (length=%zu): '%s'", processed_text.length(), processed_text.c_str());
+    FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] parse_special=%s", parse_special ? "true" : "false");
+    const auto tokens_list = common_tokenize(context, processed_text, true, parse_special);
+    FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Tokenized text: %zu tokens", tokens_list.size());
+    
+    // Log first few tokens for debugging
+    for (size_t i = 0; i < std::min((size_t)5, tokens_list.size()); i++) {
+        std::string token_str = common_token_to_piece(context, tokens_list[i]);
+        FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Token[%zu]: %d ('%s')", i, tokens_list[i], token_str.c_str());
+    }
+    
+    env->ReleaseStringUTFChars(jtext, text);
+    
+    // Check if tokens fit in context
+    auto n_ctx = llama_n_ctx(context);
+    int max_input_tokens = std::max(1, (int)n_ctx - image_tokens - 1);
+    std::vector<llama_token> final_tokens = tokens_list;
+    if ((int)final_tokens.size() > max_input_tokens) {
+        FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Input tokens(%zu) exceed available space(%d), truncating",
+                  final_tokens.size(), max_input_tokens);
+        final_tokens.resize(max_input_tokens);
+    }
+    
+    // Clear batch and add tokens starting from image_tokens position
+    common_batch_clear(*batch);
+    for (size_t i = 0; i < final_tokens.size(); i++) {
+        common_batch_add(*batch, final_tokens[i], 
+                        image_tokens + i,  // Position starts after image tokens
+                        {0}, false);
+    }
+    
+    // Set logits for last token
+    if (batch->n_tokens > 0) {
+        batch->logits[batch->n_tokens - 1] = true;
+    }
+    
+    FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Batch prepared: %d tokens, positions %d-%d",
+              batch->n_tokens, image_tokens, image_tokens + batch->n_tokens - 1);
+    
+    // Decode text tokens
+    int decode_result = llama_decode(context, *batch);
+    if (decode_result != 0) {
+        ERROR_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Text decode failed: %d", decode_result);
+        return -1;
+    }
+    
+    int total_tokens = image_tokens + batch->n_tokens;
+    FORCE_LOG(TAG, "[COMPLETION_INIT_WITH_IMAGES] Complete: %d image tokens + %d text tokens = %d total",
+              image_tokens, batch->n_tokens, total_tokens);
+    
+    return total_tokens;
+}
+

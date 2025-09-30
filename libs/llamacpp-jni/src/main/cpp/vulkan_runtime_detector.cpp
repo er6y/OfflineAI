@@ -353,31 +353,33 @@ VulkanRuntimeInfo detect_vulkan_runtime() {
             LOGD("No Vulkan physical devices found or enumeration failed");
         }
         
+        // Clean up Vulkan instance after detection
         if (vkDestroyInstance_func) {
             vkDestroyInstance_func(instance, nullptr);
         }
     }
     
 #ifdef GGML_USE_VULKAN
-    // 7. 检查是否满足最小版本要求：1.2+ 直接满足
-    if (VULKAN_VERSION_GE(cached_info.detected_api_version, 1, 2, 0)) {
+    // 7. PATCH: Lower minimum version requirement to 1.1 for Mali G610 compatibility
+    // 检查是否满足最小版本要求：降低到 1.1+
+    if (VULKAN_VERSION_GE(cached_info.detected_api_version, 1, 1, 0)) {
         cached_info.meets_min_version_requirement = true;
+        if (VULKAN_VERSION_GE(cached_info.detected_api_version, 1, 2, 0)) {
+            LOGD("Vulkan 1.2+ detected - fully supported");
+        } else {
+            LOGD("Vulkan 1.1 detected - experimental support (some features may not work)");
+        }
     } else {
-        cached_info.meets_min_version_requirement = 
-            VULKAN_VERSION_GE(cached_info.detected_api_version, 
-                             VK_VERSION_MAJOR(GGML_VULKAN_MIN_VERSION),
-                             VK_VERSION_MINOR(GGML_VULKAN_MIN_VERSION),
-                             VK_VERSION_PATCH(GGML_VULKAN_MIN_VERSION));
+        cached_info.meets_min_version_requirement = false;
+        LOGD("Vulkan version < 1.1 - not supported");
     }
     
-    LOGD("Minimum required version: %s, detected version meets requirement: %s",
-         GGML_VULKAN_MIN_VERSION_STR,
+    LOGD("Minimum required version: 1.1.0 (patched), detected version meets requirement: %s",
          cached_info.meets_min_version_requirement ? "yes" : "no");
 #else
     cached_info.meets_min_version_requirement = false;
     LOGD("GGML_USE_VULKAN not defined, version requirement check skipped");
 #endif
-    
     // 8. 综合判断Vulkan是否可用于llama.cpp
     cached_info.suitable_for_llamacpp = 
         cached_info.library_available &&
@@ -407,8 +409,11 @@ VulkanRuntimeInfo detect_vulkan_runtime() {
     LOGI("  Meets min version requirement: %s", cached_info.meets_min_version_requirement ? "yes" : "no");
     LOGI("  Suitable for llama.cpp: %s", cached_info.suitable_for_llamacpp ? "yes" : "no");
 
-    if (!VULKAN_VERSION_GE(cached_info.detected_api_version, 1, 2, 0)) {
-        LOGW("Vulkan instance version < 1.2; will force CPU fallback in JNI if GPU was requested");
+    // PATCH: Remove CPU fallback warning for Vulkan 1.1 since we now support it
+    if (!VULKAN_VERSION_GE(cached_info.detected_api_version, 1, 1, 0)) {
+        LOGW("Vulkan instance version < 1.1; GPU acceleration not available");
+    } else if (!VULKAN_VERSION_GE(cached_info.detected_api_version, 1, 2, 0)) {
+        LOGI("Vulkan 1.1 detected - experimental GPU acceleration enabled");
     }
     
     return cached_info;
