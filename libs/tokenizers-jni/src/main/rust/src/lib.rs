@@ -114,7 +114,7 @@ pub extern "C" fn free_tokenizer(tokenizer_ptr: *mut c_void) {
 
 // 直接JNI实现 - 创建分词器
 #[no_mangle]
-pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_createTokenizer(
+pub extern "system" fn Java_com_offlineai_tokenizers_TokenizerJNI_createTokenizer(
     env: JNIEnv,
     _class: JClass,
     model_type: JString,
@@ -166,7 +166,7 @@ pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_createToken
 
 // 直接JNI实现 - 从文件加载分词器
 #[no_mangle]
-pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_loadTokenizerFromFileNative(
+pub extern "system" fn Java_com_offlineai_tokenizers_TokenizerJNI_loadTokenizerFromFileNative(
     env: JNIEnv,
     _class: JClass,
     path: JString,
@@ -205,7 +205,7 @@ pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_loadTokeniz
 
 // 直接JNI实现 - 分词
 #[no_mangle]
-pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_tokenize(
+pub extern "system" fn Java_com_offlineai_tokenizers_TokenizerJNI_tokenize(
     env: JNIEnv,
     _class: JClass,
     tokenizer_ptr: jlong,
@@ -269,7 +269,7 @@ pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_tokenize(
 
 // 直接JNI实现 - 获取分词器配置
 #[no_mangle]
-pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_getTokenizerConfig(
+pub extern "system" fn Java_com_offlineai_tokenizers_TokenizerJNI_getTokenizerConfig(
     env: JNIEnv,
     _class: JClass,
     tokenizer_ptr: jlong,
@@ -334,7 +334,7 @@ pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_getTokenize
 
 // 直接JNI实现 - 解码token ID为文本（默认不跳过特殊token）
 #[no_mangle]
-pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_decode__JLjava_lang_String_2(
+pub extern "system" fn Java_com_offlineai_tokenizers_TokenizerJNI_decode__JLjava_lang_String_2(
     env: JNIEnv,
     _class: JClass,
     tokenizer_ptr: jlong,
@@ -346,7 +346,7 @@ pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_decode__JLj
 
 // 直接JNI实现 - 解码token ID为文本（可选择是否跳过特殊token）
 #[no_mangle]
-pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_decode__JLjava_lang_String_2Z(
+pub extern "system" fn Java_com_offlineai_tokenizers_TokenizerJNI_decode__JLjava_lang_String_2Z(
     env: JNIEnv,
     _class: JClass,
     tokenizer_ptr: jlong,
@@ -422,7 +422,7 @@ fn decode_impl(
 
 // 直接JNI实现 - 释放分词器
 #[no_mangle]
-pub extern "system" fn Java_com_starlocalrag_tokenizers_TokenizerJNI_freeTokenizer(
+pub extern "system" fn Java_com_offlineai_tokenizers_TokenizerJNI_freeTokenizer(
     _env: JNIEnv,
     _class: JClass,
     tokenizer_ptr: jlong,

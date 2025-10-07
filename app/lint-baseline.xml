@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+﻿<?xml version="1.0" encoding="UTF-8"?>
 <issues format="6" by="lint 8.9.1" type="baseline" client="gradle" dependencies="false" name="AGP (8.9.1)" variant="all" version="8.9.1">
 
     <issue
@@ -7,7 +7,7 @@
         errorLine1="            String filePath = tokenizerFile.getAbsolutePath().toLowerCase();"
         errorLine2="                                                              ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/BertTokenizer.java"
+            file="src/main/java/com/example/OfflineAI/BertTokenizer.java"
             line="201"
             column="63"/>
     </issue>
@@ -18,7 +18,7 @@
         errorLine1="                    text = text.toLowerCase();"
         errorLine2="                                ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/BertTokenizer.java"
+            file="src/main/java/com/example/OfflineAI/BertTokenizer.java"
             line="1259"
             column="33"/>
     </issue>
@@ -29,7 +29,7 @@
         errorLine1="                            textViewProgressLabel.setText(String.format(&quot;%.1f%%&quot;, percentage) + &quot; &quot; + formatElapsedTime());"
         errorLine2="                                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/BuildKnowledgeBaseFragment.java"
+            file="src/main/java/com/example/OfflineAI/BuildKnowledgeBaseFragment.java"
             line="592"
             column="59"/>
     </issue>
@@ -40,7 +40,7 @@
         errorLine1="                    if (file.isFile() &amp;&amp; file.getName().toLowerCase().contains(&quot;embedding&quot;)) {"
         errorLine2="                                                        ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/ConfigManager.java"
+            file="src/main/java/com/example/OfflineAI/ConfigManager.java"
             line="520"
             column="57"/>
     </issue>
@@ -51,7 +51,7 @@
         errorLine1="                    String name = file.getName().toLowerCase();"
         errorLine2="                                                 ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/ConfigManager.java"
+            file="src/main/java/com/example/OfflineAI/ConfigManager.java"
             line="528"
             column="50"/>
     </issue>
@@ -62,7 +62,7 @@
         errorLine1="                    String name = file.getName().toLowerCase();"
         errorLine2="                                                 ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/ConfigManager.java"
+            file="src/main/java/com/example/OfflineAI/ConfigManager.java"
             line="548"
             column="50"/>
     </issue>
@@ -73,7 +73,7 @@
         errorLine1="                mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(fileExtension.toLowerCase());"
         errorLine2="                                                                                             ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/DocumentParser.java"
+            file="src/main/java/com/example/OfflineAI/DocumentParser.java"
             line="129"
             column="94"/>
     </issue>
@@ -84,7 +84,7 @@
         errorLine1="        String lowerCase = fileName.toLowerCase();"
         errorLine2="                                    ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/DocumentParser.java"
+            file="src/main/java/com/example/OfflineAI/DocumentParser.java"
             line="151"
             column="37"/>
     </issue>
@@ -95,7 +95,7 @@
         errorLine1="        return fileName.toLowerCase().endsWith(&quot;.pdf&quot;);"
         errorLine2="                        ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/DocumentParser.java"
+            file="src/main/java/com/example/OfflineAI/DocumentParser.java"
             line="162"
             column="25"/>
     </issue>
@@ -106,7 +106,7 @@
         errorLine1="            String lowerCase = fileName.toLowerCase();"
         errorLine2="                                        ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/DocumentParser.java"
+            file="src/main/java/com/example/OfflineAI/DocumentParser.java"
             line="176"
             column="41"/>
     </issue>
@@ -117,7 +117,7 @@
         errorLine1="                    String fileName = file.getName().toLowerCase();"
         errorLine2="                                                     ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/EmbeddingModelHandler.java"
+            file="src/main/java/com/example/OfflineAI/EmbeddingModelHandler.java"
             line="257"
             column="54"/>
     </issue>
@@ -128,7 +128,7 @@
         errorLine1="        if (modelPath != null &amp;&amp; modelPath.toLowerCase().contains(&quot;bge-m3&quot;)) {"
         errorLine2="                                           ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/EmbeddingModelHandler.java"
+            file="src/main/java/com/example/OfflineAI/EmbeddingModelHandler.java"
             line="639"
             column="44"/>
     </issue>
@@ -139,7 +139,7 @@
         errorLine1="        String lowerPath = path.toLowerCase();"
         errorLine2="                                ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/EmbeddingModelHandler.java"
+            file="src/main/java/com/example/OfflineAI/EmbeddingModelHandler.java"
             line="694"
             column="33"/>
     </issue>
@@ -150,7 +150,7 @@
         errorLine1="                if (dirName.toLowerCase().contains(&quot;bge-m3&quot;)) {"
         errorLine2="                            ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/EmbeddingModelHandler.java"
+            file="src/main/java/com/example/OfflineAI/EmbeddingModelHandler.java"
             line="758"
             column="29"/>
     </issue>
@@ -161,7 +161,7 @@
         errorLine1="                    if (dirName.toLowerCase().contains(keyword.toLowerCase())) {"
         errorLine2="                                ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/EmbeddingModelHandler.java"
+            file="src/main/java/com/example/OfflineAI/EmbeddingModelHandler.java"
             line="795"
             column="33"/>
     </issue>
@@ -172,7 +172,7 @@
         errorLine1="                    if (dirName.toLowerCase().contains(keyword.toLowerCase())) {"
         errorLine2="                                                               ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/EmbeddingModelHandler.java"
+            file="src/main/java/com/example/OfflineAI/EmbeddingModelHandler.java"
             line="795"
             column="64"/>
     </issue>
@@ -183,7 +183,7 @@
         errorLine1="                            if (name.toLowerCase().contains(&quot;bge-m3&quot;)) {"
         errorLine2="                                     ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/EmbeddingModelHandler.java"
+            file="src/main/java/com/example/OfflineAI/EmbeddingModelHandler.java"
             line="864"
             column="38"/>
     </issue>
@@ -194,7 +194,7 @@
         errorLine1="                if (fileName.toLowerCase().endsWith(&quot;.json&quot;)) {"
         errorLine2="                             ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/TextProcessor.java"
+            file="src/main/java/com/example/OfflineAI/TextProcessor.java"
             line="82"
             column="30"/>
     </issue>
@@ -205,7 +205,7 @@
         errorLine1="        String message = String.format(&quot;字体大小: %.1fsp (范围: %.1f-%.1fsp)&quot;, "
         errorLine2="                         ^">
         <location
-            file="src/main/java/com/example/starlocalrag/TextViewZoomHelper.java"
+            file="src/main/java/com/example/OfflineAI/TextViewZoomHelper.java"
             line="168"
             column="26"/>
     </issue>
@@ -216,7 +216,7 @@
         errorLine1="        Toast.makeText(context, &quot;字体大小: &quot; + String.format(&quot;%.1f&quot;, currentTextSize) + &quot;sp&quot;, Toast.LENGTH_SHORT).show();"
         errorLine2="                                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/ViewZoomHelper.java"
+            file="src/main/java/com/example/OfflineAI/ViewZoomHelper.java"
             line="171"
             column="44"/>
     </issue>
@@ -238,7 +238,7 @@
         errorLine1="            possiblePaths.add(&quot;/sdcard/Download/starragdata/embeddings&quot;);"
         errorLine2="                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/RagQaFragment.java"
+            file="src/main/java/com/example/OfflineAI/RagQaFragment.java"
             line="1763"
             column="31"/>
     </issue>
@@ -249,7 +249,7 @@
         errorLine1="        possiblePaths.add(&quot;/sdcard/Download/starragdata/embeddings&quot;);"
         errorLine2="                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/RagQaFragment.java"
+            file="src/main/java/com/example/OfflineAI/RagQaFragment.java"
             line="2105"
             column="27"/>
     </issue>
@@ -260,7 +260,7 @@
         errorLine1="            String timestamp = new java.text.SimpleDateFormat(&quot;yyyy-MM-dd HH:mm:ss&quot;).format(new java.util.Date());"
         errorLine2="                               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/RagQaFragment.java"
+            file="src/main/java/com/example/OfflineAI/RagQaFragment.java"
             line="717"
             column="32"/>
     </issue>
@@ -271,7 +271,7 @@
         errorLine1="        startForeground(NOTIFICATION_ID, createNotification(&quot;正在构建知识库...&quot;));"
         errorLine2="        ~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/KnowledgeBaseService.java"
+            file="src/main/java/com/example/OfflineAI/KnowledgeBaseService.java"
             line="75"
             column="9"/>
     </issue>
@@ -383,7 +383,7 @@
         errorLine1="            wakeLock.acquire();"
         errorLine2="            ~~~~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/KnowledgeBaseService.java"
+            file="src/main/java/com/example/OfflineAI/KnowledgeBaseService.java"
             line="79"
             column="13"/>
     </issue>
@@ -394,7 +394,7 @@
         errorLine1="        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {"
         errorLine2="            ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/KnowledgeBaseService.java"
+            file="src/main/java/com/example/OfflineAI/KnowledgeBaseService.java"
             line="58"
             column="13"/>
     </issue>
@@ -690,7 +690,7 @@
         errorLine1="        spinnerApiModel.setOnTouchListener((v, event) -> {"
         errorLine2="                                           ^">
         <location
-            file="src/main/java/com/example/starlocalrag/RagQaFragment.java"
+            file="src/main/java/com/example/OfflineAI/RagQaFragment.java"
             line="189"
             column="44"/>
     </issue>
@@ -701,7 +701,7 @@
         errorLine1="        spinnerKnowledgeBase.setOnTouchListener((v, event) -> {"
         errorLine2="                                                ^">
         <location
-            file="src/main/java/com/example/starlocalrag/RagQaFragment.java"
+            file="src/main/java/com/example/OfflineAI/RagQaFragment.java"
             line="214"
             column="49"/>
     </issue>
@@ -712,7 +712,7 @@
         errorLine1="        textView.setOnTouchListener((v, event) -> {"
         errorLine2="        ^">
         <location
-            file="src/main/java/com/example/starlocalrag/TextViewZoomHelper.java"
+            file="src/main/java/com/example/OfflineAI/TextViewZoomHelper.java"
             line="50"
             column="9"/>
     </issue>
@@ -723,7 +723,7 @@
         errorLine1="        textView.setOnTouchListener((v, event) -> {"
         errorLine2="                                    ^">
         <location
-            file="src/main/java/com/example/starlocalrag/TextViewZoomHelper.java"
+            file="src/main/java/com/example/OfflineAI/TextViewZoomHelper.java"
             line="50"
             column="37"/>
     </issue>
@@ -734,7 +734,7 @@
         errorLine1="        targetView.setOnTouchListener((v, event) -> {"
         errorLine2="                                      ^">
         <location
-            file="src/main/java/com/example/starlocalrag/ViewZoomHelper.java"
+            file="src/main/java/com/example/OfflineAI/ViewZoomHelper.java"
             line="54"
             column="39"/>
     </issue>
@@ -822,7 +822,7 @@
         errorLine1="                            textViewProgressLabel.setText(String.format(&quot;%.1f%%&quot;, percentage) + &quot; &quot; + formatElapsedTime());"
         errorLine2="                                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/BuildKnowledgeBaseFragment.java"
+            file="src/main/java/com/example/OfflineAI/BuildKnowledgeBaseFragment.java"
             line="592"
             column="59"/>
     </issue>
@@ -833,7 +833,7 @@
         errorLine1="            textViewProgressLabel.setText(&quot;0/0 00:00:00&quot;);"
         errorLine2="                                          ~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/BuildKnowledgeBaseFragment.java"
+            file="src/main/java/com/example/OfflineAI/BuildKnowledgeBaseFragment.java"
             line="792"
             column="43"/>
     </issue>
@@ -844,7 +844,7 @@
         errorLine1="            textViewProgressLabel.setText(&quot;0/&quot; + totalFiles + &quot; 00:00:00&quot;);"
         errorLine2="                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/BuildKnowledgeBaseFragment.java"
+            file="src/main/java/com/example/OfflineAI/BuildKnowledgeBaseFragment.java"
             line="806"
             column="43"/>
     </issue>
@@ -855,7 +855,7 @@
         errorLine1="            textViewProgressLabel.setText(&quot;0/&quot; + totalFiles + &quot; 00:00:00&quot;);"
         errorLine2="                                                              ~~~~~~~~~~~">
         <location
-            file="src/main/java/com/example/starlocalrag/BuildKnowledgeBaseFragment.java"
+            file="src/main/java/com/example/OfflineAI/BuildKnowledgeBaseFragment.java"
             line="806"
             column="63"/>
     </issue>
@@ -1697,3 +1697,4 @@
     </issue>
 
 </issues>
+

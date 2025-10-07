@@ -1,11 +1,11 @@
-# Git LFS 使用指南 | Git LFS Usage Guide
+﻿# Git LFS 使用指南 | Git LFS Usage Guide
 
 ## 中文
 
 ### 概述
 
 本项目已配置 Git LFS (Large File Storage) 来处理大文件，特别是：
-- APK 文件（如 StarLocalRAG_release20250709230825.apk，170.92 MB）
+- APK 文件（如 OfflineAI_release20250709230825.apk，170.92 MB）
 - JNI 库文件（app/src/main/jniLibs/ 目录下的 .so 文件，50-55MB）
 
 ### 已配置的文件类型
@@ -56,8 +56,8 @@ git lfs status
 
 ```bash
 # 克隆仓库并下载 LFS 文件
-git clone https://github.com/er6y/StarLocalRAG.git
-cd StarLocalRAG
+git clone https://github.com/er6y/OfflineAI.git
+cd OfflineAI
 git lfs pull
 ```
 
@@ -78,7 +78,7 @@ git lfs pull
 ### Overview
 
 This project has been configured with Git LFS (Large File Storage) to handle large files, specifically:
-- APK files (e.g., StarLocalRAG_release20250709230825.apk, 170.92 MB)
+- APK files (e.g., OfflineAI_release20250709230825.apk, 170.92 MB)
 - JNI library files (.so files in app/src/main/jniLibs/ directory, 50-55MB)
 
 ### Configured File Types
@@ -129,8 +129,8 @@ git lfs status
 
 ```bash
 # Clone repository and download LFS files
-git clone https://github.com/er6y/StarLocalRAG.git
-cd StarLocalRAG
+git clone https://github.com/er6y/OfflineAI.git
+cd OfflineAI
 git lfs pull
 ```
 

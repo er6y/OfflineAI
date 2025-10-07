@@ -1,0 +1,62 @@
+{
+  "embedding": {
+    "Qwen3-Embedding-0.6B-onnx-uint8": {
+      ".gitattributes": "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/.gitattributes?download=true",
+      "added_tokens.json": "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/added_tokens.json?download=true",
+      "config.json": "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/config.json?download=true",
+      "dynamic_uint8.onnx": "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/dynamic_uint8.onnx?download=true",
+      "merges.txt": "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/merges.txt?download=true",
+      "tokenizer.json": "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/tokenizer.json?download=true",
+      "tokenizer_config.json": "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/tokenizer_config.json?download=true",
+      "vocab.json": "https://hf-mirror.com/electroglyph/Qwen3-Embedding-0.6B-onnx-uint8/resolve/main/vocab.json?download=true",
+	  "comments": "RAG嵌入式向量生成。/RAG embedding Vector generation."
+    },
+    "bge-m3_dynamic_int8_onnx": {
+      "tokenizer_config.json": "https://hf-mirror.com/er6y/bge-m3_dynamic_int8_onnx/resolve/main/tokenizer_config.json?download=true",
+      "tokenizer.json": "https://hf-mirror.com/er6y/bge-m3_dynamic_int8_onnx/resolve/main/tokenizer.json?download=true",
+      "special_tokens_map.json": "https://hf-mirror.com/er6y/bge-m3_dynamic_int8_onnx/resolve/main/special_tokens_map.json?download=true",
+      "model.onnx": "https://hf-mirror.com/er6y/bge-m3_dynamic_int8_onnx/resolve/main/model.onnx?download=true",
+      "conversion_info.json": "https://hf-mirror.com/er6y/bge-m3_dynamic_int8_onnx/resolve/main/conversion_info.json?download=true",
+      "config.json": "https://hf-mirror.com/er6y/bge-m3_dynamic_int8_onnx/resolve/main/config.json?download=true",
+	  "comments": "RAG嵌入式向量生成。/RAG embedding Vector generation."
+    }
+  },
+  "reranker": {
+    "bge-reranker-v2-m3_dynamic_int8_onnx": {
+      "config.json": "https://hf-mirror.com/er6y/bge-reranker-v2-m3_dynamic_int8_onnx/resolve/main/config.json?download=true",
+      "conversion_info.json": "https://hf-mirror.com/er6y/bge-reranker-v2-m3_dynamic_int8_onnx/resolve/main/conversion_info.json?download=true",
+      "model.onnx": "https://hf-mirror.com/er6y/bge-reranker-v2-m3_dynamic_int8_onnx/resolve/main/model.onnx?download=true",
+      "special_tokens_map.json": "https://hf-mirror.com/er6y/bge-reranker-v2-m3_dynamic_int8_onnx/resolve/main/special_tokens_map.json?download=true",
+      "tokenizer.json": "https://hf-mirror.com/er6y/bge-reranker-v2-m3_dynamic_int8_onnx/resolve/main/tokenizer.json?download=true",
+      "tokenizer_config.json": "https://hf-mirror.com/er6y/bge-reranker-v2-m3_dynamic_int8_onnx/resolve/main/tokenizer_config.json?download=true",
+	  "comments": "RAG召回结果重排增强准确性。/RAG Recall Results Re-ranking for Enhanced Accuracy."
+    }
+  },
+  "llm": {
+    "Qwen3-0.6B-GGUF-Q8_0": {
+      "Qwen3-0.6B-Q8_0.gguf": "https://hf-mirror.com/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf?download=true",
+      "params": "https://hf-mirror.com/Qwen/Qwen3-0.6B-GGUF/resolve/main/params?download=true",
+	  "comments": "Qwen3 Text2Text."
+    },
+    "Qwen3-1.7B-GGUF-Q8_0": {
+      "Qwen3-1.7B-Q8_0.gguf": "https://hf-mirror.com/Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q8_0.gguf?download=true",
+      "params": "https://hf-mirror.com/Qwen/Qwen3-1.7B-GGUF/resolve/main/params?download=true",
+	  "comments": "Qwen3 Text2Text."
+    },
+    "Qwen3-4B-Thinking-2507-GGUF-Q4_0": {
+      "Qwen3-4B-Thinking-2507-Q4_0.gguf": "https://www.modelscope.cn/models/unsloth/Qwen3-4B-Thinking-2507-GGUF/resolve/master/Qwen3-4B-Thinking-2507-Q4_0.gguf",
+      "params": "https://www.modelscope.cn/models/unsloth/Qwen3-4B-Thinking-2507-GGUF/resolve/master/params",
+	  "comments": "Qwen3 Text2Text. Recommended for local RAG LLM"
+    },
+    "Qwen2.5-VL-3B-Instruct-GGUF-Q4_K_M": {
+      "Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf": "https://www.modelscope.cn/models/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/master/Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+      "mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf": "https://www.modelscope.cn/models/ggml-org/Qwen2.5-VL-3B-Instruct-GGUF/resolve/master/mmproj-Qwen2.5-VL-3B-Instruct-Q8_0.gguf",
+	  "comments": "Qwen2.5 VL Text-Image2Text"
+    },
+    "Qwen2.5-VL-3B-Instruct-GGUF-Q4_0": {
+      "Qwen2.5-VL-3B-Instruct-Q4_0.gguf": "https://www.modelscope.cn/models/unsloth/Qwen2.5-VL-3B-Instruct-GGUF/resolve/master/Qwen2.5-VL-3B-Instruct-Q4_0.gguf",
+      "mmproj-F16.gguf": "https://www.modelscope.cn/models/unsloth/Qwen2.5-VL-3B-Instruct-GGUF/resolve/master/mmproj-F16.gguf",
+	  "comments": "Qwen2.5 VL Text-Image2Text"
+    }	
+  }
+}

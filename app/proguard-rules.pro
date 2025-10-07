@@ -170,14 +170,14 @@
 -dontwarn io.noties.markwon.**
 
 # 保持本地LLM相关类
--keep class com.example.starlocalrag.api.** { *; }
--keep class com.example.starlocalrag.LocalLlmHandler { *; }
--keep class com.example.starlocalrag.LocalLlmHandler$** { *; }
+-keep class com.example.offlineai.api.** { *; }
+-keep class com.example.offlineai.LocalLlmHandler { *; }
+-keep class com.example.offlineai.LocalLlmHandler$** { *; }
 
 # 保持所有应用的Fragment和Activity类
--keep class com.example.starlocalrag.*Fragment { *; }
--keep class com.example.starlocalrag.*Activity { *; }
--keep class com.example.starlocalrag.MainActivity { *; }
+-keep class com.example.offlineai.*Fragment { *; }
+-keep class com.example.offlineai.*Activity { *; }
+-keep class com.example.offlineai.MainActivity { *; }
 
 # 保持所有点击事件处理方法
 -keepclassmembers class * {
@@ -420,41 +420,41 @@
 -dontwarn software.amazon.awssdk.crt.s3.S3MetaRequestResponseHandler
 
 # 保持所有Adapter类
--keep class com.example.starlocalrag.*Adapter { *; }
--keep class com.example.starlocalrag.*Adapter$** { *; }
+-keep class com.example.offlineai.*Adapter { *; }
+-keep class com.example.offlineai.*Adapter$** { *; }
 
 # 保持所有Manager和Handler类
--keep class com.example.starlocalrag.*Manager { *; }
--keep class com.example.starlocalrag.*Handler { *; }
--keep class com.example.starlocalrag.*Manager$** { *; }
--keep class com.example.starlocalrag.*Handler$** { *; }
+-keep class com.example.offlineai.*Manager { *; }
+-keep class com.example.offlineai.*Handler { *; }
+-keep class com.example.offlineai.*Manager$** { *; }
+-keep class com.example.offlineai.*Handler$** { *; }
 
 # ===== 开源项目专用配置 =====
 # 开源项目禁止混淆，保持所有类名、方法名、字段名不变
 # 只启用压缩和性能优化，便于开源协作、调试和代码追踪
 
 # 保持所有应用类完全不混淆
--keep class com.example.starlocalrag.** {
+-keep class com.example.offlineai.** {
     *;
 }
 
 # 保持所有类名、方法名、字段名不混淆
--keepnames class com.example.starlocalrag.**
--keepclassmembernames class com.example.starlocalrag.** {
+-keepnames class com.example.offlineai.**
+-keepclassmembernames class com.example.offlineai.** {
     *;
 }
 
 # 保持所有内部类和匿名类不混淆
--keepnames class com.example.starlocalrag.**$*
--keepclassmembernames class com.example.starlocalrag.**$* {
+-keepnames class com.example.offlineai.**$*
+-keepclassmembernames class com.example.offlineai.**$* {
     *;
 }
 
 # 保持View Binding相关类
--keep class com.example.starlocalrag.databinding.** { *; }
+-keep class com.example.offlineai.databinding.** { *; }
 
 # 保持所有内部类和匿名类
--keep class com.example.starlocalrag.**$* { *; }
+-keep class com.example.offlineai.**$* { *; }
 
 # 保持JNI相关
 -keepclasseswithmembernames class * {
@@ -462,15 +462,15 @@
 }
 
 # 保持 LlamaCpp JNI 相关类 - 开源项目完全不混淆
--keep class com.starlocalrag.llamacpp.** { *; }
--keepnames class com.starlocalrag.llamacpp.**
--keepclassmembernames class com.starlocalrag.llamacpp.** {
+-keep class com.offlineai.llamacpp.** { *; }
+-keepnames class com.offlineai.llamacpp.**
+-keepclassmembernames class com.offlineai.llamacpp.** {
     *;
 }
 
 # 保持所有内部类和匿名类不混淆
--keepnames class com.starlocalrag.llamacpp.**$*
--keepclassmembernames class com.starlocalrag.llamacpp.**$* {
+-keepnames class com.offlineai.llamacpp.**$*
+-keepclassmembernames class com.offlineai.llamacpp.**$* {
     *;
 }
 

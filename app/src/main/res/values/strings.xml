@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">StarLocalRAG</string>
+    <string name="app_name">OfflineAI</string>
     
     <!-- 通用状态字符串 -->
     <string name="common_success">成功</string>
@@ -124,7 +124,7 @@
     <string name="progress_vectorization_keyword">正在生成向量</string>
 
     <!-- 导航项 -->
-    <string name="navigation_rag_qa">RAG问答</string>
+    <string name="navigation_rag_qa">AI问答</string>
     <string name="navigation_build_kb">构建知识库</string>
     <string name="navigation_kb_note">知识库笔记</string>
 
@@ -264,10 +264,10 @@
     <string name="dialog_message_confirm_interrupt">确定要中断当前知识库创建过程吗？已处理的数据将被保留。</string>
     <string name="dialog_message_kb_exists">知识库 "%1$s" 已存在，您想要如何处理？</string>
     <string name="dialog_title_need_full_file_access">需要完全文件访问权限</string>
-    <string name="dialog_message_need_full_file_access">StarLocalRAG需要完全的文件访问权限才能正常工作。请在接下来的设置页面中授予权限，授予后将不再请求此权限。</string>
+    <string name="dialog_message_need_full_file_access">OfflineAI需要完全的文件访问权限才能正常工作。请在接下来的设置页面中授予权限，授予后将不再请求此权限。</string>
     <string name="dialog_title_need_storage_permission">需要存储权限</string>
-    <string name="dialog_message_need_storage_permission">StarLocalRAG 需要访问外部存储权限才能读取和保存模型文件、知识库文件等。\n\n请在设置中授予应用存储权限，否则应用将无法正常工作。</string>
-    <string name="dialog_title_about">关于 StarLocalRAG</string>
+    <string name="dialog_message_need_storage_permission">OfflineAI 需要访问外部存储权限才能读取和保存模型文件、知识库文件等。\n\n请在设置中授予应用存储权限，否则应用将无法正常工作。</string>
+    <string name="dialog_title_about">关于 OfflineAI</string>
     <string name="dialog_message_about">版本: %1$s\n\n本地RAG (检索增强生成) 应用</string>
     <string name="dialog_add_new_api_address">添加新的API地址</string>
 
@@ -404,7 +404,8 @@
     <string name="dialog_select_embedding_model">请选择要使用的嵌入模型：</string>
     <string name="dialog_select_reranker_model">请选择要使用的重排模型：</string>
     <string name="dialog_remember_choice">记住此选择，下次自动使用</string>
-    <string name="title_default_model_download">默认模型下载</string>
+    <string name="text_model_download">模型下载</string>
+    <string name="text_model_list_hint">模型列表文件ModelDownloadList.txt保存于“设置”的模型根目录下面，可自行增添内容。</string>
     <string name="title_embedding_model_list">嵌入模型列表</string>
     <string name="title_reranker_model_list">重排模型列表</string>
     <string name="title_llm_list">LLM列表</string>
@@ -443,9 +444,6 @@
     <string name="text_knowledge_base">知识库</string>
     <string name="text_related">相关</string>
     <string name="text_text_chunking_settings">文本分块设置</string>
-    <string name="text_model_download">模型下载</string>
-
-
     <!-- 文件类型显示文本 -->
     <string name="file_type_pdf">PDF文档</string>
     <string name="file_type_txt">文本文件</string>
@@ -866,7 +864,7 @@
     <string name="hint_api_url_example">例如: https://api.example.com</string>
     <string name="label_api_key_optional">API密钥 (可选)</string>
     <string name="hint_api_key_example">例如: sk-abcdefg123456</string>
-    <string name="title_help">StarLocalRAG 使用说明</string>
+    <string name="title_help">OfflineAI 使用说明</string>
     <string name="content_description_scroll_up">向上滚动</string>
     <string name="content_description_scroll_down">向下滚动</string>
     

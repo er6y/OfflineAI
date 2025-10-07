@@ -4,6 +4,6 @@
 }
 
 # Keep tokenizer JNI class
--keep class com.starlocalrag.tokenizers.HuggingfaceTokenizerJNI {
+-keep class com.offlineai.tokenizers.HuggingfaceTokenizerJNI {
     *;
 }

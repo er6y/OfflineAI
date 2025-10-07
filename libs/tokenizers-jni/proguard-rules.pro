@@ -25,15 +25,15 @@
 # 只启用压缩和性能优化，便于开源协作、调试和代码追踪
 
 # 保持所有JNI相关类完全不混淆
--keep class com.starlocalrag.tokenizers.** { *; }
--keepnames class com.starlocalrag.tokenizers.**
--keepclassmembernames class com.starlocalrag.tokenizers.** {
+-keep class com.offlineai.tokenizers.** { *; }
+-keepnames class com.offlineai.tokenizers.**
+-keepclassmembernames class com.offlineai.tokenizers.** {
     *;
 }
 
 # 保持所有内部类和匿名类不混淆
--keepnames class com.starlocalrag.tokenizers.**$*
--keepclassmembernames class com.starlocalrag.tokenizers.**$* {
+-keepnames class com.offlineai.tokenizers.**$*
+-keepclassmembernames class com.offlineai.tokenizers.**$* {
     *;
 }
 

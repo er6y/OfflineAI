@@ -8,16 +8,28 @@
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal"
+        android:orientation="vertical"
         android:padding="16dp"
         android:gravity="center_vertical">
 
+        <!-- 标题 -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/title_default_model_download"
-            android:textSize="20sp"
+            android:text="@string/text_model_download"
+            android:textSize="16sp"
             android:textStyle="bold" />
+
+        <!-- 说明小字 -->
+        <TextView
+            android:id="@+id/textViewModelListHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/text_model_list_hint"
+            android:textSize="10sp"
+            android:textColor="@android:color/darker_gray"
+            android:typeface="monospace"
+            android:layout_marginTop="0dp" />
 
     </LinearLayout>
 
@@ -41,19 +53,12 @@
             android:textStyle="bold"
             android:layout_marginBottom="0dp" />
 
-        <CheckBox
-            android:id="@+id/checkBoxBgeM3"
+        <LinearLayout
+            android:id="@+id/containerEmbeddingModels"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="bge-m3_dynamic_int8_onnx"
-            android:layout_marginBottom="0dp" />
-
-        <CheckBox
-            android:id="@+id/checkBoxQwen3Embedding"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Qwen3-Embedding-0.6B-onnx-uint8"
-            android:layout_marginBottom="0dp" />
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp" />
 
         <!-- 重排模型列表 -->
         <TextView
@@ -65,12 +70,12 @@
             android:layout_marginTop="2dp"
             android:layout_marginBottom="0dp" />
 
-        <CheckBox
-            android:id="@+id/checkBoxBgeReranker"
+        <LinearLayout
+            android:id="@+id/containerRerankerModels"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="bge-reranker-v2-m3_dynamic_int8_onnx"
-            android:layout_marginBottom="0dp" />
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp" />
 
         <!-- LLM列表 -->
         <TextView
@@ -82,19 +87,12 @@
             android:layout_marginTop="2dp"
             android:layout_marginBottom="0dp" />
 
-        <CheckBox
-            android:id="@+id/checkBoxQwen06B"
+        <LinearLayout
+            android:id="@+id/containerLlmModels"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Qwen3-0.6B-GGUF"
-            android:layout_marginBottom="0dp" />
-
-        <CheckBox
-            android:id="@+id/checkBoxQwen17B"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Qwen3-1.7B-GGUF"
-            android:layout_marginBottom="0dp" />
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp" />
 
         <!-- 进度显示区域 -->
         <TextView

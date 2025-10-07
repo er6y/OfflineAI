@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace = 'com.starlocalrag.tokenizers'
+    namespace = 'com.offlineai.tokenizers'
     compileSdkVersion 34
 
     defaultConfig {
@@ -43,7 +43,7 @@ android {
     }
 }
 
-group = 'com.starlocalrag'
+group = 'com.offlineai'
 version = '1.0-SNAPSHOT'
 
 dependencies {

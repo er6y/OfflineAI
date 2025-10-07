@@ -1,4 +1,4 @@
-// 修复前：长度限制时返回nullptr，导致Java层无限循环
+﻿// 修复前：长度限制时返回nullptr，导致Java层无限循环
 if (should_end_eog || should_end_length) {
     return nullptr;  // 错误：Java层会继续循环
 }
@@ -141,7 +141,7 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - SettingsFragment.getBackendPreference() 方法：移除布尔值兼容性处理，直接验证后端偏好值有效性，无效时默认返回 "CPU"。
   - 删除不再使用的 SettingsFragment.getUseGpu() 方法。
 - Java 层包装方法（本次补充）：
-  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/example/starlocalrag/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，新增对 "KLEIDIAI" 与 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
+  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/example/OfflineAI/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，新增对 "KLEIDIAI" 与 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
 - 后端映射逻辑下沉到JNI层（架构优化）：
   - 原Java层映射逻辑：LocalLLMLlamaCppHandler.mapBackendPreferenceToGpuLayers() 将字符串后端偏好映射为 nGpuLayers 参数（"CPU" → 0，"VULKAN" → -1）。
   - 重构后JNI层映射：新增 load_model_with_backend 和 new_context_with_backend JNI方法，直接接收后端偏好字符串，在C++层实现 map_backend_preference_to_gpu_layers 映射逻辑。
@@ -173,7 +173,7 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - "[BACKEND] preference=CPU -> CPU path (KleidiAI microkernels if compiled)"
   - "[CPU] features -> dotprod=<0|1> sme=<0|1>"
   - "[KLEIDIAI] compiled-in: <yes|no>"
-- 代码位置：<mcfile name="SettingsFragment.java" path="app/src/main/java/com/example/starlocalrag/SettingsFragment.java"></mcfile> 中的硬编码选项为来源；getBackendPreference(Context) 对读取值进行有效性校验与兼容映射；<mcfile name="llama_inference.cpp" path="libs/llamacpp-jni/src/main/cpp/llama_inference.cpp"></mcfile> 中依据后端字符串设置 GGML_KLEIDIAI_SME 环境变量。
+- 代码位置：<mcfile name="SettingsFragment.java" path="app/src/main/java/com/example/OfflineAI/SettingsFragment.java"></mcfile> 中的硬编码选项为来源；getBackendPreference(Context) 对读取值进行有效性校验与兼容映射；<mcfile name="llama_inference.cpp" path="libs/llamacpp-jni/src/main/cpp/llama_inference.cpp"></mcfile> 中依据后端字符串设置 GGML_KLEIDIAI_SME 环境变量。
 
 ---
 
@@ -188,7 +188,7 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - SettingsFragment.getBackendPreference() 方法：移除布尔值兼容性处理，直接验证后端偏好值有效性；对历史值进行兼容映射，无效时默认返回 "CPU"。
   - 删除不再使用的 SettingsFragment.getUseGpu() 方法。
 - Java 层包装方法（本次补充）：
-  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/starlocalrag/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，包含对 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
+  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/OfflineAI/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，包含对 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
 - 后端映射逻辑下沉到JNI层（架构优化）：
   - 参见上文，不再赘述。
 
@@ -254,10 +254,10 @@ KleidiAI 头文件路径与 CMake 集成（本次修复）
   3) 建议用条件包裹（例如启用 KleidiAI 时才生效），避免未启用 KleidiAI 的冗余 include。
 - 实施位置：
   - 在 <mcfile name="CMakeLists.txt" path="libs/llamacpp-jni/src/main/cpp/CMakeLists.txt"></mcfile> 中，ggml-cpu 目标创建后通过 target_include_directories 注入下列目录（示例）：
-    - D:/yilei.wang/StarLocalRAG/libs/kleidiai/kai/ukernels/matmul/pack
-    - D:/yilei.wang/StarLocalRAG/libs/kleidiai/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p
-    - D:/yilei.wang/StarLocalRAG/libs/kleidiai/kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi4c32p
-    - D:/yilei.wang/StarLocalRAG/libs/kleidiai/kai/ukernels/matmul/matmul_clamp_fp32_bf16p_bf16
+    - D:/yilei.wang/OfflineAI/libs/kleidiai/kai/ukernels/matmul/pack
+    - D:/yilei.wang/OfflineAI/libs/kleidiai/kai/ukernels/matmul/matmul_clamp_f32_qsi8d32p_qsi4c32p
+    - D:/yilei.wang/OfflineAI/libs/kleidiai/kai/ukernels/matmul/matmul_clamp_f32_qai8dxp_qsi4c32p
+    - D:/yilei.wang/OfflineAI/libs/kleidiai/kai/ukernels/matmul/matmul_clamp_fp32_bf16p_bf16
   - 依据 <mcfile name="kernels.cpp" path="libs/llama.cpp-master/ggml/src/ggml-cpu/kleidiai/kernels.cpp"></mcfile> 顶部 include 的内核头做最小集合覆盖，避免过度添加目录。
 - 构建验证：
   - 执行 ninja -v -C <.cxx/Debug/.../arm64-v8a> llamacpp_jni 成功，产出 libllamacpp_jni.so；x86_64 同样产出。
@@ -341,7 +341,7 @@ CMake（JNI 构建脚本）优化补充说明（此次变更汇总，保持行�
   - 停止行为：无论用户点击“停止”或触发全局停止标志，Java 引擎在 generateWithLlamaCpp 与 generateWithTraditionalStreaming 结束时都会回调 onComplete；停止时追加英文日志 "[STREAM] ... finalizing with onComplete" 以便诊断。
   - 目的：确保 LocalLlmHandler/LocalLlmAdapter 的上层状态机能稳定复位 READY/清理调用态，避免 UI 悬挂或下次调用被占用。
   - 异常路径：超时/错误仍走 onError，不改变既有语义。
-  - 代码位置：<mcfile name="LocalLLMLlamaCppHandler.java" path="app/src/main/java/com/example/starlocalrag/api/LocalLLMLlamaCppHandler.java"></mcfile>
+  - 代码位置：<mcfile name="LocalLLMLlamaCppHandler.java" path="app/src/main/java/com/example/OfflineAI/api/LocalLLMLlamaCppHandler.java"></mcfile>
   
   - 状态快照日志（发送前/后台线程启动）
     - 目的：在用户点击“发送”与 RAG 后台任务启动两处关键时机，输出一帧“状态快照”英文日志，快速定位“推理未完全停止/卡死/状态错乱”等问题根因。
@@ -349,9 +349,9 @@ CMake（JNI 构建脚本）优化补充说明（此次变更汇总，保持行�
       - 发送前快照：位于发送按钮点击分支、参数日志之后，RAG 任务提交之前。
       - 后台线程启动快照：位于 ragQueryExecutor 提交的 Runnable 入口处（后台线程）。
     - 涉及代码：
-      - UI 层：<mcfile name="RagQaFragment.java" path="app/src/main/java/com/example/starlocalrag/ui/RagQaFragment.java"></mcfile>
-      - 全局停止与模块状态：<mcfile name="GlobalStopManager.java" path="app/src/main/java/com/example/starlocalrag/core/GlobalStopManager.java"></mcfile>
-      - 本地 LLM 状态：<mcfile name="LocalLlmAdapter.java" path="app/src/main/java/com/example/starlocalrag/api/LocalLlmAdapter.java"></mcfile>
+      - UI 层：<mcfile name="RagQaFragment.java" path="app/src/main/java/com/example/OfflineAI/ui/RagQaFragment.java"></mcfile>
+      - 全局停止与模块状态：<mcfile name="GlobalStopManager.java" path="app/src/main/java/com/example/OfflineAI/core/GlobalStopManager.java"></mcfile>
+      - 本地 LLM 状态：<mcfile name="LocalLlmAdapter.java" path="app/src/main/java/com/example/OfflineAI/api/LocalLlmAdapter.java"></mcfile>
     - 字段清单（发送前）：
       - UI/任务编排：isSending、isTaskRunning、isTaskCancelled、ragTaskFuture（isDone/isCancelled/非空）
       - 全局停止：GlobalStopManager.isGlobalStopRequested()、areAllModulesStopped()、isModuleStopped(...)（LLM/Embedding/Reranker/Tokenizer）
@@ -517,7 +517,7 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - SettingsFragment.getBackendPreference() 方法：移除布尔值兼容性处理，直接验证后端偏好值有效性，无效时默认返回 "CPU"。
   - 删除不再使用的 SettingsFragment.getUseGpu() 方法。
 - Java 层包装方法（本次补充）：
-  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/example/starlocalrag/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，新增对 "KLEIDIAI" 与 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
+  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/example/OfflineAI/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，新增对 "KLEIDIAI" 与 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
 - 后端映射逻辑下沉到JNI层（架构优化）：
   - 原Java层映射逻辑：LocalLLMLlamaCppHandler.mapBackendPreferenceToGpuLayers() 将字符串后端偏好映射为 nGpuLayers 参数（"CPU" → 0，"VULKAN" → -1）。
   - 重构后JNI层映射：新增 load_model_with_backend 和 new_context_with_backend JNI方法，直接接收后端偏好字符串，在C++层实现 map_backend_preference_to_gpu_layers 映射逻辑。
@@ -549,7 +549,7 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - "[BACKEND] preference=CPU -> CPU path (KleidiAI microkernels if compiled)"
   - "[CPU] features -> dotprod=<0|1> sme=<0|1>"
   - "[KLEIDIAI] compiled-in: <yes|no>"
-- 代码位置：<mcfile name="SettingsFragment.java" path="app/src/main/java/com/example/starlocalrag/SettingsFragment.java"></mcfile> 中的硬编码选项为来源；getBackendPreference(Context) 对读取值进行有效性校验与兼容映射；<mcfile name="llama_inference.cpp" path="libs/llamacpp-jni/src/main/cpp/llama_inference.cpp"></mcfile> 中依据后端字符串设置 GGML_KLEIDIAI_SME 环境变量。
+- 代码位置：<mcfile name="SettingsFragment.java" path="app/src/main/java/com/example/OfflineAI/SettingsFragment.java"></mcfile> 中的硬编码选项为来源；getBackendPreference(Context) 对读取值进行有效性校验与兼容映射；<mcfile name="llama_inference.cpp" path="libs/llamacpp-jni/src/main/cpp/llama_inference.cpp"></mcfile> 中依据后端字符串设置 GGML_KLEIDIAI_SME 环境变量。
 
 ---
 
@@ -564,7 +564,7 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - SettingsFragment.getBackendPreference() 方法：移除布尔值兼容性处理，直接验证后端偏好值有效性；对历史值进行兼容映射，无效时默认返回 "CPU"。
   - 删除不再使用的 SettingsFragment.getUseGpu() 方法。
 - Java 层包装方法（本次补充）：
-  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/starlocalrag/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，包含对 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
+  - 在 <mcfile name="LlamaCppInference.java" path="libs/llamacpp-jni/src/main/java/com/OfflineAI/llamacpp/LlamaCppInference.java"></mcfile> 的 setBackendPreference() 中，包含对 "KLEIDIAI-SME" 的合法性校验；当接收到未知值时，打印英文警告并回退为 "CPU"，示例："Unknown backend preference: <value>, using CPU"。
 - 后端映射逻辑下沉到JNI层（架构优化）：
   - 参见上文，不再赘述。
 
@@ -701,7 +701,7 @@ Vulkan 运行时检测与 CPU 回退策略（不改变章节结构，记录实�
   - 使用 `FORCE_LOG` 输出英文日志
   - 使用 `llama_model_meta_val_str()` 读取模型 metadata
 
-- **Java 接口**：`libs/llamacpp-jni/src/main/java/com/starlocalrag/llamacpp/LlamaCppInference.java`
+- **Java 接口**：`libs/llamacpp-jni/src/main/java/com/OfflineAI/llamacpp/LlamaCppInference.java`
   - 第 493-515 行：native 方法声明
   - 完整的 JavaDoc 注释
 
@@ -837,7 +837,7 @@ if (result >= 0) {
    - `get_image_marker(mtmdHandle)` - 获取图片标记（如 `<|vision_start|>`）
    - `mtmd_use_non_causal(mtmdHandle)` - 检查是否需要非因果掩码
 
-3. **Java 接口声明**（`libs/llamacpp-jni/src/main/java/com/starlocalrag/llamacpp/LlamaCppInference.java` 第516-561行）：
+3. **Java 接口声明**（`libs/llamacpp-jni/src/main/java/com/OfflineAI/llamacpp/LlamaCppInference.java` 第516-561行）：
    - 添加了对应的 native 方法声明
    - 提供了完整的 JavaDoc 注释
 
@@ -889,7 +889,7 @@ if (result >= 0) {
 - 编译结果：✅ BUILD SUCCESSFUL
 
 **测试指南**：
-1. 安装 APK：`StarLocalRAG_debug_20250930223700.apk`
+1. 安装 APK：`OfflineAI_debug_20250930223700.apk`
 2. 加载 Qwen2-VL 模型
 3. 选择图片（自动压缩到336px）
 4. 输入文本提示
@@ -1053,12 +1053,12 @@ imagePaths = imageThumbnailAdapter.getCompressedImagePaths(targetImageSize);
    - 自动获取模型特定的图像标记（使用 `mtmd_default_marker()`）
    - 统一的错误处理和日志记录
 
-2. **Java JNI接口扩展**（`libs/llamacpp-jni/src/main/java/com/starlocalrag/llamacpp/LlamaCppInference.java`）：
+2. **Java JNI接口扩展**（`libs/llamacpp-jni/src/main/java/com/OfflineAI/llamacpp/LlamaCppInference.java`）：
    - 新增 `completion_init_with_images()` native方法声明
    - 支持可选的多模态参数（mtmdHandle, imageHandles）
    - 保持与原有 `completion_init()` 接口的兼容性
 
-3. **Java层简化**（`app/src/main/java/com/example/starlocalrag/api/LocalLLMLlamaCppHandler.java`）：
+3. **Java层简化**（`app/src/main/java/com/example/OfflineAI/api/LocalLLMLlamaCppHandler.java`）：
    - 删除 `generateWithLlamaCppMultimodal()` 方法，消除代码重复
    - 修改 `generateTextWithImageHandles()` 直接调用统一的 `generateWithLlamaCpp()` 方法
    - `generateWithLlamaCpp()` 方法根据 `imageHandles` 参数自动选择初始化方式：
@@ -1428,7 +1428,7 @@ public void generateTextWithImages(String prompt, List<String> imagePaths, ...) 
 4. ✅ 编译验证通过
    - Debug构建成功：`./gradlew :app:assembleDebug -PKEYPSWD=abc-1234`
    - 所有编译错误已修复
-   - APK 生成：`StarLocalRAG_debug_20251001140926.apk`
+   - APK 生成：`OfflineAI_debug_20251001140926.apk`
 
 5. ✅ 修复运行时 tokenization 错误（2025-10-01 15:03 - 16:34）
    - **问题**：`tokenize: error: number of bitmaps (1) does not match number of markers (0)`
@@ -1531,7 +1531,7 @@ public void generateTextWithImages(String prompt, List<String> imagePaths, ...) 
 ### 已完成功能
 
 #### 1. LocalLLMLlamaCppHandler 多模态检测
-**文件**：`app/src/main/java/com/example/starlocalrag/api/LocalLLMLlamaCppHandler.java`
+**文件**：`app/src/main/java/com/example/OfflineAI/api/LocalLLMLlamaCppHandler.java`
 
 **新增字段**（第 121-124 行）：
 ```java
@@ -1555,7 +1555,7 @@ private String modelArchitecture = null;
 **调用时机**：在 `initializeLlamaCpp()` 方法中，模型加载和参数提取之后（第 234 行）
 
 #### 2. LocalLlmAdapter 多模态接口暴露
-**文件**：`app/src/main/java/com/example/starlocalrag/api/LocalLlmAdapter.java`
+**文件**：`app/src/main/java/com/example/OfflineAI/api/LocalLlmAdapter.java`
 
 **新增方法**（第 516-564 行）：
 ```java
@@ -1570,7 +1570,7 @@ public String getModelArchitecture()
 - 如果不是或 handler 为 null，返回安全的默认值（false / 336 / null）
 
 #### 3. RagQaFragment 容错处理
-**文件**：`app/src/main/java/com/example/starlocalrag/RagQaFragment.java`
+**文件**：`app/src/main/java/com/example/OfflineAI/RagQaFragment.java`
 
 **容错逻辑**（第 1065-1109 行，在 `handleSendStopClick()` 方法中）：
 
@@ -2441,3 +2441,4 @@ if (arch == "qwen3") {
 - ✅ 成功初始化 mtmd context
 - ✅ mmproj文件被正确加载
 - ✅ 不误判纯文本的qwen3模型（block_count ≠ 36）
+

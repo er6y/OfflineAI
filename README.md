@@ -1,10 +1,10 @@
-# StarLocalRAG
+﻿# OfflineAI
 
 <div align="center">
 
-![StarLocalRAG Logo](https://img.shields.io/badge/StarLocalRAG-Local%20RAG%20Solution-blue?style=for-the-badge)
+![OfflineAI Logo](https://img.shields.io/badge/OfflineAI-Local%20RAG%20Solution-blue?style=for-the-badge)
 
-**🚀 完全本地化的Android RAG应用 | Fully Local Android RAG Application**
+**🚀 完全本地化的Android LLM AI应用 | Fully Local Android LLM AI Application**
 
 [![Android](https://img.shields.io/badge/Android-3DDC84?style=flat-square&logo=android&logoColor=white)](https://developer.android.com/)
 [![Java](https://img.shields.io/badge/Java-ED8B00?style=flat-square&logo=openjdk&logoColor=white)](https://www.java.com/)
@@ -33,7 +33,9 @@
 
 ### 📖 项目简介
 
-StarLocalRAG 是一个基于Android平台的**完全本地化RAG（检索增强生成）应用**，支持离线知识库构建、文档检索和智能问答。所有AI推理和数据处理都在设备本地进行，确保用户数据隐私和安全。
+When the net is gone, the mind stays on.
+
+OfflineAI 是一个基于Android平台的**完全本地化 LLM AI应用**，支持离线知识库构建、文档检索和智能问答。所有AI推理和数据处理都在设备本地进行，确保用户数据隐私和安全。
 
 ### ✨ 核心特性
 
@@ -72,7 +74,7 @@ StarLocalRAG 是一个基于Android平台的**完全本地化RAG（检索增强�
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    StarLocalRAG 架构                        │
+│                    OfflineAI 架构                        │
 ├─────────────────────────────────────────────────────────────┤
 │  UI Layer (Android)                                         │
 │  ├── RAG问答界面    ├── 构建知识库    ├── 知识库笔记         │
@@ -129,7 +131,7 @@ if (isBusy.compareAndSet(false, true)) {
 
 ### 📱 功能模块
 
-StarLocalRAG 提供了完整的本地化RAG解决方案，包含以下核心功能模块：
+OfflineAI 提供了完整的本地化RAG解决方案，包含以下核心功能模块：
 
 #### RAG问答系统
 - 基于知识库的智能问答
@@ -200,8 +202,8 @@ StarLocalRAG 提供了完整的本地化RAG解决方案，包含以下核心功�
 #### 编译构建
 ```bash
 # 克隆项目
-git clone https://github.com/yourusername/StarLocalRAG.git
-cd StarLocalRAG
+git clone https://github.com/yourusername/OfflineAI.git
+cd OfflineAI
 
 # 初始化子模块
 git submodule update --init --recursive
@@ -273,7 +275,9 @@ cargo build --release
 
 ### 📖 Project Overview
 
-StarLocalRAG is a **fully local RAG (Retrieval-Augmented Generation) application** for Android that supports offline knowledge base construction, document retrieval, and intelligent Q&A. All AI inference and data processing are performed locally on the device, ensuring user data privacy and security.
+When the net is gone, the mind stays on.
+
+OfflineAI is a **fully local LLM AI application** for Android that supports offline knowledge base construction, document retrieval, and intelligent Q&A. All AI inference and data processing are performed locally on the device, ensuring user data privacy and security.
 
 ### ✨ Key Features
 
@@ -312,7 +316,7 @@ StarLocalRAG is a **fully local RAG (Retrieval-Augmented Generation) application
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    StarLocalRAG Architecture                │
+│                    OfflineAI Architecture                │
 ├─────────────────────────────────────────────────────────────┤
 │  UI Layer (Android)                                         │
 │  ├── RAG Q&A Interface  ├── Build Knowledge  ├── Knowledge Notes │
@@ -369,7 +373,7 @@ if (isBusy.compareAndSet(false, true)) {
 
 ### 📱 Functional Modules
 
-StarLocalRAG provides a complete local RAG solution with the following core functional modules:
+OfflineAI provides a complete local RAG solution with the following core functional modules:
 
 #### RAG Q&A System
 - Knowledge base-driven intelligent Q&A
@@ -440,8 +444,8 @@ StarLocalRAG provides a complete local RAG solution with the following core func
 #### Build Instructions
 ```bash
 # Clone the project
-git clone https://github.com/yourusername/StarLocalRAG.git
-cd StarLocalRAG
+git clone https://github.com/yourusername/OfflineAI.git
+cd OfflineAI
 
 # Initialize submodules
 git submodule update --init --recursive
@@ -516,3 +520,4 @@ Thanks to the following open source projects:
 **⭐ If this project helps you, please give us a star!**
 
 </div>
+

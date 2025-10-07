@@ -175,7 +175,7 @@ static std::atomic<int>  g_ctx_shift_n_keep{1024};
 // ===== JNI: context shift configuration setters/getters =====
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_set_1context_1shift(
+Java_com_offlineai_llamacpp_LlamaCppInference_set_1context_1shift(
         JNIEnv *, jclass, jboolean enable, jint n_keep) {
     g_ctx_shift_enabled.store(enable);
     g_ctx_shift_n_keep.store(std::max(0, (int)n_keep));
@@ -184,14 +184,14 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_set_1context_1shift(
 
 extern "C"
 JNIEXPORT jboolean JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1context_1shift_1enabled(
+Java_com_offlineai_llamacpp_LlamaCppInference_get_1context_1shift_1enabled(
         JNIEnv *, jclass) {
     return g_ctx_shift_enabled.load();
 }
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1context_1shift_1n_1keep(
+Java_com_offlineai_llamacpp_LlamaCppInference_get_1context_1shift_1n_1keep(
         JNIEnv *, jclass) {
     return g_ctx_shift_n_keep.load();
 }
@@ -526,7 +526,7 @@ static bool is_vulkan_suitable_for_llamacpp() {
 
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model(JNIEnv *env, jobject, jstring filename) {
+Java_com_offlineai_llamacpp_LlamaCppInference_load_1model(JNIEnv *env, jobject, jstring filename) {
     LOGi("[TRACE_POINT_1] ===== LOAD_MODEL FUNCTION ENTRY =====");
     
     llama_model_params model_params = llama_model_default_params();
@@ -684,7 +684,7 @@ static void log_cpu_info_brief() {
 // 新增：带后端偏好参数的模型加载方法
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1backend(JNIEnv *env, jobject, jstring filename, jstring backend_preference) {
+Java_com_offlineai_llamacpp_LlamaCppInference_load_1model_1with_1backend(JNIEnv *env, jobject, jstring filename, jstring backend_preference) {
     // Ensure llama/ggml logs are captured early (Android log + file sink)
     llama_log_set(log_callback, NULL);
 
@@ -861,7 +861,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1model_1with_1backend(JNIE
 // 新增：带后端偏好参数的上下文创建方法
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1context_1with_1backend(JNIEnv *env, jobject, jlong model_handle, jint n_ctx, jint n_batch, jint n_threads) {
+Java_com_offlineai_llamacpp_LlamaCppInference_new_1context_1with_1backend(JNIEnv *env, jobject, jlong model_handle, jint n_ctx, jint n_batch, jint n_threads) {
     FORCE_LOG(TAG, "[BACKEND] Creating context (backend already configured during model loading)");
     
     // 验证模型句柄
@@ -900,7 +900,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1context_1with_1backend(JNI
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1model(JNIEnv *, jobject, jlong model) {
+Java_com_offlineai_llamacpp_LlamaCppInference_free_1model(JNIEnv *, jobject, jlong model) {
     //DEBUG_LOG("LlamaCppJNI", "free_model called with pointer=%p", (void*)model);
     
     if (model == 0) {
@@ -927,7 +927,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1model(JNIEnv *, jobject, 
 
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1context(JNIEnv *env, jobject, jlong jmodel) {
+Java_com_offlineai_llamacpp_LlamaCppInference_new_1context(JNIEnv *env, jobject, jlong jmodel) {
     auto model = reinterpret_cast<llama_model *>(jmodel);
 
     if (!model) {
@@ -961,7 +961,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1context(JNIEnv *env, jobje
 // 新增：带参数的上下文创建方法
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1context_1with_1params(JNIEnv *env, jobject, jlong jmodel, jint context_size, jint threads, jint gpu_layers) {
+Java_com_offlineai_llamacpp_LlamaCppInference_new_1context_1with_1params(JNIEnv *env, jobject, jlong jmodel, jint context_size, jint threads, jint gpu_layers) {
     auto model = reinterpret_cast<llama_model *>(jmodel);
 
     if (!model) {
@@ -1003,7 +1003,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1context_1with_1params(JNIE
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1context(JNIEnv *, jobject, jlong context) {
+Java_com_offlineai_llamacpp_LlamaCppInference_free_1context(JNIEnv *, jobject, jlong context) {
     //DEBUG_LOG("LlamaCppJNI", "free_context called with pointer=%p", (void*)context);
     
     if (context == 0) {
@@ -1030,7 +1030,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1context(JNIEnv *, jobject
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1free(JNIEnv *env, jobject) {
+Java_com_offlineai_llamacpp_LlamaCppInference_backend_1free(JNIEnv *env, jobject) {
     llama_backend_free();
     
     // 清理JNI全局引用
@@ -1044,13 +1044,13 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1free(JNIEnv *env, jobj
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_log_1to_1android(JNIEnv *, jobject) {
+Java_com_offlineai_llamacpp_LlamaCppInference_log_1to_1android(JNIEnv *, jobject) {
     llama_log_set(log_callback, NULL);
 }
 
 extern "C"
 JNIEXPORT jstring JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_bench_1model(
+Java_com_offlineai_llamacpp_LlamaCppInference_bench_1model(
         JNIEnv *env,
         jobject,
         jlong context_pointer,
@@ -1170,7 +1170,7 @@ static std::mutex batch_map_mutex;
 
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1batch(JNIEnv *env, jobject, jint n_tokens, jint embd, jint n_seq_max) {
+Java_com_offlineai_llamacpp_LlamaCppInference_new_1batch(JNIEnv *env, jobject, jint n_tokens, jint embd, jint n_seq_max) {
     LOGi("[TRACE_POINT_0] ===== NEW_BATCH FUNCTION ENTRY =====");
     LOGi("[TRACE_POINT_0] new_batch called with n_tokens=%d, embd=%d, n_seq_max=%d", n_tokens, embd, n_seq_max);
     // New batch start logging removed
@@ -1337,7 +1337,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1batch(JNIEnv *env, jobject
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1batch(JNIEnv *, jobject, jlong batch_pointer) {
+Java_com_offlineai_llamacpp_LlamaCppInference_free_1batch(JNIEnv *, jobject, jlong batch_pointer) {
     const auto batch = reinterpret_cast<llama_batch *>(batch_pointer);
     
     // Batch freeing logging removed
@@ -1403,7 +1403,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1batch(JNIEnv *, jobject, 
 
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1sampler(JNIEnv *, jobject) {
+Java_com_offlineai_llamacpp_LlamaCppInference_new_1sampler(JNIEnv *, jobject) {
     auto sparams = llama_sampler_chain_default_params();
     sparams.no_perf = true;
     llama_sampler * smpl = llama_sampler_chain_init(sparams);
@@ -1414,7 +1414,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1sampler(JNIEnv *, jobject)
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1sampler(JNIEnv *, jobject, jlong sampler_pointer) {
+Java_com_offlineai_llamacpp_LlamaCppInference_free_1sampler(JNIEnv *, jobject, jlong sampler_pointer) {
     //DEBUG_LOG("LlamaCppJNI", "free_sampler called with pointer=%p", (void*)sampler_pointer);
     
     if (sampler_pointer == 0) {
@@ -1441,7 +1441,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1sampler(JNIEnv *, jobject
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1init(JNIEnv *env, jobject) {
+Java_com_offlineai_llamacpp_LlamaCppInference_backend_1init(JNIEnv *env, jobject) {
     FORCE_LOG(TAG, "[BACKEND] Starting backend initialization...");
     
     // 初始化JNI全局引用用于LogManager调用
@@ -1449,7 +1449,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1init(JNIEnv *env, jobj
         env->GetJavaVM(&g_jvm);
         
         // 获取LogManager类
-        jclass local_log_manager_class = env->FindClass("com/example/starlocalrag/LogManager");
+        jclass local_log_manager_class = env->FindClass("com/example/offlineai/LogManager");
         if (local_log_manager_class) {
             g_log_manager_class = (jclass)env->NewGlobalRef(local_log_manager_class);
             env->DeleteLocalRef(local_log_manager_class);
@@ -1493,7 +1493,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_backend_1init(JNIEnv *env, jobj
 
 extern "C"
 JNIEXPORT jstring JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_system_1info(JNIEnv *env, jobject) {
+Java_com_offlineai_llamacpp_LlamaCppInference_system_1info(JNIEnv *env, jobject) {
     return env->NewStringUTF(llama_print_system_info());
 }
 
@@ -1502,7 +1502,7 @@ static std::string apply_chat_template(llama_context* context, const char* user_
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1init(
+Java_com_offlineai_llamacpp_LlamaCppInference_completion_1init(
         JNIEnv * env,
         jclass,
         jlong context_pointer,
@@ -1732,7 +1732,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1init(
 
 extern "C"
 JNIEXPORT jstring JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1loop(
+Java_com_offlineai_llamacpp_LlamaCppInference_completion_1loop(
         JNIEnv * env,
         jobject,
         jlong context_pointer,
@@ -1991,7 +1991,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1loop(
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_kv_1cache_1clear(JNIEnv *, jobject, jlong context) {
+Java_com_offlineai_llamacpp_LlamaCppInference_kv_1cache_1clear(JNIEnv *, jobject, jlong context) {
     if (context == 0) {
         LOGe("[KV_CACHE_CLEAR] ERROR: context pointer is null (0)");
         return;
@@ -2011,7 +2011,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_kv_1cache_1clear(JNIEnv *, jobj
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_set_1should_1stop(
+Java_com_offlineai_llamacpp_LlamaCppInference_set_1should_1stop(
         JNIEnv *,
         jobject,
         jboolean should_stop
@@ -2026,7 +2026,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_set_1should_1stop(
 
 extern "C"
 JNIEXPORT jboolean JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1should_1stop(
+Java_com_offlineai_llamacpp_LlamaCppInference_get_1should_1stop(
         JNIEnv *,
         jobject
 ) {
@@ -2035,7 +2035,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1should_1stop(
 
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1sampler_1with_1params(
+Java_com_offlineai_llamacpp_LlamaCppInference_new_1sampler_1with_1params(
         JNIEnv *env,
         jobject,
         jfloat temp,
@@ -2099,7 +2099,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1sampler_1with_1params(
 
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1sampler_1with_1full_1params(
+Java_com_offlineai_llamacpp_LlamaCppInference_new_1sampler_1with_1full_1params(
         JNIEnv *env,
         jobject,
         jfloat temp,
@@ -2175,7 +2175,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_new_1sampler_1with_1full_1param
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_model_1meta_1count(JNIEnv *env, jobject, jlong model_handle) {
+Java_com_offlineai_llamacpp_LlamaCppInference_model_1meta_1count(JNIEnv *env, jobject, jlong model_handle) {
     auto model = reinterpret_cast<llama_model*>(model_handle);
     if (!model) {
         LOGe("[MODEL_META] model_meta_count: Invalid model handle");
@@ -2189,7 +2189,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_model_1meta_1count(JNIEnv *env,
 
 extern "C"
 JNIEXPORT jstring JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_model_1meta_1key_1by_1index(JNIEnv *env, jobject, jlong model_handle, jint index) {
+Java_com_offlineai_llamacpp_LlamaCppInference_model_1meta_1key_1by_1index(JNIEnv *env, jobject, jlong model_handle, jint index) {
     auto model = reinterpret_cast<llama_model*>(model_handle);
     if (!model) {
         LOGe("[MODEL_META] model_meta_key_by_index: Invalid model handle");
@@ -2209,7 +2209,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_model_1meta_1key_1by_1index(JNI
 
 extern "C"
 JNIEXPORT jstring JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_model_1meta_1val_1str(JNIEnv *env, jobject, jlong model_handle, jstring key) {
+Java_com_offlineai_llamacpp_LlamaCppInference_model_1meta_1val_1str(JNIEnv *env, jobject, jlong model_handle, jstring key) {
     auto model = reinterpret_cast<llama_model*>(model_handle);
     if (!model) {
         LOGe("[MODEL_META] model_meta_val_str: Invalid model handle");
@@ -2237,7 +2237,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_model_1meta_1val_1str(JNIEnv *e
 
 extern "C"
 JNIEXPORT jstring JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_model_1meta_1val_1str_1by_1index(JNIEnv *env, jobject, jlong model_handle, jint index) {
+Java_com_offlineai_llamacpp_LlamaCppInference_model_1meta_1val_1str_1by_1index(JNIEnv *env, jobject, jlong model_handle, jint index) {
     auto model = reinterpret_cast<llama_model*>(model_handle);
     if (!model) {
         LOGe("[MODEL_META] model_meta_val_str_by_index: Invalid model handle");
@@ -2257,7 +2257,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_model_1meta_1val_1str_1by_1inde
 
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_model_1size(JNIEnv *env, jobject, jlong model_handle) {
+Java_com_offlineai_llamacpp_LlamaCppInference_model_1size(JNIEnv *env, jobject, jlong model_handle) {
     auto model = reinterpret_cast<llama_model*>(model_handle);
     if (!model) {
         LOGe("[MODEL_SIZE] model_size: Invalid model handle");
@@ -2269,7 +2269,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_model_1size(JNIEnv *env, jobjec
 
 extern "C"
 JNIEXPORT jstring JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1vulkan_1version(JNIEnv *env, jobject) {
+Java_com_offlineai_llamacpp_LlamaCppInference_get_1vulkan_1version(JNIEnv *env, jobject) {
     vulkan_runtime::VulkanRuntimeInfo info = vulkan_runtime::detect_vulkan_runtime();
     
     if (!info.library_available || !info.instance_creation_works || !info.physical_devices_available) {
@@ -2297,7 +2297,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1vulkan_1version(JNIEnv *en
  */
 extern "C"
 JNIEXPORT jboolean JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_is_1model_1multimodal(JNIEnv *env, jobject, jlong model_handle) {
+Java_com_offlineai_llamacpp_LlamaCppInference_is_1model_1multimodal(JNIEnv *env, jobject, jlong model_handle) {
     auto model = reinterpret_cast<llama_model*>(model_handle);
     if (!model) {
         ERROR_LOG(TAG, "[MULTIMODAL] is_model_multimodal: Invalid model handle");
@@ -2363,7 +2363,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_is_1model_1multimodal(JNIEnv *e
  */
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1model_1image_1size(JNIEnv *env, jobject, jlong mtmd_handle) {
+Java_com_offlineai_llamacpp_LlamaCppInference_get_1model_1image_1size(JNIEnv *env, jobject, jlong mtmd_handle) {
     auto mtmd_ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
     if (!mtmd_ctx) {
         ERROR_LOG(TAG, "[MULTIMODAL] get_model_image_size: Invalid mtmd context handle");
@@ -2406,7 +2406,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1model_1image_1size(JNIEnv 
  */
 extern "C"
 JNIEXPORT jstring JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1model_1architecture(JNIEnv *env, jobject, jlong model_handle) {
+Java_com_offlineai_llamacpp_LlamaCppInference_get_1model_1architecture(JNIEnv *env, jobject, jlong model_handle) {
     auto model = reinterpret_cast<llama_model*>(model_handle);
     if (!model) {
         ERROR_LOG(TAG, "[MULTIMODAL] get_model_architecture: Invalid model handle");
@@ -2437,7 +2437,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1model_1architecture(JNIEnv
  */
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_init_1mtmd_1context(
+Java_com_offlineai_llamacpp_LlamaCppInference_init_1mtmd_1context(
     JNIEnv *env, jobject, jlong model_handle, jstring mmproj_path, jboolean use_gpu, jint n_threads) {
     
     auto model = reinterpret_cast<llama_model*>(model_handle);
@@ -2488,7 +2488,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_init_1mtmd_1context(
  */
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1mtmd_1context(
+Java_com_offlineai_llamacpp_LlamaCppInference_free_1mtmd_1context(
     JNIEnv *env, jobject, jlong mtmd_handle) {
     
     auto ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
@@ -2510,7 +2510,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1mtmd_1context(
  */
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1image_1bitmap(
+Java_com_offlineai_llamacpp_LlamaCppInference_load_1image_1bitmap(
     JNIEnv *env, jobject, jlong mtmd_handle, jstring image_path) {
     
     auto ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
@@ -2546,7 +2546,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_load_1image_1bitmap(
  */
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1image_1bitmap(
+Java_com_offlineai_llamacpp_LlamaCppInference_free_1image_1bitmap(
     JNIEnv *env, jobject, jlong bitmap_handle) {
     
     auto bitmap = reinterpret_cast<mtmd_bitmap*>(bitmap_handle);
@@ -2565,7 +2565,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_free_1image_1bitmap(
  */
 extern "C"
 JNIEXPORT jstring JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1image_1marker(
+Java_com_offlineai_llamacpp_LlamaCppInference_get_1image_1marker(
     JNIEnv *env, jobject, jlong mtmd_handle) {
     
     auto ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
@@ -2586,7 +2586,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_get_1image_1marker(
  */
 extern "C"
 JNIEXPORT jboolean JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1use_1non_1causal(
+Java_com_offlineai_llamacpp_LlamaCppInference_mtmd_1use_1non_1causal(
     JNIEnv *env, jobject, jlong mtmd_handle) {
     
     auto ctx = reinterpret_cast<mtmd_context*>(mtmd_handle);
@@ -2613,7 +2613,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1use_1non_1causal(
  */
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_test_1multimodal_1inference(
+Java_com_offlineai_llamacpp_LlamaCppInference_test_1multimodal_1inference(
     JNIEnv *env, jobject, jlong mtmd_handle, jlong llama_ctx_handle, 
     jstring image_path, jstring prompt) {
     
@@ -2722,7 +2722,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_test_1multimodal_1inference(
 
 extern "C"
 JNIEXPORT jlong JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1create_1input_1chunks(
+Java_com_offlineai_llamacpp_LlamaCppInference_mtmd_1create_1input_1chunks(
     JNIEnv* env, jclass clazz) {
     
     mtmd_input_chunks* chunks = mtmd_input_chunks_init();
@@ -2737,7 +2737,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1create_1input_1chunks(
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1free_1input_1chunks(
+Java_com_offlineai_llamacpp_LlamaCppInference_mtmd_1free_1input_1chunks(
     JNIEnv* env, jclass clazz, jlong chunks_handle) {
     
     if (chunks_handle == 0) {
@@ -2751,7 +2751,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1free_1input_1chunks(
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1tokenize_1with_1images(
+Java_com_offlineai_llamacpp_LlamaCppInference_mtmd_1tokenize_1with_1images(
     JNIEnv* env, jclass clazz, jlong mtmd_handle, jlong chunks_handle, 
     jstring prompt, jlongArray image_handles) {
     
@@ -2812,7 +2812,7 @@ Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1tokenize_1with_1images(
 
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_mtmd_1eval_1chunks(
+Java_com_offlineai_llamacpp_LlamaCppInference_mtmd_1eval_1chunks(
     JNIEnv* env, jclass clazz, jlong mtmd_handle, jlong llama_handle, 
     jlong chunks_handle, jint n_past, jint seq_id, jint n_batch, 
     jboolean logits_last, jintArray n_past_out) {
@@ -3008,7 +3008,7 @@ static int process_multimodal_images(JNIEnv* env, jlong mtmd_handle, jlong conte
 // Main function: completion_init with optional image support
 extern "C"
 JNIEXPORT jint JNICALL
-Java_com_starlocalrag_llamacpp_LlamaCppInference_completion_1init_1with_1images(
+Java_com_offlineai_llamacpp_LlamaCppInference_completion_1init_1with_1images(
     JNIEnv* env, jclass clazz,
     jlong context_pointer,
     jlong batch_pointer,

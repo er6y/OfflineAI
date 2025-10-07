@@ -25,15 +25,15 @@
 # 只启用压缩和性能优化，便于开源协作、调试和代码追踪
 
 # 保持所有LlamaCpp JNI相关类完全不混淆
--keep class com.starlocalrag.llamacpp.** { *; }
--keepnames class com.starlocalrag.llamacpp.**
--keepclassmembernames class com.starlocalrag.llamacpp.** {
+-keep class com.offlineai.llamacpp.** { *; }
+-keepnames class com.offlineai.llamacpp.**
+-keepclassmembernames class com.offlineai.llamacpp.** {
     *;
 }
 
 # 保持所有内部类和匿名类不混淆
--keepnames class com.starlocalrag.llamacpp.**$*
--keepclassmembernames class com.starlocalrag.llamacpp.**$* {
+-keepnames class com.offlineai.llamacpp.**$*
+-keepclassmembernames class com.offlineai.llamacpp.**$* {
     *;
 }
 

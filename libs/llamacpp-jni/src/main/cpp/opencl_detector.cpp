@@ -34,7 +34,7 @@ extern "C" {
  * Returns: JSON-like string with detection result
  */
 JNIEXPORT jstring JNICALL
-Java_com_starlocalrag_llamacpp_OpenCLDetector_detectOpenCL(JNIEnv* env, jclass clazz) {
+Java_com_offlineai_llamacpp_OpenCLDetector_detectOpenCL(JNIEnv* env, jclass clazz) {
     LOGI("=== OpenCL Detection Start ===");
     
     std::string result = "";

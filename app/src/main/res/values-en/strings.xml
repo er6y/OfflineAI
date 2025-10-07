@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">StarLocalRAG</string>
+    <string name="app_name">OfflineAI</string>
     
     <!-- Common status strings -->
     <string name="common_success">Success</string>
@@ -124,7 +124,7 @@
     <string name="progress_vectorization_keyword">Generating vectors</string>
 
     <!-- Navigation items -->
-    <string name="navigation_rag_qa">RAG Q&amp;A</string>
+    <string name="navigation_rag_qa">AI Q&amp;A</string>
     <string name="navigation_build_kb">Build Knowledge Base</string>
     <string name="navigation_kb_note">Knowledge Base Notes</string>
 
@@ -264,10 +264,10 @@
     <string name="dialog_message_confirm_interrupt">Are you sure you want to interrupt the current knowledge base creation process? Processed data will be retained.</string>
     <string name="dialog_message_kb_exists">Knowledge base "%1$s" already exists. How would you like to proceed?</string>
     <string name="dialog_title_need_full_file_access">Full File Access Required</string>
-    <string name="dialog_message_need_full_file_access">StarLocalRAG requires full file access to function properly. Please grant permission on the next settings page. This permission will not be requested again after granting.</string>
+    <string name="dialog_message_need_full_file_access">OfflineAI requires full file access to function properly. Please grant permission on the next settings page. This permission will not be requested again after granting.</string>
     <string name="dialog_title_need_storage_permission">Storage Permission Required</string>
-    <string name="dialog_message_need_storage_permission">StarLocalRAG needs external storage access to read and save model files, knowledge base files, etc.\n\nPlease grant storage permission in settings, otherwise the app will not function properly.</string>
-    <string name="dialog_title_about">About StarLocalRAG</string>
+    <string name="dialog_message_need_storage_permission">OfflineAI needs external storage access to read and save model files, knowledge base files, etc.\n\nPlease grant storage permission in settings, otherwise the app will not function properly.</string>
+    <string name="dialog_title_about">About OfflineAI</string>
     <string name="dialog_message_about">Version: %1$s\n\nLocal RAG (Retrieval Augmented Generation) Application</string>
     <string name="dialog_add_new_api_address">Add New API Address</string>
 
@@ -398,7 +398,8 @@
     <string name="dialog_select_embedding_model">Please select the embedding model to use:</string>
     <string name="dialog_select_reranker_model">Please select the reranker model to use:</string>
     <string name="dialog_remember_choice">Remember this choice, use automatically next time</string>
-    <string name="title_default_model_download">Default Model Download</string>
+    <string name="text_model_download">Model Download</string>
+    <string name="text_model_list_hint">The model list file ModelDownloadList.txt is saved under the model root directory in Settings. You can add entries yourself.</string>
     <string name="title_embedding_model_list">Embedding Model List</string>
     <string name="title_reranker_model_list">Reranker Model List</string>
     <string name="title_llm_list">LLM List</string>
@@ -437,7 +438,6 @@
     <string name="text_knowledge_base">Knowledge Base</string>
     <string name="text_related">Related</string>
     <string name="text_text_chunking_settings">Text Chunking Settings</string>
-    <string name="text_model_download">Model Download</string>
 
 
     <!-- File type display text -->
@@ -860,7 +860,7 @@
     <string name="hint_api_url_example">e.g.: https://api.example.com</string>
     <string name="label_api_key_optional">API Key (optional)</string>
     <string name="hint_api_key_example">e.g.: sk-abcdefg123456</string>
-    <string name="title_help">StarLocalRAG User Guide</string>
+    <string name="title_help">OfflineAI User Guide</string>
     <string name="content_description_scroll_up">Scroll up</string>
     <string name="content_description_scroll_down">Scroll down</string>
     

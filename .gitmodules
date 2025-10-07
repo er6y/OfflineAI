@@ -7,3 +7,6 @@
 [submodule "libs/kleidiai"]
 	path = libs/kleidiai
 	url = git@github.com:ARM-software/kleidiai.git
+[submodule "libs/mnn"]
+	path = libs/mnn
+	url = git@github.com:alibaba/MNN.git

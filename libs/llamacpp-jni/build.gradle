@@ -70,7 +70,7 @@ if (useGradleVkShaders) {
 }
 
 android {
-    namespace = 'com.starlocalrag.llamacpp'
+    namespace = 'com.offlineai.llamacpp'
     compileSdkVersion 34
     // buildToolsVersion removed - using default from Android Gradle Plugin
 

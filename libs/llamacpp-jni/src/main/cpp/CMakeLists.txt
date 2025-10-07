@@ -484,6 +484,7 @@ if(ENABLE_VULKAN_BACKEND)
 
     set(_vkgen_source_dir  "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders")
     if(CMAKE_HOST_WIN32)
+        # Use Visual Studio generator build dir on Windows (host tool)
         set(_vkgen_build_dir   "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders-build-vs")
     else()
         set(_vkgen_build_dir   "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders-build-ninja")
@@ -595,7 +596,8 @@ if(ENABLE_VULKAN_BACKEND)
                        ${_vkgen_cmake_args}
             BUILD_COMMAND     ${CMAKE_COMMAND} --build . --config Release
             # BUILD_ALWAYS TRUE  # disabled to improve incremental builds
-            INSTALL_COMMAND   ${CMAKE_COMMAND} -E env --unset=DESTDIR "${CMAKE_COMMAND}" --install . --config Release
+            # Skip install to avoid Windows file lock/permission issues
+            INSTALL_COMMAND   ""
         )
     else()
         ExternalProject_Add(vulkan-shaders-gen-ext
@@ -610,37 +612,40 @@ if(ENABLE_VULKAN_BACKEND)
                        ${_vkgen_cmake_args}
             BUILD_COMMAND     ${CMAKE_COMMAND} --build .
             # BUILD_ALWAYS TRUE  # disabled to improve incremental builds
-            INSTALL_COMMAND   ${CMAKE_COMMAND} -E env --unset=DESTDIR "${CMAKE_COMMAND}" --install .
+            # Skip install; use built binary directly
+            INSTALL_COMMAND   ""
         )
     endif()
 
     set(_ggml_vk_header "${CMAKE_CURRENT_BINARY_DIR}/ggml-vulkan-shaders.hpp")
-    set(_ggml_vk_source "${CMAKE_CURRENT_BINARY_DIR}/ggml-vulkan-shaders.cpp")
     set(_ggml_vk_input_dir  "${LLAMA_CPP_DIR}/ggml/src/ggml-vulkan/vulkan-shaders")
     set(_ggml_vk_output_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders.spv")
 
-    set(_ggml_vk_genshaders_cmd "${_vkgen_install_dir}/vulkan-shaders-gen${_ggml_vk_host_suffix}")
+    # Use the built generator directly from build dir
+    if(CMAKE_HOST_WIN32)
+        set(_ggml_vk_genshaders_cmd "${_vkgen_build_dir}/Release/vulkan-shaders-gen${_ggml_vk_host_suffix}")
+    else()
+        set(_ggml_vk_genshaders_cmd "${_vkgen_build_dir}/vulkan-shaders-gen${_ggml_vk_host_suffix}")
+    endif()
 
+    # Enumerate shader sources and generator sources (to wire up dependencies)
+    file(GLOB _ggml_vk_shader_files CONFIGURE_DEPENDS "${_ggml_vk_input_dir}/*.comp")
+    file(GLOB _ggml_vk_shaders_gen_sources CONFIGURE_DEPENDS "${_vkgen_source_dir}/*.cpp" "${_vkgen_source_dir}/*.h")
+
+    # Generate a single header with extern declarations
     add_custom_command(
-        OUTPUT ${_ggml_vk_header} ${_ggml_vk_source}
+        OUTPUT ${_ggml_vk_header}
         COMMAND ${_ggml_vk_genshaders_cmd}
-                --glslc      "${Vulkan_GLSLC_EXECUTABLE}"
-                --input-dir  "${_ggml_vk_input_dir}"
+                --input-dir "${_ggml_vk_input_dir}"
                 --output-dir "${_ggml_vk_output_dir}"
                 --target-hpp "${_ggml_vk_header}"
-                --target-cpp "${_ggml_vk_source}"
-                --no-clean
-        DEPENDS vulkan-shaders-gen-ext
-        COMMENT "Generate vulkan shaders (ggml-vulkan)"
+        DEPENDS ${_ggml_vk_shaders_gen_sources} vulkan-shaders-gen-ext
+        COMMENT "Generate vulkan shaders header (ggml-vulkan)"
     )
 endif()
 # ========== 创建 ggml-vulkan 静态库（使用本地 ggml-vulkan.cpp + 生成的 shaders） ==========
 if(ENABLE_VULKAN_BACKEND AND HAVE_VULKAN_HPP)
-    set(GGML_VULKAN_SOURCES
-        "${CMAKE_CURRENT_SOURCE_DIR}/ggml-vulkan.cpp"
-        ${_ggml_vk_source}
-    )
-    add_library(ggml-vulkan STATIC ${GGML_VULKAN_SOURCES})
+    add_library(ggml-vulkan STATIC "${CMAKE_CURRENT_SOURCE_DIR}/ggml-vulkan.cpp")
     add_dependencies(ggml-vulkan vulkan-shaders-gen-ext)
 
     # Ensure ABI alignment and PIC for static lib linkage into shared JNI
@@ -673,6 +678,30 @@ if(ENABLE_VULKAN_BACKEND AND HAVE_VULKAN_HPP)
     if(DEFINED VULKAN_HPP_INCLUDE_DIR)
         target_include_directories(ggml-vulkan PRIVATE "${VULKAN_HPP_INCLUDE_DIR}")
     endif()
+
+    # Add generated shaders: header and per-shader cpp files
+    target_sources(ggml-vulkan PRIVATE ${_ggml_vk_header})
+    foreach (file_full ${_ggml_vk_shader_files})
+        get_filename_component(file ${file_full} NAME)
+        set (_ggml_vk_target_cpp "${CMAKE_CURRENT_BINARY_DIR}/${file}.cpp")
+
+        add_custom_command(
+            OUTPUT  ${_ggml_vk_target_cpp}
+            DEPFILE ${_ggml_vk_target_cpp}.d
+            COMMAND ${_ggml_vk_genshaders_cmd}
+                --glslc      "${Vulkan_GLSLC_EXECUTABLE}"
+                --input-dir  "${_ggml_vk_input_dir}"
+                --source     "${file_full}"
+                --output-dir "${_ggml_vk_output_dir}"
+                --target-hpp "${_ggml_vk_header}"
+                --target-cpp "${_ggml_vk_target_cpp}"
+            DEPENDS ${file_full}
+                    ${_ggml_vk_shaders_gen_sources}
+                    vulkan-shaders-gen-ext
+            COMMENT "Generate vulkan shader for ${file}"
+        )
+        target_sources(ggml-vulkan PRIVATE ${_ggml_vk_target_cpp})
+    endforeach()
 endif()
 
 # Ensure ggml-vulkan links to Vulkan loader library on Android and non-Android

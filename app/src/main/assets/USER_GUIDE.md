@@ -1,4 +1,16 @@
-# StarLocalRAG 用户指南 / User Guide
+# OfflineAI 用户指南 / User Guide
+
+> When the net is gone, the mind stays on.
+
+## 引言 / Introduction
+
+OfflineAI 是一款离线优先的安卓 AI 应用，秉持“网络离线，思维常在”的产品理念，强调在设备本地完成模型推理与知识处理，确保隐私与可用性。
+
+OfflineAI 的核心能力包括：本地对话、私有知识管理（含检索增强生成 RAG）、知识笔记与多模态推理。RAG 是本应用的重要功能之一，但并非唯一重点；本指南将以离线使用体验为中心阐述，RAG 原理与用法作为专题章节进行说明。
+
+OfflineAI is an offline-first Android AI application. Guided by the motto "When the net is gone, the mind stays on.", it focuses on completing model inference and knowledge processing locally on-device to ensure privacy and availability.
+
+Core capabilities include local conversation, private knowledge management (with RAG), knowledge notes, and multimodal inference. RAG is a major capability but not the only focus; this guide centers on offline experience and presents RAG as a dedicated topic.
 
 ## 1. RAG 基本原理介绍 / RAG Basic Principles
 
@@ -87,16 +99,17 @@ RAG Q&A Process:                                            v
 3. 混合内容 / Mixed Content：先按结构分块，再对长块二次分块 / Structure-based chunking first, then secondary chunking for long blocks
 4. 添加元数据标记块类型和关键字段 / Add metadata to mark chunk types and key fields
 
-## 2. StarLocalRAG 软件介绍 / Software Introduction
+## 2. OfflineAI 软件介绍 / Software Introduction
 
-StarLocalRAG 是一款安卓本地 RAG 应用，允许用户在设备本地构建知识库、进行问答交互和管理知识笔记，无需依赖云服务。应用支持多种文档格式，使用嵌入模型进行向量化，并通过本地数据库进行高效检索。
+OfflineAI 是一款离线优先的安卓 AI 应用，允许用户在设备本地构建私有知识、进行自然语言对话并管理知识笔记，无需依赖云服务。RAG 是本应用的重要能力之一，但不是唯一重点。应用支持多种文档格式，使用嵌入模型进行向量化，并通过本地数据库进行高效检索。
 
-StarLocalRAG is an Android local RAG application that allows users to build knowledge bases, conduct Q&A interactions, and manage knowledge notes locally on their devices without relying on cloud services. The app supports multiple document formats, uses embedding models for vectorization, and performs efficient retrieval through local databases.
+OfflineAI is an Android offline-first AI application that allows users to build private knowledge bases, conduct natural language conversations, and manage notes locally on their devices without relying on cloud services. RAG is one of the major capabilities, not the only focus. The app supports multiple document formats, uses embedding models for vectorization, and performs efficient retrieval through local databases.
 
 ### 主要特点 / Key Features
 
 - **完全本地化 / Fully Local**：所有处理和存储都在设备本地进行，保护数据隐私 / All processing and storage are performed locally on the device, protecting data privacy
 - **多格式支持 / Multi-format Support**：支持PDF、Word、Excel、PPT、文本等多种文档格式 / Supports PDF, Word, Excel, PPT, text and other document formats
+- **多模态推理 / Multimodal Inference**：支持图像-文本多模态模型（如 LLaVA、Qwen-VL、InternVL 等），在离线环境进行多模态理解与回答 / Supports vision-language models (e.g., LLaVA, Qwen-VL, InternVL) for multimodal understanding and answering offline
 - **知识笔记 / Knowledge Notes**：支持创建和管理知识笔记，方便整理和扩充知识库 / Supports creating and managing knowledge notes for easy organization and expansion of knowledge base
 - **灵活配置 / Flexible Configuration**：支持自定义嵌入模型、分块大小、API设置等 / Supports custom embedding models, chunk sizes, API settings, etc.
 - **性能优化 / Performance Optimization**：优化内存使用和处理速度，支持大文件处理 / Optimized memory usage and processing speed, supports large file processing
@@ -105,15 +118,15 @@ StarLocalRAG is an Android local RAG application that allows users to build know
 
 ### 3.1 主界面导航 / Main Interface Navigation
 
-StarLocalRAG 应用包含三个主要页面，通过底部导航栏进行切换：
+OfflineAI 应用包含三个主要页面，通过底部导航栏进行切换：
 
-The StarLocalRAG app contains three main pages, accessible through the bottom navigation bar:
+The OfflineAI app contains three main pages, accessible through the bottom navigation bar:
 
 - **RAG问答 / RAG Q&A**：进行基于知识库的问答交互 / Conduct knowledge base-based Q&A interactions
 - **构建知识库 / Build Knowledge Base**：创建和更新知识库 / Create and update knowledge bases
 - **知识笔记 / Knowledge Notes**：创建和管理知识笔记 / Create and manage knowledge notes
 
-### 3.2 RAG问答页面 / RAG Q&A Page
+### 3.2 问答页面（支持RAG） / Q&A Page (with RAG)
 
 #### 界面元素说明 / Interface Elements
 
@@ -163,6 +176,23 @@ The StarLocalRAG app contains three main pages, accessible through the bottom na
 6. **其他功能 / Other Features**：
    - 可以通过长按回答文本进行复制或转为笔记 / Can long-press answer text to copy or convert to notes
    - 点击停止按钮可以中断生成过程 / Click stop button to interrupt generation process
+
+#### 多模态推理 / Multimodal Inference
+
+当选择支持多模态的本地模型（例如 LLaVA、Qwen-VL、InternVL 的 GGUF 版本）时，应用会在问答页面提供图像输入入口：
+
+1. 选择或加载支持多模态的模型（通常为视觉-语言模型，VLM）
+2. 在问答页面附加图片（支持 `.png`/`.jpg`/`.webp`），并输入文本提示词
+3. 发送后，模型会基于图像与文本联合推理，生成回答
+
+使用建议：
+- 移动设备建议选择小尺寸多模态模型，避免内存不足
+- 图片越清晰、提示词越具体，回答质量越好
+- 首次加载多模态模型可能耗时更长，请耐心等待
+
+Notes:
+- 如果当前选择的模型不支持多模态，图像输入入口可能不会显示
+- 不同模型的图像输入尺寸和预处理方式可能有所不同，请参考模型仓库说明
 
 ### 3.3 构建知识库页面 / Build Knowledge Base Page
 
@@ -281,9 +311,9 @@ The StarLocalRAG app contains three main pages, accessible through the bottom na
 
 ### 3.6 菜单功能 / Menu Functions
 
-StarLocalRAG 应用在右上角提供了菜单选项：
+OfflineAI 应用在右上角提供了菜单选项：
 
-The StarLocalRAG app provides menu options in the top-right corner:
+The OfflineAI app provides menu options in the top-right corner:
 
 - **设置 / Settings**：打开设置页面，配置应用参数 / Open settings page to configure application parameters
 ### 默认模型下载
@@ -311,6 +341,11 @@ The StarLocalRAG app provides menu options in the top-right corner:
 - **Qwen2-0.5B-Instruct**：0.5B参数的轻量级模型，适合学习研究 / 0.5B parameter lightweight model, suitable for learning and research
 - **Qwen2-1.5B-Instruct**：1.5B参数的小型模型，性能和速度平衡 / 1.5B parameter small model, balanced performance and speed
 - **TinyLlama-1.1B**：1.1B参数的英文模型，运行速度快 / 1.1B parameter English model, fast running speed
+
+**多模态模型 / Multimodal Models**
+- **LLaVA（GGUF 小尺寸变体）**：图像-文本理解，建议选择小模型以适配移动设备 / Vision-language understanding; choose small variants for mobile
+- **Qwen-VL（GGUF）**：中文多模态能力较强，注意内存占用 / Strong CN multimodal ability; watch memory usage
+- **InternVL（GGUF）**：多场景图像理解，需根据设备性能选择 / Broad image understanding; choose based on device capability
 
 #### 使用建议
 - **首次使用**：建议先下载一个嵌入模型和一个小型LLM模型
@@ -388,9 +423,9 @@ Rerank models are specialized models for reordering retrieval results, capable o
 
 ### 4.2 模型使用跟踪 / Model Usage Tracking
 
-StarLocalRAG 实现了模型使用跟踪机制，防止模型过早卸载，确保模型在需要时保持加载状态。当应用检测到模型不再使用时，会自动释放资源，优化内存使用。
+OfflineAI 实现了模型使用跟踪机制，防止模型过早卸载，确保模型在需要时保持加载状态。当应用检测到模型不再使用时，会自动释放资源，优化内存使用。
 
-StarLocalRAG implements a model usage tracking mechanism to prevent premature model unloading and ensure models remain loaded when needed. When the application detects that a model is no longer in use, it automatically releases resources to optimize memory usage.
+OfflineAI implements a model usage tracking mechanism to prevent premature model unloading and ensure models remain loaded when needed. When the application detects that a model is no longer in use, it automatically releases resources to optimize memory usage.
 
 ### 4.3 文本转笔记 / Text to Notes
 
@@ -532,6 +567,23 @@ Viewing logs can help locate the cause of problems, especially when processing l
 - 复杂问题的回答质量有限 / Limited answer quality for complex questions
 - 主要用途是学习、研究和隐私保护场景 / Main uses are learning, research and privacy protection scenarios
 - 对于重要决策或专业问题，建议使用在线大模型验证结果 / For important decisions or professional questions, recommend using online large models to verify results
+
+#### 图像编码设置详解 / Image Encoding Settings Explained
+
+设置页面当前仅包含两项与图像编码相关的参数，用于多模态推理前的图像预处理与并行度控制。以下说明与代码实现一致。
+
+- 图片预处理尺寸（像素）
+  - 预设选项：`112, 280, 392, 504(默认), 672, 896, 1008, MAX(原图)`
+  - 含义：按预设尺寸对输入图片进行等比例缩放后编码；`MAX`表示不缩放，按原始分辨率编码。
+  - 说明：这些预设均为 28 的倍数（适配常见 VL 模型）。
+  - 建议：中低端设备优先选择 `392–504`；高性能设备可选 `672–1008` 或 `MAX`，但会增加耗时与内存占用。
+
+- 图像编码线程数
+  - 范围：`1–16` 线程（默认 `4`）
+  - 含义：控制图像编码阶段的并行度；线程越多速度越快，但会占用更多 CPU 资源。
+  - 建议：中端设备设为 `4–8`；低端设备设为 `2–4`；若出现发热或卡顿，请适当降低。
+- 图片越清晰、提示词越具体，越能提升答案质量
+- 首次加载多模态模型可能耗时较长，属于正常现象
 
 ### 8.3 重排模型使用建议 / Rerank Model Usage Recommendations
 
