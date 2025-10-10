@@ -233,9 +233,18 @@ public class AcceleratorDiagnostics {
         
         info.append(String.format("  - libhiai_hcl_model_runtime_impl.so: %s\n", hasRuntimeImpl ? "✓" : "✗"));
         info.append(String.format("  - libcpucl.so: %s\n", hasCpuCl ? "✓" : "✗"));
+
+        // Additional HiAI-related libraries often required by DDK/runtime
+        boolean hasAiClient = checkSystemLibrary("/system/lib64/libai_client.so");
+        boolean hasHiaiIrBuild = checkSystemLibrary("/system/lib64/libhiai_ir_build.so");
+        boolean hasHiaiCl = checkSystemLibrary("/system/lib64/libhiai_cl.so");
+
+        info.append(String.format("  - libai_client.so: %s\n", hasAiClient ? "✓" : "✗"));
+        info.append(String.format("  - libhiai_ir_build.so: %s\n", hasHiaiIrBuild ? "✓" : "✗"));
+        info.append(String.format("  - libhiai_cl.so: %s\n", hasHiaiCl ? "✓" : "✗"));
         
-        if (!hasRuntimeImpl || !hasCpuCl) {
-            info.append("  └─ Full NPU runtime not available, app must bundle DDK libraries\n");
+        if (!hasRuntimeImpl || !hasCpuCl || !hasAiClient || !hasHiaiIrBuild || !hasHiaiCl) {
+            info.append("  └─ Full NPU runtime not available, app may need to bundle DDK libs\n");
         }
         
         // Check HiAI package

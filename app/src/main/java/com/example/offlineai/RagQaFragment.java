@@ -132,6 +132,8 @@ public class RagQaFragment extends Fragment {
     private CheckBox checkBoxThinkingMode; // Thinking mode checkbox
     private RecyclerView recyclerViewImageThumbnails; // Image thumbnail container
     private ImageThumbnailAdapter imageThumbnailAdapter; // Image thumbnail adapter
+    // 避免程序化设置复选框状态时触发监听器造成误保存
+    private boolean isUpdatingUiFromConfig = false;
     
     // Image picker launcher for Android 13+
     private ActivityResultLauncher<PickVisualMediaRequest> pickMedia;
@@ -392,6 +394,11 @@ public class RagQaFragment extends Fragment {
         
         // Add listener for thinking mode checkbox
         checkBoxThinkingMode.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            // 程序化更新期间不进行持久化写入，避免误保存与抖动
+            if (isUpdatingUiFromConfig) {
+                LogManager.logD(TAG, "Ignore checkbox change during config-driven UI update");
+                return;
+            }
             // Note: no_thinking=TRUE unchecks, false checks
             // So logic needs to be inverted here
             boolean noThinking = !isChecked;
@@ -481,6 +488,9 @@ public class RagQaFragment extends Fragment {
         
         // Set up custom text selection menu
         setupCustomTextSelectionMenu();
+
+        // 加载配置以初始化界面控件状态（包含思考模式复选框）
+        loadConfig();
     }
     
     // The following methods are copied from MainActivity and adjusted for Fragment needs
@@ -612,9 +622,11 @@ public class RagQaFragment extends Fragment {
         
         // Load thinking mode setting
         // Note: no_thinking=TRUE unchecks, false checks
+            isUpdatingUiFromConfig = true;
             boolean noThinking = ConfigManager.getNoThinking(requireContext());
             checkBoxThinkingMode.setChecked(!noThinking);
             LogManager.logD(TAG, "Loaded thinking mode setting: " + (!noThinking ? "enabled" : "disabled"));
+            isUpdatingUiFromConfig = false;
             
             LogManager.logD(TAG, "Configuration loading completed");
         } catch (Exception e) {

@@ -76,6 +76,8 @@ public class LocalLlmHandler {
     
     // 是否使用GPU
     private String useGpu = "CPU";
+    // 全局思考模式开关，默认关闭，避免未勾选也插入 <think>
+    private volatile boolean thinkingModeEnabled = false;
     
     // 推理停止标志
     private final AtomicBoolean shouldStopInference = new AtomicBoolean(false);
@@ -390,6 +392,11 @@ public class LocalLlmHandler {
         // 初始化GPU设置
         this.useGpu = ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
         LogManager.logD(TAG, "LocalLlmHandler初始化: 后端偏好设置为 " + this.useGpu);
+
+        // 从配置管理器读取思考模式（cfgmng 负责持久化），默认不禁用思考
+        boolean noThinking = ConfigManager.getNoThinking(context);
+        this.thinkingModeEnabled = !noThinking;
+        LogManager.logD(TAG, "LocalLlmHandler初始化: 思考模式=" + (this.thinkingModeEnabled ? "启用" : "禁用") + "（来自配置管理器）");
         
         // 推理引擎将在loadModel时根据模型类型自动选择
         // 支持的引擎类型：
@@ -435,6 +442,11 @@ public class LocalLlmHandler {
      */
     public void setUseGpu(String useGpu) {
         this.useGpu = useGpu;
+    }
+
+    // 设置全局思考模式，供 UI 开关调用
+    public void setThinkingMode(boolean thinkingMode) {
+        this.thinkingModeEnabled = thinkingMode;
     }
     
     /**
@@ -609,8 +621,8 @@ public class LocalLlmHandler {
         // 设置状态为 BUSY
         forceSetModelState(ModelState.BUSY);
 
-        // 构造默认推理参数（如需从配置细化可后续扩展）
-        InferenceParams params = new InferenceParams();
+        // 构造推理参数：按使用点从配置管理器读取，确保设置即时生效
+        InferenceParams params = buildParamsFromConfig();
 
         // 轻量统计：记录开始时间与token数
         final long startNs = System.nanoTime();
@@ -666,6 +678,53 @@ public class LocalLlmHandler {
                 LogManager.logD(TAG, "[ASYNC] delegate worker finished - thread=" + Thread.currentThread().getName());
             }
         });
+    }
+
+    /**
+     * 从配置管理器构建推理参数（按调用点读取，避免使用陈旧的全局缓存值）
+     */
+    private InferenceParams buildParamsFromConfig() {
+        InferenceParams params = new InferenceParams();
+        // 思考模式：no_thinking=true 表示禁用思考，因此需要取反
+        boolean noThinking = ConfigManager.getNoThinking(context);
+        params.setThinkingMode(!noThinking);
+
+        // 统一从ConfigManager读取所有推理参数，确保设置即时生效
+        // 优先顺序：如果开启“优先手动参数”则使用手动参数；否则读取全局LLM/LlamaCpp配置
+        boolean priorityManual = ConfigManager.getPriorityManualParams(context);
+        if (priorityManual) {
+            // 手动参数区域（Manual Inference Params）
+            int maxNewTokens = ConfigManager.getMaxNewTokens(context);
+            float temperature = ConfigManager.getManualTemperature(context);
+            int topK = ConfigManager.getManualTopK(context);
+            float topP = ConfigManager.getManualTopP(context);
+            float repetitionPenalty = ConfigManager.getManualRepeatPenalty(context);
+            int seed = -1; // 手动参数暂不提供seed配置，使用默认随机
+
+            params.setMaxTokens(maxNewTokens);
+            params.setTemperature(temperature);
+            params.setTopK(topK);
+            params.setTopP(topP);
+            params.setRepetitionPenalty(repetitionPenalty);
+            params.setSeed(seed);
+        } else {
+            // LlamaCpp/LLM通用参数区域（若未来支持其他引擎，也在此集中管理）
+            int maxNewTokens = ConfigManager.getMaxNewTokens(context);
+            float temperature = ConfigManager.getLlamaCppTemperature(context);
+            int topK = ConfigManager.getLlamaCppTopK(context);
+            float topP = ConfigManager.getLlamaCppTopP(context);
+            float repetitionPenalty = ConfigManager.getLlamaCppRepetitionPenalty(context);
+            int seed = ConfigManager.getLlamaCppSeed(context);
+
+            params.setMaxTokens(maxNewTokens);
+            params.setTemperature(temperature);
+            params.setTopK(topK);
+            params.setTopP(topP);
+            params.setRepetitionPenalty(repetitionPenalty);
+            params.setSeed(seed);
+        }
+
+        return params;
     }
     
     /**
@@ -1318,7 +1377,7 @@ public class LocalLlmHandler {
         private float temperature = 0.7f;
         private int topK = 40;
         private float topP = 0.9f;
-        private boolean thinkingMode = true;
+        private boolean thinkingMode = false;
         private float repetitionPenalty = 1.1f;
         private int seed = -1; // -1表示随机种子
         

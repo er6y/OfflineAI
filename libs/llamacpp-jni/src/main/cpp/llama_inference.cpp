@@ -564,7 +564,7 @@ static bool configure_backend_for_model(const std::string& backend, llama_model_
         // Vulkan backend: set layer=-1 (use all GPU layers)
         // Note: This will load Vulkan backend regardless of version compatibility
         model_params.n_gpu_layers = -1; // Use all GPU layers
-        FORCE_LOG(TAG, "[BACKEND] Vulkan backend selected: n_gpu_layers=-1 (all layers)");
+        FORCE_LOG(TAG, "[BACKEND] Vulkan backend selected: n_gpu_layers=%d", model_params.n_gpu_layers);
         return true; // Load GPU backends
         
     } else if (backend == "KLEIDIAI") {

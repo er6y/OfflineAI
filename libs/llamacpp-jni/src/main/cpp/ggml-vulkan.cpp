@@ -416,6 +416,7 @@ struct vk_device_struct {
     bool subgroup_clustered;
     bool multi_add;
     bool shader_int64;
+    bool buffer_device_address;
 
     bool add_rms_fusion;
     uint32_t partials_binding_alignment;
@@ -606,7 +607,7 @@ struct vk_device_struct {
     bool disable_fusion;
     bool disable_host_visible_vidmem;
     bool allow_sysmem_fallback;
-    bool disable_optimize_graph;
+    bool disable_graph_optimize;
 
 #ifdef GGML_VULKAN_MEMORY_DEBUG
     std::unique_ptr<vk_memory_logger> memory_logger;
@@ -2031,6 +2032,10 @@ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std
 
     vk::BufferUsageFlags usage_flags = vk::BufferUsageFlagBits::eStorageBuffer | vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eTransferDst;
     vk::MemoryAllocateFlags mem_flags {};
+    if (device->buffer_device_address) {
+        usage_flags |= vk::BufferUsageFlagBits::eShaderDeviceAddress;
+        mem_flags |= vk::MemoryAllocateFlagBits::eDeviceAddress;
+    }
 
     vk::BufferCreateInfo buffer_create_info{
         vk::BufferCreateFlags(),
@@ -2088,7 +2093,10 @@ static vk_buffer ggml_vk_create_buffer(vk_device& device, size_t size, const std
     buf->device = device;
     buf->size = size;
 
-    // buffer device address path disabled for mobile compatibility
+    if (device->buffer_device_address) {
+        const vk::BufferDeviceAddressInfo addressInfo(buf->buffer);
+        buf->bda_addr = device->device.getBufferAddress(addressInfo);
+    }
 
 #ifdef GGML_VULKAN_MEMORY_DEBUG
     device->memory_logger->log_allocation(buf, size);
@@ -3564,7 +3572,11 @@ static void ggml_vk_load_shaders(vk_device& device) {
         ggml_vk_create_pipeline(device, device->pipeline_im2col_f32_f16, "im2col_f32_f16", im2col_f32_f16 ## bda ## _len, im2col_f32_f16 ## bda ## _data, "main", 2, sizeof(vk_op_im2col_push_constants), {512, 1, 1}, { device->subgroup_size }, 1, true);   \
         ggml_vk_create_pipeline(device, device->pipeline_im2col_3d_f32_f16, "im2col_3d_f32_f16", im2col_3d_f32_f16 ## bda ## _len, im2col_3d_f32_f16 ## bda ## _data, "main", 2, sizeof(vk_op_im2col_3d_push_constants), {512, 1, 1}, { 512 }, 1, true);      \
     }
-    IM2COL()
+    if (device->shader_int64 && device->buffer_device_address) {
+        IM2COL(_bda)
+    } else {
+        IM2COL()
+    }
 
     ggml_vk_create_pipeline(device, device->pipeline_timestep_embedding_f32, "timestep_embedding_f32", timestep_embedding_f32_len, timestep_embedding_f32_data, "main", 2, sizeof(vk_op_timestep_embedding_push_constants), {256, 1, 1}, {}, 1);
 
@@ -3732,8 +3744,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
         const char* GGML_VK_ALLOW_SYSMEM_FALLBACK = getenv("GGML_VK_ALLOW_SYSMEM_FALLBACK");
         device->allow_sysmem_fallback = GGML_VK_ALLOW_SYSMEM_FALLBACK != nullptr;
 
-        const char* GGML_VK_DISABLE_OPTIMIZE_GRAPH = getenv("GGML_VK_DISABLE_OPTIMIZE_GRAPH");
-        device->disable_optimize_graph = GGML_VK_DISABLE_OPTIMIZE_GRAPH != nullptr;
+        const char* GGML_VK_DISABLE_GRAPH_OPTIMIZE = getenv("GGML_VK_DISABLE_GRAPH_OPTIMIZE");
+        device->disable_graph_optimize = GGML_VK_DISABLE_GRAPH_OPTIMIZE != nullptr;
 
         bool fp16_storage = false;
         bool fp16_compute = false;
@@ -3742,7 +3754,8 @@ static vk_device ggml_vk_get_device(size_t idx) {
         bool amd_shader_core_properties2 = false;
         bool pipeline_robustness = false;
         bool coopmat2_support = false;
-        bool shader_non_semantic_info = false;
+        bool pipeline_executable_properties_support = false;
+        bool shader_non_semantic_info_support = false;
         device->coopmat_support = false;
         device->integer_dot_product = false;
         bool bfloat16_support = false;
@@ -3762,8 +3775,6 @@ static vk_device ggml_vk_get_device(size_t idx) {
                 pipeline_robustness = true;
             } else if (strcmp("VK_EXT_subgroup_size_control", properties.extensionName) == 0) {
                 device->subgroup_size_control = true;
-            } else if (strcmp("VK_KHR_shader_non_semantic_info", properties.extensionName) == 0) {
-                shader_non_semantic_info = true;
 #if defined(GGML_VULKAN_COOPMAT_GLSLC_SUPPORT)
             } else if (strcmp("VK_KHR_cooperative_matrix", properties.extensionName) == 0 &&
                        !getenv("GGML_VK_DISABLE_COOPMAT")) {
@@ -3787,6 +3798,10 @@ static vk_device ggml_vk_get_device(size_t idx) {
                        !getenv("GGML_VK_DISABLE_BFLOAT16")) {
                 bfloat16_support = true;
 #endif
+            } else if (strcmp("VK_KHR_pipeline_executable_properties", properties.extensionName) == 0) {
+                pipeline_executable_properties_support = true;
+            } else if (strcmp("VK_KHR_shader_non_semantic_info", properties.extensionName) == 0) {
+                shader_non_semantic_info_support = true;
             }
         }
 
@@ -3848,15 +3863,18 @@ static vk_device ggml_vk_get_device(size_t idx) {
         const char* GGML_VK_FORCE_MAX_ALLOCATION_SIZE = getenv("GGML_VK_FORCE_MAX_ALLOCATION_SIZE");
 
         if (GGML_VK_FORCE_MAX_ALLOCATION_SIZE != nullptr) {
-            device->max_memory_allocation_size = std::stoul(GGML_VK_FORCE_MAX_ALLOCATION_SIZE);
+            device->max_memory_allocation_size = std::stoull(GGML_VK_FORCE_MAX_ALLOCATION_SIZE);
         } else if (maintenance4_support) {
             device->max_memory_allocation_size = std::min(props3.maxMemoryAllocationSize, props4.maxBufferSize);
         } else {
             device->max_memory_allocation_size = props3.maxMemoryAllocationSize;
         }
 
-        // PATCH: remove FORCE_MAX_BUFFER_SIZE override to reduce misconfiguration risk; rely on device limits
-        if (maintenance4_support) {
+        const char* GGML_VK_FORCE_MAX_BUFFER_SIZE = getenv("GGML_VK_FORCE_MAX_BUFFER_SIZE");
+
+        if (GGML_VK_FORCE_MAX_BUFFER_SIZE != nullptr) {
+            device->max_buffer_size = std::stoull(GGML_VK_FORCE_MAX_BUFFER_SIZE);
+        } else if (maintenance4_support) {
             device->max_buffer_size = props4.maxBufferSize;
         } else {
             device->max_buffer_size = device->max_memory_allocation_size;
@@ -3865,7 +3883,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
         const char* GGML_VK_SUBALLOCATION_BLOCK_SIZE = getenv("GGML_VK_SUBALLOCATION_BLOCK_SIZE");
 
         if (GGML_VK_SUBALLOCATION_BLOCK_SIZE != nullptr) {
-            device->suballocation_block_size = std::stoul(GGML_VK_SUBALLOCATION_BLOCK_SIZE);
+            device->suballocation_block_size = std::stoull(GGML_VK_SUBALLOCATION_BLOCK_SIZE);
         } else {
             // Limit batching of allocations to 1GB by default to avoid fragmentation issues
             device->suballocation_block_size = 1024*1024*1024;
@@ -4020,11 +4038,17 @@ static vk_device ggml_vk_get_device(size_t idx) {
             device_extensions.push_back("VK_KHR_shader_integer_dot_product");
         }
 
-        // Do not request VK_KHR_pipeline_executable_properties on mobile; avoid unsupported extension
+        VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pep_features {};
+        pep_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR;
+        if (pipeline_executable_properties_support) {
+            last_struct->pNext = (VkBaseOutStructure *)&pep_features;
+            last_struct = (VkBaseOutStructure *)&pep_features;
+            device_extensions.push_back("VK_KHR_pipeline_executable_properties");
+        }
 
         vkGetPhysicalDeviceFeatures2(device->physical_device, &device_features2);
 
-        // No pipeline executable properties support tracking on mobile
+        device->pipeline_executable_properties_support = pipeline_executable_properties_support;
 
         device->fp16 = device->fp16 && vk12_features.shaderFloat16;
 
@@ -4043,6 +4067,7 @@ static vk_device ggml_vk_get_device(size_t idx) {
                             getenv("GGML_VK_DISABLE_MULTI_ADD") == nullptr;
 
         device->shader_int64 = device_features2.features.shaderInt64;
+        device->buffer_device_address = vk12_features.bufferDeviceAddress;
 
         if (device->subgroup_size_control) {
             device->subgroup_min_size = subgroup_size_control_props.minSubgroupSize;
@@ -4146,21 +4171,19 @@ static vk_device ggml_vk_get_device(size_t idx) {
             throw std::runtime_error("Unsupported device");
         }
 
-        // 16-bit storage: if not supported, fall back to disabling fp16 features; only request extension when available
-        if (!vk11_features.storageBuffer16BitAccess) {
-            std::cerr << "ggml_vulkan: device " << GGML_VK_NAME << idx << " does not support 16-bit storage, falling back to 32-bit mode." << std::endl;
-            device->fp16 = false;
-        } else if (fp16_storage) {
+        // Only enable extension if it is reported available; on Vulkan 1.2+ this can be core without the extension
+        if (fp16_storage) {
             device_extensions.push_back("VK_KHR_16bit_storage");
         }
 
 #ifdef GGML_VULKAN_VALIDATE
-        if (shader_non_semantic_info) {
+        if (shader_non_semantic_info_support) {
             device_extensions.push_back("VK_KHR_shader_non_semantic_info");
         }
 #endif
 
-        if (device->fp16 && fp16_compute) {
+        // Only enable extension if reported available; Float16 may be core via Vulkan 1.2
+        if (fp16_compute) {
             device_extensions.push_back("VK_KHR_shader_float16_int8");
         }
 
@@ -4555,17 +4578,15 @@ static void ggml_vk_instance_init() {
         return;
     }
     VK_LOG_DEBUG("ggml_vk_instance_init()");
-    // Initialize global Vulkan-HPP dispatcher before any HPP global calls
+
+    // See https://github.com/KhronosGroup/Vulkan-Hpp?tab=readme-ov-file#extensions--per-device-function-pointers-
     ggml_vk_default_dispatcher_instance.init(vkGetInstanceProcAddr);
 
     uint32_t api_version = vk::enumerateInstanceVersion();
 
     if (api_version < VK_API_VERSION_1_2) {
-        // Gracefully skip Vulkan backend when runtime is below 1.2
-        std::cerr << "ggml_vulkan: Info: Vulkan 1.2 required; skipping Vulkan backend (api="
-                  << VK_VERSION_MAJOR(api_version) << "." << VK_VERSION_MINOR(api_version) << ")" << std::endl;
-        vk_instance_initialized = true;
-        return;
+        std::cerr << "ggml_vulkan: Error: Vulkan 1.2 required." << std::endl;
+        throw vk::SystemError(vk::Result::eErrorFeatureNotPresent, "Vulkan 1.2 required");
     }
 
     vk::ApplicationInfo app_info{ "ggml-vulkan", 1, nullptr, 0, api_version };
@@ -4614,8 +4635,6 @@ static void ggml_vk_instance_init() {
         GGML_LOG_DEBUG("ggml_vulkan: Validation layers enabled\n");
     }
     vk_instance.instance = vk::createInstance(instance_create_info);
-    // Initialize instance-level dispatcher
-    VULKAN_HPP_DEFAULT_DISPATCHER.init(vk_instance.instance);
     vk_instance_initialized = true;
 
     if (debug_utils_ext) {
@@ -4631,7 +4650,6 @@ static void ggml_vk_instance_init() {
     vk_perf_logger_enabled = getenv("GGML_VK_PERF_LOGGER") != nullptr;
 
     // See https://github.com/KhronosGroup/Vulkan-Hpp?tab=readme-ov-file#extensions--per-device-function-pointers-
-    // Initialize (again) in case validation layers modified the dispatch table
     VULKAN_HPP_DEFAULT_DISPATCHER.init(vk_instance.instance);
 
     std::vector<vk::PhysicalDevice> devices = vk_instance.instance.enumeratePhysicalDevices();
@@ -8651,6 +8669,10 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
 
         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { vk_subbuffer{ d_X, x_buf_offset, x_sz }, vk_subbuffer{ d_Y, y_buf_offset, y_sz }, subbuf_z, vk_subbuffer{ d_D, d_buf_offset, d_sz } }, pc, elements);
     } else if (op == GGML_OP_IM2COL || op == GGML_OP_IM2COL_3D) {
+        if (ctx->device->shader_int64 && ctx->device->buffer_device_address) {
+            // buffer device address path doesn't use dst buffer
+            d_sz = 1;
+        }
         // im2col uses only src1 and dst buffers
         ggml_vk_dispatch_pipeline(ctx, subctx, pipeline, { vk_subbuffer{ d_Y, y_buf_offset, y_sz }, vk_subbuffer{ d_D, d_buf_offset, d_sz } }, pc, elements);
     } else if (op == GGML_OP_COUNT_EQUAL) {
@@ -11745,6 +11767,12 @@ static ggml_backend_buffer_t ggml_backend_vk_host_buffer_type_alloc_buffer(ggml_
         return ggml_backend_buft_alloc_buffer(ggml_backend_cpu_buffer_type(), size);
     }
 
+    if (ptr == nullptr) {
+        // Some mobile drivers may not throw but return null on pinned alloc
+        GGML_LOG_WARN("ggml_vulkan: Pinned host allocation returned NULL, using CPU buffer\n");
+        return ggml_backend_buft_alloc_buffer(ggml_backend_cpu_buffer_type(), size);
+    }
+
     ggml_backend_buffer_t buffer = ggml_backend_cpu_buffer_from_ptr(ptr, size);
     buffer->buft = buft;
     buffer->iface.free_buffer = ggml_backend_vk_host_buffer_free_buffer;
@@ -12204,7 +12232,7 @@ static void ggml_vk_graph_optimize(ggml_backend_t backend, struct ggml_cgraph * 
     VK_LOG_DEBUG("ggml_vk_graph_optimize(" << graph->n_nodes << " nodes)");
     ggml_backend_vk_context * ctx = (ggml_backend_vk_context *)backend->context;
 
-    if (ctx->device->disable_optimize_graph) {
+    if (ctx->device->disable_graph_optimize) {
         return;
     }
 

@@ -1868,6 +1868,51 @@ public class ConfigManager {
     }
 
     /**
+     * 获取LlamaCpp温度参数
+     * @param context 上下文
+     * @return 温度参数
+     */
+    public static float getLlamaCppTemperature(Context context) {
+        return getFloat(context, KEY_LLAMACPP_TEMPERATURE, DEFAULT_LLAMACPP_TEMPERATURE);
+    }
+
+    /**
+     * 获取LlamaCpp Top-P参数
+     * @param context 上下文
+     * @return Top-P参数
+     */
+    public static float getLlamaCppTopP(Context context) {
+        return getFloat(context, KEY_LLAMACPP_TOP_P, DEFAULT_LLAMACPP_TOP_P);
+    }
+
+    /**
+     * 获取LlamaCpp Top-K参数
+     * @param context 上下文
+     * @return Top-K参数
+     */
+    public static int getLlamaCppTopK(Context context) {
+        return getInt(context, KEY_LLAMACPP_TOP_K, DEFAULT_LLAMACPP_TOP_K);
+    }
+
+    /**
+     * 获取LlamaCpp重复惩罚参数
+     * @param context 上下文
+     * @return 重复惩罚参数
+     */
+    public static float getLlamaCppRepetitionPenalty(Context context) {
+        return getFloat(context, KEY_LLAMACPP_REPEAT_PENALTY, DEFAULT_LLAMACPP_REPEAT_PENALTY);
+    }
+
+    /**
+     * 获取LlamaCpp随机种子
+     * @param context 上下文
+     * @return 随机种子（-1表示随机）
+     */
+    public static int getLlamaCppSeed(Context context) {
+        return getInt(context, KEY_LLAMACPP_SEED, DEFAULT_LLAMACPP_SEED);
+    }
+
+    /**
      * 检查是否启用调试模式
      * @param context 上下文
      * @return 是否启用调试模式

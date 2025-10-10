@@ -832,26 +832,22 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
      */
     private synchronized long acquireSampler(LocalLlmHandler.InferenceParams params) {
         LocalLlmHandler.InferenceParams finalParams = null;
-        
-        // 检查是否优先使用手动参数
-        Context context = getContext();
-        boolean priorityManualParams = false;
-        if (context != null) {
-            priorityManualParams = ConfigManager.getPriorityManualParams(context);
-        }
-        
-        if (priorityManualParams) {
-            // 优先手动参数开关打开，直接使用手动参数
-            finalParams = getManualInferenceParams();
-            LogManager.logI(TAG, "优先手动参数开关已开启，直接使用手动推理参数");
+
+        // 优先使用调用点传入的参数，确保设置即时生效（统一由上层构建）
+        if (params != null) {
+            finalParams = params;
+            LogManager.logI(TAG, "使用调用点传入的推理参数（优先级最高）");
         } else {
-            // 参数优先级：模型目录参数 > 手动配置参数
-            if (modelParams != null) {
-                // 使用模型目录参数（最高优先级）
+            // 兼容旧逻辑：若未传入，则回退到现有优先级（模型目录 > 手动配置）
+            Context context = getContext();
+            boolean priorityManualParams = (context != null) && ConfigManager.getPriorityManualParams(context);
+            if (priorityManualParams) {
+                finalParams = getManualInferenceParams();
+                LogManager.logI(TAG, "优先手动参数开关已开启，直接使用手动推理参数");
+            } else if (modelParams != null) {
                 finalParams = modelParams;
                 LogManager.logI(TAG, "使用模型目录的推理参数（最高优先级）");
             } else {
-                // 使用手动配置参数（第二优先级）
                 finalParams = getManualInferenceParams();
                 LogManager.logI(TAG, "使用手动配置的推理参数（第二优先级）");
             }
@@ -1218,8 +1214,10 @@ public class LocalLLMLlamaCppHandler implements LocalLlmHandler.InferenceEngine 
     
     private void generateWithLlamaCpp(String prompt, LocalLlmHandler.InferenceParams params, LocalLlmHandler.StreamingCallback callback, StringBuilder fullResponse, long[] imageHandles) {
         try {
-            // 从ConfigManager获取配置参数
-            int maxTokens = ConfigManager.getMaxNewTokens(context);
+            // 统一使用传入的推理参数，确保设置即时生效；若为空或无效则回退配置值
+            int maxTokens = (params != null && params.getMaxTokens() > 0)
+                    ? params.getMaxTokens()
+                    : ConfigManager.getMaxNewTokens(context);
             
             LogManager.logI(TAG, String.format("推理参数 - MaxTokens: %d", maxTokens));
             
