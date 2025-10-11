@@ -7,17 +7,17 @@ plugins {
 task clean(type: Delete) {
     delete rootProject.buildDir
     
-    // 清理 Rust 编译产物
+    //  Rust 
     delete 'libs/tokenizers-jni/src/main/rust/target'
     
-    // 清理其他可能的编译产物
+    //  
     delete 'app/build'
     delete 'libs/tokenizers-jni/build'
-    delete 'libs/llamacpp-jni/build'
+    delete 'libs/mnn-jni/build'
     
     doLast {
-        println "已清理所有编译产物："
-        println "- Rust target 目录"
-        println "- 所有模块的 build 目录"
+        println "  :"
+        println "- Rust target   "
+        println "-     build   "
     }
 }

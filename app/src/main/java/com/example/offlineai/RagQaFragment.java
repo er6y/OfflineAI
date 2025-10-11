@@ -62,16 +62,12 @@ import com.android.volley.toolbox.Volley;
 import com.example.offlineai.api.LocalLlmHandler;
 import com.example.offlineai.api.LocalLlmAdapter;
 import com.example.offlineai.ApiUrlAdapter;
-import com.example.offlineai.api.TokenizerManager;
-import com.example.offlineai.RerankerModelManager;
+import com.example.offlineai.RerankerHandler;
 import com.example.offlineai.AppConstants;
 import com.example.offlineai.StateDisplayManager;
 import com.example.offlineai.adapter.StateAwareSpinnerAdapter;
 import com.example.offlineai.ImageThumbnailAdapter;
-import com.example.offlineai.GlobalStopManager;
-import com.example.offlineai.EmbeddingModelHandler;
-import com.example.offlineai.EmbeddingModelManager;
-import com.example.offlineai.EmbeddingModelUtils;
+import com.example.offlineai.EmbeddingHandler;
 import com.example.offlineai.SQLiteVectorDatabaseHandler;
 import com.example.offlineai.ConfigManager;
 import io.noties.markwon.Markwon;
@@ -157,22 +153,21 @@ public class RagQaFragment extends Fragment {
     // Global stop flag - used to uniformly control the stopping of all models
     private volatile boolean globalStopFlag = false;
     private volatile Future<?> ragTaskFuture; // Track RAG task future for cancellation
+    
+    /**
+     * Static stop flag for cross-module communication
+     * Used by Embedding/Tokenizer/Reranker to check if user requested stop
+     * This replaces GlobalStopManager with a simpler approach
+     */
+    public static volatile boolean userRequestedStop = false;
 
     // keep screen on flag
     private boolean isKeepScreenOn = false;
     // track battery optimization status
     private boolean batteryOptimizationDisabled = false;
     
-    // [Important Fix] Thread pool responsibility separation:
-    // 1. stopCheckExecutor - specifically for stop check tasks, should not trigger model operations
-    // 2. ragQueryExecutor - specifically for RAG query tasks, can call models
-    private final ExecutorService stopCheckExecutor = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "RagQa-StopCheck-Thread");
-        t.setDaemon(true);
-        return t;
-    });
-    
-    private final ExecutorService ragQueryExecutor = Executors.newSingleThreadExecutor(r -> {
+    // RAG query thread pool
+    private ExecutorService ragQueryExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "RagQa-Query-Thread");
         t.setDaemon(true);
         return t;
@@ -1004,7 +999,7 @@ public class RagQaFragment extends Fragment {
                 boolean ui_isTaskRunning = isTaskRunning;
                 boolean ui_isTaskCancelled = isTaskCancelled;
                 boolean ui_globalStopFlag = globalStopFlag;
-                boolean ui_globalStopRequested = GlobalStopManager.isGlobalStopRequested();
+                boolean ui_globalStopRequested = userRequestedStop;
                 String ragFutureState = (ragTaskFuture == null ? "null" : (ragTaskFuture.isDone() ? "done" : "not_done"));
                 Thread uiThread = Thread.currentThread();
 
@@ -1032,12 +1027,8 @@ public class RagQaFragment extends Fragment {
                 LogManager.logE(TAG, "Error collecting send-click snapshot", th);
             }
 
-            // Cancel any pending stop-check and cleanup leftover RAG Future before new send (English log)
+            // Cleanup leftover RAG Future before new send
             try {
-                if (needsStopCheck) {
-                    LogManager.logD(TAG, "Cancel any pending stop-check before new send");
-                }
-                needsStopCheck = false;
                 if (ragTaskFuture != null) {
                     if (!ragTaskFuture.isDone()) {
                         boolean cancelBeforeSend = ragTaskFuture.cancel(true);
@@ -1099,12 +1090,31 @@ public class RagQaFragment extends Fragment {
             // [Important Fix] Use dedicated RAG query thread pool to execute query tasks
             // Avoid executing model operations in stop check thread, eliminate concurrency conflicts
             LogManager.logI(TAG, "[SEND] Submitting RAG task to executor - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
+            
+            // CRITICAL: Check if previous task is stuck (cancelled but not done)
+            // This happens when native call (e.g. Reranker loading) is blocking the thread
+            if (ragTaskFuture != null && ragTaskFuture.isCancelled() && !ragTaskFuture.isDone()) {
+                LogManager.logW(TAG, "[EXECUTOR] Previous task is STUCK (cancelled but not done), recreating executor");
+                try {
+                    ragQueryExecutor.shutdownNow();
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[EXECUTOR] Error shutting down stuck executor: " + e.getMessage());
+                }
+                ragQueryExecutor = Executors.newSingleThreadExecutor(r -> {
+                    Thread t = new Thread(r, "RagQa-Query-Thread");
+                    t.setDaemon(true);
+                    return t;
+                });
+                LogManager.logI(TAG, "[EXECUTOR] Executor recreated successfully");
+            }
+            
+            LogManager.logI(TAG, "[EXECUTOR] Before submit - isShutdown=" + ragQueryExecutor.isShutdown() + ", isTerminated=" + ragQueryExecutor.isTerminated());
             ragTaskFuture = ragQueryExecutor.submit(() -> {
+                LogManager.logI(TAG, "[EXECUTOR] Task lambda ENTERED - thread=" + Thread.currentThread().getName());
                 // Background thread snapshot at RAG task start (English log)
                 try {
                     Thread worker = Thread.currentThread();
-                    boolean globalStopRequested = GlobalStopManager.isGlobalStopRequested();
-                    boolean allModulesStopped = GlobalStopManager.areAllModulesStopped();
+                    boolean globalStopRequested = userRequestedStop;
 
                     LocalLlmAdapter adapter = LocalLlmAdapter.getInstance(requireContext());
                     String modelState = String.valueOf(adapter.getModelState());
@@ -1116,8 +1126,7 @@ public class RagQaFragment extends Fragment {
                         TAG,
                         "[SNAPSHOT][BG_START] RAG-task start - thread=" + worker.getName()
                             + ", interrupted=" + worker.isInterrupted()
-                            + ", GlobalStopManager=" + globalStopRequested
-                            + ", allModulesStopped=" + allModulesStopped
+                            + ", userRequestedStop=" + globalStopRequested
                             + ", modelState=" + modelState
                             + ", llmBusy=" + llmBusy
                             + ", llmRunning=" + llmRunning
@@ -1146,6 +1155,7 @@ public class RagQaFragment extends Fragment {
                 //updateProgressOnUiThread("Starting knowledge base query...");
                 executeRagQuery(apiUrl, apiKey, model, knowledgeBase, systemPrompt, userPrompt);
             });
+            LogManager.logI(TAG, "[EXECUTOR] After submit - ragTaskFuture=" + (ragTaskFuture == null ? "null" : "not_null") + ", isDone=" + (ragTaskFuture != null && ragTaskFuture.isDone()) + ", isCancelled=" + (ragTaskFuture != null && ragTaskFuture.isCancelled()));
 
         } else if (isSending.compareAndSet(true, false)) {
             // --- Stop sending --- 
@@ -1172,8 +1182,8 @@ public class RagQaFragment extends Fragment {
             globalStopFlag = true;
             isTaskCancelled = true;
             
-            // Use GlobalStopManager to set global stop flag
-            GlobalStopManager.setGlobalStopFlag(true);
+            // Set static stop flag for cross-module communication
+            userRequestedStop = true;
             LogManager.logI(TAG, "[STOP] Global stop requested - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isTaskRunning=" + isTaskRunning + ", ragFuture=" + (ragTaskFuture==null?"null":(ragTaskFuture.isDone()?"done":"not_done")));
             
             LogManager.logD(TAG, "Set global stop flag and task cancellation flag to true");
@@ -1201,65 +1211,49 @@ public class RagQaFragment extends Fragment {
             
             // 2. Stop Embedding model (if in use)
             try {
-                EmbeddingModelManager embeddingManager = EmbeddingModelManager.getInstance(getContext());
-                if (embeddingManager != null) {
-                    // EmbeddingModelManager doesn't have direct stop method, but can stop by unloading model
-                    LogManager.logD(TAG, "Embedding model manager found, marking as stopped");
+                EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(getContext());
+                if (embeddingHandler != null) {
+                    embeddingHandler.stopInference();
+                    LogManager.logI(TAG, "✓ Embedding model stop signal sent");
+                } else {
+                    LogManager.logD(TAG, "Embedding handler is null");
                 }
-                LogManager.logI(TAG, "✓ Embedding model stop signal sent");
             } catch (Exception e) {
                 LogManager.logE(TAG, "✗ Error stopping embedding model", e);
             }
             
             // 3. Stop Reranker model (if in use)
             try {
-                RerankerModelManager rerankerManager = RerankerModelManager.getInstance(getContext());
-                if (rerankerManager != null) {
-                    // RerankerModelManager doesn't have direct stop method, but can stop by reset
-                    LogManager.logD(TAG, "Reranker model manager found, marking as stopped");
+                RerankerHandler rerankerHandler = RerankerHandler.getInstance(getContext());
+                if (rerankerHandler != null) {
+                    rerankerHandler.stopInference();
+                    LogManager.logI(TAG, "✓ Reranker model stop signal sent");
+                } else {
+                    LogManager.logD(TAG, "Reranker handler is null");
                 }
-                LogManager.logI(TAG, "✓ Reranker model stop signal sent");
             } catch (Exception e) {
                 LogManager.logE(TAG, "✗ Error stopping reranker model", e);
             }
             
-            // 4. Stop Tokenizer (if in use)
-            try {
-                TokenizerManager tokenizerManager = TokenizerManager.getInstance(requireContext());
-                if (tokenizerManager != null) {
-                    // TokenizerManager has reset method to reset state
-                    tokenizerManager.reset();
-                    LogManager.logI(TAG, "✓ Tokenizer reset completed");
-                } else {
-                    LogManager.logD(TAG, "Tokenizer manager not found, skipping");
-                }
-            } catch (Exception e) {
-                LogManager.logE(TAG, "✗ Error resetting tokenizer", e);
-            }
+            // MNN models have built-in tokenizers, no external tokenizer to stop
+            LogManager.logI(TAG, "✓ MNN tokenizers are managed internally");
             
             LogManager.logI(TAG, "All component stop signals have been sent");
             
-            // Request cancellation for RAG Future if still running (English log)
+            // CRITICAL FIX: Use cancel(false) instead of cancel(true) for graceful stop
+            // cancel(true) calls Thread.interrupt() which is abrupt interruption
+            // cancel(false) only sets flag, lets native call finish naturally, then checks mShouldStop
+            // This follows LLM's graceful stop pattern: set flag → wait for natural checkpoint → stop
             if (ragTaskFuture != null && !ragTaskFuture.isDone()) {
-                boolean cancelResult = ragTaskFuture.cancel(true);
-                LogManager.logI(TAG, "Requested cancellation for RAG task Future, result=" + cancelResult);
+                boolean cancelResult = ragTaskFuture.cancel(false);  // ✅ false = no interrupt
+                LogManager.logI(TAG, "Requested graceful cancellation for RAG task Future (no thread interrupt), result=" + cancelResult);
             } else {
                 LogManager.logD(TAG, "No active RAG task Future to cancel");
             }
             
-            // Start stop completion check mechanism (fail-safe mechanism)
-            // Smart check: only start when truly needed (when task might still be running)
-            if (isTaskRunning || !globalStopFlag) {
-                needsStopCheck = true;
-                startStopCompletionCheck();
-            } else {
-                LogManager.logD(TAG, "[Fail-safe mechanism] Task state is normal, no need to start check");
-            }
-            
             Toast.makeText(requireContext(), getString(R.string.toast_request_stopped), Toast.LENGTH_SHORT).show();
             appendToResponse("\n" + getString(R.string.toast_request_stopped) + "。");
-            LogManager.logD(TAG, "Stop processing initiated, waiting for completion check");
-            LogManager.logD(TAG, "[STOP] Waiting for completion check, needsStopCheck=" + needsStopCheck);
+            LogManager.logD(TAG, "Stop processing initiated");
         } else {
             // Prevent duplicate clicks
             LogManager.logD(TAG, "Button click ignored - operation already in progress or completed");
@@ -1278,6 +1272,27 @@ public class RagQaFragment extends Fragment {
         // [Important] Do not reset global stop flag, maintain previous stop state
         LogManager.logD(TAG, "Initializing sending state - task running: " + isTaskRunning + ", cancelled: " + isTaskCancelled + ", global stop flag unchanged: " + globalStopFlag);
         LogManager.logI(TAG, "[STATE] initializeSendingState - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
+        
+        // Reset stop flags for embedding and reranker handlers
+        try {
+            EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(getContext());
+            if (embeddingHandler != null) {
+                embeddingHandler.resetStopFlag();
+                LogManager.logD(TAG, "Embedding handler stop flag reset");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Error resetting embedding handler stop flag", e);
+        }
+        
+        try {
+            RerankerHandler rerankerHandler = RerankerHandler.getInstance(getContext());
+            if (rerankerHandler != null) {
+                rerankerHandler.resetStopFlag();
+                LogManager.logD(TAG, "Reranker handler stop flag reset");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Error resetting reranker handler stop flag", e);
+        }
     }
     
     /**
@@ -1294,7 +1309,7 @@ public class RagQaFragment extends Fragment {
         // This ensures stop flag is not reset prematurely
         LogManager.logD(TAG, "Resetting sending state - confirming all tasks stopped before resetting global stop flag");
         globalStopFlag = false;
-        GlobalStopManager.setGlobalStopFlag(false);
+        userRequestedStop = false;
         LogManager.logD(TAG, "Global stop flag reset to false after confirming all tasks stopped");
         
         // Ensure RAG task future is cleaned up and not leaking (English log)
@@ -1347,157 +1362,9 @@ public class RagQaFragment extends Fragment {
             if (buttonSendStop != null) {
                 buttonSendStop.setText(getString(R.string.button_send));
             }
-            LogManager.logW(TAG, "Validation failed, restored send state - reason=" + reason);
         } catch (Throwable th) {
             LogManager.logE(TAG, "Error restoring state after validation failure", th);
         }
-    }
-
-    // Smart check flag - only start failsafe check when truly needed
-    private volatile boolean needsStopCheck = false;
-    
-    /**
-     * Start stop completion check mechanism (failsafe mechanism)
-     * Continuously monitor whether all tasks have truly stopped, ensuring correct button state
-     * Optimization: reduce check frequency, smart checking
-     */
-    private void startStopCompletionCheck() {
-        // Smart check: only start when truly needed
-        if (!needsStopCheck) {
-            LogManager.logD(TAG, "[Failsafe Mechanism] No need to start check, task state is normal");
-            LogManager.logD(TAG, "[STOP][CHECK] Skip check as not required");
-            return;
-        }
-        
-        LogManager.logD(TAG, "[Failsafe Mechanism] Starting stop completion check (smart mode)");
-        
-        // [Important Fix] Use dedicated stop check thread pool to avoid conflicts with RAG query tasks
-        stopCheckExecutor.execute(() -> {
-            int checkCount = 0;
-            final int CHECK_INTERVAL_MS = 300; // Reduce check frequency: from 100ms to 300ms
-            final int MAX_CHECKS = 100; // Reduce maximum check count: from 300 to 100 times (30 seconds)
-            
-            while (needsStopCheck) {
-                try {
-                    Thread.sleep(CHECK_INTERVAL_MS);
-                    checkCount++;
-                    
-                    boolean allTasksStopped = checkAllTasksStopped();
-                    
-                    // Log once every 5 checks to reduce log frequency
-                    if (checkCount % 5 == 0) {
-                        LogManager.logD(TAG, "[Failsafe Mechanism] Check #" + checkCount + ", all tasks stopped: " + allTasksStopped);
-                    }
-                    
-                    if (allTasksStopped) {
-                        LogManager.logI(TAG, "[Failsafe Mechanism] ✓ All tasks confirmed stopped, restoring button state (checked " + checkCount + " times)");
-                        needsStopCheck = false; // Reset smart check flag
-                        resetSendingState();
-                        return;
-                    }
-                    
-                    // Safety check: if too many checks, force restore state
-                    if (checkCount > MAX_CHECKS) {
-                        LogManager.logW(TAG, "[Failsafe Mechanism] ⚠ Too many checks (" + checkCount + " times), forcing button state restore");
-                        needsStopCheck = false; // Reset smart check flag
-                        resetSendingState();
-                        return;
-                    }
-                    
-                } catch (InterruptedException e) {
-                    LogManager.logE(TAG, "[Failsafe Mechanism] Check thread interrupted", e);
-                    needsStopCheck = false; // Reset smart check flag
-                    break;
-                }
-            }
-        });
-    }
-    
-    /**
-     * Check if all tasks have stopped
-     * @return true if all tasks have stopped, false otherwise
-     */
-    private boolean checkAllTasksStopped() {
-        // Check if RAG query task is still running
-        if (isTaskRunning && !isTaskCancelled) {
-            LogManager.logD(TAG, "[Failsafe Mechanism] RAG task still running");
-            return false;
-        }
-        // Check Future status to ensure task has fully stopped (English log)
-        if (ragTaskFuture != null && !ragTaskFuture.isDone()) {
-            LogManager.logD(TAG, "Safety check: RAG Future still running");
-            return false;
-        }
-        
-        // Check global stop flag
-        if (!globalStopFlag) {
-            LogManager.logD(TAG, "[Failsafe Mechanism] Global stop flag not set");
-            return false;
-        }
-        
-        // Use GlobalStopManager to check stop status of each module
-        if (!GlobalStopManager.areAllModulesStopped()) {
-            LogManager.logD(TAG, "[Failsafe Mechanism] Some modules not fully stopped yet");
-            return false;
-        }
-        
-        // Check if local LLM is still inferencing
-        String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
-        String currentApiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrlDisplay);
-        
-        if (AppConstants.ApiUrl.LOCAL.equals(currentApiUrl)) {
-            try {
-                // Check if local LLM has truly stopped
-                if (!GlobalStopManager.isModuleStopped("LocalLLM")) {
-                    LogManager.logD(TAG, "[Failsafe Mechanism] Local LLM still running");
-                    return false;
-                }
-                LogManager.logD(TAG, "[Failsafe Mechanism] Local LLM stopped");
-            } catch (Exception e) {
-                LogManager.logE(TAG, "[Failsafe Mechanism] Error checking local LLM status: " + e.getMessage());
-                // Consider not fully stopped when error occurs
-                return false;
-            }
-        }
-        
-        // Check Embedding model status
-        try {
-            if (!GlobalStopManager.isModuleStopped("Embedding")) {
-                LogManager.logD(TAG, "[Failsafe Mechanism] Embedding model still running");
-                return false;
-            }
-            LogManager.logD(TAG, "[Failsafe Mechanism] Embedding model stopped");
-        } catch (Exception e) {
-            LogManager.logE(TAG, "[Failsafe Mechanism] Error checking Embedding model status: " + e.getMessage());
-            return false;
-        }
-        
-        // Check Reranker model status
-        try {
-            if (!GlobalStopManager.isModuleStopped("Reranker")) {
-                LogManager.logD(TAG, "[Failsafe Mechanism] Reranker model still running");
-                return false;
-            }
-            LogManager.logD(TAG, "[Failsafe Mechanism] Reranker model stopped");
-        } catch (Exception e) {
-            LogManager.logE(TAG, "[Failsafe Mechanism] Error checking Reranker model status: " + e.getMessage());
-            return false;
-        }
-        
-        // Check Tokenizer status
-        try {
-            if (!GlobalStopManager.isModuleStopped("Tokenizer")) {
-                LogManager.logD(TAG, "[Failsafe Mechanism] Tokenizer still running");
-                return false;
-            }
-            LogManager.logD(TAG, "[Failsafe Mechanism] Tokenizer stopped");
-        } catch (Exception e) {
-            LogManager.logE(TAG, "[Failsafe Mechanism] Error checking Tokenizer status: " + e.getMessage());
-            return false;
-        }
-        
-        LogManager.logD(TAG, "[Failsafe Mechanism] All components confirmed fully stopped, can switch button state");
-        return true;
     }
     private void executeRagQuery(String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt, String userPrompt) {
         // [Fix] Use dedicated initialization method, do not reset global stop flag
@@ -1604,7 +1471,8 @@ public class RagQaFragment extends Fragment {
                             Thread.sleep(100);
                         } catch (InterruptedException e) {
                             LogManager.logE(TAG, "Interrupted while waiting for query results", e);
-                            break;
+                            // CRITICAL: Return immediately, don't continue to call LLM
+                            return;
                         }
                     }
                     
@@ -1712,13 +1580,18 @@ public class RagQaFragment extends Fragment {
             LogManager.logE(TAG, errorMsg, e);
             
             updateResultOnUiThread("Query failed: " + e.getMessage());
-            mainHandler.post(() -> {
-                buttonSendStop.setText(getString(R.string.button_send));
-                isSending.set(false); // Use atomic operation to reset sending state
-            });
+            // CRITICAL: Reset state when exception occurs (before LLM is called)
+            resetSendingState();
         } finally {
-            // executeRagQuery method execution completed, LLM inference will proceed asynchronously
-            LogManager.logD(TAG, "executeRagQuery method execution completed, LLM inference will proceed asynchronously");
+            // CRITICAL: Check if task was cancelled during embedding/reranker phase
+            // If cancelled, reset state immediately (LLM was never called)
+            // If not cancelled, LLM callback will handle state reset
+            if (isTaskCancelled || globalStopFlag) {
+                LogManager.logI(TAG, "Task cancelled during embedding/reranker phase, resetting state immediately");
+                resetSendingState();
+            } else {
+                LogManager.logD(TAG, "executeRagQuery completed, waiting for LLM callback to reset state");
+            }
         }
     }
     
@@ -1900,9 +1773,9 @@ public class RagQaFragment extends Fragment {
                         File[] files = modeldirFile.listFiles();
                         if (files != null) {
                             for (File file : files) {
-                                if (file.isFile() && (file.getName().endsWith(".pt") || 
-                                                     file.getName().endsWith(".pth") || 
-                                                     file.getName().endsWith(".onnx"))) {
+                                // MNN models use .mnn format or config.json
+                                if (file.isFile() && (file.getName().endsWith(".mnn") || 
+                                                     file.getName().equals("config.json"))) {
                                     foundModelPath = file.getAbsolutePath();
                                     LogManager.logD(TAG, "Using model from modeldir: " + foundModelPath);
                                     break;
@@ -1930,22 +1803,20 @@ public class RagQaFragment extends Fragment {
                         File[] directories = embeddingModelDir.listFiles(File::isDirectory);
                         if (directories != null) {
                             for (File dir : directories) {
-                                // Check if directory contains model files
+                                // Check if directory contains MNN model files
                                 File[] modelFiles = dir.listFiles(file -> 
-                                    file.isFile() && (file.getName().endsWith(".pt") || 
-                                                     file.getName().endsWith(".pth") || 
-                                                     file.getName().endsWith(".onnx")));
+                                    file.isFile() && (file.getName().endsWith(".mnn") || 
+                                                     file.getName().equals("config.json")));
                                 if (modelFiles != null && modelFiles.length > 0) {
                                     availableModels.add(dir.getName());
                                 }
                             }
                         }
                         
-                        // Also check for model files in root directory
+                        // Also check for MNN model files in root directory
                         File[] rootModelFiles = embeddingModelDir.listFiles(file -> 
-                            file.isFile() && (file.getName().endsWith(".pt") || 
-                                             file.getName().endsWith(".pth") || 
-                                             file.getName().endsWith(".onnx")));
+                            file.isFile() && (file.getName().endsWith(".mnn") || 
+                                             file.getName().equals("config.json")));
                         if (rootModelFiles != null && rootModelFiles.length > 0) {
                             availableModels.add("Root Directory");
                         }
@@ -1965,8 +1836,8 @@ public class RagQaFragment extends Fragment {
                     }
                 }
                 
-                // Use utility class to check and load embedding model
-                EmbeddingModelUtils.checkAndLoadEmbeddingModel(
+                // Use EmbeddingHandler to check and load embedding model
+                EmbeddingHandler.checkAndLoadEmbeddingModel(
                     requireContext(),
                     vectorDbRef[0],
                     modelFoundPath -> {
@@ -1981,7 +1852,16 @@ public class RagQaFragment extends Fragment {
                         updateProgressOnUiThread("Using embedding model: " + embModelName);
                         
                         // Load embedding model
-                        loadModelAndProcessQuery(modelFoundPath, query, vectorDbRef[0]);
+                        try {
+                            loadModelAndProcessQuery(modelFoundPath, query, vectorDbRef[0]);
+                        } catch (InterruptedException ie) {
+                            LogManager.logI(TAG, "Model loading interrupted: " + ie.getMessage());
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException(ie);
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "Model loading failed: " + e.getMessage(), e);
+                            throw new RuntimeException(e);
+                        }
                     },
                     (selectedModel, selectedModelPath) -> {
                         // User selected a model, continue processing
@@ -1990,7 +1870,16 @@ public class RagQaFragment extends Fragment {
                         updateProgressOnUiThread("Using selected embedding model: " + selectedModel);
                         
                         // Load embedding model
-                        loadModelAndProcessQuery(selectedModelPath, query, vectorDbRef[0]);
+                        try {
+                            loadModelAndProcessQuery(selectedModelPath, query, vectorDbRef[0]);
+                        } catch (InterruptedException ie) {
+                            LogManager.logI(TAG, "Model loading interrupted: " + ie.getMessage());
+                            Thread.currentThread().interrupt();
+                            throw new RuntimeException(ie);
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "Model loading failed: " + e.getMessage(), e);
+                            throw new RuntimeException(e);
+                        }
                     }
                 );
                 
@@ -2003,10 +1892,8 @@ public class RagQaFragment extends Fragment {
                     updateProgressOnUiThread(errorMsg);
                 }
                 
-                // Ensure model resources are released even in exception cases
-                EmbeddingModelManager modelManager = EmbeddingModelManager.getInstance(requireContext());
-                modelManager.markModelNotInUse();
-                LogManager.logD(TAG, "Marked model usage end in exception case, allowing auto-unload");
+                // MNN embedding handler manages model lifecycle automatically
+                LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
                 
                 // Close database connection
                 if (vectorDbRef[0] != null) {
@@ -2094,9 +1981,9 @@ public class RagQaFragment extends Fragment {
     // Call LLM API to get answer (with image support)
     private void callLLMApi(String apiUrl, String apiKey, String model, String prompt, java.util.List<String> imagePaths) {
         try {
-            // Check global stop flag
-            if (globalStopFlag) {
-                LogManager.logD(TAG, "Global stop flag is set, aborting LLM API call");
+            // Check global stop flag and task cancelled flag
+            if (globalStopFlag || isTaskCancelled) {
+                LogManager.logI(TAG, "Task stopped/cancelled, aborting LLM API call (globalStopFlag=" + globalStopFlag + ", isTaskCancelled=" + isTaskCancelled + ")");
                 resetSendingState();
                 return;
             }
@@ -2525,6 +2412,41 @@ public class RagQaFragment extends Fragment {
         updateProgressOnUiThreadWithRetry(progress, 3); // Maximum 3 retries
     }
     
+    // Update progress as plain text (no Markdown rendering) to avoid highlighting issues
+    private void updateProgressPlainText(String progress) {
+        if (getActivity() == null || !isAdded() || isDetached()) {
+            return;
+        }
+        
+        getActivity().runOnUiThread(() -> {
+            if (getActivity() == null || !isAdded() || isDetached() || getView() == null) {
+                return;
+            }
+            
+            TextView textViewResponse = getView().findViewById(R.id.textViewResponse);
+            ScrollView scrollView = getView().findViewById(R.id.scrollViewResponse);
+            if (textViewResponse == null || scrollView == null) return;
+            
+            // Append as plain text without Markdown rendering
+            CharSequence currentText = textViewResponse.getText();
+            String newText = currentText.length() == 0 ? progress : currentText + progress;
+            textViewResponse.setText(newText);
+            
+            // Force UI refresh to prevent buffering (ensure each dot appears immediately)
+            textViewResponse.invalidate();
+            textViewResponse.requestLayout();
+            
+            // Auto scroll
+            scrollView.post(() -> {
+                try {
+                    scrollView.fullScroll(View.FOCUS_DOWN);
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "Failed to scroll to bottom", e);
+                }
+            });
+        });
+    }
+    
     // UI update method with retry mechanism
     private void updateProgressOnUiThreadWithRetry(String progress, int retryCount) {
         if (retryCount <= 0) {
@@ -2894,44 +2816,30 @@ public class RagQaFragment extends Fragment {
 
     
     // Load model and process query
-    private void loadModelAndProcessQuery(String foundModelPath, String query, SQLiteVectorDatabaseHandler vectorDb) {
+    private void loadModelAndProcessQuery(String foundModelPath, String query, SQLiteVectorDatabaseHandler vectorDb) throws InterruptedException {
         try {
             // Update progress
             updateProgressOnUiThread("Loading embedding model...");
             
-            // Initialize TokenizerManager
-            TokenizerManager tokenizerManager = TokenizerManager.getInstance(requireContext());
-            if (!tokenizerManager.isInitialized()) {
-                //updateProgressOnUiThread("Initializing global tokenizer...");
-                boolean initSuccess = tokenizerManager.initialize(foundModelPath);
-                if (initSuccess) {
-                    //updateProgressOnUiThread("Global tokenizer initialization successful, will use unified tokenization strategy");
-                    // Enable consistent tokenization
-                    tokenizerManager.setUseConsistentTokenization(true);
-                    
-                    // Set debug mode
-                    boolean debugMode = SettingsFragment.isDebugModeEnabled(requireContext());
-                    if (debugMode) {
-                        tokenizerManager.setDebugMode(true);
-                        updateProgressOnUiThread("Global tokenizer debug mode enabled");
-                    }
-                } else {
-                    updateProgressOnUiThread("Global tokenizer initialization failed, will use model's built-in tokenizer");
-                }
-            } else {
-                updateProgressOnUiThread("Using already initialized global tokenizer");
-                // Enable consistent tokenization
-                tokenizerManager.setUseConsistentTokenization(true);
-                
-                // Set debug mode
-                boolean debugMode = SettingsFragment.isDebugModeEnabled(requireContext());
-                if (debugMode) {
-                    tokenizerManager.setDebugMode(true);
-                }
-            }
+            // Get embedding handler instance
+            EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(requireContext());
             
-            // Create model handler
-            EmbeddingModelHandler embeddingHandler = new EmbeddingModelHandler(requireContext(), foundModelPath, false);
+            // No Thread.isInterrupted() check - using graceful stop pattern (flag only)
+            
+            LogManager.logI(TAG, "[LOCK] About to call embeddingHandler.loadModel() - thread=" + Thread.currentThread().getName());
+            if (!embeddingHandler.loadModel(foundModelPath)) {
+                throw new Exception("Failed to load embedding model");
+            }
+            LogManager.logI(TAG, "[LOCK] embeddingHandler.loadModel() returned - thread=" + Thread.currentThread().getName());
+            
+            // CRITICAL: Check stop flags after loading
+            // If stopped, DON'T throw exception - model is already loaded and should be kept!
+            // Just skip inference and return gracefully
+            if (userRequestedStop || isTaskCancelled) {
+                LogManager.logI(TAG, "Task stopped after embedding loading - model loaded successfully, skipping inference");
+                updateProgressOnUiThread("Model loaded, operation stopped by user");
+                return;  // ✅ Graceful return, keep model loaded for next call
+            }
             
             // Get model vector dimension
             int embeddingDimension = embeddingHandler.getEmbeddingDimension();
@@ -2951,15 +2859,13 @@ public class RagQaFragment extends Fragment {
             }
 
 
-            // Mark model as in use
-            EmbeddingModelManager modelManager = EmbeddingModelManager.getInstance(requireContext());
-            modelManager.markModelInUse();
-            LogManager.logD(TAG, "Marked model as in use to prevent auto-unloading");
+            // MNN embedding handler manages model lifecycle automatically
+            LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
             //updateProgressOnUiThread("Mark model as in use to prevent auto-unloading");
             
             try {
                 // Check global stop flag
-                if (GlobalStopManager.isGlobalStopRequested()) {
+                if (userRequestedStop) {
                     LogManager.logD(TAG, "Global stop requested, aborting before vector generation");
                     updateProgressOnUiThread("Operation stopped by user");
                     return;
@@ -2972,17 +2878,33 @@ public class RagQaFragment extends Fragment {
                 String userQuery = editTextUserPrompt.getText().toString().trim();
                 
                 // Generate vector
-                float[] queryVector = embeddingHandler.generateEmbedding(userQuery);
+                float[] queryVector;
+                try {
+                    queryVector = embeddingHandler.computeEmbedding(userQuery);
+                } catch (InterruptedException ie) {
+                    LogManager.logI(TAG, "Embedding computation interrupted by user");
+                    updateProgressOnUiThread("Operation stopped by user");
+                    // CRITICAL: Set task cancelled flag to prevent further processing
+                    isTaskCancelled = true;
+                    // Close database before returning
+                    try {
+                        vectorDb.close();
+                        LogManager.logD(TAG, "Vector database closed after embedding interruption");
+                    } catch (Exception ex) {
+                        LogManager.logE(TAG, "Failed to close vector database: " + ex.getMessage(), ex);
+                    }
+                    return;
+                }
                 
                 // Check global stop flag
-                if (GlobalStopManager.isGlobalStopRequested()) {
+                if (userRequestedStop) {
                     LogManager.logD(TAG, "Global stop requested, aborting after vector generation");
                     updateProgressOnUiThread("Operation stopped by user");
                     return;
                 }
                 
                 // Record vector debug information
-                String vectorDebugInfo = embeddingHandler.getVectorDebugInfo(userQuery, queryVector, System.currentTimeMillis());
+                String vectorDebugInfo = "Query vector generated, dimension: " + queryVector.length;
                 
                 // Only display basic vector information in non-debug mode
                 boolean isDebugMode = ConfigManager.getBoolean(requireContext(), ConfigManager.KEY_DEBUG_MODE, false);
@@ -2991,7 +2913,7 @@ public class RagQaFragment extends Fragment {
 
                 
                 // Check global stop flag
-                if (GlobalStopManager.isGlobalStopRequested()) {
+                if (userRequestedStop) {
                     LogManager.logD(TAG, "Global stop requested, aborting before database search");
                     updateProgressOnUiThread("Operation stopped by user");
                     return;
@@ -3007,7 +2929,7 @@ public class RagQaFragment extends Fragment {
                 List<SQLiteVectorDatabaseHandler.SearchResult> searchResults = vectorDb.searchSimilar(queryVector, retrievalCount);
                 
                 // Check global stop flag
-                if (GlobalStopManager.isGlobalStopRequested()) {
+                if (userRequestedStop) {
                     LogManager.logD(TAG, "Global stop requested, aborting after database search");
                     updateProgressOnUiThread("Operation stopped by user");
                     return;
@@ -3026,7 +2948,7 @@ public class RagQaFragment extends Fragment {
                 }
                 
                 // Check global stop flag
-                if (GlobalStopManager.isGlobalStopRequested()) {
+                if (userRequestedStop) {
                     LogManager.logD(TAG, "Global stop requested, aborting before reranking");
                     updateProgressOnUiThread("Operation stopped by user");
                     return;
@@ -3040,7 +2962,15 @@ public class RagQaFragment extends Fragment {
                     // Use reranker model
                     LogManager.logI(TAG, "Using reranker model with rerank count: " + rerankCount);
                     updateProgressOnUiThread("Using reranker model to optimize results...");
-                    processWithReranker(userQuery, searchResults, rerankerModelPath, vectorDb);
+                    try {
+                        LogManager.logI(TAG, "[DEBUG] About to call processWithReranker - query.len=" + userQuery.length() + ", results=" + searchResults.size() + ", path=" + rerankerModelPath + ", vectorDb=" + (vectorDb != null ? "not_null" : "null"));
+                        processWithReranker(userQuery, searchResults, rerankerModelPath, vectorDb);
+                        LogManager.logI(TAG, "[DEBUG] processWithReranker returned successfully");
+                    } catch (InterruptedException ie) {
+                        LogManager.logI(TAG, "Reranker process interrupted: " + ie.getMessage());
+                        // Re-throw to stop the entire flow
+                        throw ie;
+                    }
                 } else {
                     // Do not use reranking, directly process vector search results
                     if (rerankCount == 0) {
@@ -3056,10 +2986,16 @@ public class RagQaFragment extends Fragment {
                     // continueRagQueryAfterReranking();
                 }
 
-                // Mark model usage end
-                modelManager.markModelNotInUse();
-                LogManager.logD(TAG, "Marked model usage end, allowing auto-unload");
-                //updateProgressOnUiThread("Mark model usage ended, allow auto unload");
+                // MNN embedding handler manages model lifecycle automatically
+                LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
+                
+                // Close database connection after search is complete
+                try {
+                    vectorDb.close();
+                    LogManager.logD(TAG, "Vector database closed successfully after query");
+                } catch (Exception ex) {
+                    LogManager.logE(TAG, "Failed to close vector database: " + ex.getMessage(), ex);
+                }
                 
                 // Get API information
                 String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
@@ -3070,11 +3006,26 @@ public class RagQaFragment extends Fragment {
                 // No longer directly call API, let executeRagQuery method handle it
                 // This avoids duplicate API calls
                 // callLLMApi(apiUrl, apiKey, apiModel, buildPromptWithKnowledgeBase(editTextSystemPrompt.getText().toString(), userQuery, relevantDocs));
+            } catch (InterruptedException ie) {
+                // Task was interrupted - re-throw to stop the entire flow
+                LogManager.logI(TAG, "Query processing interrupted: " + ie.getMessage());
+                throw ie;
             } catch (Exception e) {
                 String errorMsg = "Query processing failed: " + e.getMessage();
                 LogManager.logE(TAG, errorMsg, e);
                 updateProgressOnUiThread(errorMsg);
             }
+        } catch (InterruptedException ie) {
+            // Task was interrupted - re-throw to stop the entire flow
+            LogManager.logI(TAG, "Model loading interrupted: " + ie.getMessage());
+            // Close database before re-throwing
+            try {
+                vectorDb.close();
+                LogManager.logD(TAG, "Vector database closed after interruption");
+            } catch (Exception ex) {
+                LogManager.logE(TAG, "Failed to close vector database: " + ex.getMessage(), ex);
+            }
+            throw ie;
         } catch (Exception e) {
             String errorMsg = "Model loading failed: " + e.getMessage();
             LogManager.logE(TAG, errorMsg, e);
@@ -3088,6 +3039,7 @@ public class RagQaFragment extends Fragment {
                 LogManager.logE(TAG, "Failed to close vector database: " + ex.getMessage(), ex);
             }
         }
+        LogManager.logD(TAG, "[MODEL_OP] Model operation finished, waiting for LLM callback to reset state");
     }
     
     /**
@@ -3112,12 +3064,12 @@ public class RagQaFragment extends Fragment {
                 return null;
             }
             
-            // Find ONNX model files
+            // Find MNN reranker model files (config.json or .mnn)
             File[] modelFiles = rerankerModelDir.listFiles(file -> 
-                file.isFile() && file.getName().toLowerCase().endsWith(".onnx"));
+                file.isFile() && (file.getName().equals("config.json") || file.getName().endsWith(".mnn")));
             
             if (modelFiles == null || modelFiles.length == 0) {
-                LogManager.logW(TAG, "No ONNX model files found in reranker model directory: " + rerankerModelDir.getAbsolutePath());
+                LogManager.logW(TAG, "No MNN reranker model files found in reranker model directory: " + rerankerModelDir.getAbsolutePath());
                 return null;
             }
             
@@ -3136,17 +3088,66 @@ public class RagQaFragment extends Fragment {
      * Process search results using reranker model
      */
     private void processWithReranker(String query, List<SQLiteVectorDatabaseHandler.SearchResult> searchResults, 
-                                   String rerankerModelPath, SQLiteVectorDatabaseHandler vectorDb) {
+                                   String rerankerModelPath, SQLiteVectorDatabaseHandler vectorDb) throws InterruptedException, Exception {
+        LogManager.logI(TAG, "[DEBUG] processWithReranker ENTERED - query.len=" + (query != null ? query.length() : "null"));
         try {
-            // Check global stop flag
-            if (GlobalStopManager.isGlobalStopRequested()) {
-                LogManager.logD(TAG, "Global stop requested, aborting reranking process");
+            LogManager.logI(TAG, "[DEBUG] Step 1: Checking stop flags");
+            // Check global stop flag and task cancelled flag
+            if (userRequestedStop || isTaskCancelled) {
+                LogManager.logI(TAG, "Task stopped/cancelled, aborting reranking process");
                 updateProgressOnUiThread("Operation stopped by user");
-                return;
+                throw new InterruptedException("Task stopped/cancelled before reranking");
             }
             
-            // Get reranker model manager
-            RerankerModelManager rerankerManager = RerankerModelManager.getInstance(requireContext());
+            LogManager.logI(TAG, "[DEBUG] Step 2: About to get RerankerHandler instance");
+            // Get reranker handler
+            RerankerHandler rerankerHandler = RerankerHandler.getInstance(requireContext());
+            LogManager.logI(TAG, "[DEBUG] Step 3: Got RerankerHandler instance - " + (rerankerHandler != null ? "not_null" : "null"));
+            
+            LogManager.logI(TAG, "[DEBUG] Step 4: About to check isModelLoaded()");
+            // Load model if not loaded - MNN one-stop solution
+            boolean modelLoaded = rerankerHandler.isModelLoaded();
+            LogManager.logI(TAG, "[DEBUG] Step 5: isModelLoaded() returned - " + modelLoaded);
+            
+            if (!modelLoaded) {
+                updateProgressOnUiThread("Loading reranker model...");
+                
+                // Check stop flags before loading (no Thread.isInterrupted - graceful stop pattern)
+                if (userRequestedStop || isTaskCancelled) {
+                    LogManager.logI(TAG, "Task stopped before reranker loading, aborting");
+                    throw new InterruptedException("Task stopped before reranker loading");
+                }
+                
+                LogManager.logI(TAG, "[LOCK] About to call rerankerHandler.loadModel() - thread=" + Thread.currentThread().getName());
+                // MNN will auto-detect reranker type from config.json
+                boolean loaded = rerankerHandler.loadModel(rerankerModelPath);
+                LogManager.logI(TAG, "[LOCK] rerankerHandler.loadModel() returned - thread=" + Thread.currentThread().getName());
+                
+                // CRITICAL: Check stop flags after loading
+                // If stopped, DON'T throw exception - model is already loaded and should be kept!
+                // Just return gracefully - setInstruction will be called on next use
+                if (userRequestedStop || isTaskCancelled) {
+                    LogManager.logI(TAG, "Task stopped after reranker loading - model loaded successfully, skipping inference");
+                    updateProgressOnUiThread("Model loaded, operation stopped by user");
+                    return;  // ✅ Graceful return, model ready for next call
+                }
+                
+                if (!loaded) {
+                    LogManager.logE(TAG, "Failed to load reranker model, aborting");
+                    updateProgressOnUiThread("Reranker model loading failed");
+                    throw new Exception("Failed to load reranker model");
+                }
+            }
+            
+            // CRITICAL: Set instruction OUTSIDE the if block
+            // Only set if not already set or different (like demo: set once, use multiple times)
+            String requiredInstruction = "Given a web search query, retrieve relevant passages that answer the query";
+            if (rerankerHandler.getInstruction() == null || !rerankerHandler.getInstruction().equals(requiredInstruction)) {
+                LogManager.logI(TAG, "Setting reranker instruction for the first time or updating");
+                rerankerHandler.setInstruction(requiredInstruction);
+            } else {
+                LogManager.logI(TAG, "Reranker instruction already set, skipping");
+            }
             
             // Extract document text
             List<String> documents = new ArrayList<>();
@@ -3154,48 +3155,56 @@ public class RagQaFragment extends Fragment {
                 documents.add(result.text);
             }
             
-            // Calculate topK value - use all retrieval results for reranking print, but still limit to rerank_count when actually using
+            // Calculate topK value
             int rerankCount = ConfigManager.getRerankCount(requireContext());
             int retrievalCount = ConfigManager.getSearchDepth(requireContext());
-            int topK = Math.min(searchResults.size(), retrievalCount); // Use all retrieval results for reranking
+            int topK = Math.min(searchResults.size(), retrievalCount);
             
-            LogManager.logI(TAG, "Starting async rerank: query=" + query + ", documents.size()=" + documents.size() + ", topK=" + topK + ", rerankCount=" + rerankCount);
+            LogManager.logI(TAG, "Starting rerank: query=" + query + ", documents.size()=" + documents.size() + ", topK=" + topK + ", rerankCount=" + rerankCount);
             
-            // Use new rerankAsync method to avoid nested thread pools
-            rerankerManager.rerankAsync(rerankerModelPath, query, documents, topK, new RerankerModelManager.RerankerCallback() {
-                @Override
-                public void onRerankProgress(String message) {
-                    LogManager.logI(TAG, "Reranking progress: " + message);
-                    updateProgressOnUiThread(message);
-                }
-                
-                @Override
-                public void onRerankComplete(List<RerankerModelHandler.RerankResult> rerankedResults) {
-                    LogManager.logI(TAG, "Reranking successful, result count: " + rerankedResults.size());
-                    
-                    try {
-                        processRerankedResults(rerankedResults);
-                    } catch (Exception e) {
-                        LogManager.logE(TAG, "Failed to process reranked results: " + e.getMessage(), e);
-                        updateProgressOnUiThread("Failed to process reranked results, using vector search results");
-                        processVectorSearchResults(searchResults);
-                    }
-                }
-                
-                @Override
-                public void onRerankError(String error) {
-                    LogManager.logE(TAG, "Reranking failed: " + error);
-                    updateProgressOnUiThread("Reranking failed, using vector search results");
-                    // Fall back to vector search results
-                    processVectorSearchResults(searchResults);
-                }
+            // CRITICAL FIX: Execute reranking synchronously (like embedding) to prevent state desync
+            // Check stop flag before reranking (graceful stop pattern - no thread interrupt)
+            if (userRequestedStop || isTaskCancelled) {
+                LogManager.logI(TAG, "Stop requested before reranking, aborting");
+                throw new InterruptedException("Task stopped before reranking");
+            }
+            
+            updateProgressOnUiThread("Reranking documents");
+            
+            // Set progress callback to show real-time progress
+            rerankerHandler.setProgressCallback((current, total) -> {
+                // Show progress with dots - simple and intuitive
+                updateProgressPlainText(".");
             });
             
+            // Perform reranking synchronously (MNN reranker is thread-safe and synchronized)
+            // Now processes one document at a time - can be interrupted and shows progress
+            List<RerankerHandler.RerankResult> rerankedResults = rerankerHandler.rerank(query, documents, topK);
+            
+            // Clear callbacks
+            rerankerHandler.setProgressCallback(null);
+            rerankerHandler.setScoreCallback(null);
+            
+            // Check stop flag after reranking (graceful stop pattern)
+            if (userRequestedStop || isTaskCancelled) {
+                LogManager.logI(TAG, "Stop requested after reranking, aborting result processing");
+                throw new InterruptedException("Task stopped after reranking");
+            }
+            
+            LogManager.logI(TAG, "Reranking successful, result count: " + rerankedResults.size());
+            
+            // Process results synchronously (no need for UI thread switch in worker thread)
+            processRerankedResults(rerankedResults);
+            
+        } catch (InterruptedException ie) {
+            // Task was interrupted - re-throw to stop the entire flow
+            LogManager.logI(TAG, "Reranking interrupted, stopping entire flow: " + ie.getMessage());
+            throw ie;
         } catch (Exception e) {
             LogManager.logE(TAG, "Reranking processing exception: " + e.getMessage(), e);
-            updateProgressOnUiThread("Reranking processing exception, using vector search results");
-            // Fall back to vector search results
-            processVectorSearchResults(searchResults);
+            updateProgressOnUiThread("Reranking processing exception");
+            // Re-throw to stop the entire flow
+            throw e;
         }
     }
     
@@ -3203,6 +3212,13 @@ public class RagQaFragment extends Fragment {
      * Process vector search results (without reranking)
      */
     private void processVectorSearchResults(List<SQLiteVectorDatabaseHandler.SearchResult> searchResults) {
+        // CRITICAL: Check stop flag before processing
+        if (userRequestedStop || isTaskCancelled) {
+            LogManager.logI(TAG, "Task stopped/cancelled, aborting processVectorSearchResults");
+            updateProgressOnUiThread("Operation stopped by user");
+            return;
+        }
+        
         try {
             // Extract relevant documents
             List<String> relevantDocs = new ArrayList<>();
@@ -3216,11 +3232,7 @@ public class RagQaFragment extends Fragment {
                 String resultInfo = "Similarity: " + result.similarity + ", Text: " + result.text.substring(0, Math.min(50, result.text.length())) + "...";
                 LogManager.logD(TAG, resultInfo);
 
-                // Add to progress display - only show match number and similarity value, not text content
-                similarityInfoBuilder.append("Match").append(i + 1).append(": ").append(String.format("%.4f", result.similarity));
-                if (i < searchResults.size() - 1) {
-                    similarityInfoBuilder.append(", ");
-                }
+
             }
 
             // Save similarity information
@@ -3240,12 +3252,19 @@ public class RagQaFragment extends Fragment {
     /**
      * Process reranking results
      */
-    private void processRerankedResults(List<RerankerModelHandler.RerankResult> rerankedResults) {
+    private void processRerankedResults(List<RerankerHandler.RerankResult> rerankedResults) {
+        // CRITICAL: Check stop flag before processing
+        if (userRequestedStop || isTaskCancelled) {
+            LogManager.logI(TAG, "Task stopped/cancelled, aborting processRerankedResults");
+            updateProgressOnUiThread("Operation stopped by user");
+            return;
+        }
+        
         try {
             // Print detailed reranking results - show all results without limiting quantity
             LogManager.logI(TAG, "=== Reranking Results Details ===");
             for (int i = 0; i < rerankedResults.size(); i++) {
-                RerankerModelHandler.RerankResult result = rerankedResults.get(i);
+                RerankerHandler.RerankResult result = rerankedResults.get(i);
                 LogManager.logI(TAG, String.format("Rerank #%d: score=%.6f, originalIndex=%d, textPreview=%s", 
                     i + 1, result.score, result.originalIndex, 
                     result.text.substring(0, Math.min(100, result.text.length())) + "..."));
@@ -3262,11 +3281,11 @@ public class RagQaFragment extends Fragment {
             StringBuilder similarityInfoBuilder = new StringBuilder();
             
             for (int i = 0; i < actualResultCount; i++) {
-                RerankerModelHandler.RerankResult result = rerankedResults.get(i);
+                RerankerHandler.RerankResult result = rerankedResults.get(i);
                 relevantDocs.add(result.text);
 
                 // Add to progress display - show rerank number and score
-                similarityInfoBuilder.append("Rerank").append(i + 1).append(": ").append(String.format("%.4f", result.score));
+                similarityInfoBuilder.append(String.format(" %.4f", result.score));
                 if (i < actualResultCount - 1) {
                     similarityInfoBuilder.append(", ");
                 }
@@ -3333,18 +3352,8 @@ public class RagQaFragment extends Fragment {
             spinnerModels.setSelection(originalModelIndex);
         }
         
-        // Check if there is a saved model mapping
-        String savedMapping = null;
-        
-        // Check if it's a specific model, use ConfigManager to get mapping
-        if (originalModel.equals("bge-m3")) {
-            savedMapping = ConfigManager.getModelMapping(requireContext(), "model_bge-m3", null);
-        } else if (originalModel.equals("SBKNBaseV1.0")) {
-            savedMapping = ConfigManager.getModelMapping(requireContext(), "kb_SBKNBaseV1.0", null);
-        } else {
-            // For other models, use generic mapping format
-            savedMapping = ConfigManager.getModelMapping(requireContext(), "model_" + originalModel, null);
-        }
+        // Check if there is a saved model mapping (use unified format)
+        String savedMapping = ConfigManager.getModelMapping(requireContext(), "model_" + originalModel, null);
         
         if (savedMapping != null && !savedMapping.isEmpty()) {
             // Find the position of saved mapping model in the list
@@ -3406,9 +3415,9 @@ public class RagQaFragment extends Fragment {
             File[] files = embeddingModelDir.listFiles();
             if (files != null) {
                 for (File file : files) {
-                    if (file.isFile() && (file.getName().endsWith(".pt") || 
-                                         file.getName().endsWith(".pth") || 
-                                         file.getName().endsWith(".onnx"))) {
+                    // MNN models use .mnn format or config.json
+                    if (file.isFile() && (file.getName().endsWith(".mnn") || 
+                                         file.getName().equals("config.json"))) {
                         foundModelPath = file.getAbsolutePath();
                         modelFound = true;
                         
@@ -3427,9 +3436,9 @@ public class RagQaFragment extends Fragment {
                 File[] files = selectedDir.listFiles();
                 if (files != null) {
                     for (File file : files) {
-                        if (file.isFile() && (file.getName().endsWith(".pt") || 
-                                             file.getName().endsWith(".pth") || 
-                                             file.getName().endsWith(".onnx"))) {
+                        // MNN models use .mnn format or config.json
+                        if (file.isFile() && (file.getName().endsWith(".mnn") || 
+                                             file.getName().equals("config.json"))) {
                             foundModelPath = file.getAbsolutePath();
                             modelFound = true;
                             
@@ -3460,66 +3469,23 @@ public class RagQaFragment extends Fragment {
         // Load embedding model
         updateProgressOnUiThread(getString(R.string.loading_embedding_model));
         
-        // Use EmbeddingModelManager to load model asynchronously
-        EmbeddingModelManager modelManager = EmbeddingModelManager.getInstance(requireContext());
+        // Use EmbeddingHandler to load model synchronously (MNN is fast enough)
+        EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(requireContext());
         
-        // Create a CountDownLatch to wait for asynchronous loading completion
-        final CountDownLatch modelLoadLatch = new CountDownLatch(1);
-        final AtomicReference<EmbeddingModelHandler> modelHandlerRef = new AtomicReference<>();
-        final AtomicReference<Exception> modelErrorRef = new AtomicReference<>();
-        
-        modelManager.getModelAsync(foundModelPath, new EmbeddingModelManager.ModelCallback() {
-            @Override
-            public void onModelReady(EmbeddingModelHandler model) {
-                modelHandlerRef.set(model);
-                modelLoadLatch.countDown();
+        try {
+            if (!embeddingHandler.loadModel(foundModelPath)) {
+                throw new Exception("Failed to load embedding model");
             }
             
-            @Override
-            public void onModelError(Exception e) {
-                modelErrorRef.set(e);
-                modelLoadLatch.countDown();
-            }
-        });
-        
-        // Wait for model loading completion with timeout
-        try {
-            boolean modelLoaded = modelLoadLatch.await(60, TimeUnit.SECONDS);
-            if (!modelLoaded) {
-                String errorMsg = getString(R.string.error_embedding_model_timeout);
-                LogManager.logE(TAG, errorMsg);
-                updateProgressOnUiThread(errorMsg);
-                return;
-            }
-        } catch (InterruptedException e) {
-            String errorMsg = getString(R.string.error_embedding_model_interrupted, e.getMessage());
+            updateProgressOnUiThread(getString(R.string.embedding_model_loaded_success, embeddingHandler.getEmbeddingModel()));
+            LogManager.logI(TAG, "Embedding model loaded successfully");
+            
+        } catch (Exception e) {
+            String errorMsg = "Error: Failed to load embedding model: " + e.getMessage();
             LogManager.logE(TAG, errorMsg, e);
             updateProgressOnUiThread(errorMsg);
             return;
         }
-        
-        // Check if there are any errors
-        if (modelErrorRef.get() != null) {
-            String errorMsg = "Error: Failed to load embedding model: " + modelErrorRef.get().getMessage();
-            LogManager.logE(TAG, errorMsg, modelErrorRef.get());
-            updateProgressOnUiThread(errorMsg);
-            return;
-        }
-        
-        // Get the loaded model
-        EmbeddingModelHandler modelHandler = modelHandlerRef.get();
-        if (modelHandler == null) {
-            String errorMsg = getString(R.string.error_embedding_model_handler_failed);
-            LogManager.logE(TAG, errorMsg);
-            updateProgressOnUiThread(errorMsg);
-            return;
-        }
-        updateProgressOnUiThread(getString(R.string.embedding_model_loaded_success, modelHandler.getModelName()));
-
-        // Mark model as in use
-        modelManager.markModelInUse();
-        LogManager.logD(TAG, "Marked model as in use to prevent auto-unloading");
-        updateProgressOnUiThread("Marked model as in use to prevent auto-unloading");
 
         // Generate query vector
         try {
@@ -3529,7 +3495,7 @@ public class RagQaFragment extends Fragment {
             String userQuery = editTextUserPrompt.getText().toString().trim();
             
             // Generate vector
-            float[] queryVector = modelHandler.generateEmbedding(userQuery);
+            float[] queryVector = embeddingHandler.computeEmbedding(userQuery);
             
             // Query vector anomaly handling
             if (queryVector != null && queryVector.length > 0) {
@@ -3564,7 +3530,7 @@ public class RagQaFragment extends Fragment {
             }
             
             // Record vector debug information
-            String vectorDebugInfo = modelHandler.getVectorDebugInfo(userQuery, queryVector, System.currentTimeMillis());
+            String vectorDebugInfo = "Query vector generated, dimension: " + queryVector.length;
             updateProgressOnUiThread(vectorDebugInfo);
             
             // Search similar text blocks
@@ -3599,10 +3565,8 @@ public class RagQaFragment extends Fragment {
                 updateProgressOnUiThread("Warning: Knowledge base query returned no relevant documents");
             }
 
-            // Mark model usage ended
-            modelManager.markModelNotInUse();
-            LogManager.logD(TAG, "Mark model usage ended, allow auto unload");
-            updateProgressOnUiThread("Mark model usage ended, allow auto unload");
+            // MNN embedding handler manages model lifecycle automatically
+            LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
             
             // Get API information
             String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
@@ -4212,31 +4176,22 @@ public class RagQaFragment extends Fragment {
         // Cleanup image cache
         ImageThumbnailAdapter.cleanupCache(requireContext());
         
-        // Close thread pools
-        if (stopCheckExecutor != null && !stopCheckExecutor.isShutdown()) {
-            stopCheckExecutor.shutdown();
-            LogManager.logD(TAG, "StopCheck executor shutdown initiated");
-        }
-        
+        // Close thread pool
         if (ragQueryExecutor != null && !ragQueryExecutor.isShutdown()) {
             ragQueryExecutor.shutdown();
             LogManager.logD(TAG, "RagQuery executor shutdown initiated");
-        }
-        
-        // Try to wait for thread pool shutdown
-        try {
-            if (stopCheckExecutor != null && !stopCheckExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
-                stopCheckExecutor.shutdownNow();
-                LogManager.logW(TAG, "StopCheck executor forced shutdown");
-            }
             
-            if (ragQueryExecutor != null && !ragQueryExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
+            // Try to wait for thread pool shutdown
+            try {
+                if (!ragQueryExecutor.awaitTermination(1, TimeUnit.SECONDS)) {
+                    ragQueryExecutor.shutdownNow();
+                    LogManager.logW(TAG, "RagQuery executor forced shutdown");
+                }
+            } catch (InterruptedException e) {
+                LogManager.logE(TAG, "Thread pool shutdown interrupted", e);
                 ragQueryExecutor.shutdownNow();
-                LogManager.logW(TAG, "RagQuery executor forced shutdown");
+                Thread.currentThread().interrupt();
             }
-        } catch (InterruptedException e) {
-            LogManager.logE(TAG, "Thread pool shutdown interrupted", e);
-            Thread.currentThread().interrupt();
         }
         
         LogManager.logD(TAG, "Thread pools shutdown completed");

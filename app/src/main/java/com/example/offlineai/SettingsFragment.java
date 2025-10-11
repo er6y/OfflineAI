@@ -1058,16 +1058,23 @@ public class SettingsFragment extends Fragment {
     
     /**
      * Convert image size to SeekBar progress
+     * CRITICAL: Must check 0 (MAX mode) FIRST, because 0 <= 112 would return wrong progress!
      */
     private int sizeToProgress(int size) {
-        if (size <= ConfigManager.IMAGE_SIZE_MIN) return 0;
-        if (size <= ConfigManager.IMAGE_SIZE_SMALL) return 1;
-        if (size <= ConfigManager.IMAGE_SIZE_MEDIUM) return 2;
-        if (size <= ConfigManager.IMAGE_SIZE_DEFAULT) return 3;
-        if (size <= ConfigManager.IMAGE_SIZE_LARGE) return 4;
-        if (size <= ConfigManager.IMAGE_SIZE_XLARGE) return 5;
-        if (size <= ConfigManager.IMAGE_SIZE_MAX_RESIZE) return 6;
-        return 7; // MAX or larger
+        // Check MAX mode (0) first - this is the most important fix!
+        if (size == ConfigManager.IMAGE_SIZE_ORIGINAL) return 7; // 0 → progress 7 (MAX)
+        
+        // Then check other sizes in ascending order
+        if (size <= ConfigManager.IMAGE_SIZE_MIN) return 0;       // ≤112 → progress 0
+        if (size <= ConfigManager.IMAGE_SIZE_SMALL) return 1;     // ≤280 → progress 1
+        if (size <= ConfigManager.IMAGE_SIZE_MEDIUM) return 2;    // ≤392 → progress 2
+        if (size <= ConfigManager.IMAGE_SIZE_DEFAULT) return 3;   // ≤504 → progress 3
+        if (size <= ConfigManager.IMAGE_SIZE_LARGE) return 4;     // ≤672 → progress 4
+        if (size <= ConfigManager.IMAGE_SIZE_XLARGE) return 5;    // ≤896 → progress 5
+        if (size <= ConfigManager.IMAGE_SIZE_MAX_RESIZE) return 6;// ≤1008 → progress 6
+        
+        // Any size > 1008 also maps to MAX mode
+        return 7; // > 1008 or unknown → progress 7 (MAX)
     }
     
     private void setupImageEncodingThreadsSeekBar() {

@@ -558,3 +558,20 @@
 -keepclassmembers class **.*TypeSystemHolder {
     *;
 }
+
+# JDOM2 XPath 相关 - 处理 Jaxen 可选依赖
+-dontwarn org.jaxen.**
+-keep class org.jdom2.** { *; }
+-dontwarn org.jdom2.xpath.jaxen.**
+
+# Java Beans 相关 - Android 不支持，但 Jackson 需要
+-dontwarn java.beans.**
+-keep class java.beans.** { *; }
+
+# Jackson 相关
+-keep class com.fasterxml.jackson.** { *; }
+-dontwarn com.fasterxml.jackson.**
+-keepclassmembers class * {
+    @com.fasterxml.jackson.annotation.* <fields>;
+    @com.fasterxml.jackson.annotation.* <methods>;
+}

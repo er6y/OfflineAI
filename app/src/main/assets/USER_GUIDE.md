@@ -179,20 +179,63 @@ The OfflineAI app contains three main pages, accessible through the bottom navig
 
 #### 多模态推理 / Multimodal Inference
 
-当选择支持多模态的本地模型（例如 LLaVA、Qwen-VL、InternVL 的 GGUF 版本）时，应用会在问答页面提供图像输入入口：
+OfflineAI 支持多模态模型（Vision-Language Models, VLM），可以在本地进行图像理解和视觉问答。
 
-1. 选择或加载支持多模态的模型（通常为视觉-语言模型，VLM）
-2. 在问答页面附加图片（支持 `.png`/`.jpg`/`.webp`），并输入文本提示词
-3. 发送后，模型会基于图像与文本联合推理，生成回答
+OfflineAI supports multimodal models (Vision-Language Models, VLM) for local image understanding and visual Q&A.
 
-使用建议：
-- 移动设备建议选择小尺寸多模态模型，避免内存不足
-- 图片越清晰、提示词越具体，回答质量越好
-- 首次加载多模态模型可能耗时更长，请耐心等待
+**支持的模型类型 / Supported Model Types**：
+- **LLaVA 系列**：开源视觉-语言模型，适合移动设备 / Open-source vision-language model, suitable for mobile devices
+- **Qwen-VL 系列**：阿里通义千问多模态版本，中文能力强 / Alibaba Qwen multimodal version, strong Chinese capability
+- **InternVL 系列**：商汤多模态模型，多场景理解能力优秀 / SenseTime multimodal model, excellent multi-scenario understanding
 
-Notes:
-- 如果当前选择的模型不支持多模态，图像输入入口可能不会显示
-- 不同模型的图像输入尺寸和预处理方式可能有所不同，请参考模型仓库说明
+**使用步骤 / Usage Steps**：
+1. **下载多模态模型** / Download multimodal model
+   - 通过"默认模型下载"功能获取预设模型 / Get preset models through "Default Model Download"
+   - 或手动下载MNN格式的多模态模型文件 / Or manually download MNN format multimodal model files
+   - 确保模型包含 `config.json`、`llm.mnn`、`llm.mnn.weight` 和 `visual.mnn` 等文件 / Ensure model contains `config.json`, `llm.mnn`, `llm.mnn.weight`, and `visual.mnn` files
+
+2. **选择多模态模型** / Select multimodal model
+   - 在问答页面的模型选择下拉框中选择多模态模型 / Select multimodal model in model selection dropdown on Q&A page
+   - 应用会自动检测模型是否支持视觉特性 / App automatically detects if model supports vision features
+   - 支持多模态的模型会显示图像输入按钮 / Models supporting multimodal will show image input button
+
+3. **输入图像和问题** / Input image and question
+   - 点击图像输入按钮，选择要分析的图片（支持 `.png`/`.jpg`/`.jpeg`/`.webp`）/ Click image input button, select image to analyze (supports `.png`/`.jpg`/`.jpeg`/`.webp`)
+   - 在文本框中输入关于图像的问题或指令 / Enter question or instruction about the image in text box
+   - 例如："描述这张图片的内容" / "请识别图中的物体" / "这张图片中有什么？" / Example: "Describe the content of this image" / "Identify objects in the image" / "What's in this picture?"
+
+4. **获取回答** / Get answer
+   - 点击发送按钮，模型会处理图像和文本 / Click send button, model will process image and text
+   - 首次加载可能需要较长时间（视觉模型初始化）/ First-time loading may take longer (vision model initialization)
+   - 模型会基于图像内容生成回答 / Model generates answer based on image content
+
+**使用建议 / Usage Recommendations**：
+- **模型选择** / Model Selection
+  - 移动设备建议选择小尺寸模型（1B-3B参数）/ Mobile devices recommend small models (1B-3B parameters)
+  - 大模型（7B+）可能导致内存不足或运行缓慢 / Large models (7B+) may cause out-of-memory or slow performance
+  - 优先选择量化版本（INT4/INT8）以节省内存 / Prioritize quantized versions (INT4/INT8) to save memory
+
+- **图像质量** / Image Quality
+  - 使用清晰、光线充足的图片效果更好 / Use clear, well-lit images for better results
+  - 避免过大的图片（建议 < 5MB）/ Avoid oversized images (recommend < 5MB)
+  - 图片会自动调整大小以适配模型输入要求 / Images are automatically resized to match model input requirements
+
+- **提示词技巧** / Prompt Tips
+  - 提示词越具体，回答质量越好 / More specific prompts lead to better answers
+  - 可以要求模型关注特定细节 / Can ask model to focus on specific details
+  - 支持多轮对话，可以追问图像相关问题 / Supports multi-turn dialogue, can ask follow-up questions about the image
+
+- **性能优化** / Performance Optimization
+  - 首次加载模型耗时较长，后续使用会更快 / First-time model loading takes longer, subsequent use is faster
+  - 在设置中调整"图片预处理尺寸"可以平衡速度和质量 / Adjust "Image Preprocessing Size" in settings to balance speed and quality
+  - 调整"图像编码线程数"可以加快图像处理速度 / Adjust "Image Encoding Threads" to speed up image processing
+
+**注意事项 / Notes**：
+- ⚠️ 多模态模型需要MNN框架支持视觉特性编译 / Multimodal models require MNN framework compiled with vision features
+- ⚠️ 模型文件通常较大（1-5GB），下载前确保存储空间充足 / Model files are usually large (1-5GB), ensure sufficient storage before downloading
+- ⚠️ 如果当前选择的模型不支持多模态，图像输入按钮不会显示 / If current model doesn't support multimodal, image input button won't appear
+- ⚠️ 不同模型的图像输入尺寸和预处理方式可能不同 / Different models may have different image input sizes and preprocessing methods
+- ⚠️ 多模态推理比纯文本推理消耗更多资源 / Multimodal inference consumes more resources than text-only inference
 
 ### 3.3 构建知识库页面 / Build Knowledge Base Page
 
@@ -347,11 +390,59 @@ The OfflineAI app provides menu options in the top-right corner:
 - **Qwen-VL（GGUF）**：中文多模态能力较强，注意内存占用 / Strong CN multimodal ability; watch memory usage
 - **InternVL（GGUF）**：多场景图像理解，需根据设备性能选择 / Broad image understanding; choose based on device capability
 
+**注意事项 / Notes**：
+- 多模态模型需要MNN框架支持视觉特性编译 / Multimodal models require MNN framework compiled with vision features
+- 模型文件通常较大（1-5GB），下载前请确保存储空间充足 / Model files are usually large (1-5GB), ensure sufficient storage before downloading
+- 首次加载多模态模型可能需要较长时间 / First-time loading of multimodal models may take longer
+
 #### 使用建议
 - **首次使用**：建议先下载一个嵌入模型和一个小型LLM模型
 - **存储考虑**：根据设备存储空间选择合适大小的模型
 - **网络环境**：在WiFi环境下载，避免消耗移动数据
 - **模型组合**：可以同时下载多个不同类型的模型进行对比测试
+
+#### 自定义模型下载列表 / Customize Model Download List
+
+应用支持用户自定义编辑模型下载列表，添加自己需要的模型：
+
+The app supports users to customize the model download list and add their own models:
+
+**编辑方法 / Editing Method**：
+1. 找到应用内部存储目录下的 `ModelDownloadList.txt` 文件 / Locate `ModelDownloadList.txt` in app's internal storage
+2. 使用文本编辑器打开文件 / Open file with text editor
+3. 按照格式添加新的模型条目 / Add new model entries following the format
+4. 保存文件并重启应用 / Save file and restart app
+
+**文件格式说明 / File Format**：
+```
+[模型类型]
+模型名称|模型URL|文件名1:下载URL1|文件名2:下载URL2|...
+```
+
+**示例 / Example**：
+```
+[LLM]
+Qwen2-0.5B-Instruct|https://modelscope.cn/models/qwen/Qwen2-0.5B-Instruct|config.json:https://...url1|llm.mnn:https://...url2
+
+[Embedding]
+bge-small-zh-v1.5|https://modelscope.cn/models/AI-ModelScope/bge-small-zh-v1.5|config.json:https://...url1|embedding.mnn:https://...url2
+
+[Reranker]
+bge-reranker-base|https://modelscope.cn/models/AI-ModelScope/bge-reranker-base|config.json:https://...url1|llm.mnn:https://...url2
+```
+
+**字段说明 / Field Description**：
+- **模型类型 / Model Type**：`[LLM]`、`[Embedding]`、`[Reranker]` 或 `[Multimodal]`
+- **模型名称 / Model Name**：显示在下载列表中的名称 / Name displayed in download list
+- **模型URL / Model URL**：模型主页链接（可选，用于参考）/ Model homepage link (optional, for reference)
+- **文件映射 / File Mapping**：`本地文件名:下载URL` 格式，用 `|` 分隔多个文件 / Format: `local_filename:download_url`, separate multiple files with `|`
+
+**注意事项 / Notes**：
+- 确保下载URL可访问且文件格式正确 / Ensure download URLs are accessible and file formats are correct
+- 模型文件必须是MNN格式（.mnn文件）/ Model files must be in MNN format (.mnn files)
+- 配置文件（config.json）必须包含模型所需的所有参数 / Config file (config.json) must contain all required parameters
+- 编辑文件时注意保持格式一致，避免解析错误 / Maintain consistent format when editing to avoid parsing errors
+- 建议先在小模型上测试，确认格式正确后再添加大模型 / Recommend testing with small models first before adding large models
 ### Language/语言切换 / Language Switching
 
 提供中英文界面切换功能，满足不同用户的语言需求：

@@ -768,7 +768,7 @@ public class SQLiteVectorDatabaseHandler {
         
         try {
             // Check global stop flag before opening database
-            if (GlobalStopManager.isGlobalStopRequested()) {
+            if (RagQaFragment.userRequestedStop) {
                 LogManager.logD(TAG, "Global stop requested, aborting database loading");
                 return false;
             }
@@ -785,7 +785,7 @@ public class SQLiteVectorDatabaseHandler {
             LogManager.logI(TAG, "Database connection successful, database object: " + database + ", path: " + database.getPath() + ", read-only: " + database.isReadOnly());
             
             // Check global stop flag before loading metadata
-            if (GlobalStopManager.isGlobalStopRequested()) {
+            if (RagQaFragment.userRequestedStop) {
                 LogManager.logD(TAG, "Global stop requested, aborting metadata loading");
                 closeDatabase();
                 return false;
@@ -1007,12 +1007,13 @@ public class SQLiteVectorDatabaseHandler {
             // Iterate through all text chunks
             while (cursor.moveToNext()) {
                 // Check global stop flag
-                if (GlobalStopManager.isGlobalStopRequested()) {
+                if (RagQaFragment.userRequestedStop) {
                     LogManager.logD(TAG, "Global stop requested, aborting database search");
                     cursor.close();
                     return results;
                 }
                 
+                // Get column indices
                 int contentIndex = cursor.getColumnIndex(COLUMN_CONTENT);
                 int metadataIndex = cursor.getColumnIndex(COLUMN_METADATA);
                 int embeddingIndex = cursor.getColumnIndex(COLUMN_EMBEDDING);

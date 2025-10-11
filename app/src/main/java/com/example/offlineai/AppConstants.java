@@ -145,7 +145,6 @@ public class AppConstants {
         public static final String TOKENIZER_JSON = "tokenizer.json";
         public static final String SPECIAL_TOKENS_MAP_JSON = "special_tokens_map.json";
         public static final String TOKENIZER_CONFIG_JSON = "tokenizer_config.json";
-        public static final String MODEL_ONNX = "model.onnx";
         public static final String GENAI_CONFIG_JSON = "genai_config.json";
     }
 

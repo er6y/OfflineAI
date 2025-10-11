@@ -37,6 +37,7 @@ import org.apache.poi.hssf.usermodel.HSSFRow;
 import org.apache.poi.hssf.usermodel.HSSFCell;
 import org.apache.tika.Tika;
 import org.apache.poi.openxml4j.util.ZipSecureFile;
+import org.apache.poi.openxml4j.opc.OPCPackage;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -74,6 +75,7 @@ public class DocumentParser {
         // 默认值是0.01，降低到0.001允许更高的压缩比
         ZipSecureFile.setMinInflateRatio(0.001);
         LogManager.logD(TAG, "已设置ZipSecureFile的最小膨胀比例为0.001");
+        LogManager.logD(TAG, "DocumentParser初始化完成，已优化资源管理避免泄漏");
     }
     
     /**
@@ -84,7 +86,7 @@ public class DocumentParser {
     public String extractText(Uri uri) {
         try {
             String mimeType = detectMimeType(uri);
-            String fileName = getFileName(uri);
+            String fileName = UriUtils.getFileName(context, uri);
             LogManager.logD(TAG, "文件类型: " + mimeType + ", 文件名: " + fileName);
             
             // 根据文件类型选择合适的解析方法
@@ -97,7 +99,11 @@ public class DocumentParser {
                     // 使用Tika作为备用方法
                     try (InputStream inputStream = context.getContentResolver().openInputStream(uri)) {
                         if (inputStream != null) {
-                            return tika.parseToString(inputStream);
+                            LogManager.logD(TAG, "[RESOURCE-TIKA] 开始使用 Tika 解析（备用方法）");
+                            String tikaText = tika.parseToString(inputStream);
+                            LogManager.logD(TAG, "[RESOURCE-TIKA] Tika 解析完成（备用方法）");
+                            // Tika 提取的内容需要激进清理
+                            return cleanText(tikaText, true);
                         } else {
                             throw new Exception("无法打开文件流");
                         }
@@ -116,20 +122,14 @@ public class DocumentParser {
     }
     
     /**
-     * 使用Tika检测文件的MIME类型
+     * 检测文件的MIME类型（使用轻量级方法避免资源泄漏）
      */
     private String detectMimeType(Uri uri) {
-        try (InputStream inputStream = context.getContentResolver().openInputStream(uri)) {
-            if (inputStream == null) {
-                LogManager.logE(TAG, "无法打开文件流");
-                return getMimeType(uri); // 回退到Android系统的MIME类型检测
-            }
-            
-            return tika.detect(inputStream);
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Tika检测MIME类型失败: " + e.getMessage(), e);
-            return getMimeType(uri); // 回退到Android系统的MIME类型检测
-        }
+        // 直接使用 Android 系统方法，避免 Tika.detect() 导致的资源泄漏
+        // Tika.detect() 会打开 ZipFile/OPCPackage 等资源但不正确关闭
+        String mimeType = getMimeType(uri);
+        LogManager.logD(TAG, "检测到的MIME类型: " + mimeType);
+        return mimeType;
     }
     
     /**
@@ -144,17 +144,6 @@ public class DocumentParser {
             }
         }
         return mimeType != null ? mimeType : "application/octet-stream";
-    }
-    
-    /**
-     * 获取文件名
-     */
-    private String getFileName(Uri uri) {
-        String result = uri.getLastPathSegment();
-        if (result != null && result.contains("/")) {
-            result = result.substring(result.lastIndexOf("/") + 1);
-        }
-        return result != null ? result : "unknown";
     }
     
     /**
@@ -180,6 +169,7 @@ public class DocumentParser {
      * 从Office文档中提取文本
      */
     private String extractFromOfficeDocument(Uri uri, String fileName) throws Exception {
+        LogManager.logD(TAG, "[RESOURCE] ========== 开始处理 Office 文档: " + fileName + " ==========");
         InputStream inputStream = context.getContentResolver().openInputStream(uri);
         
         if (inputStream == null) {
@@ -189,73 +179,93 @@ public class DocumentParser {
         try {
             String lowerCase = fileName.toLowerCase();
             StringBuilder text = new StringBuilder();
+            boolean usedTika = false;  // 追踪是否使用了 Tika
             
-            // 首先尝试使用Tika检测实际的文件类型，避免仅依赖文件扩展名
-            try {
-                String detectedType = tika.detect(inputStream);
-                LogManager.logD(TAG, "Tika检测到的文件类型: " + detectedType);
-                
-                // 如果检测到的类型与扩展名不匹配，记录警告
-                if (!detectedType.contains("officedocument") && 
-                    !detectedType.contains("msword") && 
-                    !detectedType.contains("application/vnd.openxmlformats") &&
-                    !detectedType.contains("application/x-tika-ooxml") &&
-                    !detectedType.contains("application/vnd.ms-") &&
-                    !detectedType.equals("application/octet-stream")) {
-                    
-                    LogManager.logW(TAG, "文件扩展名与实际内容类型不匹配: 扩展名表明是Office文档，但实际类型是 " + detectedType);
-                    
-                    // 如果是文本类型，直接使用Tika解析
-                    if (detectedType.contains("text/") || 
-                        detectedType.contains("application/json") || 
-                        detectedType.contains("application/xml")) {
-                        
-                        // 重置流
-                        inputStream.close();
-                        inputStream = context.getContentResolver().openInputStream(uri);
-                        if (inputStream == null) {
-                            throw new Exception("无法重新打开文件流");
-                        }
-                        
-                        String tikaText = tika.parseToString(inputStream);
-                        return tikaText;
-                    }
-                }
-                
-                // 重置流
-                inputStream.close();
-                inputStream = context.getContentResolver().openInputStream(uri);
-                if (inputStream == null) {
-                    throw new Exception("无法重新打开文件流");
-                }
-            } catch (Exception e) {
-                LogManager.logE(TAG, "使用Tika检测文件类型失败: " + e.getMessage());
-                // 重置流
-                inputStream.close();
-                inputStream = context.getContentResolver().openInputStream(uri);
-                if (inputStream == null) {
-                    throw new Exception("无法重新打开文件流");
-                }
-            }
+            // 主要依赖文件扩展名判断类型，避免使用 Tika.detect() 导致资源泄漏
+            // Tika.detect() 会打开 ZipFile/OPCPackage 等资源但不正确关闭
+            String detectedType = "";
+            LogManager.logD(TAG, "使用文件扩展名判断文档类型，避免资源泄漏");
             
-            if (lowerCase.endsWith(".doc")) {
+            // 使用文件扩展名判断类型（更可靠且避免资源泄漏）
+            boolean isDocx = lowerCase.endsWith(".docx");
+            boolean isDoc = lowerCase.endsWith(".doc");
+            boolean isXlsx = lowerCase.endsWith(".xlsx");
+            boolean isXls = lowerCase.endsWith(".xls");
+            boolean isPptx = lowerCase.endsWith(".pptx");
+            boolean isPpt = lowerCase.endsWith(".ppt");
+            
+            LogManager.logD(TAG, "Document type detection: isDocx=" + isDocx + ", isDoc=" + isDoc + 
+                           ", isXlsx=" + isXlsx + ", isXls=" + isXls + 
+                           ", isPptx=" + isPptx + ", isPpt=" + isPpt);
+            
+            if (isDoc) {
                 // 处理DOC文件
-                HWPFDocument doc = new HWPFDocument(inputStream);
-                WordExtractor extractor = new WordExtractor(doc);
-                text.append(extractor.getText());
-                extractor.close();
-            } else if (lowerCase.endsWith(".docx")) {
-                // 处理DOCX文件
-                XWPFDocument docx = new XWPFDocument(inputStream);
-                XWPFWordExtractor extractor = new XWPFWordExtractor(docx);
-                text.append(extractor.getText());
-                extractor.close();
-                docx.close();
-            } else if (lowerCase.endsWith(".xls")) {
-                // 处理XLS文件
+                LogManager.logD(TAG, "Using Apache POI HWPFDocument for .doc file");
+                try (HWPFDocument doc = new HWPFDocument(inputStream);
+                     WordExtractor extractor = new WordExtractor(doc)) {
+                    text.append(extractor.getText());
+                }
+            } else if (isDocx) {
+                // 处理DOCX文件 - 使用 OPCPackage.open() 方式避免 XWPFDocument 构造函数的资源泄漏
+                LogManager.logD(TAG, "Using Apache POI XWPFDocument for .docx file (via OPCPackage)");
+                OPCPackage opcPackage = null;
+                XWPFDocument docx = null;
+                XWPFWordExtractor extractor = null;
                 try {
-                    // 尝试使用POI处理
-                    HSSFWorkbook workbook = new HSSFWorkbook(inputStream);
+                    LogManager.logD(TAG, "[RESOURCE] 开始创建 OPCPackage");
+                    // 先创建 OPCPackage，这样可以更好地控制资源
+                    opcPackage = OPCPackage.open(inputStream);
+                    LogManager.logD(TAG, "[RESOURCE] OPCPackage 创建完成");
+                    
+                    LogManager.logD(TAG, "[RESOURCE] 开始创建 XWPFDocument (from OPCPackage)");
+                    docx = new XWPFDocument(opcPackage);
+                    LogManager.logD(TAG, "[RESOURCE] XWPFDocument 创建完成");
+                    
+                    extractor = new XWPFWordExtractor(docx);
+                    LogManager.logD(TAG, "[RESOURCE] XWPFWordExtractor 创建完成");
+                    
+                    text.append(extractor.getText());
+                    LogManager.logD(TAG, "[RESOURCE] 文本提取完成，准备关闭资源");
+                } finally {
+                    LogManager.logD(TAG, "[RESOURCE] 进入 finally 块，开始关闭资源");
+                    
+                    if (extractor != null) {
+                        try { 
+                            LogManager.logD(TAG, "[RESOURCE] 关闭 extractor");
+                            extractor.close(); 
+                            LogManager.logD(TAG, "[RESOURCE] extractor 已关闭");
+                        } catch (Exception e) { 
+                            LogManager.logE(TAG, "[RESOURCE] 关闭 extractor 失败: " + e.getMessage());
+                        }
+                    }
+                    
+                    if (docx != null) {
+                        try { 
+                            LogManager.logD(TAG, "[RESOURCE] 关闭 docx");
+                            docx.close(); 
+                            LogManager.logD(TAG, "[RESOURCE] docx 已关闭");
+                        } catch (Exception e) { 
+                            LogManager.logE(TAG, "[RESOURCE] 关闭 docx 失败: " + e.getMessage());
+                        }
+                    }
+                    
+                    // 最关键：必须显式关闭 OPCPackage（我们自己创建的）
+                    if (opcPackage != null) {
+                        try { 
+                            LogManager.logD(TAG, "[RESOURCE] 关闭 OPCPackage");
+                            opcPackage.close(); 
+                            LogManager.logD(TAG, "[RESOURCE] OPCPackage 已关闭");
+                        } catch (Exception e) { 
+                            LogManager.logE(TAG, "[RESOURCE] 关闭 OPCPackage 失败: " + e.getMessage());
+                        }
+                    }
+                    
+                    LogManager.logD(TAG, "[RESOURCE] finally 块执行完毕");
+                }
+            } else if (isXls) {
+                // 处理XLS文件
+                LogManager.logD(TAG, "Using Apache POI HSSFWorkbook for .xls file");
+                try (HSSFWorkbook workbook = new HSSFWorkbook(inputStream)) {
                     FormulaEvaluator evaluator = workbook.getCreationHelper().createFormulaEvaluator();
                     
                     // 提取每个工作表的内容
@@ -289,7 +299,6 @@ public class DocumentParser {
                         }
                         text.append("\n");
                     }
-                    workbook.close();
                 } catch (Exception e) {
                     // 如果POI处理失败，回退到使用Tika
                     LogManager.logE(TAG, "使用POI处理XLS文件失败，回退到使用Tika: " + e.getMessage());
@@ -300,14 +309,26 @@ public class DocumentParser {
                     }
                     
                     // 使用Tika尝试提取文本
+                    LogManager.logD(TAG, "[RESOURCE-TIKA] 开始使用 Tika 解析 XLS（回退）");
                     String tikaText = tika.parseToString(inputStream);
+                    LogManager.logD(TAG, "[RESOURCE-TIKA] Tika 解析 XLS 完成（回退）");
+                    usedTika = true;
                     text.append(tikaText);
                 }
-            } else if (lowerCase.endsWith(".xlsx")) {
-                // 处理XLSX文件
+            } else if (isXlsx) {
+                // 处理XLSX文件 - 使用 OPCPackage.open() 方式避免资源泄漏
+                LogManager.logD(TAG, "Using Apache POI XSSFWorkbook for .xlsx file (via OPCPackage)");
+                OPCPackage opcPackage = null;
+                XSSFWorkbook workbook = null;
                 try {
-                    // 尝试使用POI处理
-                    XSSFWorkbook workbook = new XSSFWorkbook(inputStream);
+                    LogManager.logD(TAG, "[RESOURCE] 开始创建 OPCPackage");
+                    opcPackage = OPCPackage.open(inputStream);
+                    LogManager.logD(TAG, "[RESOURCE] OPCPackage 创建完成");
+                    
+                    LogManager.logD(TAG, "[RESOURCE] 开始创建 XSSFWorkbook (from OPCPackage)");
+                    workbook = new XSSFWorkbook(opcPackage);
+                    LogManager.logD(TAG, "[RESOURCE] XSSFWorkbook 创建完成");
+                    
                     FormulaEvaluator evaluator = workbook.getCreationHelper().createFormulaEvaluator();
                     
                     // 提取每个工作表的内容
@@ -341,7 +362,6 @@ public class DocumentParser {
                         }
                         text.append("\n");
                     }
-                    workbook.close();
                 } catch (Exception e) {
                     // 如果POI处理失败，回退到使用Tika
                     LogManager.logE(TAG, "使用POI处理XLSX文件失败，回退到使用Tika: " + e.getMessage());
@@ -352,160 +372,86 @@ public class DocumentParser {
                     }
                     
                     // 使用Tika尝试提取文本
+                    LogManager.logD(TAG, "[RESOURCE-TIKA] 开始使用 Tika 解析 XLSX（回退）");
                     String tikaText = tika.parseToString(inputStream);
+                    LogManager.logD(TAG, "[RESOURCE-TIKA] Tika 解析 XLSX 完成（回退）");
+                    usedTika = true;
                     text.append(tikaText);
-                }
-            } else if (lowerCase.endsWith(".ppt") || lowerCase.endsWith(".pptx")) {
-                // 处理PPT/PPTX文件
-                try {
-                    if (lowerCase.endsWith(".ppt")) {
-                        // 处理PPT文件
-                        LogManager.logD(TAG, "使用HSLFSlideShow处理PPT文件: " + fileName);
-                        HSLFSlideShowImpl slideShow = new HSLFSlideShowImpl(inputStream);
-                        HSLFSlideShow ppt = new HSLFSlideShow(slideShow);
-                        
-                        // 提取每张幻灯片的文本
-                        List<HSLFSlide> slides = ppt.getSlides();
-                        for (int i = 0; i < slides.size(); i++) {
-                            HSLFSlide slide = slides.get(i);
-                            text.append("幻灯片 ").append(i + 1).append(":\n");
-                            
-                            // 提取形状中的文本
-                            for (HSLFShape shape : slide.getShapes()) {
-                                if (shape instanceof HSLFTextShape) {
-                                    HSLFTextShape textShape = (HSLFTextShape) shape;
-                                    String shapeText = textShape.getText();
-                                    if (shapeText != null && !shapeText.trim().isEmpty()) {
-                                        text.append(shapeText).append("\n");
-                                    }
-                                }
-                            }
-                            text.append("\n");
+                } finally {
+                    LogManager.logD(TAG, "[RESOURCE] 进入 finally 块，开始关闭 XLSX 资源");
+                    
+                    if (workbook != null) {
+                        try { 
+                            LogManager.logD(TAG, "[RESOURCE] 关闭 workbook");
+                            workbook.close(); 
+                            LogManager.logD(TAG, "[RESOURCE] workbook 已关闭");
+                        } catch (Exception e) { 
+                            LogManager.logE(TAG, "[RESOURCE] 关闭 workbook 失败: " + e.getMessage());
                         }
-                        ppt.close();
-                    } else {
-                        // 处理PPTX文件
-                        LogManager.logD(TAG, "使用XMLSlideShow处理PPTX文件: " + fileName);
-                        XMLSlideShow pptx = new XMLSlideShow(inputStream);
-                        
-                        // 提取每张幻灯片的文本
-                        List<XSLFSlide> slides = pptx.getSlides();
-                        for (int i = 0; i < slides.size(); i++) {
-                            try {
-                                XSLFSlide slide = slides.get(i);
-                                text.append("幻灯片 ").append(i + 1).append(":\n");
-                                
-                                // 使用更安全的方式提取幻灯片文本
-                                try {
-                                    // 方法1：尝试直接从幻灯片XML中提取文本，避免使用可能不兼容的POI API
-                                    try {
-                                        String slideText = extractTextDirectlyFromSlide(slide);
-                                        if (slideText != null && !slideText.trim().isEmpty()) {
-                                            text.append(slideText).append("\n");
-                                            continue; // 如果成功提取，则跳过其他方法
-                                        }
-                                    } catch (Exception e) {
-                                        LogManager.logD(TAG, "直接从幻灯片XML提取文本失败，尝试其他方法: " + e.getMessage());
-                                    }
-                                    
-                                    // 方法2：使用安全的方式获取形状
-                                    List<XSLFShape> shapes = null;
-                                    try {
-                                        shapes = slide.getShapes();
-                                    } catch (VerifyError | NoClassDefFoundError | UnsatisfiedLinkError ve) {
-                                        LogManager.logE(TAG, "获取幻灯片形状时出现错误，尝试备用方法: " + ve.getMessage());
-                                        // 无法获取形状，跳过形状处理
-                                        shapes = null;
-                                    }
-                                    
-                                    if (shapes != null) {
-                                        // 安全地处理每个形状
-                                        processShapesSafely(shapes, text);
-                                    } else {
-                                        // 备用方法：尝试使用反射获取幻灯片中的文本
-                                        String reflectionText = extractTextUsingReflection(slide);
-                                        if (reflectionText != null && !reflectionText.trim().isEmpty()) {
-                                            text.append(reflectionText).append("\n");
-                                        } else {
-                                            text.append("无法提取此幻灯片中的文本内容。\n");
-                                        }
-                                    }
-                                } catch (VerifyError ve) {
-                                    // 捕获VerifyError，这可能是由于Android平台不支持某些Java AWT类引起的
-                                    LogManager.logE(TAG, "处理幻灯片形状时出现VerifyError: " + ve.getMessage(), ve);
-                                    text.append("无法提取此幻灯片中的所有内容，可能包含不支持的元素。\n");
-                                } catch (NoClassDefFoundError ncdfe) {
-                                    // 捕获NoClassDefFoundError，这可能是由于类加载问题引起的
-                                    LogManager.logE(TAG, "处理幻灯片形状时出现NoClassDefFoundError: " + ncdfe.getMessage(), ncdfe);
-                                    text.append("无法提取此幻灯片中的所有内容，可能包含不支持的元素。\n");
-                                } catch (UnsatisfiedLinkError ule) {
-                                    // 捕获UnsatisfiedLinkError，这可能是由于本地库问题引起的
-                                    LogManager.logE(TAG, "处理幻灯片形状时出现UnsatisfiedLinkError: " + ule.getMessage(), ule);
-                                    text.append("无法提取此幻灯片中的所有内容，可能包含不支持的元素。\n");
-                                } catch (Exception e) {
-                                    LogManager.logE(TAG, "处理幻灯片形状时出错: " + e.getMessage(), e);
-                                    text.append("处理此幻灯片时出现错误。\n");
-                                }
-                                
-                                text.append("\n");
-                            } catch (Exception e) {
-                                LogManager.logE(TAG, "处理幻灯片 " + (i + 1) + " 时出错: " + e.getMessage(), e);
-                                text.append("无法提取幻灯片 ").append(i + 1).append(" 的内容\n\n");
-                            }
-                        }
-                        pptx.close();
-                    }
-                } catch (VerifyError ve) {
-                    // 捕获VerifyError，这可能是由于Android平台不支持某些Java AWT类引起的
-                    LogManager.logE(TAG, "处理PPT/PPTX文件时出现VerifyError，回退到使用Tika: " + ve.getMessage(), ve);
-                    // 回退到使用Tika
-                    inputStream.close();
-                    inputStream = context.getContentResolver().openInputStream(uri);
-                    if (inputStream == null) {
-                        throw new Exception("无法重新打开文件流");
                     }
                     
-                    // 使用Tika尝试提取文本
-                    LogManager.logD(TAG, "回退使用Tika解析PPT/PPTX文件: " + fileName);
-                    String tikaText = tika.parseToString(inputStream);
-                    text.append(tikaText);
-                } catch (Exception e) {
-                    // 如果POI处理失败，回退到使用Tika
-                    LogManager.logE(TAG, "使用POI处理PPT/PPTX文件失败，回退到使用Tika: " + e.getMessage(), e);
-                    inputStream.close();
-                    inputStream = context.getContentResolver().openInputStream(uri);
-                    if (inputStream == null) {
-                        throw new Exception("无法重新打开文件流");
+                    // 最关键：必须显式关闭 OPCPackage
+                    if (opcPackage != null) {
+                        try { 
+                            LogManager.logD(TAG, "[RESOURCE] 关闭 OPCPackage");
+                            opcPackage.close(); 
+                            LogManager.logD(TAG, "[RESOURCE] OPCPackage 已关闭");
+                        } catch (Exception e) { 
+                            LogManager.logE(TAG, "[RESOURCE] 关闭 OPCPackage 失败: " + e.getMessage());
+                        }
                     }
                     
-                    // 使用Tika尝试提取文本
-                    String tikaText = tika.parseToString(inputStream);
-                    text.append(tikaText);
+                    LogManager.logD(TAG, "[RESOURCE] XLSX finally 块执行完毕");
                 }
-            } else {
-                // 对于其他Office文档类型，尝试使用Tika
-                inputStream.close();
-                inputStream = context.getContentResolver().openInputStream(uri);
-                if (inputStream == null) {
-                    throw new Exception("无法重新打开文件流");
-                }
-                
-                // 使用Tika尝试提取文本
+            } else if (isPpt || isPptx) {
+                // 处理PPT/PPTX文件 - 直接使用 Tika（POI 在 Android 上有兼容性问题）
+                LogManager.logD(TAG, "Using Tika for PPT/PPTX file (more reliable on Android)");
+                LogManager.logD(TAG, "[RESOURCE-TIKA] 开始使用 Tika 解析 PPT/PPTX");
                 String tikaText = tika.parseToString(inputStream);
+                LogManager.logD(TAG, "[RESOURCE-TIKA] Tika 解析 PPT/PPTX 完成");
+                usedTika = true;
+                text.append(tikaText);
+            } else {
+                // 其他类型使用 Tika
+                LogManager.logD(TAG, "Using Tika for other file types");
+                LogManager.logD(TAG, "[RESOURCE-TIKA] 开始使用 Tika 解析其他类型");
+                String tikaText = tika.parseToString(inputStream);
+                LogManager.logD(TAG, "[RESOURCE-TIKA] Tika 解析其他类型完成");
+                usedTika = true;
                 text.append(tikaText);
             }
             
             // 将提取的文本保存到临时文件
-            String cleanedText = cleanText(text.toString());
+            String rawText = text.toString();
+            // 根据是否使用 Tika 选择不同的清理策略
+            String cleanedText = cleanText(rawText, usedTika);
+            
+            // Log text extraction details for debugging
+            LogManager.logD(TAG, "Office文档文本提取: 原始长度=" + rawText.length() + 
+                           ", 清理后长度=" + cleanedText.length() + 
+                           ", 清理后trim长度=" + cleanedText.trim().length());
+            
             File tempFile = saveToTempFile(cleanedText, fileName);
             LogManager.logD(TAG, "已将Office文档内容保存到临时文件: " + tempFile.getAbsolutePath());
             
+            // Warn if extracted text is abnormally large (may contain image/table metadata)
+            if (cleanedText.length() > 500000) { // > 500KB
+                LogManager.logW(TAG, "WARNING: Large text extracted from Office document (" + 
+                               (cleanedText.length() / 1024) + "KB). " +
+                               "File: " + fileName + ". " +
+                               "This may indicate the document contains images, tables, or formatting metadata. " +
+                               "Temp file for analysis: " + tempFile.getAbsolutePath());
+            }
+            
+            LogManager.logD(TAG, "[RESOURCE] ========== Office 文档处理完成: " + fileName + " ==========");
             return cleanedText;
         } finally {
             try {
+                LogManager.logD(TAG, "[RESOURCE] 关闭 Office 文档的 inputStream");
                 inputStream.close();
+                LogManager.logD(TAG, "[RESOURCE] Office 文档的 inputStream 已关闭");
             } catch (Exception e) {
-                LogManager.logE(TAG, "关闭输入流失败", e);
+                LogManager.logE(TAG, "[RESOURCE] 关闭输入流失败", e);
             }
         }
     }
@@ -522,15 +468,20 @@ public class DocumentParser {
         
         try {
             StringBuilder text = new StringBuilder();
+            LogManager.logD(TAG, "[RESOURCE-PDF] 开始创建 PdfReader");
             PdfReader reader = new PdfReader(inputStream);
+            LogManager.logD(TAG, "[RESOURCE-PDF] PdfReader 创建完成");
             int pages = reader.getNumberOfPages();
+            LogManager.logD(TAG, "[RESOURCE-PDF] PDF 总页数: " + pages);
             
             for (int i = 1; i <= pages; i++) {
                 String pageText = PdfTextExtractor.getTextFromPage(reader, i);
                 text.append(pageText).append("\n");
             }
             
+            LogManager.logD(TAG, "[RESOURCE-PDF] 关闭 PdfReader");
             reader.close();
+            LogManager.logD(TAG, "[RESOURCE-PDF] PdfReader 已关闭");
             String cleanedText = cleanText(text.toString());
             
             // 将提取的文本保存到临时文件
@@ -602,23 +553,148 @@ public class DocumentParser {
     
     /**
      * 清理提取的文本，移除无用字符和格式
+     * 注意: 保留换行符以维持文档结构
+     * @param text 要清理的文本
+     * @param isFromTika 是否来自 Tika 提取（Tika 需要更激进的清理）
      */
-    public String cleanText(String text) {
+    public String cleanText(String text, boolean isFromTika) {
         if (text == null) return "";
         
-        // 移除连续的空白字符
-        text = text.replaceAll("\\s+", " ");
+        // Apache POI 提取的内容很干净，只做最基础的规范化
+        if (!isFromTika) {
+            LogManager.logD(TAG, "Minimal cleaning for Apache POI extracted text");
+            
+            // 只做基础规范化：统一换行符
+            text = text.replaceAll("\\r\\n", "\n");
+            text = text.replaceAll("\\r", "\n");
+            
+            // 压缩过多的空行
+            text = text.replaceAll("\\n{3,}", "\n\n");
+            
+            return text.trim();
+        }
         
-        // 移除控制字符
+        // Tika 提取的内容需要激进清理（因为 Tika 会提取图片/表格元数据）
+        LogManager.logD(TAG, "Applying aggressive cleaning for Tika-extracted text");
+        
+        // 移除控制字符 (但保留换行符、回车符和制表符)
         text = text.replaceAll("[\\p{Cntrl}&&[^\r\n\t]]", "");
         
         // 移除特殊Unicode字符
         text = text.replaceAll("[\\p{Cf}]", "");
         
-        // 移除过长的重复字符序列（可能是二进制数据）
-        text = removeRepeatingPatterns(text);
+        // === PPT/PPTX 特殊清理 ===
+        // 移除图片元数据标记
+        text = text.replaceAll("(?i)image\\d+\\.(png|jpg|jpeg|gif|bmp|tiff|emf|wmf|svg)", "");
+        text = text.replaceAll("(?i)embedded\\s*image", "");
+        text = text.replaceAll("(?i)\\[image:\\s*[^\\]]+\\]", "");
+        text = text.replaceAll("(?i)picture\\s*\\d+", "");
+        text = text.replaceAll("(?i)图片\\s*\\d+", "");
         
-        return text.trim();
+        // 移除 PPT 中的图表/表格标记
+        text = text.replaceAll("(?i)chart\\s*\\d+", "");
+        text = text.replaceAll("(?i)table\\s*\\d+", "");
+        text = text.replaceAll("(?i)图表\\s*\\d+", "");
+        text = text.replaceAll("(?i)表格\\s*\\d+", "");
+        
+        // 移除 PPT 中的形状/对象标记
+        text = text.replaceAll("(?i)shape\\s*\\d+", "");
+        text = text.replaceAll("(?i)object\\s*\\d+", "");
+        text = text.replaceAll("(?i)textbox\\s*\\d+", "");
+        
+        // 移除 PPT 中的幻灯片编号标记（如果不需要的话）
+        // text = text.replaceAll("(?i)slide\\s*\\d+", "");  // 可选：保留幻灯片编号可能有用
+        
+        // 移除 PPT 中的备注/注释标记
+        text = text.replaceAll("(?i)notes?\\s*page", "");
+        text = text.replaceAll("(?i)speaker\\s*notes?", "");
+        
+        // 移除Base64编码的图片数据 (长串字母数字)
+        text = text.replaceAll("(?m)^[A-Za-z0-9+/=]{100,}$", "");
+        
+        // 移除XML/HTML标签残留
+        text = text.replaceAll("<[^>]+>", "");
+        
+        // 移除表格边框字符和过多的制表符/空格
+        text = text.replaceAll("[│┤├┼┴┬─]{2,}", "");
+        text = text.replaceAll("\\t{3,}", "\t");
+        text = text.replaceAll(" {5,}", " ");
+        
+        // 规范化换行符: 统一使用 \n
+        text = text.replaceAll("\\r\\n", "\n");
+        text = text.replaceAll("\\r", "\n");
+        
+        // 移除连续的空行 (3个以上连续换行符压缩为2个)
+        text = text.replaceAll("\\n{3,}", "\n\n");
+        
+        // 移除每行首尾的空白字符,但保留换行符
+        String[] lines = text.split("\\n");
+        StringBuilder cleaned = new StringBuilder();
+        for (String line : lines) {
+            String trimmedLine = line.trim();
+            
+            // 过滤垃圾行
+            if (!trimmedLine.isEmpty() && !isGarbageLine(trimmedLine)) {
+                cleaned.append(trimmedLine).append("\n");
+            }
+        }
+        
+        // 移除过长的重复字符序列（可能是二进制数据）
+        String result = removeRepeatingPatterns(cleaned.toString());
+        
+        return result.trim();
+    }
+    
+    /**
+     * 兼容旧接口：默认不是从 Tika 提取
+     */
+    public String cleanText(String text) {
+        return cleanText(text, false);
+    }
+    
+    /**
+     * 判断是否是垃圾行 (图片元数据、格式信息等)
+     * 只用于 Tika 提取的内容，特别是 PPT/PPTX
+     */
+    private boolean isGarbageLine(String line) {
+        // 过滤只包含特殊字符的行（但允许常见分隔符）
+        if (line.matches("^[^a-zA-Z0-9\\u4e00-\\u9fa5\\-=_*#]+$")) {
+            return true;
+        }
+        
+        // 过滤看起来像十六进制数据的行
+        if (line.length() > 20 && line.matches("^[0-9A-Fa-f\\s]{20,}$")) {
+            return true;
+        }
+        
+        // 过滤Base64编码的行
+        if (line.length() > 50 && line.matches("^[A-Za-z0-9+/=]{50,}$")) {
+            return true;
+        }
+        
+        // === PPT/PPTX 特殊垃圾行检测 ===
+        // 过滤图片文件名
+        if (line.matches("(?i).*\\.(png|jpg|jpeg|gif|bmp|tiff|emf|wmf|svg)$")) {
+            return true;
+        }
+        
+        // 过滤只包含数字和点的行（可能是图片尺寸、坐标等）
+        if (line.matches("^[\\d\\.\\s]+$") && line.length() < 30) {
+            return true;
+        }
+        
+        // 过滤 PPT 元数据关键词
+        String lowerLine = line.toLowerCase();
+        if (lowerLine.matches("^(image|picture|chart|table|shape|object|textbox|slide|notes?)\\s*\\d*$")) {
+            return true;
+        }
+        
+        // 过滤只包含单个字符重复的行（可能是边框）
+        if (line.matches("^(.)\\1{5,}$")) {
+            return true;
+        }
+        
+        return false;
     }
     
     /**

@@ -359,13 +359,8 @@ public class KnowledgeBaseBuilderService extends Service {
                 // 确保在任何情况下都释放资源
                 LogManager.logD(TAG, "知识库构建过程结束，释放资源");
                 
-                // 释放嵌入模型
-                try {
-                    EmbeddingModelManager.getInstance(this).markModelNotInUse();
-                    LogManager.logD(TAG, "已释放嵌入模型资源");
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "释放嵌入模型资源时出错", e);
-                }
+                // MNN embedding handler manages model lifecycle automatically
+                LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
             }
         });
     }
@@ -407,6 +402,9 @@ public class KnowledgeBaseBuilderService extends Service {
      */
     private boolean buildKnowledgeBase(String knowledgeBaseName, String embeddingModel, String rerankerModel, List<Uri> selectedFiles) {
         LogManager.logD(TAG, "开始构建知识库: " + knowledgeBaseName + ", 模型: " + embeddingModel + ", 文件数: " + selectedFiles.size());
+        
+        // 清理旧的临时文件，避免累积占用存储空间
+        cleanupTempFiles();
         
         // 这里实现知识库构建的核心逻辑
         // 1. 初始化文本处理器
@@ -520,13 +518,8 @@ public class KnowledgeBaseBuilderService extends Service {
             // 确保在任何情况下都释放资源
             LogManager.logD(TAG, "知识库构建过程结束，释放资源");
             
-            // 释放嵌入模型
-            try {
-                EmbeddingModelManager.getInstance(this).markModelNotInUse();
-                LogManager.logD(TAG, "已释放嵌入模型资源");
-            } catch (Exception e) {
-                LogManager.logE(TAG, "释放嵌入模型资源时出错", e);
-            }
+            // MNN embedding handler manages model lifecycle automatically
+            LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
         }
     }
     
@@ -561,6 +554,52 @@ public class KnowledgeBaseBuilderService extends Service {
               "任务状态: " + (isTaskRunning ? "运行中" : "已取消") + ", " +
               "执行器状态: " + (isExecutorShutdown ? "已关闭" : "运行中") + ", " +
               "线程ID: " + Thread.currentThread().getId());
+    }
+    
+    /**
+     * 清理旧的临时文件
+     * 在知识库构建前调用，避免临时文件累积占用存储空间
+     */
+    private void cleanupTempFiles() {
+        try {
+            java.io.File cacheDir = getCacheDir();
+            if (cacheDir == null || !cacheDir.exists()) {
+                LogManager.logW(TAG, "Cache directory does not exist, skip cleanup");
+                return;
+            }
+            
+            java.io.File[] files = cacheDir.listFiles();
+            if (files == null || files.length == 0) {
+                LogManager.logD(TAG, "No files in cache directory, skip cleanup");
+                return;
+            }
+            
+            int deletedCount = 0;
+            long deletedSize = 0;
+            
+            for (java.io.File file : files) {
+                // Only delete temporary text files created by DocumentParser
+                if (file.isFile() && file.getName().startsWith("temp_") && file.getName().endsWith(".txt")) {
+                    long fileSize = file.length();
+                    if (file.delete()) {
+                        deletedCount++;
+                        deletedSize += fileSize;
+                        LogManager.logD(TAG, "Deleted temp file: " + file.getName() + " (" + (fileSize / 1024) + " KB)");
+                    } else {
+                        LogManager.logW(TAG, "Failed to delete temp file: " + file.getName());
+                    }
+                }
+            }
+            
+            if (deletedCount > 0) {
+                LogManager.logI(TAG, "Cleaned up " + deletedCount + " temporary files, freed " + (deletedSize / 1024) + " KB");
+            } else {
+                LogManager.logD(TAG, "No temporary files to clean up");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to cleanup temporary files", e);
+            // 清理失败不影响知识库构建，继续执行
+        }
     }
 }
 

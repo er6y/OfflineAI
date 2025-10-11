@@ -7,11 +7,8 @@ import android.os.Looper;
 import android.util.Log;
 
 import com.example.offlineai.ConfigManager;
-import com.example.offlineai.GlobalStopManager;
 import com.example.offlineai.LogManager;
 import com.example.offlineai.R;
-import com.offlineai.llamacpp.LlamaCppInference;
-import com.offlineai.llamacpp.NativeLibraryLoader;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -398,13 +395,10 @@ public class LocalLlmHandler {
         this.thinkingModeEnabled = !noThinking;
         LogManager.logD(TAG, "LocalLlmHandler初始化: 思考模式=" + (this.thinkingModeEnabled ? "启用" : "禁用") + "（来自配置管理器）");
         
-        // 推理引擎将在loadModel时根据模型类型自动选择
-        // 支持的引擎类型：
-        // - LlamaCpp：用于GGUF格式模型
-        // - ONNX Runtime GenAI：用于ONNX格式模型（内置分词器）
-        // - 传统ONNX Runtime：用于ONNX格式模型（Hugging Face分词器）
+        // Inference engine will be auto-selected when loading model
+        // Supported engine: MNN (Mobile Neural Network)
         this.inferenceEngine = null;
-        LogManager.logI(TAG, "LocalLlmHandler初始化: 推理引擎将根据模型类型自动选择");
+        LogManager.logI(TAG, "LocalLlmHandler initialized: inference engine will be auto-selected based on model type");
     }
     
     /**
@@ -453,8 +447,8 @@ public class LocalLlmHandler {
      * 根据配置更新推理引擎
      */
     public void updateEngineFromConfig() {
-        // ONNX引擎配置更新逻辑已移除，只支持LlamaCpp引擎
-        LogManager.logI(TAG, "只支持LlamaCpp引擎，无需更新引擎配置");
+        // MNN engine configuration is managed automatically
+        LogManager.logI(TAG, "MNN engine only, no manual config update needed");
     }
     
     /**
@@ -501,7 +495,6 @@ public class LocalLlmHandler {
         ModelState currentState = modelState.get();
         LogManager.logD(TAG, "[SNAPSHOT][BG_START] pre-reset-stop, state=" + currentState
                 + ", shouldStop=" + shouldStopInference.get()
-                + ", GlobalStopManager=" + GlobalStopManager.isGlobalStopRequested()
                 + ", thread=" + Thread.currentThread().getName());
         
         // 重置停止标志，并发送 [STREAM] onStart 日志
@@ -511,12 +504,25 @@ public class LocalLlmHandler {
         // 在后台线程执行模型加载
         executorService.submit(() -> {
             try {
+                // Check if the same model is already loaded
+                if (modelName.equals(currentModelName) && modelState.get() == ModelState.READY) {
+                    LogManager.logI(TAG, "Model already loaded: " + modelName + ", skipping reload");
+                    callback.onComplete("Already loaded");
+                    return;
+                }
+                
                 ModelState st = modelState.get();
                 if (st == ModelState.BUSY) {
                     callback.onError("Model is busy, cannot load now");
                     return;
                 }
-                
+
+                // 如果目标模型与当前不同，且已有模型已加载，先强制卸载以避免残留会话/资源
+                if (currentModelName != null && !modelName.equals(currentModelName) && isModelLoaded()) {
+                    LogManager.logI(TAG, "Switching model: force unload previous model '" + currentModelName + "' before loading '" + modelName + "'");
+                    unloadModel();
+                }
+
                 forceSetModelState(ModelState.LOADING);
                 
                 String baseModelPath = ConfigManager.getModelPath(context);
@@ -535,7 +541,7 @@ public class LocalLlmHandler {
                 }
                 
                 // Let the engine find and validate the model file
-                // This delegates format-specific logic (e.g., .gguf, .onnx) to the engine
+                // This delegates format-specific logic (e.g., .gguf, .mnn) to the engine
                 String modelPath = engine.findModelFile(modelDir);
                 if (modelPath == null) {
                     forceSetModelState(ModelState.UNLOADED);
@@ -597,7 +603,6 @@ public class LocalLlmHandler {
         ModelState currentState = modelState.get();
         LogManager.logD(TAG, "[SNAPSHOT][BG_START] pre-reset-stop, state=" + currentState
                 + ", shouldStop=" + shouldStopInference.get()
-                + ", GlobalStopManager=" + GlobalStopManager.isGlobalStopRequested()
                 + ", thread=" + Thread.currentThread().getName());
 
         // 重置停止标志，并发送 [STREAM] onStart 日志
@@ -708,7 +713,7 @@ public class LocalLlmHandler {
             params.setRepetitionPenalty(repetitionPenalty);
             params.setSeed(seed);
         } else {
-            // LlamaCpp/LLM通用参数区域（若未来支持其他引擎，也在此集中管理）
+            // MNN/LLM common parameters (centralized management for all engines)
             int maxNewTokens = ConfigManager.getMaxNewTokens(context);
             float temperature = ConfigManager.getLlamaCppTemperature(context);
             int topK = ConfigManager.getLlamaCppTopK(context);
@@ -799,12 +804,10 @@ public class LocalLlmHandler {
         // 设置本地停止标志
         shouldStopInference.set(true);
         
-        // 如果当前状态是BUSY，直接设置为READY
-        ModelState currentState = modelState.get();
-        if (currentState == ModelState.BUSY) {
-            forceSetModelState(ModelState.READY);
-            LogManager.logD(TAG, "Model state set from BUSY to READY");
-        }
+        // DO NOT force state change here!
+        // State will be changed to READY by onComplete/onError callbacks
+        // when native thread actually stops
+        LogManager.logD(TAG, "Stop signal sent, waiting for native thread to finish");
     }
     
     /**
@@ -833,14 +836,14 @@ public class LocalLlmHandler {
         }
         
         try {
-            // 根据推理引擎类型调用相应的重置方法
-            if (inferenceEngine instanceof LocalLLMLlamaCppHandler) {
-                ((LocalLLMLlamaCppHandler) inferenceEngine).resetModelMemory();
+            if (inferenceEngine != null && inferenceEngine instanceof LocalLLMMNNHandler) {
+                LogManager.logI(TAG, "Resetting MNN session (clearing KV cache)");
+                ((LocalLLMMNNHandler) inferenceEngine).resetSession();
             } else {
-                LogManager.logW(TAG, "未知的推理引擎类型，无法重置记忆");
+                LogManager.logI(TAG, "Current engine does not support session reset");
             }
         } catch (Exception e) {
-            LogManager.logE(TAG, "重置模型记忆失败", e);
+            LogManager.logE(TAG, "Failed to reset model memory", e);
         }
     }
     
@@ -983,74 +986,6 @@ public class LocalLlmHandler {
         return calculatedLength;
     }
     
-    /**
-     * 智能检测模型是否支持KV缓存
-     * 通过检查模型输入中是否包含KV缓存相关的输入来判断
-     * @param inputInfo 模型输入信息
-     * @return true如果模型支持KV缓存，false否则
-     */
-    private boolean detectKVCacheSupport(Map<String, ai.onnxruntime.NodeInfo> inputInfo) {
-        if (inputInfo == null || inputInfo.isEmpty()) {
-            LogManager.logW(TAG, "模型输入信息为空，无法检测KV缓存支持");
-            return false;
-        }
-        
-        // 检查是否包含KV缓存相关的输入名称
-        // 修复：移除attention_mask，它是正常输入不是KV缓存输入
-        // 更严格的KV缓存输入名称模式
-        String[] kvCachePatterns = {
-            "past_key_values",
-            "past_key",
-            "past_value", 
-            "cache_length",
-            "key_cache",
-            "value_cache",
-            "kv_cache"
-        };
-        
-        int kvCacheInputCount = 0;
-        int totalInputs = inputInfo.size();
-        
-        LogManager.logD(TAG, "开始检测KV缓存支持，总输入数量: " + totalInputs);
-        
-        for (String inputName : inputInfo.keySet()) {
-            String lowerInputName = inputName.toLowerCase();
-            
-            // 检查是否匹配KV缓存模式
-            for (String pattern : kvCachePatterns) {
-                if (lowerInputName.contains(pattern.toLowerCase())) {
-                    kvCacheInputCount++;
-                    LogManager.logD(TAG, "发现KV缓存相关输入: " + inputName + " (匹配模式: " + pattern + ")");
-                    break;
-                }
-            }
-        }
-        
-        // 修复判断逻辑：
-        // 1. 必须明确发现KV缓存相关的输入名称才认为支持
-        // 2. 基础输入通常只有input_ids和attention_mask（1-3个）
-        // 3. 移除基于输入数量的模糊判断，避免误判
-        
-        boolean supportsKVCache = false;
-        
-        if (kvCacheInputCount > 0) {
-            supportsKVCache = true;
-            LogManager.logI(TAG, "检测结果: 模型支持KV缓存 (发现 " + kvCacheInputCount + " 个KV缓存相关输入)");
-        } else {
-            supportsKVCache = false;
-            LogManager.logI(TAG, "检测结果: 模型不支持KV缓存 (输入数量: " + totalInputs + ", KV缓存输入: " + kvCacheInputCount + ")");
-        }
-        
-        // 详细记录所有输入名称用于调试
-        StringBuilder inputNames = new StringBuilder("所有模型输入: ");
-        for (String inputName : inputInfo.keySet()) {
-            inputNames.append(inputName).append(", ");
-        }
-        LogManager.logD(TAG, inputNames.toString());
-        
-        return supportsKVCache;
-    }
-    
     // ...
     private void logMemoryInfo() {
         // 记录内存信息逻辑
@@ -1168,27 +1103,6 @@ public class LocalLlmHandler {
         return modelConfig;
     }
     
-    /**
-     * 检查是否为GGUF模型
-     * @param modelDir 模型目录
-     * @return 是否为GGUF模型
-     */
-    private boolean isGgufModel(File modelDir) {
-        if (!modelDir.exists() || !modelDir.isDirectory()) {
-            return false;
-        }
-        
-        // 检查目录中是否有.gguf文件
-        File[] files = modelDir.listFiles();
-        if (files != null) {
-            for (File file : files) {
-                if (file.isFile() && file.getName().toLowerCase().endsWith(".gguf")) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
     
     /**
      * 根据模型目录内容选择合适的推理引擎
@@ -1196,40 +1110,90 @@ public class LocalLlmHandler {
      * @return 推理引擎实例
      */
     private InferenceEngine selectInferenceEngine(File modelDir) {
-        LogManager.logI(TAG, "检测模型类型: " + modelDir.getAbsolutePath());
+        LogManager.logI(TAG, "Detecting model type: " + modelDir.getAbsolutePath());
         
-        // 检查是否为GGUF模型
-        if (isGgufModel(modelDir)) {
-            LogManager.logI(TAG, "检测到GGUF模型，选择LlamaCpp推理引擎");
-            return new LocalLLMLlamaCppHandler(context);
+        // Check for MNN model
+        if (isMnnModel(modelDir)) {
+            LogManager.logI(TAG, "Detected MNN model, selecting MNN inference engine");
+            return new LocalLLMMNNHandler(context);
         }
         
-        // ONNX模型支持已移除，只支持GGUF模型
-        LogManager.logW(TAG, "只支持GGUF模型，ONNX模型支持已移除");
+        // No compatible model format found
+        LogManager.logW(TAG, "No compatible model format found (supported: MNN only)");
         return null;
     }
     
     /**
-     * 为LlamaCpp模型创建基本配置
-     * @param modelPath 模型路径
-     * @return 模型配置
+     * Check if directory contains MNN model
+     * @param modelDir Model directory
+     * @return true if MNN model files exist
+     */
+    private boolean isMnnModel(File modelDir) {
+        if (!modelDir.isDirectory()) {
+            LogManager.logW(TAG, "Not a directory: " + modelDir.getAbsolutePath());
+            return false;
+        }
+        
+        // Check for required MNN model files
+        File llmMnn = new File(modelDir, "llm.mnn");
+        File llmWeight = new File(modelDir, "llm.mnn.weight");
+        File tokenizer = new File(modelDir, "tokenizer.txt");
+        File config = new File(modelDir, "config.json");
+        
+        // Check for optional multimodal (vision) files
+        File visualMnn = new File(modelDir, "visual.mnn");
+        File visualWeight = new File(modelDir, "visual.mnn.weight");
+        
+        // Check for optional embedding file (required for some models like Qwen2.5-VL)
+        File embeddingFile = new File(modelDir, "embeddings_bf16.bin");
+        
+        // Log file existence for debugging
+        LogManager.logD(TAG, "Checking MNN files in: " + modelDir.getAbsolutePath());
+        LogManager.logD(TAG, "  llm.mnn: " + (llmMnn.exists() ? "✓" : "✗"));
+        LogManager.logD(TAG, "  llm.mnn.weight: " + (llmWeight.exists() ? "✓" : "✗"));
+        LogManager.logD(TAG, "  tokenizer.txt: " + (tokenizer.exists() ? "✓" : "✗"));
+        LogManager.logD(TAG, "  config.json: " + (config.exists() ? "✓" : "✗"));
+        LogManager.logD(TAG, "  embeddings_bf16.bin: " + (embeddingFile.exists() ? "✓ (" + formatFileSize(embeddingFile.length()) + ")" : "✗ (optional)"));
+        LogManager.logD(TAG, "  visual.mnn: " + (visualMnn.exists() ? "✓ (multimodal)" : "✗ (text-only)"));
+        LogManager.logD(TAG, "  visual.mnn.weight: " + (visualWeight.exists() ? "✓ (multimodal)" : "✗ (text-only)"));
+        
+        boolean isMnn = llmMnn.exists() && llmWeight.exists() && tokenizer.exists() && config.exists();
+        
+        if (isMnn) {
+            boolean isMultimodal = visualMnn.exists() && visualWeight.exists();
+            if (isMultimodal) {
+                LogManager.logI(TAG, "MNN MULTIMODAL model files found (with vision support)");
+            } else {
+                LogManager.logI(TAG, "MNN TEXT-ONLY model files found");
+            }
+        } else {
+            LogManager.logW(TAG, "MNN model files incomplete or missing");
+        }
+        
+        return isMnn;
+    }
+    
+    /**
+     * Create basic model configuration for MNN
+     * @param modelPath Model path
+     * @return Model configuration
      */
     private ModelConfig createBasicModelConfig(String modelPath) {
-        LogManager.logI(TAG, "为LlamaCpp模型创建基本配置");
+        LogManager.logI(TAG, "Creating basic config for MNN model");
         
-        // 创建基本配置
-        ModelConfig config = new ModelConfig("llamacpp", 32000, 4096, 32, 32);
+        // Create basic configuration
+        ModelConfig config = new ModelConfig("mnn", 32000, 4096, 32, 32);
         config.setModelPath(modelPath);
         
-        // 设置序列长度
+        // Set sequence length
         int configuredMaxSeqLength = ConfigManager.getMaxSequenceLength(context);
         config.setMaxSequenceLength(configuredMaxSeqLength);
         
-        // 设置基本token
+        // Set basic tokens
         config.setBosToken(1);
         config.setEosToken(2);
         
-        LogManager.logD(TAG, "LlamaCpp基本配置创建完成，最大序列长度: " + configuredMaxSeqLength);
+        LogManager.logD(TAG, "MNN basic config created, max sequence length: " + configuredMaxSeqLength);
         
         return config;
     }
@@ -1319,7 +1283,7 @@ public class LocalLlmHandler {
     public interface InferenceEngine {
         /**
          * Find the main model file in the given directory
-         * This method handles format-specific logic (e.g., .gguf vs .onnx)
+         * This method handles format-specific logic (e.g., .gguf, .mnn)
          * and intelligently selects the correct file (e.g., main model vs mmproj)
          * @param modelDir Model directory
          * @return Absolute path to the main model file, or null if not found
@@ -1435,8 +1399,9 @@ public class LocalLlmHandler {
      * @return true if model supports images, false if text-only
      */
     public boolean isMultimodalModel() {
-        if (inferenceEngine instanceof LocalLLMLlamaCppHandler) {
-            return ((LocalLLMLlamaCppHandler) inferenceEngine).isMultimodalSupported();
+        // MNN supports multimodal by default if model has vision encoder
+        if (inferenceEngine instanceof LocalLLMMNNHandler) {
+            return true; // MNN models can support multimodal
         }
         return false;
     }
@@ -1446,10 +1411,8 @@ public class LocalLlmHandler {
      * @return image size in pixels, or 336 if not available
      */
     public int getModelImageSize() {
-        if (inferenceEngine instanceof LocalLLMLlamaCppHandler) {
-            return ((LocalLLMLlamaCppHandler) inferenceEngine).getModelImageSize();
-        }
-        return 336; // default
+        // MNN default image size
+        return 336;
     }
     
     /**
@@ -1457,10 +1420,25 @@ public class LocalLlmHandler {
      * @return architecture name or null if not available
      */
     public String getModelArchitecture() {
-        if (inferenceEngine instanceof LocalLLMLlamaCppHandler) {
-            return ((LocalLLMLlamaCppHandler) inferenceEngine).getModelArchitecture();
+        // MNN architecture
+        return "mnn";
+    }
+    
+    /**
+     * Format file size to human-readable string
+     * @param size File size in bytes
+     * @return Formatted string (e.g., "594MB")
+     */
+    private String formatFileSize(long size) {
+        if (size < 1024) {
+            return size + "B";
+        } else if (size < 1024 * 1024) {
+            return String.format("%.1fKB", size / 1024.0);
+        } else if (size < 1024 * 1024 * 1024) {
+            return String.format("%.0fMB", size / (1024.0 * 1024.0));
+        } else {
+            return String.format("%.2fGB", size / (1024.0 * 1024.0 * 1024.0));
         }
-        return null;
     }
 }
 

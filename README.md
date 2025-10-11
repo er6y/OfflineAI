@@ -1,4 +1,4 @@
-﻿# OfflineAI
+# OfflineAI
 
 <div align="center">
 
@@ -45,6 +45,11 @@ OfflineAI 是一个基于Android平台的**完全本地化 LLM AI应用**，支�
 - 数据完全保留在本地，保护用户隐私
 
 #### 🧠 **多引擎AI推理**
+- **MNN推理框架**：阿里巴巴开源的统一推理引擎，支持LLM、Embedding、Reranker、多模态模型
+  - 一站式配置：只需config.json，自动处理所有参数
+  - 跨平台支持：Android、iOS、Linux、macOS、Windows、Web
+  - 硬件加速：CPU、OpenCL、Vulkan、Metal、NNAPI
+  - 内存优化：INT4/INT8量化、mmap支持、低内存模式
 - **LlamaCpp引擎**：支持GGUF格式模型，优化内存使用
 - **ONNX Runtime 1.21.0**：高性能推理，支持GPU加速
 - **Rust分词器**：高效的多架构分词处理（ARM64/ARMv7/x86_64）
@@ -59,8 +64,17 @@ OfflineAI 是一个基于Android平台的**完全本地化 LLM AI应用**，支�
 
 #### 🔍 **高级检索技术**
 - **向量检索**：基于语义相似度的精确匹配
-- **重排模型**：二次排序提升检索相关性
-- **多模态支持**：文本、代码、结构化数据统一处理
+- **Embedding模型**：本地文本向量化，支持MNN和ONNX双引擎
+- **重排模型**：二次排序提升检索相关性，自动检测Qwen3/GTE类型
+- **多模态支持**：文本、代码、结构化数据、图像理解统一处理
+
+#### 🎨 **多模态AI能力**
+- **视觉-语言模型（VLM）**：支持图像理解和视觉问答
+  - LLaVA系列：开源视觉-语言模型，适合移动设备
+  - Qwen-VL系列：阿里通义千问多模态版本，中文能力强
+  - InternVL系列：商汤多模态模型，多场景理解优秀
+- **图像预处理**：自动调整尺寸、多线程编码、性能优化
+- **多轮对话**：支持基于图像的多轮问答和追问
 
 #### ⚡ **性能优化**
 - **流式输出**：实时显示AI生成内容
@@ -84,6 +98,7 @@ OfflineAI 是一个基于Android平台的**完全本地化 LLM AI应用**，支�
 │  ├── EmbeddingModelManager  ├── RerankerModelManager        │
 ├─────────────────────────────────────────────────────────────┤
 │  AI Inference Layer                                         │
+│  ├── MNN Inference (LLM/Embedding/Reranker/Multimodal)     │
 │  ├── LocalLlmHandler (LlamaCpp)                            │
 │  ├── EmbeddingModelHandler (ONNX)                          │
 │  ├── TokenizerManager (Rust JNI)                           │
@@ -179,12 +194,16 @@ OfflineAI 提供了完整的本地化RAG解决方案，包含以下核心功能�
 - **联系支持**：问题反馈渠道、社区链接、开发者联系方式
 
 #### 模型管理
-- 本地模型下载和管理
-- 断点续传和智能重试
-- 多模型并发下载
-- GPU配置检测和优化
-- 模型性能评估和推荐
-- 模型版本管理和更新
+- **本地模型下载**：预设常用模型快速下载
+  - LLM模型：Qwen2、TinyLlama等
+  - Embedding模型：bge-small-zh、bge-base-zh等
+  - Reranker模型：bge-reranker-base、bge-reranker-large
+  - 多模态模型：LLaVA、Qwen-VL、InternVL（MNN格式）
+- **自定义模型列表**：用户可编辑ModelDownloadList.txt添加自己的模型
+- **断点续传**：支持下载中断后继续，避免重复下载
+- **多模型并发**：同时下载多个模型，提高效率
+- **自动配置**：下载完成后自动配置模型路径
+- **存储管理**：自动检查存储空间，避免下载失败
 
 ### 🛠️ 开发环境
 
@@ -265,6 +284,7 @@ cargo build --release
 
 #### 开源项目支持
 感谢以下开源项目的支持：
+- [MNN](https://github.com/alibaba/MNN) - 阿里巴巴统一AI推理框架
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) - 高性能LLM推理引擎
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime) - 跨平台AI推理框架
 - [Tokenizers](https://github.com/huggingface/tokenizers) - 高效分词器库
@@ -287,6 +307,11 @@ OfflineAI is a **fully local LLM AI application** for Android that supports offl
 - Data stays completely local, protecting user privacy
 
 #### 🧠 **Multi-Engine AI Inference**
+- **MNN Inference Framework**: Alibaba's open-source unified inference engine supporting LLM, Embedding, Reranker, and Multimodal models
+  - One-stop configuration: Only config.json needed, auto-handles all parameters
+  - Cross-platform: Android, iOS, Linux, macOS, Windows, Web
+  - Hardware acceleration: CPU, OpenCL, Vulkan, Metal, NNAPI
+  - Memory optimization: INT4/INT8 quantization, mmap support, low-memory mode
 - **LlamaCpp Engine**: Supports GGUF format models with optimized memory usage
 - **ONNX Runtime 1.21.0**: High-performance inference with GPU acceleration
 - **Rust Tokenizer**: Efficient multi-architecture tokenization (ARM64/ARMv7/x86_64)
@@ -301,8 +326,17 @@ OfflineAI is a **fully local LLM AI application** for Android that supports offl
 
 #### 🔍 **Advanced Retrieval Technology**
 - **Vector Retrieval**: Precise matching based on semantic similarity
-- **Rerank Models**: Secondary ranking to improve retrieval relevance
-- **Multi-modal Support**: Unified processing for text, code, and structured data
+- **Embedding Models**: Local text vectorization with MNN and ONNX dual-engine support
+- **Rerank Models**: Secondary ranking to improve retrieval relevance, auto-detect Qwen3/GTE types
+- **Multi-modal Support**: Unified processing for text, code, structured data, and image understanding
+
+#### 🎨 **Multimodal AI Capabilities**
+- **Vision-Language Models (VLM)**: Support for image understanding and visual Q&A
+  - LLaVA series: Open-source vision-language models, suitable for mobile devices
+  - Qwen-VL series: Alibaba Qwen multimodal version, strong Chinese capability
+  - InternVL series: SenseTime multimodal models, excellent multi-scenario understanding
+- **Image Preprocessing**: Auto-resize, multi-threaded encoding, performance optimization
+- **Multi-turn Dialogue**: Support for image-based multi-turn Q&A and follow-up questions
 
 #### ⚡ **Performance Optimization**
 - **Streaming Output**: Real-time display of AI-generated content
@@ -326,6 +360,7 @@ OfflineAI is a **fully local LLM AI application** for Android that supports offl
 │  ├── EmbeddingModelManager  ├── RerankerModelManager        │
 ├─────────────────────────────────────────────────────────────┤
 │  AI Inference Layer                                         │
+│  ├── MNN Inference (LLM/Embedding/Reranker/Multimodal)     │
 │  ├── LocalLlmHandler (LlamaCpp)                            │
 │  ├── EmbeddingModelHandler (ONNX)                          │
 │  ├── TokenizerManager (Rust JNI)                           │
@@ -421,12 +456,16 @@ OfflineAI provides a complete local RAG solution with the following core functio
 - **Contact Support**: Feedback channels, community links, developer contact information
 
 #### Model Management
-- Local model download and management
-- Resume download and smart retry
-- Concurrent multi-model downloads
-- GPU configuration detection and optimization
-- Model performance evaluation and recommendations
-- Model version management and updates
+- **Local Model Download**: Quick download of preset common models
+  - LLM models: Qwen2, TinyLlama, etc.
+  - Embedding models: bge-small-zh, bge-base-zh, etc.
+  - Reranker models: bge-reranker-base, bge-reranker-large
+  - Multimodal models: LLaVA, Qwen-VL, InternVL (MNN format)
+- **Custom Model List**: Users can edit ModelDownloadList.txt to add their own models
+- **Resume Download**: Support for resuming interrupted downloads, avoiding re-downloads
+- **Concurrent Multi-model**: Download multiple models simultaneously for efficiency
+- **Auto Configuration**: Automatically configure model paths after download
+- **Storage Management**: Auto-check storage space to avoid download failures
 
 ### 🛠️ Development Environment
 
@@ -507,6 +546,7 @@ Nevertheless, this project remains an **excellent demonstration of AI programmin
 
 #### Open Source Project Support
 Thanks to the following open source projects:
+- [MNN](https://github.com/alibaba/MNN) - Alibaba's unified AI inference framework
 - [llama.cpp](https://github.com/ggerganov/llama.cpp) - High-performance LLM inference engine
 - [ONNX Runtime](https://github.com/microsoft/onnxruntime) - Cross-platform AI inference framework
 - [Tokenizers](https://github.com/huggingface/tokenizers) - Efficient tokenizer library

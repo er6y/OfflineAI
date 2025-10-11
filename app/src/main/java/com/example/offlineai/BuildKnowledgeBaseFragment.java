@@ -49,13 +49,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.example.offlineai.ConfigManager;
-import com.example.offlineai.EmbeddingModelHandler;
-import com.example.offlineai.EmbeddingModelManager.ModelCallback;
+import com.example.offlineai.EmbeddingHandler;
 import com.example.offlineai.ProgressManager;
 import com.example.offlineai.SQLiteVectorDatabaseHandler;
 import com.example.offlineai.SettingsFragment;
 import com.example.offlineai.TextChunkProcessor.ProgressCallback;
-import com.example.offlineai.api.TokenizerManager;
 import com.example.offlineai.Utils;
 import com.example.offlineai.AppConstants;
 import com.example.offlineai.StateDisplayManager;
@@ -922,8 +920,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         // 保存最后选择的嵌入模型
         ConfigManager.setString(requireContext(), ConfigManager.KEY_LAST_SELECTED_EMBEDDING_MODEL, embeddingModel);
         
-        // 标记嵌入模型正在使用中，防止被卸载
-        EmbeddingModelManager.getInstance(requireContext()).markModelInUse();
+        // MNN embedding handler manages model lifecycle automatically
         
         // 获取知识库目录路径
         String knowledgeBasePath = ConfigManager.getKnowledgeBasePath(requireContext());
@@ -934,7 +931,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         
         try {
             // 加载模型以获取维度信息
-            EmbeddingModelHandler model = EmbeddingModelManager.getInstance(requireContext()).getModel(embeddingModelPath);
+            EmbeddingHandler model = EmbeddingHandler.getInstance(requireContext()).getModel(embeddingModelPath);
             int modelDimension = model.getEmbeddingDimension();
             LogManager.logD(TAG, "当前模型向量维度: " + modelDimension);
             
@@ -958,8 +955,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                     isProcessing = false;
                     buttonCreateKnowledgeBase.setText(StateDisplayManager.getButtonDisplayText(requireContext(), AppConstants.BUTTON_TEXT_CREATE_KB));
                     
-                    // 标记模型不再使用
-                    EmbeddingModelManager.getInstance(requireContext()).markModelNotInUse();
+                    // MNN embedding handler manages model lifecycle automatically
                     
                     return;
                 } else if (!existingModel.equals(embeddingModel)) {
@@ -976,7 +972,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                             // 恢复UI状态
                             isProcessing = false;
                             buttonCreateKnowledgeBase.setText(StateDisplayManager.getButtonDisplayText(requireContext(), AppConstants.BUTTON_TEXT_CREATE_KB));
-                            EmbeddingModelManager.getInstance(requireContext()).markModelNotInUse();
+                            // MNN embedding handler manages model lifecycle automatically
                         })
                         .show();
                 }
@@ -1172,8 +1168,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                 
                 // Operations after processing completion
                 mainHandler.post(() -> {
-                    // Mark embedding model as not in use
-                    EmbeddingModelManager.getInstance(requireContext()).markModelNotInUse();
+                    // MNN embedding handler manages model lifecycle automatically
                     
                     isProcessing = false;
                     isTaskCancelledAtomic.set(false);
@@ -1203,8 +1198,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                 
                 // Handle exception in UI thread
                 mainHandler.post(() -> {
-                    // Mark embedding model as not in use
-                    EmbeddingModelManager.getInstance(requireContext()).markModelNotInUse();
+                    // MNN embedding handler manages model lifecycle automatically
                     
                     isProcessing = false;
                     isTaskCancelledAtomic.set(false);

@@ -182,13 +182,6 @@ public class ConfigManager {
     public static final int DEFAULT_LLAMACPP_EMBEDDING_BATCH_SIZE = 32;
     public static final boolean DEFAULT_USE_LLAMACPP = false;
     
-    // 手动推理参数默认值
-    public static final float DEFAULT_MANUAL_TEMPERATURE = 0.8f;
-    public static final float DEFAULT_MANUAL_TOP_P = 0.95f;
-    public static final int DEFAULT_MANUAL_TOP_K = 40;
-    public static final float DEFAULT_MANUAL_REPEAT_PENALTY = 1.1f;
-    public static final int DEFAULT_IMAGE_PREPROCESS_SIZE = 504; // 图片预处理尺寸默认值（28的倍数）
-    
     // Image preprocessing size presets (all multiples of 28 for VL models)
     public static final int IMAGE_SIZE_MIN = 112;      // 28×4, ~16 tokens
     public static final int IMAGE_SIZE_SMALL = 280;    // 28×10, ~100 tokens
@@ -198,6 +191,13 @@ public class ConfigManager {
     public static final int IMAGE_SIZE_XLARGE = 896;   // 28×32, ~1024 tokens
     public static final int IMAGE_SIZE_MAX_RESIZE = 1008; // 28×36, ~1296 tokens
     public static final int IMAGE_SIZE_ORIGINAL = 0;   // No resize (MAX mode)
+    
+    // 手动推理参数默认值
+    public static final float DEFAULT_MANUAL_TEMPERATURE = 0.8f;
+    public static final float DEFAULT_MANUAL_TOP_P = 0.95f;
+    public static final int DEFAULT_MANUAL_TOP_K = 40;
+    public static final float DEFAULT_MANUAL_REPEAT_PENALTY = 1.1f;
+    public static final int DEFAULT_IMAGE_PREPROCESS_SIZE = IMAGE_SIZE_ORIGINAL; // 图片预处理尺寸默认值（0=MAX模式，让MNN自己处理）
     
     // 语言设置默认值
     public static final String DEFAULT_LANGUAGE = "CHN"; // 默认中文
@@ -811,10 +811,10 @@ public class ConfigManager {
                     }
                 }
                 
-                // 如果没有找到包含"embedding"的文件，尝试查找.pt、.pth或.onnx文件
+                // 如果没有找到包含"embedding"的文件，尝试查找MNN模型文件
                 for (File file : files) {
                     String name = file.getName().toLowerCase();
-                    if (file.isFile() && (name.endsWith(".pt") || name.endsWith(".pth") || name.endsWith(".onnx"))) {
+                    if (file.isFile() && (name.endsWith(".mnn") || name.equals("config.json"))) {
                         LogManager.logD(TAG, LOG_FOUND_POSSIBLE_MODEL + ": " + file.getAbsolutePath());
                         return file.getAbsolutePath();
                     }

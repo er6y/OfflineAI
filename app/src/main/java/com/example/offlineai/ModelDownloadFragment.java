@@ -207,15 +207,25 @@ public class ModelDownloadFragment extends Fragment {
         containerRerankerModels = view.findViewById(R.id.containerRerankerModels);
         containerLlmModels = view.findViewById(R.id.containerLlmModels);
         textViewProgress = view.findViewById(R.id.textViewProgress);
-        // 修复类型转换错误：根据布局文件，textViewProgress的父视图是LinearLayout，不是ScrollView
-        // 因此我们不尝试获取ScrollView引用，将其设为null
-        scrollViewProgress = null;
+        // Find the ScrollView ancestor that contains the progress TextView
+        scrollViewProgress = view.findViewById(R.id.scrollViewMain);
+        if (scrollViewProgress == null) {
+            // Fallback: try to find ScrollView by traversing parent hierarchy
+            android.view.ViewParent parent = textViewProgress.getParent();
+            while (parent != null && !(parent instanceof ScrollView)) {
+                parent = parent.getParent();
+            }
+            if (parent instanceof ScrollView) {
+                scrollViewProgress = (ScrollView) parent;
+            }
+        }
         buttonDownload = view.findViewById(R.id.buttonDownload);
         
-        // 设置进度文本框支持文本选择和滚动
+        // Enable text selection and scrolling for progress TextView
         textViewProgress.setTextIsSelectable(true);
         textViewProgress.setFocusable(true);
         textViewProgress.setFocusableInTouchMode(true);
+        textViewProgress.setMovementMethod(new android.text.method.ScrollingMovementMethod());
     }
     
     private void setupListeners() {
@@ -300,10 +310,27 @@ public class ModelDownloadFragment extends Fragment {
         }
     }
     
+    /**
+     * Get the base path for a model based on its category
+     * @param modelName the model name
+     * @return the base path for the model category
+     */
+    private String getModelBasePath(String modelName) {
+        if (modelList.containsKey("embedding") && modelList.get("embedding").containsKey(modelName)) {
+            return ConfigManager.getEmbeddingModelPath(getContext());
+        } else if (modelList.containsKey("reranker") && modelList.get("reranker").containsKey(modelName)) {
+            return ConfigManager.getRerankerModelPath(getContext());
+        } else if (modelList.containsKey("llm") && modelList.get("llm").containsKey(modelName)) {
+            return ConfigManager.getModelPath(getContext());
+        }
+        // Default to LLM model path if category not found
+        return ConfigManager.getModelPath(getContext());
+    }
+    
     private List<String> checkDirectoryConflicts(List<String> selectedModels) {
         List<String> conflicts = new ArrayList<>();
-        String basePath = ConfigManager.getModelPath(getContext());
         for (String modelName : selectedModels) {
+            String basePath = getModelBasePath(modelName);
             File targetDir = new File(basePath, modelName);
             if (targetDir.exists() && targetDir.isDirectory()) {
                 conflicts.add(modelName);
@@ -325,9 +352,9 @@ public class ModelDownloadFragment extends Fragment {
     }
     
     private void executeDownloadWithOverwrite(List<String> selectedModels) {
-        // 删除冲突目录中的文件，然后开始下载
-        String basePath = ConfigManager.getModelPath(getContext());
+        // Delete files in conflicting directories, then start download
         for (String modelName : selectedModels) {
+            String basePath = getModelBasePath(modelName);
             File targetDir = new File(basePath, modelName);
             if (targetDir.exists() && targetDir.isDirectory()) {
                 File[] files = targetDir.listFiles();
@@ -391,15 +418,23 @@ public class ModelDownloadFragment extends Fragment {
     }
     
     private boolean downloadModel(String modelName) {
-        // 根据类别查找对应的文件映射
+        // Determine model category and get corresponding file mapping
         Map<String, String> filesMap = null;
+        final String modelCategory;
+        
         if (modelList.containsKey("embedding") && modelList.get("embedding").containsKey(modelName)) {
             filesMap = modelList.get("embedding").get(modelName);
+            modelCategory = "embedding";
         } else if (modelList.containsKey("reranker") && modelList.get("reranker").containsKey(modelName)) {
             filesMap = modelList.get("reranker").get(modelName);
+            modelCategory = "reranker";
         } else if (modelList.containsKey("llm") && modelList.get("llm").containsKey(modelName)) {
             filesMap = modelList.get("llm").get(modelName);
+            modelCategory = "llm";
+        } else {
+            modelCategory = null;
         }
+        
         if (filesMap == null || filesMap.isEmpty()) {
             mainHandler.post(() -> appendProgress(getString(R.string.common_unknown_model) + ": " + modelName + "\n"));
             return false;
@@ -407,8 +442,24 @@ public class ModelDownloadFragment extends Fragment {
         
         mainHandler.post(() -> appendProgress("\n" + getString(R.string.log_start_downloading) + ": " + modelName + "\n"));
         
-        // 创建目标目录（统一到模型目录）
-        File targetDir = new File(ConfigManager.getModelPath(getContext()), modelName);
+        // Create target directory based on model category
+        String basePath;
+        switch (modelCategory) {
+            case "embedding":
+                basePath = ConfigManager.getEmbeddingModelPath(getContext());
+                break;
+            case "reranker":
+                basePath = ConfigManager.getRerankerModelPath(getContext());
+                break;
+            case "llm":
+                basePath = ConfigManager.getModelPath(getContext());
+                break;
+            default:
+                mainHandler.post(() -> appendProgress("Unknown model category: " + modelCategory + "\n"));
+                return false;
+        }
+        
+        File targetDir = new File(basePath, modelName);
         if (!targetDir.exists()) {
             targetDir.mkdirs();
         }
@@ -839,18 +890,26 @@ public class ModelDownloadFragment extends Fragment {
     }
     
     private void appendProgress(String text) {
-        // 简单的文本追加
+        // Append text to progress buffer
         progressText.append(text);
         
-        // 直接设置文本内容
+        // Update TextView content
         textViewProgress.setText(progressText.toString());
         
-        // 自动滚动到底部（如果scrollViewProgress不为null）
-        if (scrollViewProgress != null) {
-            scrollViewProgress.post(() -> {
+        // Auto-scroll to bottom: try both ScrollView and TextView scrolling
+        textViewProgress.post(() -> {
+            // Scroll TextView itself to bottom
+            int scrollAmount = textViewProgress.getLayout().getLineTop(textViewProgress.getLineCount()) 
+                             - textViewProgress.getHeight();
+            if (scrollAmount > 0) {
+                textViewProgress.scrollTo(0, scrollAmount);
+            }
+            
+            // Also scroll the parent ScrollView to bottom if available
+            if (scrollViewProgress != null) {
                 scrollViewProgress.fullScroll(ScrollView.FOCUS_DOWN);
-            });
-        }
+            }
+        });
     }
     
     private void acquireWakeLocks() {

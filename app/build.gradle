@@ -161,26 +161,12 @@ dependencies {
     implementation 'io.noties.markwon:image:4.6.2'
     implementation 'io.noties.markwon:syntax-highlight:4.6.2'
     implementation 'io.noties.markwon:ext-latex:4.6.2'
-    // PyTorch Mobile
-    implementation 'org.pytorch:pytorch_android:1.13.1'
-    implementation 'org.pytorch:pytorch_android_torchvision:1.13.1'
     
-    // ONNX Runtime - 使用当前可用的最新版本
-    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.22.0'
-    // 添加ONNX Runtime扩展（使用可用的最新版本0.13.0）
-    implementation 'com.microsoft.onnxruntime:onnxruntime-extensions-android:0.13.0'
-    // ONNX Runtime GenAI 0.8.1 (本地AAR文件)
-    //implementation files('libs/onnxruntime-genai-android-0.8.1.aar')
-    // Tokenizers JNI - 现在作为Android库模块
-    implementation project(':libs:tokenizers-jni')
-    
-    // LlamaCpp JNI - 使用项目依赖方式
-    implementation project(':libs:llamacpp-jni')
-    // 如果需要使用AAR文件，请确保文件存在并取消注释下面一行
-    //implementation files('../libs/llamacpp-jni/build/outputs/aar/llamacpp-jni-release.aar')
+    // MNN JNI - MNN推理引擎 (includes built-in tokenizer)
+    implementation project(':libs:mnn-jni')
     
     // 文档解析库
-    implementation 'org.apache.tika:tika-core:2.7.0'
+    implementation 'org.apache.tika:tika-core:2.9.0'
     implementation 'com.itextpdf:itextpdf:5.5.13.3'
     implementation 'com.itextpdf:itext-pdfa:5.5.13.3'
     implementation('org.apache.poi:poi:5.2.3') {

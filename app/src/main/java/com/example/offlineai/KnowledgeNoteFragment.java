@@ -48,13 +48,10 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import com.example.offlineai.ConfigManager; // 添加 ConfigManager 的导入
-import com.example.offlineai.EmbeddingModelManager; // 导入 EmbeddingModelManager
+import com.example.offlineai.EmbeddingHandler; // 导入 EmbeddingHandler
 import com.example.offlineai.StateDisplayManager;
 import com.example.offlineai.AppConstants;
-import com.example.offlineai.EmbeddingModelHandler; // 导入 EmbeddingModelHandler
 import com.example.offlineai.SQLiteVectorDatabaseHandler; // 导入 SQLiteVectorDatabaseHandler
-import com.example.offlineai.EmbeddingModelUtils; // 导入词嵌入模型工具类
-import com.example.offlineai.api.TokenizerManager; // 导入分词器管理器
 import com.example.offlineai.TextChunkProcessor; // 导入文本处理器
 
 public class KnowledgeNoteFragment extends Fragment {
@@ -270,6 +267,10 @@ public class KnowledgeNoteFragment extends Fragment {
                 return;
             }
         
+        // Combine title and content for vectorization (notes are structured data)
+        // Format: "Title: XXX\n\nContent: YYY" to ensure title is searchable
+        final String fullText = "Title: " + title + "\n\nContent: " + content;
+        
         // 获取选中的知识库
         if (spinnerKnowledgeBase.getSelectedItemPosition() < 0 || 
             knowledgeBaseNames.isEmpty() || 
@@ -318,7 +319,7 @@ public class KnowledgeNoteFragment extends Fragment {
                             final SQLiteVectorDatabaseHandler finalVectorDb = vectorDb;
                             
                             requireActivity().runOnUiThread(() -> {
-                                EmbeddingModelUtils.checkAndLoadEmbeddingModel(
+                                EmbeddingHandler.checkAndLoadEmbeddingModel(
                                     requireContext(),
                                     finalVectorDb,
                                     modelPath -> {
@@ -452,80 +453,25 @@ public class KnowledgeNoteFragment extends Fragment {
                 updateProgress(getString(R.string.found_embedding_model, embeddingModelPath));
             updateProgress(getString(R.string.loading_model_wait));
                 
-                // 使用EmbeddingModelManager异步加载模型
-                EmbeddingModelManager modelManager = EmbeddingModelManager.getInstance(requireContext());
+                // 使用EmbeddingHandler加载模型
+                EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(requireContext());
                 
-                // 创建一个CountDownLatch来等待异步加载完成
-                final CountDownLatch modelLoadLatch = new CountDownLatch(1);
-                final AtomicReference<EmbeddingModelHandler> modelHandlerRef = new AtomicReference<>();
-                final AtomicReference<Exception> modelErrorRef = new AtomicReference<>();
-                
-                modelManager.getModelAsync(embeddingModelPath, new EmbeddingModelManager.ModelCallback() {
-                    @Override
-                    public void onModelReady(EmbeddingModelHandler model) {
-                        modelHandlerRef.set(model);
-                        modelLoadLatch.countDown();
-                    }
-                    
-                    @Override
-                    public void onModelError(Exception e) {
-                        modelErrorRef.set(e);
-                        modelLoadLatch.countDown();
-                    }
-                });
-                
-                // 等待模型加载完成，设置超时
                 try {
-                    boolean modelLoaded = modelLoadLatch.await(180, TimeUnit.SECONDS);
-                    if (!modelLoaded) {
-                        updateProgress(getString(R.string.error_embedding_model_timeout));
+                    if (!embeddingHandler.loadModel(embeddingModelPath)) {
+                        updateProgress(getString(R.string.error_embedding_model_handler_failed));
                         enableAddButton();
                         return;
                     }
-                } catch (InterruptedException e) {
-                    updateProgress(getString(R.string.error_embedding_model_interrupted, e.getMessage()));
+                } catch (Exception e) {
+                    updateProgress(getString(R.string.error_embedding_model_failed, e.getMessage()));
                     enableAddButton();
                     return;
                 }
                 
-                // 检查是否有错误
-                if (modelErrorRef.get() != null) {
-                    updateProgress(getString(R.string.error_embedding_model_failed, modelErrorRef.get().getMessage()));
-                    enableAddButton();
-                    return;
-                }
+                // MNN embedding has built-in tokenizer
+                updateProgress("Using MNN built-in tokenizer");
                 
-                // 获取加载好的模型
-                EmbeddingModelHandler embeddingHandler = modelHandlerRef.get();
-                if (embeddingHandler == null) {
-                    updateProgress(getString(R.string.error_embedding_model_handler_failed));
-                    enableAddButton();
-                    return;
-                }
-                
-                // 确保TokenizerManager已初始化
-                TokenizerManager tokenizerManager = TokenizerManager.getInstance(requireContext());
-                if (!tokenizerManager.isInitialized()) {
-                    updateProgress(getString(R.string.initializing_tokenizer));
-                    boolean initSuccess = tokenizerManager.initialize(embeddingModelPath);
-                    if (initSuccess) {
-                        updateProgress(getString(R.string.tokenizer_init_success));
-                        // 启用一致性分词
-                        tokenizerManager.setUseConsistentTokenization(true);
-                    } else {
-                        updateProgress(getString(R.string.tokenizer_init_failed));
-                    }
-                } else {
-                    updateProgress(getString(R.string.using_global_tokenizer));
-                    // 启用一致性分词
-                    tokenizerManager.setUseConsistentTokenization(true);
-                }
-                
-                updateProgress(getString(R.string.embedding_model_loaded_success, embeddingHandler.getModelType()));
-                
-                // 标记模型开始使用
-                modelManager.markModelInUse();
-                updateProgress(getString(R.string.mark_model_start_use));
+                updateProgress(getString(R.string.embedding_model_loaded_success, embeddingHandler.getEmbeddingModel()));
                 
                 // 使用SQLiteVectorDatabaseHandler添加笔记
                 updateProgress(getString(R.string.adding_note_to_kb));
@@ -537,147 +483,68 @@ public class KnowledgeNoteFragment extends Fragment {
                         updateProgress(getString(R.string.error_load_sqlite_db));
                         enableAddButton();
                         
-                        // 标记模型使用结束（即使发生错误）
-                        modelManager.markModelNotInUse();
-                        updateProgress(getString(R.string.progress_mark_model_end_use));
+                        // MNN embedding handler manages model lifecycle automatically
                         
                         return;
                     }
                     
-                    // 获取分块大小和重叠大小
-                    int chunkSize = ConfigManager.getChunkSize(requireContext());
-                    int chunkOverlap = ConfigManager.getInt(requireContext(), ConfigManager.KEY_OVERLAP_SIZE, ConfigManager.DEFAULT_OVERLAP_SIZE);
-                    int minChunkSize = ConfigManager.getMinChunkSize(requireContext());
+                    // Note: Knowledge base notes are structured data and should NOT be chunked
+                    // Each note is an independent entity with title + content
+                    updateProgress("Processing note as complete structured data (no chunking)");
+                    updateProgress("Full text length: " + fullText.length() + " chars (title + content)");
                     
-                    updateProgress(getString(R.string.progress_chunk_params_info, chunkSize, chunkOverlap, minChunkSize));
+                    // Notes are always processed as complete entities (no chunking)
                     
-                    // 如果内容长度超过分块大小，需要进行分块处理
-                    if (content.length() > chunkSize) {
-                        updateProgress(getString(R.string.chunking_text));
-                        
-                        // 使用TextChunkProcessor的分块方法，确保与构建知识库使用相同的分块算法
-                        TextChunkProcessor textChunkProcessor = new TextChunkProcessor(requireContext());
-                        List<String> chunks = textChunkProcessor.splitTextIntoChunks(content, chunkSize, chunkOverlap);
-                        updateProgress(getString(R.string.text_chunking_complete, chunks.size()));
-                        
-                        // 获取添加前的文本块数量
-                        int beforeChunkCount = noteVectorDb.getChunkCount();
-                        updateProgress(getString(R.string.db_chunk_count_before, beforeChunkCount));
-                        
-                        boolean success = true;
-                        int addedCount = 0;
-                        
-                        // 处理每个文本块
-                        for (int i = 0; i < chunks.size(); i++) {
-                            String chunk = chunks.get(i);
-                            updateProgress(getString(R.string.adding_chunk_progress, (i + 1), chunks.size()));
+                    // Generate embedding vector for complete note (title + content)
+                    updateProgress(getString(R.string.generating_embedding_vector));
+                    float[] contentEmbedding = embeddingHandler.computeEmbedding(fullText);
+                    
+                    // 向量异常处理
+                    try {
+                        // 检测向量异常
+                        VectorAnomalyHandler.AnomalyResult anomalyResult = VectorAnomalyHandler.detectAnomalies(contentEmbedding, -1);
+                        if (anomalyResult.isAnomalous) {
+                            updateProgress(getString(R.string.vector_anomaly_detected_repairing));
+                            // 尝试修复向量
+                            contentEmbedding = VectorAnomalyHandler.repairVector(contentEmbedding, anomalyResult.type);
                             
-                            // 生成嵌入向量
-                            float[] chunkEmbedding = embeddingHandler.generateEmbedding(chunk);
-                            
-                            // 向量异常处理
-                            try {
-                                // 检测向量异常
-                                VectorAnomalyHandler.AnomalyResult anomalyResult = VectorAnomalyHandler.detectAnomalies(chunkEmbedding, -1);
-                                if (anomalyResult.isAnomalous) {
-                                    updateProgress(getString(R.string.vector_anomaly_detected_repairing));
-                                    // 尝试修复向量
-                                    chunkEmbedding = VectorAnomalyHandler.repairVector(chunkEmbedding, anomalyResult.type);
-                                    
-                                    // 对修复后的向量进行最终验证
-                                    VectorAnomalyHandler.AnomalyResult verifyResult = VectorAnomalyHandler.detectAnomalies(chunkEmbedding, -1);
-                                    if (verifyResult.isAnomalous) {
-                                        updateProgress(getString(R.string.vector_repair_failed_using_random));
-                                        // 如果修复失败，生成随机单位向量作为备用
-                                        chunkEmbedding = VectorAnomalyHandler.generateRandomUnitVector(chunkEmbedding.length);
-                                    } else {
-                                        updateProgress(getString(R.string.vector_repair_success));
-                                    }
-                                }
-                            } catch (Exception e) {
-                                updateProgress(getString(R.string.vector_processing_error, e.getMessage()));
-                                // 异常情况下生成随机单位向量
-                                chunkEmbedding = VectorAnomalyHandler.generateRandomUnitVector(chunkEmbedding.length);
-                            }
-                            
-                            // 添加文本块到数据库
-                            String chunkTitle = title + " (BLK " + (i+1) + "/" + chunks.size() + ")";
-                            boolean chunkSuccess = noteVectorDb.addChunk(chunk, chunkTitle, chunkEmbedding);
-                            
-                            if (chunkSuccess) {
-                                addedCount++;
+                            // 对修复后的向量进行最终验证
+                            VectorAnomalyHandler.AnomalyResult verifyResult = VectorAnomalyHandler.detectAnomalies(contentEmbedding, -1);
+                            if (verifyResult.isAnomalous) {
+                                updateProgress(getString(R.string.vector_repair_failed_using_random));
+                                // 如果修复失败，生成随机单位向量作为备用
+                                contentEmbedding = VectorAnomalyHandler.generateRandomUnitVector(contentEmbedding.length);
                             } else {
-                                success = false;
-                                updateProgress(getString(R.string.add_chunk_failed, i+1));
+                                updateProgress(getString(R.string.vector_repair_success));
                             }
                         }
-                        
-                        updateProgress(getString(R.string.all_chunks_added));
-                        
-                        // 保存数据库
-                        if (success) {
-                            success = noteVectorDb.saveDatabase();
-                            if (success) {
-                                updateProgress(getString(R.string.chunk_added_success));
-                            }
-                        }
-                        
-                        // 获取添加后的文本块数量
-                        int afterChunkCount = noteVectorDb.getChunkCount();
-                        updateProgress(getString(R.string.db_chunk_count_after, afterChunkCount));
-                        updateProgress(getString(R.string.added_chunk_count, addedCount));
-                    } else {
-                        // 直接生成嵌入向量
-                        updateProgress(getString(R.string.generating_embedding_vector));
-                        float[] contentEmbedding = embeddingHandler.generateEmbedding(content);
-                        
-                        // 向量异常处理
-                        try {
-                            // 检测向量异常
-                            VectorAnomalyHandler.AnomalyResult anomalyResult = VectorAnomalyHandler.detectAnomalies(contentEmbedding, -1);
-                            if (anomalyResult.isAnomalous) {
-                                updateProgress(getString(R.string.vector_anomaly_detected_repairing));
-                                // 尝试修复向量
-                                contentEmbedding = VectorAnomalyHandler.repairVector(contentEmbedding, anomalyResult.type);
-                                
-                                // 对修复后的向量进行最终验证
-                                VectorAnomalyHandler.AnomalyResult verifyResult = VectorAnomalyHandler.detectAnomalies(contentEmbedding, -1);
-                                if (verifyResult.isAnomalous) {
-                                    updateProgress(getString(R.string.vector_repair_failed_using_random));
-                                    // 如果修复失败，生成随机单位向量作为备用
-                                    contentEmbedding = VectorAnomalyHandler.generateRandomUnitVector(contentEmbedding.length);
-                                } else {
-                                    updateProgress(getString(R.string.vector_repair_success));
-                                }
-                            }
-                        } catch (Exception e) {
-                            updateProgress(getString(R.string.vector_processing_error, e.getMessage()));
-                            // 异常情况下生成随机单位向量
-                            contentEmbedding = VectorAnomalyHandler.generateRandomUnitVector(contentEmbedding.length);
-                        }
-                        
-                        // 记录向量调试信息
-                        String vectorDebugInfo = embeddingHandler.getVectorDebugInfo(content, contentEmbedding, System.currentTimeMillis());
-                        updateProgress(vectorDebugInfo);
-                        
-                        // 获取添加前的文本块数量
-                        int beforeChunkCount = noteVectorDb.getChunkCount();
-                        updateProgress(getString(R.string.progress_db_chunk_count_before, beforeChunkCount));
-                        
-                        // 添加文本块到数据库
-                        updateProgress(getString(R.string.saving_to_database));
-                        boolean success = noteVectorDb.addChunk(content, title, contentEmbedding);
-                        
-                        // 保存数据库
-                        if (success) {
-                            success = noteVectorDb.saveDatabase();
-                        }
-                        
-                        // 获取添加后的文本块数量
-                        int afterChunkCount = noteVectorDb.getChunkCount();
-                        updateProgress(getString(R.string.db_chunk_count_after, afterChunkCount));
-                        updateProgress(getString(R.string.new_chunk_count, afterChunkCount - beforeChunkCount));
+                    } catch (Exception e) {
+                        updateProgress(getString(R.string.vector_processing_error, e.getMessage()));
+                        // 异常情况下生成随机单位向量
+                        contentEmbedding = VectorAnomalyHandler.generateRandomUnitVector(contentEmbedding.length);
                     }
+                    
+                    // 记录向量调试信息
+                    String vectorDebugInfo = "Content vector generated, dimension: " + contentEmbedding.length;
+                    updateProgress(vectorDebugInfo);
+                    
+                    // 获取添加前的文本块数量
+                    int beforeChunkCount = noteVectorDb.getChunkCount();
+                    updateProgress(getString(R.string.progress_db_chunk_count_before, beforeChunkCount));
+                    
+                    // Add complete note to database (store full text with title)
+                    updateProgress(getString(R.string.saving_to_database));
+                    boolean success = noteVectorDb.addChunk(fullText, title, contentEmbedding);
+                    
+                    // 保存数据库
+                    if (success) {
+                        success = noteVectorDb.saveDatabase();
+                    }
+                    
+                    // 获取添加后的文本块数量
+                    int afterChunkCount = noteVectorDb.getChunkCount();
+                    updateProgress(getString(R.string.db_chunk_count_after, afterChunkCount));
+                    updateProgress(getString(R.string.new_chunk_count, afterChunkCount - beforeChunkCount));
                     
                     // 在关闭数据库之前检查文本块数量
                     boolean hasChunks = noteVectorDb.getChunkCount() > 0;
@@ -685,27 +552,23 @@ public class KnowledgeNoteFragment extends Fragment {
                     // 关闭数据库
                     noteVectorDb.close();
                     
-                    // 标记模型使用结束
-                    modelManager.markModelNotInUse();
-                    updateProgress(getString(R.string.mark_model_end_use));
+                    // MNN embedding handler manages model lifecycle automatically
+                    LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
                     
                     if (hasChunks) {
                         updateProgress(getString(R.string.note_added_success));
+                        
+                        // 清空输入框
+                        requireActivity().runOnUiThread(() -> {
+                            editTextTitle.setText("");
+                            editTextContent.setText("");
+                        });
+                    } else {
+                        updateProgress("Warning: No chunks added to database");
                     }
-                    
-                    // 清空输入框
-                    requireActivity().runOnUiThread(() -> {
-                        editTextTitle.setText("");
-                        editTextContent.setText("");
-                    });
                 } catch (Exception e) {
-                    LogManager.logE(TAG, "生成嵌入向量或添加笔记失败", e);
+                    LogManager.logE(TAG, "处理笔记时发生错误", e);
                     updateProgress(getString(R.string.error_message, e.getMessage()));
-                    if (noteVectorDb != null) {
-                        noteVectorDb.close();
-                    }
-                    modelManager.markModelNotInUse();
-                    updateProgress(getString(R.string.mark_model_end_use_error));
                 }
             } catch (Exception e) {
                 LogManager.logE(TAG, "添加到知识库失败", e);
@@ -750,8 +613,8 @@ public class KnowledgeNoteFragment extends Fragment {
             if (files != null) {
                 for (File file : files) {
                     String name = file.getName().toLowerCase();
-                    // 查找.pt、.pth、.onnx文件或包含model的目录
-                    if ((file.isFile() && (name.endsWith(".pt") || name.endsWith(".pth") || name.endsWith(".onnx"))) ||
+                    // 查找MNN模型文件(.mnn或config.json)或包含model的目录
+                    if ((file.isFile() && (name.endsWith(".mnn") || name.equals("config.json"))) ||
                         (file.isDirectory() && name.contains("model"))) {
                         availableModels.add(file.getName()); // 只添加文件名，而不是完整路径
                         LogManager.logD(TAG, "找到可用模型: " + file.getName());

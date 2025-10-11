@@ -34,7 +34,7 @@ import android.os.PowerManager;
 import android.provider.Settings;
 import android.util.Log;
 import com.example.offlineai.LogManager;
-import com.example.offlineai.EmbeddingModelManager;
+import com.example.offlineai.EmbeddingHandler;
 import com.example.offlineai.api.LocalLlmAdapter;
 import com.example.offlineai.AcceleratorDiagnostics;
 import android.view.Menu;
@@ -555,23 +555,21 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
             LogManager.logE(TAG, "Backend setting change: Failed to update LocalLlmAdapter backend settings: " + e.getMessage(), e);
         }
         
-        // 更新EmbeddingModelManager的后端设置
+        // 更新EmbeddingHandler的后端设置（MNN不需要单独设置后端，已在模型加载时处理）
         try {
-            EmbeddingModelManager embeddingModelManager = EmbeddingModelManager.getInstance(this);
-            if (embeddingModelManager != null) {
-                embeddingModelManager.updateGpuSetting(backendPreference);
-                LogManager.logI(TAG, "Backend setting change: Successfully updated EmbeddingModelManager backend settings");
-            } else {
-                LogManager.logW(TAG, "Backend setting change: EmbeddingModelManager instance is null, cannot update backend settings");
+            EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(this);
+            if (embeddingHandler != null && embeddingHandler.isModelLoaded()) {
+                // MNN embedding uses built-in backend, no need to update separately
+                LogManager.logI(TAG, "Backend setting change: EmbeddingHandler using MNN built-in backend");
             }
         } catch (Exception e) {
-            LogManager.logE(TAG, "Backend setting change: Failed to update EmbeddingModelManager backend settings: " + e.getMessage(), e);
+            LogManager.logE(TAG, "Backend setting change: Failed to access EmbeddingHandler: " + e.getMessage(), e);
         }
         
-        // 重新加载当前Fragment
-        int currentItem = viewPager.getCurrentItem();
-        viewPager.setAdapter(viewPager.getAdapter());
-        viewPager.setCurrentItem(currentItem);
+        // [FIX] Do NOT recreate fragments to preserve user state (selected model, browsed images, etc.)
+        // Only notify fragments to apply new settings (e.g., font size) via onResume()
+        // Removed: viewPager.setAdapter(viewPager.getAdapter()); - this destroys all fragments
+        LogManager.logI(TAG, "Settings applied without recreating fragments to preserve user state");
     }
     
     /**

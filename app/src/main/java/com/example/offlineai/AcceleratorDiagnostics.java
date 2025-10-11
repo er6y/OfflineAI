@@ -181,6 +181,10 @@ public class AcceleratorDiagnostics {
         
         info.append("--- OpenCL Information ---\n");
         
+        // TODO: OpenCL detection requires llamacpp module (not yet implemented)
+        info.append("OpenCL Detection: Not available (llamacpp module not integrated)\n");
+        
+        /* Commented out until llamacpp module is integrated
         try {
             // Call native OpenCL detector
             String openclResult = com.offlineai.llamacpp.OpenCLDetector.detectOpenCL();
@@ -192,6 +196,7 @@ public class AcceleratorDiagnostics {
             info.append("OpenCL Detection: Failed\n");
             info.append("  └─ Error: " + e.getMessage() + "\n");
         }
+        */
         
         info.append("\n");
         return info.toString();
