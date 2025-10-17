@@ -625,39 +625,7 @@
                 android:layout_marginStart="0dp" />
         </LinearLayout>
         
-        <!-- 图像编码线程数 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:layout_marginBottom="8dp">
-
-            <TextView
-                android:layout_width="100dp"
-                android:layout_height="wrap_content"
-                android:text="@string/label_image_encoding_threads"
-                android:textSize="16sp" />
-
-            <SeekBar
-                android:id="@+id/seekBarImageEncodingThreads"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginStart="0dp"
-                android:layout_marginEnd="0dp"
-                android:max="15"
-                android:progress="3" />
-
-            <TextView
-                android:id="@+id/textViewImageEncodingThreadsValue"
-                android:layout_width="40dp"
-                android:layout_height="wrap_content"
-                android:text="4"
-                android:textSize="14sp"
-                android:gravity="center"
-                android:layout_marginStart="0dp" />
-        </LinearLayout>
+        <!-- 图像编码线程数UI已移除（MNN不支持独立配置） -->
         
         <!-- ONNX引擎开关UI已移除 -->
         

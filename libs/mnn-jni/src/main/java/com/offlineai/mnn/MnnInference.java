@@ -264,6 +264,16 @@ public class MnnInference {
             return this;
         }
         
+        public ConfigBuilder chunk(int chunkSize) {
+            addField("chunk", chunkSize);
+            return this;
+        }
+        
+        public ConfigBuilder kvcacheLimit(int limit) {
+            addField("kvcache_limit", limit);
+            return this;
+        }
+        
         private void addField(String key, String value) {
             if (!first) json.append(",");
             json.append("\"").append(key).append("\":\"").append(value).append("\"");

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Chat UI colors -->
+    <color name="colorTextInfo">#9b9b9b</color>
+    <color name="color_white">#FFFFFF</color>
+    <color name="color_darker_blue">#1976D2</color>
+</resources>

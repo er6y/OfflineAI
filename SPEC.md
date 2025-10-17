@@ -3690,6 +3690,65 @@ if (params != null) {
 }
 ```
 
+#### MNN推理参数配置（2025-10-18）
+
+**配置项说明**：
+
+| 配置项 | 作用 | 实现方式 | 数值范围 |
+|--------|------|----------|----------|
+| **max_new_tokens** | 限制新生成的token数量 | `.maxNewTokens(maxNewTokens)` | 512-4096 |
+| **thread_num** | CPU推理线程数 | `.threadNum(threads)` | 1-16 |
+| **chunk** | Prefill阶段分块大小 | `.chunk(256)` | 固定256 |
+| **kvcache_limit** | KV Cache大小限制（上下文窗口） | `.kvcacheLimit(maxSeqLength)` | 512-8192 |
+
+**关键设计决策**：
+
+1. **chunk vs max_sequence_length**
+   - `chunk`：控制单次前向传播处理的token数（影响内存峰值）
+   - `max_sequence_length`：控制总的上下文窗口大小（KV Cache限制）
+   - **实现**：chunk固定为256（平衡内存和性能），max_sequence_length映射到kvcache_limit
+
+2. **chunk值的选择**
+   ```
+   内存消耗 ∝ chunk²（attention矩阵大小）
+   - chunk=128: 128×128 = 16K
+   - chunk=256: 256×256 = 64K  ← 选择
+   - chunk=512: 512×512 = 256K
+   - chunk=8192: 8192×8192 = 67M ❌ 手机OOM
+   ```
+
+3. **图像编码线程数已移除**
+   - MNN使用统一的`thread_num`控制所有推理（文本LLM + 视觉编码器）
+   - 不支持像llamacpp那样独立配置图像编码线程数
+   - 相关配置项已从UI、ConfigManager、strings.xml中移除
+
+**代码实现**：
+```java
+// LocalLLMMNNHandler.java
+final int CHUNK_SIZE = 256;  // 固定chunk大小
+int maxSeqLength = ConfigManager.getMaxSequenceLength(context);
+
+MnnInference.ConfigBuilder builder = new MnnInference.ConfigBuilder()
+    .chunk(CHUNK_SIZE)              // Prefill分块大小
+    .kvcacheLimit(maxSeqLength)     // KV Cache限制
+    .maxNewTokens(maxNewTokens)     // 最大生成token数
+    .threadNum(threads);            // 推理线程数
+```
+
+**MNN配置参数完整列表**（参考`libs/mnn/docs/transformers/llm.md`）：
+- `backend_type`: cpu/opencl/vulkan
+- `thread_num`: 线程数（CPU）或GPU MODE（OpenCL）
+- `precision`: low(fp16)/normal(fp32)
+- `memory`: low(runtime quant)/normal
+- `power`: high(big cores)/normal
+- `max_new_tokens`: 最大生成token数
+- `chunk`: Prefill分块大小
+- `kvcache_limit`: KV Cache大小限制
+- `reuse_kv`: 多轮对话KV复用
+- `use_mmap`: 权重mmap到磁盘
+- `kvcache_mmap`: KV Cache mmap到磁盘
+- `tmp_path`: mmap临时目录
+
 #### 音频输入（可选）
 通过编译选项启用：
 ```gradle
@@ -6134,6 +6193,201 @@ String savedMapping = ConfigManager.getModelMapping(requireContext(), "model_" +
   - 提供具体示例比抽象描述更有帮助
   - 注意事项应醒目标注（使用⚠️符号）
   - 保持文档与代码实现同步更新
+
+---
+
+多媒体聊天UI集成（2025-10-16）
+- 问题描述：现有聊天界面只支持纯文本显示，无法展示图片、语音等多媒体内容，缺少推理过程、调试信息等折叠显示功能
+- 需求背景：
+  1. 用户希望在聊天窗口中直接显示输入的图片
+  2. 未来需要支持扩散模型生成的图片显示
+  3. 推理过程（thinking）、调试信息（debug）、性能指标需要折叠显示，避免干扰主要内容
+  4. MNN官方应用（MnnLlmChat）已有成熟的多媒体聊天UI实现
+- 技术方案：采用Kotlin/Java混编，直接复用MNN的聊天UI组件
+  
+  ### 1. 启用Kotlin支持 ✅
+  - 修改根目录`build.gradle`：添加Kotlin插件声明
+  - 修改`app/build.gradle`：启用Kotlin插件和编译选项（jvmTarget='17'）
+  - 新增依赖：`com.github.ybq:Android-SpinKit:1.4.0`（加载动画）
+  
+  ### 2. 核心组件架构
+  - `chat/model/ChatDataItem.kt`：消息数据模型（支持文本/图片/音频/3种折叠区域）
+  - `chat/chatlist/ChatViewHolders.kt`：RecyclerView ViewHolders（HEADER/USER/ASSISTANT）
+  - `chat/chatlist/ChatRecyclerViewAdapter.kt`：适配器（支持增量更新）
+  - `chat/chatlist/AudioPlayerComponent.kt`：音频播放组件
+  - `chat/utils/CollapsibleTextParser.kt`：折叠文本解析器
+  - `utils/AudioPlayService.kt`：音频播放服务（单例）
+  
+  ### 3. ChatDataItem数据模型（增强版）
+  - 基础字段：type, text, displayText, imageUri, audioUri, audioDuration, loading
+  - 折叠区域字段：
+    - thinkingText + showThinking + thinkingFinishedTime（推理过程）
+    - debugText + showDebug（调试信息）
+    - performanceText + showPerformance（性能指标）
+  - 方法：toggleThinking(), toggleDebug(), togglePerformance()
+  
+  ### 4. 折叠标记格式规范
+  ```
+  <think>推理过程...</think>
+  <debug>调试信息...</debug>
+  <performance>性能指标...</performance>
+  或自动识别：prefill: 149 tokens/s decode: 89 tokens/s
+  ```
+  
+  ### 5. CollapsibleTextParser解析器
+  - parseAndPopulate()：提取折叠区域，设置displayText
+  - hasCollapsibleSections()：检查是否包含折叠标记
+  - extractThinkingTime()：提取推理耗时
+  - 支持多种格式的性能指标识别
+  
+  ### 6. ViewHolder设计（3种类型）
+  - HeaderViewHolder：显示时间戳
+  - UserViewHolder：用户消息（文本+图片+音频）
+  - AssistantViewHolder：AI消息（文本+图片+3个折叠区域+加载动画）
+  
+  ### 7. 布局文件结构
+  - item_holder_chatheader.xml：时间戳头部
+  - item_holder_user.xml：用户消息（图片100x100，音频播放控件）
+  - item_holder_assistant.xml：AI消息（3个折叠区+主文本+图片200x200+加载动画）
+  - 每个折叠区包含：toggle标题栏+container内容区+左侧彩色标记线
+  
+  ### 8. 在RagQaFragment中集成（待实现）
+  ```java
+  // 初始化RecyclerView
+  recyclerViewChat.setLayoutManager(new LinearLayoutManager(getContext()));
+  chatAdapter = new ChatRecyclerViewAdapter(getContext());
+  
+  // 发送消息（带图片）
+  ChatDataItem userMsg = ChatDataItem.Companion.createImageInputData(
+      getCurrentTime(), userInput, imageUri);
+  chatMessages.add(userMsg);
+  chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+  
+  // 接收流式响应
+  ChatDataItem aiMsg = chatMessages.get(chatMessages.size() - 1);
+  aiMsg.setText(aiMsg.getText() + chunk);
+  CollapsibleTextParser.INSTANCE.parseAndPopulate(aiMsg.getText(), aiMsg);
+  chatAdapter.updateRecentItem(aiMsg);  // 增量更新
+  ```
+
+- 功能特性：
+  1. **多媒体支持**：图片输入/输出、音频输入/输出（预留接口）
+  2. **折叠区域**：Thinking/Debug/Performance三种折叠区，左侧彩色标记线
+  3. **Markdown渲染**：使用Markwon库渲染所有文本内容
+  4. **性能优化**：RecyclerView视图复用、增量更新机制（payload）
+  5. **用户体验**：加载动画、长按复制、点击查看大图、音频进度条
+
+- 影响范围：
+  - 新增Kotlin文件：6个（ChatDataItem, ChatViewHolders, ChatRecyclerViewAdapter, AudioPlayerComponent, CollapsibleTextParser, AudioPlayService）
+  - 新增布局文件：3个（item_holder_chatheader, item_holder_user, item_holder_assistant）**✅ 从MNN直接复制**
+  - 新增Drawable XML：9个（bg_chat_user/assistant, ic_arrow_up/down, ic_audio_play/pause, ic_button_ripple, ic_issue, ic_statistics）**✅ 从MNN直接复制**
+  - 新增图片资源：2个（logo.png, testtest.jpg）**✅ 从MNN直接复制**
+  - 新增Values资源：3个（dimens_chat.xml, styles_chat.xml, colors_chat.xml）**✅ 从MNN直接复制**
+  - 修改文件：build.gradle（根目录和app），启用Kotlin支持，添加JitPack仓库
+
+- 验证要点：
+  - ✅ Kotlin编译成功，与Java代码无缝互操作
+  - ✅ RecyclerView正常显示3种消息类型
+  - ✅ 折叠标记正确解析和提取
+  - ✅ 折叠区域正常展开/收起
+  - ✅ Markdown渲染正常
+  - ✅ 已集成到RagQaFragment（sendMessage、流式输出、新对话）
+  - ✅ AudioPlayService已从MNN原版复制并移到chat/utils
+  - ⏳ 待编译测试和功能验证
+
+- 最佳实践：
+  1. **Kotlin/Java混编**：Kotlin用于数据类和工具类，Java用于业务逻辑，使用@JvmField暴露字段
+  2. **折叠标记设计**：使用XML风格标记，支持多种格式，标记名称语义化
+  3. **性能优化**：使用payload增量更新，避免主线程重操作，图片使用缩略图
+  4. **代码复用**：直接复用成熟组件，保持代码结构清晰，提供详细集成文档
+
+---
+
+Chatbox UI/UX优化与Debug信息增强（2025-10-17）
+- 问题描述：
+  1. Embedding和Reranker过程缺少实时进度反馈，用户体验差
+  2. Retrieval Similarity和Reranker Similarity打印不完整，缺少数量标识
+  3. 有知识库时未打印Prompt Length
+  4. Chatbox文本无法选择复制（setText后丢失selectable状态）
+
+- 技术方案：
+  
+  ### 1. Embedding进度显示优化 ✅
+  - 在`computeEmbedding()`前后添加进度点显示
+  - 使用`updateProgressPlainText(".")`确保实时刷新
+  - 代码位置：`RagQaFragment.java:3102-3105`
+  
+  ### 2. Retrieval Similarity增强显示 ✅
+  - 添加结果数量标识：`Retrieval Similarity (10 results): 0.856, 0.823, ...`
+  - 使用`updateProgressPlainText()`而非`updateProgressOnUiThread()`避免缓冲延迟
+  - 添加换行符`\n`使信息更清晰
+  - 同时输出到LogManager便于调试
+  - 代码位置：`RagQaFragment.java:3160-3173`
+  
+  ### 3. Reranker Similarity增强显示 ✅
+  - 格式：`Reranker Similarity (5 results): 0.8234, 0.7891, ...`
+  - 在`processRerankedResults()`中立即显示所有reranker分数
+  - 使用`updateProgressPlainText()`确保实时显示
+  - 保留原有的score callback用于日志记录
+  - 代码位置：`RagQaFragment.java:3529-3532`
+  
+  ### 4. Prompt Length打印补充 ✅
+  - 在有知识库时也打印Prompt Length
+  - 添加到debug info中：`Prompt Length: 1234 chars`
+  - 与无知识库时的格式保持一致
+  - 代码位置：`RagQaFragment.java:1639-1641`
+  
+  ### 5. Chatbox文本选择修复 ✅
+  - 问题根因：`setText()`会重置TextView的selectable状态
+  - 解决方案：在所有`setText()`调用后立即调用`setTextIsSelectable(true)`
+  - 修复位置：
+    - `updateProgressPlainText()` - 进度更新时（2550-2551行）
+    - `onStreamingData()` - 流式输出时（2289-2290行）
+    - `performAppendToResponse()` - 追加内容时（2740-2742行）
+    - `updateResultOnUiThread()` - 结果更新时（2803-2804, 2810-2811行）
+    - `onNewChatClicked()` - 清空时（2994-2995行）
+  - 同时确保`setMovementMethod(LinkMovementMethod.getInstance())`用于链接点击
+
+- 用户体验改进：
+  1. **实时反馈**：Embedding和Reranker过程中显示进度点，用户知道系统在工作
+  2. **信息完整**：显示所有similarity分数和结果数量，便于评估检索质量
+  3. **格式统一**：Retrieval和Reranker的显示格式一致，易于对比
+  4. **文本可选**：用户可以选择和复制chatbox中的任何文本内容
+  5. **调试友好**：Prompt Length在所有场景下都显示，便于排查问题
+
+- 技术细节：
+  - `updateProgressPlainText()` vs `updateProgressOnUiThread()`：
+    - 前者直接追加文本，无Markdown渲染，无缓冲延迟
+    - 后者会进行Markdown渲染，可能有缓冲
+    - 进度信息（点、similarity）使用前者确保实时性
+  - TextView selectable状态管理：
+    - 布局XML中设置`android:textIsSelectable="true"`只是初始状态
+    - `setText()`会重置这个状态，必须重新设置
+    - 需要同时设置`MovementMethod`才能支持链接点击和文本选择
+
+- 影响范围：
+  - 修改文件：`app/src/main/java/com/example/offlineai/RagQaFragment.java`
+    - 新增：Embedding进度点显示（2行）
+    - 修改：Retrieval Similarity显示格式（13行）
+    - 修改：Reranker Similarity显示逻辑（3行）
+    - 新增：Prompt Length打印（2行）
+    - 修改：5处setText后添加setTextIsSelectable（10行）
+
+- 验证要点：
+  - ✅ Embedding过程显示进度点
+  - ✅ Retrieval Similarity显示完整（数量+所有分数）
+  - ✅ Reranker Similarity显示完整（数量+所有分数）
+  - ✅ 有知识库时显示Prompt Length
+  - ✅ Chatbox文本可以选择和复制
+  - ✅ Markdown链接可以点击
+  - ✅ 流式输出时文本保持可选择状态
+
+- 最佳实践：
+  1. **进度反馈**：长时间操作必须提供实时反馈，避免用户焦虑
+  2. **信息完整性**：调试信息要完整，包括数量、分数、长度等关键指标
+  3. **格式一致性**：同类信息使用统一格式，便于用户理解和对比
+  4. **TextView状态管理**：setText后必须重新设置selectable和movement method
+  5. **性能考虑**：进度更新使用plain text避免Markdown渲染开销
 
 ---
 

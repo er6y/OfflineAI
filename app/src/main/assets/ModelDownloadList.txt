@@ -54,6 +54,18 @@
       "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen2.5-VL-3B-Instruct-MNN/resolve/master/visual.mnn.weight",
 	    "comments": "Qwen2.5 VL Text-Image2Text(似乎visual有问题大量空tokens效果不好)"
     },
+    "Qwen3-VL-4B-Thinking-MNN-int4": {
+      "config.json": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/config.json",
+      "configuration.json": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/configuration.json",
+      "llm_config.json": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/llm_config.json" ,
+      "llm.mnn.json": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/llm.mnn.json",
+      "llm.mnn": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/llm.mnn",
+      "llm.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/llm.mnn.weight",
+      "tokenizer.txt": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/tokenizer.txt",
+      "visual.mnn": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/visual.mnn",
+      "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/visual.mnn.weight",
+	    "comments": "Qwen3 VL Thinking Text-Image2Text"
+    },    
     "MiniCPM-V-4-MNN-int4": {
       "config.json": "https://www.modelscope.cn/models/MNN/MiniCPM-V-4-MNN/resolve/master/config.json",
       "configuration.json": "https://www.modelscope.cn/models/MNN/MiniCPM-V-4-MNN/resolve/master/configuration.json",

@@ -7,11 +7,13 @@
 #include <vector>
 #include <map>
 #include <mutex>
+#include <atomic>
 #include <chrono>
 #include "llm/llm.hpp"
 #include "llm/reranker.hpp"
 #include "jsonhpp/json.hpp"
 #include "MNN/MNNDefine.h"
+#include "core/Backend.hpp"
 
 #define LOG_TAG "MNN_JNI"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -1090,6 +1092,24 @@ Java_com_offlineai_mnn_MnnInference_isEmbeddingValid(
 
 // ========== JNI Lifecycle ==========
 
+// Global flag to track initialization
+static std::atomic<bool> g_mnn_initialized(false);
+
+// Trigger MNN initialization by calling a public API
+static void trigger_mnn_initialization() {
+    // MNNGetExtraRuntimeCreator() will internally call registerBackend()
+    // This is a public API that's safe to call
+    try {
+        // Just getting the creator will trigger backend registration
+        MNN::MNNGetExtraRuntimeCreator(MNN_FORWARD_CPU);
+        LOGI("MNN backend initialization triggered successfully");
+    } catch (const std::exception& e) {
+        LOGE("Failed to trigger MNN initialization: %s", e.what());
+    } catch (...) {
+        LOGE("Failed to trigger MNN initialization: unknown error");
+    }
+}
+
 JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
     JNIEnv* env = nullptr;
     if (vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) {
@@ -1097,6 +1117,15 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
     }
     
     LOGI("MNN JNI library loaded");
+    
+    // Trigger MNN backend initialization ONCE per library load
+    // This ensures registerBackend() is called before any model loading
+    if (!g_mnn_initialized.exchange(true)) {
+        LOGI("Triggering MNN backend initialization (first time)...");
+        trigger_mnn_initialization();
+    } else {
+        LOGW("MNN backend already initialized, skipping");
+    }
     
     // Initialize log redirection
     init_log_redirection(env);

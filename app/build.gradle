@@ -1,5 +1,6 @@
 plugins {
     id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
 }
 
 android {
@@ -75,6 +76,10 @@ namespace = 'com.example.offlineai'
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+    }
+    
+    kotlinOptions {
+        jvmTarget = '17'
     }
     
     // 添加编译选项以显示详细错误信息
@@ -185,6 +190,9 @@ dependencies {
     // 添加LangChain4j依赖
     implementation 'dev.langchain4j:langchain4j:0.24.0'
     implementation 'dev.langchain4j:langchain4j-core:0.24.0'
+    
+    // SpinKit loading animation
+    implementation 'com.github.ybq:Android-SpinKit:1.4.0'
     
     // 强制使用统一版本的BouncyCastle库
     implementation 'org.bouncycastle:bcprov-jdk18on:1.72'

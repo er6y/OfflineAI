@@ -568,9 +568,29 @@ Text chunking and overlap sizes can be configured in settings, with multiple pre
 
 **问题：应用运行缓慢 / Issue: Application running slowly**
 - 检查设备内存使用情况 / Check device memory usage
-- 调整模型参数（如线程数、序列长度） / Adjust model parameters (such as thread count, sequence length)
+- 调整LLM推理参数 / Adjust LLM inference parameters：
+  - 降低"最大序列长度"（如从4096降至2048）/ Reduce "Max Sequence Length" (e.g., from 4096 to 2048)
+  - 减少"推理线程数"（如从8降至4）/ Reduce "Inference Threads" (e.g., from 8 to 4)
+  - 降低"最大输出Token数"（如从2048降至512）/ Reduce "Max Output Tokens" (e.g., from 2048 to 512)
 - 考虑使用更小的模型 / Consider using smaller models
 - 清理不必要的知识库 / Clean up unnecessary knowledge bases
+
+**问题：应用崩溃或内存不足（OOM）/ Issue: App crashes or Out Of Memory (OOM)**
+- **立即操作 / Immediate Actions**：
+  - 降低"最大序列长度"至1024或2048 / Reduce "Max Sequence Length" to 1024 or 2048
+  - 关闭其他后台应用释放内存 / Close other background apps to free memory
+  - 重启应用清理缓存 / Restart app to clear cache
+- **长期优化 / Long-term Optimization**：
+  - 使用更小的模型（如1B参数而非3B）/ Use smaller models (e.g., 1B parameters instead of 3B)
+  - 避免同时加载多个大模型 / Avoid loading multiple large models simultaneously
+  - 定期清理应用缓存和临时文件 / Regularly clear app cache and temporary files
+
+**问题：多轮对话后AI"遗忘"前面的内容 / Issue: AI "forgets" previous content after multiple rounds**
+- **原因 / Cause**：最大序列长度设置过小，超出限制后自动截断历史 / Max sequence length set too small, automatically truncates history when exceeded
+- **解决方案 / Solution**：
+  - 增加"最大序列长度"（如从1024增至2048或4096）/ Increase "Max Sequence Length" (e.g., from 1024 to 2048 or 4096)
+  - 注意：需要确保设备有足够内存 / Note: Ensure device has sufficient memory
+  - 参考上文"LLM推理设置详解"选择合适的值 / Refer to "LLM Inference Settings Explained" above to choose appropriate value
 
 ### 5.2 日志分析 / Log Analysis
 
@@ -627,15 +647,89 @@ Viewing logs can help locate the cause of problems, especially when processing l
 #### LLM推理设置详解 / LLM Inference Settings Explained
 
 **基础参数设置 / Basic Parameter Settings**
-- **最大序列长度 / Max Sequence Length**：控制模型能处理的最大文本长度 / Controls maximum text length the model can process
-  - 建议范围：512-2048 / Recommended range: 512-2048
-  - 设置过大会消耗更多内存和计算资源 / Setting too large consumes more memory and computational resources
-- **推理线程数 / Inference Threads**：控制并行计算的线程数量 / Controls number of parallel computing threads
-  - 建议设置为CPU核心数的50%-75% / Recommend setting to 50%-75% of CPU core count
-  - 过多线程可能导致性能下降 / Too many threads may cause performance degradation
-- **最大输出Token数 / Max Output Tokens**：限制模型单次回答的最大长度 / Limits maximum length of model's single response
-  - 建议范围：256-1024 / Recommended range: 256-1024
-  - 根据实际需求调整 / Adjust according to actual needs
+
+##### 1. 最大序列长度（KV Cache大小）/ Max Sequence Length (KV Cache Size)
+
+**作用 / Purpose**：
+- 控制模型的**上下文窗口大小**，即能记住多少历史对话 / Controls **context window size**, i.e., how much conversation history can be remembered
+- 决定**KV Cache内存占用**，影响多轮对话和长文本理解能力 / Determines **KV Cache memory usage**, affects multi-turn dialogue and long text comprehension
+
+**配置范围 / Configuration Range**：
+- 当前范围：1024-6144 tokens / Current range: 1024-6144 tokens
+- 默认值：2048 tokens / Default: 2048 tokens
+- 步进：512 tokens / Step: 512 tokens
+
+**内存消耗参考（以Qwen2.5-3B为例）/ Memory Consumption Reference (Qwen2.5-3B example)**：
+
+| 序列长度 / Sequence Length | KV Cache内存 / KV Cache Memory | 适用场景 / Use Case |
+|---------------------------|-------------------------------|-------------------|
+| **1024** | ~294 MB | 短对话、内存受限设备 / Short conversations, memory-limited devices |
+| **2048** | ~589 MB | 普通对话（推荐）/ Normal conversations (Recommended) ✅ |
+| **4096** | ~1.15 GB | 长对话、RAG检索 / Long conversations, RAG retrieval |
+| **6144** | ~1.73 GB | 超长文本、深度对话 / Very long texts, deep conversations |
+
+**配置建议 / Configuration Recommendations**：
+
+根据设备内存选择 / Choose based on device memory：
+- **4GB RAM设备**：建议1024-2048，避免OOM / Recommend 1024-2048, avoid OOM
+- **6GB RAM设备**：建议2048-4096，平衡性能 / Recommend 2048-4096, balanced performance
+- **8GB+ RAM设备**：可选4096-6144，充分利用 / Can choose 4096-6144, full utilization
+
+根据使用场景选择 / Choose based on use case：
+- **普通聊天（2-3轮）**：1024-2048足够 / 1024-2048 sufficient
+- **RAG问答（5个文档）**：建议2048-4096 / Recommend 2048-4096
+- **长文本总结（2000字+）**：建议4096+ / Recommend 4096+
+- **多轮深度对话（10轮+）**：建议4096-6144 / Recommend 4096-6144
+
+**影响说明 / Impact Description**：
+- ✅ **太小（1024）**：内存占用低，但容易"遗忘"前面的对话，RAG效果受限 / Low memory usage, but easily "forgets" previous conversations, limited RAG effectiveness
+- ✅ **适中（2048-4096）**：平衡内存和性能，适合大多数场景 / Balanced memory and performance, suitable for most scenarios
+- ⚠️ **太大（6144+）**：内存压力大，生成速度变慢，低端设备可能OOM / High memory pressure, slower generation, low-end devices may OOM
+
+**技术细节 / Technical Details**：
+- MNN使用固定chunk=256进行Prefill分块，控制峰值内存 / MNN uses fixed chunk=256 for Prefill chunking, controlling peak memory
+- 序列长度通过`kvcache_limit`参数传递给MNN引擎 / Sequence length passed to MNN engine via `kvcache_limit` parameter
+- 超过限制时，MNN会自动截断最早的token / When limit exceeded, MNN automatically truncates earliest tokens
+
+##### 2. 推理线程数 / Inference Threads
+
+**作用 / Purpose**：
+- 控制CPU推理时使用的**并行线程数** / Controls **number of parallel threads** during CPU inference
+- 影响推理速度和CPU占用率 / Affects inference speed and CPU utilization
+
+**配置范围 / Configuration Range**：
+- 范围：1-16线程 / Range: 1-16 threads
+- 默认值：4线程 / Default: 4 threads
+
+**配置建议 / Configuration Recommendations**：
+- **4核CPU**：建议2-4线程 / Recommend 2-4 threads
+- **6核CPU**：建议4-6线程 / Recommend 4-6 threads
+- **8核+CPU**：建议6-8线程 / Recommend 6-8 threads
+- ⚠️ 不建议超过物理核心数，会导致性能下降 / Not recommended to exceed physical core count, causes performance degradation
+
+**注意事项 / Notes**：
+- GPU后端时，此参数代表GPU MODE，不是线程数 / For GPU backend, this parameter represents GPU MODE, not thread count
+- 线程数越多，CPU发热越明显 / More threads, more CPU heat
+- 同时运行其他应用时，建议降低线程数 / When running other apps simultaneously, recommend reducing thread count
+
+##### 3. 最大输出Token数 / Max Output Tokens
+
+**作用 / Purpose**：
+- 限制模型**单次生成的最大token数量** / Limits **maximum number of tokens** generated in single response
+- 防止模型无限生成，避免资源浪费 / Prevents infinite generation, avoids resource waste
+
+**配置范围 / Configuration Range**：
+- 范围：512-4096 tokens / Range: 512-4096 tokens
+- 默认值：512 tokens / Default: 512 tokens
+
+**配置建议 / Configuration Recommendations**：
+- **简短回答**：512-1024 tokens / 512-1024 tokens
+- **详细解释**：1024-2048 tokens / 1024-2048 tokens
+- **长文本生成**：2048-4096 tokens / 2048-4096 tokens
+
+**影响说明 / Impact Description**：
+- 此参数**不影响内存占用**，只控制生成长度 / Does **not affect memory usage**, only controls generation length
+- 超过限制时，模型会自动停止生成 / When limit exceeded, model automatically stops generation
 
 **高级参数调优 / Advanced Parameter Tuning**
 - **温度（Temperature）/ Temperature**：控制输出的随机性 / Controls output randomness
@@ -661,20 +755,30 @@ Viewing logs can help locate the cause of problems, especially when processing l
 
 #### 图像编码设置详解 / Image Encoding Settings Explained
 
-设置页面当前仅包含两项与图像编码相关的参数，用于多模态推理前的图像预处理与并行度控制。以下说明与代码实现一致。
+**图片预处理尺寸（像素）/ Image Preprocessing Size (Pixels)**
 
-- 图片预处理尺寸（像素）
-  - 预设选项：`112, 280, 392, 504(默认), 672, 896, 1008, MAX(原图)`
-  - 含义：按预设尺寸对输入图片进行等比例缩放后编码；`MAX`表示不缩放，按原始分辨率编码。
-  - 说明：这些预设均为 28 的倍数（适配常见 VL 模型）。
-  - 建议：中低端设备优先选择 `392–504`；高性能设备可选 `672–1008` 或 `MAX`，但会增加耗时与内存占用。
+**预设选项 / Preset Options**：
+- `112, 280, 392, 504(默认), 672, 896, 1008, MAX(原图)` / `112, 280, 392, 504(default), 672, 896, 1008, MAX(original)`
 
-- 图像编码线程数
-  - 范围：`1–16` 线程（默认 `4`）
-  - 含义：控制图像编码阶段的并行度；线程越多速度越快，但会占用更多 CPU 资源。
-  - 建议：中端设备设为 `4–8`；低端设备设为 `2–4`；若出现发热或卡顿，请适当降低。
-- 图片越清晰、提示词越具体，越能提升答案质量
-- 首次加载多模态模型可能耗时较长，属于正常现象
+**含义 / Meaning**：
+- 按预设尺寸对输入图片进行等比例缩放后编码 / Scale input images proportionally to preset size before encoding
+- `MAX`表示不缩放，按原始分辨率编码 / `MAX` means no scaling, encode at original resolution
+- 这些预设均为28的倍数（适配常见VL模型）/ These presets are multiples of 28 (adapted for common VL models)
+
+**配置建议 / Configuration Recommendations**：
+- **中低端设备（4-6GB RAM）**：优先选择`392-504` / Prioritize `392-504`
+- **高性能设备（8GB+ RAM）**：可选`672-1008`或`MAX` / Can choose `672-1008` or `MAX`
+- ⚠️ 更大的尺寸会增加耗时与内存占用 / Larger sizes increase processing time and memory usage
+
+**图像编码线程数说明 / Image Encoding Threads Note**：
+- ⚠️ **已移除此配置项** / **This configuration has been removed**
+- MNN引擎使用统一的"推理线程数"控制所有推理（包括文本LLM和视觉编码器）/ MNN engine uses unified "Inference Threads" to control all inference (including text LLM and vision encoder)
+- 无法像llamacpp那样独立配置图像编码线程数 / Cannot independently configure image encoding threads like llamacpp
+- 如需调整图像编码性能，请调整"推理线程数"参数 / To adjust image encoding performance, please adjust "Inference Threads" parameter
+
+**使用提示 / Usage Tips**：
+- 图片越清晰、提示词越具体，越能提升答案质量 / Clearer images and more specific prompts improve answer quality
+- 首次加载多模态模型可能耗时较长，属于正常现象 / First-time loading of multimodal models may take longer, this is normal
 
 ### 8.3 重排模型使用建议 / Rerank Model Usage Recommendations
 

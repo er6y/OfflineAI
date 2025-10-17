@@ -1,5 +1,6 @@
 package com.example.offlineai;
 
+import android.Manifest;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -7,6 +8,7 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.net.Uri;
@@ -50,6 +52,8 @@ import androidx.activity.result.PickVisualMediaRequest;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.content.ContextCompat;
+import androidx.core.content.FileProvider;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentTransaction;
 import androidx.recyclerview.widget.LinearLayoutManager;
@@ -70,6 +74,10 @@ import com.example.offlineai.ImageThumbnailAdapter;
 import com.example.offlineai.EmbeddingHandler;
 import com.example.offlineai.SQLiteVectorDatabaseHandler;
 import com.example.offlineai.ConfigManager;
+import com.example.offlineai.chat.model.ChatDataItem;
+import com.example.offlineai.chat.chatlist.ChatRecyclerViewAdapter;
+import com.example.offlineai.chat.chatlist.ChatViewHolders;
+import com.example.offlineai.chat.utils.CollapsibleTextParser;
 import io.noties.markwon.Markwon;
 import io.noties.markwon.html.HtmlPlugin;
 import io.noties.markwon.AbstractMarkwonPlugin;
@@ -107,6 +115,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 
 public class RagQaFragment extends Fragment {
 
@@ -131,10 +142,20 @@ public class RagQaFragment extends Fragment {
     // 避免程序化设置复选框状态时触发监听器造成误保存
     private boolean isUpdatingUiFromConfig = false;
     
+    // Chat UI components
+    private RecyclerView recyclerViewChat; // Chat message list
+    private ChatRecyclerViewAdapter chatAdapter; // Chat adapter
+    private List<ChatDataItem> chatMessages = new ArrayList<>(); // Chat messages
+    
     // Image picker launcher for Android 13+
     private ActivityResultLauncher<PickVisualMediaRequest> pickMedia;
     // Document picker launcher for Android 11/12
     private ActivityResultLauncher<String[]> pickDocument;
+    // Camera launcher for taking photos
+    private ActivityResultLauncher<Uri> takePictureLauncher;
+    private Uri cameraCaptureUri; // Temporary URI for camera capture
+    // Camera permission launcher
+    private ActivityResultLauncher<String> cameraPermissionLauncher;
     
     // Markdown renderer
     private Markwon markwon;
@@ -198,6 +219,27 @@ public class RagQaFragment extends Fragment {
         checkBoxThinkingMode = view.findViewById(R.id.checkBoxThinkingModeKey); // Initialize thinking mode checkbox
         recyclerViewImageThumbnails = view.findViewById(R.id.recyclerViewImageThumbnails); // Initialize image thumbnail container
         textViewResponse = view.findViewById(R.id.textViewResponse); // Initialize response text view
+        recyclerViewChat = view.findViewById(R.id.recyclerViewChat); // Initialize chat RecyclerView
+        
+        // Initialize chat RecyclerView and adapter
+        chatAdapter = new ChatRecyclerViewAdapter(requireContext());
+        chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
+        
+        // Set transfer to note callback
+        chatAdapter.setOnTransferToNoteCallback(text -> {
+            transferToKnowledgeNote(text);
+            return null; // Return Unit for Kotlin compatibility
+        });
+        
+        // Set image preview callback
+        chatAdapter.setOnImagePreviewCallback(imagePath -> {
+            showImagePreview(imagePath);
+            return null; // Return Unit for Kotlin compatibility
+        });
+        
+        recyclerViewChat.setLayoutManager(new LinearLayoutManager(requireContext()));
+        recyclerViewChat.setAdapter(chatAdapter);
+        LogManager.logD(TAG, "Chat RecyclerView initialized with callbacks");
         
         // Initialize image thumbnail adapter and RecyclerView
         imageThumbnailAdapter = new ImageThumbnailAdapter();
@@ -1082,7 +1124,38 @@ public class RagQaFragment extends Fragment {
             // Update button state (isSending has already been set to true in compareAndSet)
             buttonSendStop.setText(getString(R.string.button_stop_with_icon));
             
-            // Clear response area and display processing message
+            // Create user message ChatDataItem
+            android.net.Uri imageUri = null;
+            if (imageThumbnailAdapter != null && imageThumbnailAdapter.getImageCount() > 0) {
+                List<String> imagePaths = imageThumbnailAdapter.getOriginalImageFiles();
+                if (imagePaths != null && !imagePaths.isEmpty()) {
+                    imageUri = Uri.parse(imagePaths.get(0));
+                }
+            }
+            
+            ChatDataItem userMsg;
+            if (imageUri != null) {
+                userMsg = ChatDataItem.Companion.createImageInputData(getCurrentTime(), userPrompt, imageUri);
+                LogManager.logD(TAG, "Created user message with image: " + imageUri);
+            } else {
+                userMsg = new ChatDataItem(getCurrentTime(), ChatViewHolders.USER, userPrompt);
+                LogManager.logD(TAG, "Created user message without image");
+            }
+            
+            chatMessages.add(userMsg);
+            chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+            recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+            
+            // Create AI message placeholder
+            ChatDataItem aiMsg = new ChatDataItem(ChatViewHolders.ASSISTANT);
+            aiMsg.setLoading(true);
+            chatMessages.add(aiMsg);
+            chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+            recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+            
+            LogManager.logD(TAG, "Chat messages created: user + AI placeholder, total=" + chatMessages.size());
+            
+            // Clear response area and display processing message (keep for old TextView compatibility)
             if (textViewResponse != null) {
                 textViewResponse.setText("");
             }
@@ -1323,6 +1396,31 @@ public class RagQaFragment extends Fragment {
         }
         
         isSending.set(false); // Use atomic operation to reset sending state
+        
+        // Auto-collapse collapsible sections after streaming completes
+        if (!chatMessages.isEmpty()) {
+            ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
+            if (lastMsg.getType() == ChatViewHolders.ASSISTANT) {
+                lastMsg.setShowDebug(false);
+                lastMsg.setShowThinking(false);
+                lastMsg.setShowPerformance(false);
+                lastMsg.setLoading(false);
+                
+                // Update UI
+                if (mainHandler != null && chatAdapter != null) {
+                    mainHandler.post(() -> {
+                        try {
+                            if (getActivity() != null && isAdded() && !isDetached()) {
+                                chatAdapter.updateRecentItem(lastMsg);
+                                LogManager.logD(TAG, "Auto-collapsed collapsible sections after streaming complete");
+                            }
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "Failed to auto-collapse sections", e);
+                        }
+                    });
+                }
+            }
+        }
         
         // Update button state on UI thread, add Fragment lifecycle check
         if (mainHandler != null && buttonSendStop != null) {
@@ -2111,7 +2209,10 @@ public class RagQaFragment extends Fragment {
                     // Log received data chunk
                     //LogManager.logD(TAG, "Received data chunk: [" + chunk + "]");
                     
-                    // Accumulate response content
+                    // Update chat message with streaming chunk
+                    updateChatMessage(chunk);
+                    
+                    // Accumulate response content (for old TextView compatibility)
                     responseBuilder.append(chunk);
                     final String fullContent = responseBuilder.toString();
                     
@@ -2757,6 +2858,12 @@ public class RagQaFragment extends Fragment {
         updateProgressOnUiThread("");
         editTextUserPrompt.setText("");
         
+        // Clear chat messages
+        if (chatAdapter != null) {
+            chatAdapter.reset();
+            LogManager.logD(TAG, "Chat messages cleared");
+        }
+        
         // Clear answer box
         if (textViewResponse != null) {
             textViewResponse.setText("");
@@ -2818,8 +2925,17 @@ public class RagQaFragment extends Fragment {
     // Load model and process query
     private void loadModelAndProcessQuery(String foundModelPath, String query, SQLiteVectorDatabaseHandler vectorDb) throws InterruptedException {
         try {
+            // Start debug section for progress info
+            updateChatMessage("<debug>\n");
+            
+            // Show knowledge base name
+            String kbName = spinnerKnowledgeBase != null && spinnerKnowledgeBase.getSelectedItem() != null 
+                ? spinnerKnowledgeBase.getSelectedItem().toString() 
+                : "Unknown";
+            updateChatMessage("Knowledge Base: " + kbName + "\n");
+            
             // Update progress
-            updateProgressOnUiThread("Loading embedding model...");
+            updateChatMessage("Loading embedding model...");
             
             // Get embedding handler instance
             EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(requireContext());
@@ -2831,6 +2947,12 @@ public class RagQaFragment extends Fragment {
                 throw new Exception("Failed to load embedding model");
             }
             LogManager.logI(TAG, "[LOCK] embeddingHandler.loadModel() returned - thread=" + Thread.currentThread().getName());
+            
+            // Show embedding model name
+            String embeddingModelName = embeddingHandler.getEmbeddingModel();
+            if (embeddingModelName != null) {
+                updateChatMessage("\nEmbedding Model: " + embeddingModelName);
+            }
             
             // CRITICAL: Check stop flags after loading
             // If stopped, DON'T throw exception - model is already loaded and should be kept!
@@ -2844,18 +2966,18 @@ public class RagQaFragment extends Fragment {
             // Get model vector dimension
             int embeddingDimension = embeddingHandler.getEmbeddingDimension();
             LogManager.logD(TAG, "Model vector dimension: " + embeddingDimension);
-            updateProgressOnUiThread("Model vector dimension: " + embeddingDimension);
+            updateChatMessage("\nModel vector dimension: " + embeddingDimension);
 
             // Check if vector dimension matches knowledge base
             int dbDimension = vectorDb.getMetadata().getEmbeddingDimension();
             LogManager.logD(TAG, "Knowledge base vector dimension: " + dbDimension + ", model vector dimension: " + embeddingDimension);
-            updateProgressOnUiThread("Knowledge base vector dimension: " + dbDimension);
+            updateChatMessage("\nKnowledge base vector dimension: " + dbDimension);
 
             if (dbDimension > 0 && dbDimension != embeddingDimension) {
                 String warningMsg = "Warning: Vector dimensions do not match! Knowledge base dimension: " + dbDimension + ", model dimension: " + embeddingDimension;
                 LogManager.logW(TAG, warningMsg);
-                updateProgressOnUiThread(warningMsg);
-                updateProgressOnUiThread("This may cause search failure, recommend rebuilding knowledge base or using matching model");
+                updateChatMessage("\n" + warningMsg);
+                updateChatMessage("\nThis may cause search failure, recommend rebuilding knowledge base or using matching model");
             }
 
 
@@ -2872,7 +2994,7 @@ public class RagQaFragment extends Fragment {
                 }
                 
                 // Generate query vector
-                updateProgressOnUiThread("Generating query vector...");
+                updateChatMessage("\nGenerating query vector...");
                 
                 // Get user query
                 String userQuery = editTextUserPrompt.getText().toString().trim();
@@ -2880,7 +3002,9 @@ public class RagQaFragment extends Fragment {
                 // Generate vector
                 float[] queryVector;
                 try {
+                    updateChatMessage(".");
                     queryVector = embeddingHandler.computeEmbedding(userQuery);
+                    updateChatMessage(".");
                 } catch (InterruptedException ie) {
                     LogManager.logI(TAG, "Embedding computation interrupted by user");
                     updateProgressOnUiThread("Operation stopped by user");
@@ -2909,7 +3033,7 @@ public class RagQaFragment extends Fragment {
                 // Only display basic vector information in non-debug mode
                 boolean isDebugMode = ConfigManager.getBoolean(requireContext(), ConfigManager.KEY_DEBUG_MODE, false);
                 
-                updateProgressOnUiThread(vectorDebugInfo);
+                updateChatMessage("\n" + vectorDebugInfo);
 
                 
                 // Check global stop flag
@@ -2920,7 +3044,7 @@ public class RagQaFragment extends Fragment {
                 }
                 
                 // Search similar text blocks
-                updateProgressOnUiThread("Searching similar text blocks...");
+                updateChatMessage("\nSearching similar text blocks...");
                 
                 // Get retrieval count setting
                 int retrievalCount = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
@@ -2935,16 +3059,19 @@ public class RagQaFragment extends Fragment {
                     return;
                 }
                 
-                // Display retrieval result similarity
+                // Display retrieval result similarity - show immediately with all scores
                 if (!searchResults.isEmpty()) {
-                    StringBuilder similarityInfo = new StringBuilder("Retrieval similarity: ");
+                    StringBuilder similarityInfo = new StringBuilder("\nRetrieval Similarity (");
+                    similarityInfo.append(searchResults.size()).append(" results): ");
                     for (int i = 0; i < searchResults.size(); i++) {
                         similarityInfo.append(String.format("%.3f", searchResults.get(i).similarity));
                         if (i < searchResults.size() - 1) {
                             similarityInfo.append(", ");
                         }
                     }
-                    updateProgressOnUiThread(similarityInfo.toString());
+                    // Use chat message update for smooth streaming display
+                    updateChatMessage(similarityInfo.toString());
+                    LogManager.logI(TAG, "Retrieval similarity scores: " + similarityInfo.toString());
                 }
                 
                 // Check global stop flag
@@ -2961,7 +3088,7 @@ public class RagQaFragment extends Fragment {
                 if (rerankCount > 0 && rerankerModelPath != null && !rerankerModelPath.isEmpty()) {
                     // Use reranker model
                     LogManager.logI(TAG, "Using reranker model with rerank count: " + rerankCount);
-                    updateProgressOnUiThread("Using reranker model to optimize results...");
+                    updateChatMessage("\nUsing reranker model to optimize results...");
                     try {
                         LogManager.logI(TAG, "[DEBUG] About to call processWithReranker - query.len=" + userQuery.length() + ", results=" + searchResults.size() + ", path=" + rerankerModelPath + ", vectorDb=" + (vectorDb != null ? "not_null" : "null"));
                         processWithReranker(userQuery, searchResults, rerankerModelPath, vectorDb);
@@ -2975,11 +3102,14 @@ public class RagQaFragment extends Fragment {
                     // Do not use reranking, directly process vector search results
                     if (rerankCount == 0) {
                         LogManager.logI(TAG, "Rerank count is 0, skipping reranking and using vector search results directly");
-                        updateProgressOnUiThread("Rerank count is 0, skipping reranking");
+                        updateChatMessage("\nRerank count is 0, skipping reranking");
                     } else {
                         LogManager.logD(TAG, "No reranker model configured, using vector search results");
                     }
                     processVectorSearchResults(searchResults);
+                    
+                    // Close debug section
+                    updateChatMessage("\n</debug>\n");
                     
                     // [Fix] No longer call continueRagQueryAfterReranking to avoid duplicate LLM API calls
                     // executeRagQuery method will wait for relevantDocuments to be set and then call callLLMApi itself
@@ -3169,12 +3299,25 @@ public class RagQaFragment extends Fragment {
                 throw new InterruptedException("Task stopped before reranking");
             }
             
-            updateProgressOnUiThread("Reranking documents");
+            updateChatMessage("\nReranking documents");
+            
+            // Show reranker model name
+            String modelPath = rerankerHandler.getCurrentModelPath();
+            if (modelPath != null) {
+                String modelName = new File(modelPath).getName();
+                updateChatMessage("\nReranker Model: " + modelName);
+            }
             
             // Set progress callback to show real-time progress
             rerankerHandler.setProgressCallback((current, total) -> {
                 // Show progress with dots - simple and intuitive
-                updateProgressPlainText(".");
+                updateChatMessage(".");
+            });
+            
+            // Set score callback to show real-time reranking scores
+            rerankerHandler.setScoreCallback((index, score, text) -> {
+                // Log each score as it's computed for debugging
+                LogManager.logD(TAG, String.format("Rerank progress [%d]: score=%.4f", index + 1, score));
             });
             
             // Perform reranking synchronously (MNN reranker is thread-safe and synchronized)
@@ -3285,11 +3428,16 @@ public class RagQaFragment extends Fragment {
                 relevantDocs.add(result.text);
 
                 // Add to progress display - show rerank number and score
-                similarityInfoBuilder.append(String.format(" %.4f", result.score));
+                similarityInfoBuilder.append(String.format("%.4f", result.score));
                 if (i < actualResultCount - 1) {
                     similarityInfoBuilder.append(", ");
                 }
             }
+
+            // Display reranker results immediately
+            String rerankerScores = "\nReranker Similarity (" + actualResultCount + " results): " + similarityInfoBuilder.toString();
+            updateChatMessage(rerankerScores);
+            LogManager.logI(TAG, "Reranker scores: " + rerankerScores);
 
             // Save rerank information
             synchronized (this) {
@@ -3299,7 +3447,10 @@ public class RagQaFragment extends Fragment {
             
             LogManager.logD(TAG, "Reranked results processing completed, actual document count used: " + relevantDocs.size());
             
-            updateProgressOnUiThread("Reranking optimization completed, found " + relevantDocs.size() + " relevant contents");
+            updateChatMessage("\nReranking optimization completed, found " + relevantDocs.size() + " relevant contents");
+            
+            // Close debug section
+            updateChatMessage("\n</debug>\n");
             
             // [Fix] No longer call continueRagQueryAfterReranking to avoid duplicate LLM API calls
             // executeRagQuery method will wait for relevantDocuments to be set and then call callLLMApi itself
@@ -4025,6 +4176,33 @@ public class RagQaFragment extends Fragment {
                         LogManager.logI(TAG, "Pick image from selection menu - no image selected");
                     }
                 });
+        
+        // Initialize camera launcher
+        takePictureLauncher = registerForActivityResult(
+                new ActivityResultContracts.TakePicture(),
+                success -> {
+                    if (success && cameraCaptureUri != null) {
+                        handleImageSelected(cameraCaptureUri);
+                        LogManager.logI(TAG, "Photo captured successfully: " + cameraCaptureUri);
+                    } else {
+                        LogManager.logI(TAG, "Photo capture failed or cancelled");
+                        Toast.makeText(requireContext(), R.string.toast_take_photo_failed, Toast.LENGTH_SHORT).show();
+                    }
+                });
+        
+        // Initialize camera permission launcher
+        cameraPermissionLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestPermission(),
+                granted -> {
+                    if (granted) {
+                        // Permission granted, launch camera
+                        startCameraCapture();
+                    } else {
+                        // Permission denied
+                        Toast.makeText(requireContext(), R.string.toast_camera_permission_denied, Toast.LENGTH_SHORT).show();
+                        LogManager.logW(TAG, "Camera permission denied by user");
+                    }
+                });
     }
     
     /**
@@ -4036,8 +4214,9 @@ public class RagQaFragment extends Fragment {
         ActionMode.Callback selectionCallback = new ActionMode.Callback() {
             @Override
             public boolean onCreateActionMode(ActionMode mode, android.view.Menu menu) {
-                // Add "Image" menu item
+                // Add "Image" and "Camera" menu items
                 menu.add(0, android.R.id.button1, 0, R.string.menu_pick_image);
+                menu.add(0, android.R.id.button2, 1, R.string.menu_take_photo);
                 return true;
             }
             
@@ -4051,6 +4230,11 @@ public class RagQaFragment extends Fragment {
                 if (item.getTitle().equals(getString(R.string.menu_pick_image))) {
                     // Launch image picker
                     launchImagePicker();
+                    mode.finish();
+                    return true;
+                } else if (item.getTitle().equals(getString(R.string.menu_take_photo))) {
+                    // Launch camera
+                    launchCamera();
                     mode.finish();
                     return true;
                 }
@@ -4112,6 +4296,74 @@ public class RagQaFragment extends Fragment {
     }
     
     /**
+     * Launch camera for taking photo
+     * Checks permission first, then starts camera capture
+     */
+    private void launchCamera() {
+        // Check if max images reached
+        if (imageThumbnailAdapter.getImageCount() >= MAX_IMAGES) {
+            Toast.makeText(requireContext(), R.string.toast_image_too_many, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        
+        // Check camera permission
+        if (ContextCompat.checkSelfPermission(requireContext(), Manifest.permission.CAMERA) 
+                == PackageManager.PERMISSION_GRANTED) {
+            // Permission already granted, start camera
+            startCameraCapture();
+        } else {
+            // Request camera permission
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA);
+        }
+    }
+    
+    /**
+     * Start camera capture with temporary file
+     */
+    private void startCameraCapture() {
+        try {
+            // Create temporary file for photo
+            File photoFile = createImageFile();
+            if (photoFile != null) {
+                // Get URI using FileProvider
+                cameraCaptureUri = FileProvider.getUriForFile(
+                        requireContext(),
+                        requireContext().getPackageName() + ".fileprovider",
+                        photoFile);
+                
+                // Launch camera
+                takePictureLauncher.launch(cameraCaptureUri);
+                LogManager.logI(TAG, "Camera launched with URI: " + cameraCaptureUri);
+            } else {
+                Toast.makeText(requireContext(), R.string.toast_take_photo_failed, Toast.LENGTH_SHORT).show();
+                LogManager.logE(TAG, "Failed to create temporary file for camera capture");
+            }
+        } catch (Exception e) {
+            Toast.makeText(requireContext(), R.string.toast_take_photo_failed, Toast.LENGTH_SHORT).show();
+            LogManager.logE(TAG, "Error starting camera capture: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Create temporary image file for camera capture
+     */
+    private File createImageFile() throws IOException {
+        // Create image file name with timestamp
+        String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(new Date());
+        String imageFileName = "JPEG_" + timeStamp + "_";
+        
+        // Get cache directory
+        File storageDir = requireContext().getCacheDir();
+        
+        // Create the image file
+        return File.createTempFile(
+                imageFileName,  /* prefix */
+                ".jpg",         /* suffix */
+                storageDir      /* directory */
+        );
+    }
+    
+    /**
      * Show full screen image preview dialog
      */
     private void showImagePreview(String imagePath) {
@@ -4167,6 +4419,77 @@ public class RagQaFragment extends Fragment {
         builder.setView(imageView);
         builder.setPositiveButton(android.R.string.ok, null);
         builder.show();
+    }
+    
+    /**
+     * Get current model name for chat UI
+     */
+    private String getCurrentModelName() {
+        if (spinnerApiModel != null && spinnerApiModel.getSelectedItem() != null) {
+            return spinnerApiModel.getSelectedItem().toString();
+        }
+        return "Unknown Model";
+    }
+    
+    /**
+     * Get current time for chat UI
+     */
+    private String getCurrentTime() {
+        SimpleDateFormat sdf = new SimpleDateFormat("HH:mm", Locale.getDefault());
+        return sdf.format(new Date());
+    }
+    
+    /**
+     * Update chat message with streaming text
+     * This replaces the old appendToResponse for chat UI
+     */
+    private void updateChatMessage(String chunk) {
+        if (getActivity() == null || !isAdded() || isDetached()) {
+            LogManager.logW(TAG, "Cannot update chat message, Fragment not attached");
+            return;
+        }
+        
+        // Check if already in UI thread
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            performUpdateChatMessage(chunk);
+        } else {
+            getActivity().runOnUiThread(() -> performUpdateChatMessage(chunk));
+        }
+    }
+    
+    private void performUpdateChatMessage(String chunk) {
+        try {
+            if (chatMessages.isEmpty()) {
+                LogManager.logW(TAG, "No chat messages to update");
+                return;
+            }
+            
+            ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
+            if (lastMsg.getType() != ChatViewHolders.ASSISTANT) {
+                LogManager.logW(TAG, "Last message is not assistant type");
+                return;
+            }
+            
+            // Accumulate text
+            String currentText = lastMsg.text;
+            if (currentText == null) currentText = "";
+            String newText = currentText + chunk;
+            lastMsg.text = newText;
+            
+            // Parse collapsible sections
+            CollapsibleTextParser.INSTANCE.parseAndPopulate(newText, lastMsg);
+            
+            lastMsg.setLoading(false);
+            
+            // Incremental update
+            chatAdapter.updateRecentItem(lastMsg);
+            
+            // Auto scroll
+            recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to update chat message", e);
+        }
     }
     
     @Override

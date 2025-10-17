@@ -849,7 +849,7 @@
     <string name="label_priority_manual_params">优先手动参数</string>
     <string name="label_image_preprocess_size">图片预处理尺寸(112~MAX):</string>
     <string name="text_image_preprocess_size_value">图片预处理尺寸: %s</string>
-    <string name="label_image_encoding_threads">图像编码线程数\n(1~16):</string>
+    <!-- label_image_encoding_threads已移除（MNN不支持独立配置） -->
     <string name="title_global_settings">全局设置</string>
     <string name="label_debug_mode">调试模式</string>
     <string name="label_backend_preference">后端偏好</string>
@@ -1020,10 +1020,18 @@
     
     <!-- Multimodal UI strings -->
     <string name="menu_pick_image">图片</string>
+    <string name="menu_take_photo">相机</string>
     <string name="desc_image_thumbnail">图片缩略图</string>
     <string name="desc_delete_image">删除图片</string>
     <string name="toast_image_pick_failed">选择图片失败</string>
     <string name="toast_image_compress_failed">压缩图片失败</string>
     <string name="toast_image_too_many">最多只能选择3张图片</string>
+    <string name="toast_camera_permission_denied">需要相机权限才能拍照</string>
+    <string name="toast_take_photo_failed">拍照失败</string>
     <string name="dialog_title_image_preview">图片预览</string>
+
+    <!-- Chat UI collapsible section titles -->
+    <string name="collapsible_debug">调试信息</string>
+    <string name="collapsible_thinking">思考过程</string>
+    <string name="collapsible_performance">性能指标</string>
 </resources>

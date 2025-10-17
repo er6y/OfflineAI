@@ -90,8 +90,7 @@ public class SettingsFragment extends Fragment {
     private SwitchCompat switchPriorityManualParams; // 优先手动参数开关
     private SeekBar seekBarImagePreprocessSize; // 图片预处理尺寸
     private TextView textViewImagePreprocessSizeValue; // 图片预处理尺寸显示
-    private SeekBar seekBarImageEncodingThreads; // 图像编码线程数
-    private TextView textViewImageEncodingThreadsValue; // 图像编码线程数显示
+    // 图像编码线程数UI已移除（MNN不支持独立配置）
     
     // Activity Result Launchers
     private ActivityResultLauncher<Intent> modelPathLauncher;
@@ -215,8 +214,7 @@ public class SettingsFragment extends Fragment {
         switchPriorityManualParams = view.findViewById(R.id.switchPriorityManualParams); // 优先手动参数开关
         seekBarImagePreprocessSize = view.findViewById(R.id.seekBarImagePreprocessSize); // 图片预处理尺寸
         textViewImagePreprocessSizeValue = view.findViewById(R.id.textViewImagePreprocessSizeValue); // 图片预处理尺寸显示
-        seekBarImageEncodingThreads = view.findViewById(R.id.seekBarImageEncodingThreads); // 图像编码线程数
-        textViewImageEncodingThreadsValue = view.findViewById(R.id.textViewImageEncodingThreadsValue); // 图像编码线程数显示
+        // 图像编码线程数UI已移除（MNN不支持独立配置）
         
         // 设置后端偏好Spinner适配器
         ArrayAdapter<String> backendAdapter = new ArrayAdapter<>(requireContext(), 
@@ -302,7 +300,7 @@ public class SettingsFragment extends Fragment {
         setupManualTopKSeekBar();
         setupManualRepeatPenaltySeekBar();
         setupImagePreprocessSizeSeekBar();
-        setupImageEncodingThreadsSeekBar();
+        // setupImageEncodingThreadsSeekBar已移除（MNN不支持独立配置）
     }
     
     private void setupFontSizeSeekBar() {
@@ -484,10 +482,7 @@ public class SettingsFragment extends Fragment {
             seekBarImagePreprocessSize.setProgress(imagePreprocessProgress);
             updateImagePreprocessSizeText(imagePreprocessProgress);
             
-            // Load image encoding threads
-            int imageEncodingThreads = ConfigManager.getImageEncodingThreads(context);
-            seekBarImageEncodingThreads.setProgress(imageEncodingThreads - 1); // 1-16 -> 0-15
-            updateImageEncodingThreadsText(imageEncodingThreads);
+            // 图像编码线程数配置已移除（MNN不支持独立配置）
             
             LogManager.logD(TAG, "Settings loaded successfully");
         } catch (Exception e) {
@@ -650,9 +645,7 @@ public class SettingsFragment extends Fragment {
             int imagePreprocessSize = progressToSize(imagePreprocessProgress);
             ConfigManager.setImagePreprocessSize(context, imagePreprocessSize);
             
-            // Save image encoding threads
-            int imageEncodingThreads = seekBarImageEncodingThreads.getProgress() + 1; // 0-15 -> 1-16
-            ConfigManager.setImageEncodingThreads(context, imageEncodingThreads);
+            // 图像编码线程数配置已移除（MNN不支持独立配置）
             
             // 创建JSON格式的设置摘要
             JSONObject settingsSummary = new JSONObject();
@@ -1077,25 +1070,6 @@ public class SettingsFragment extends Fragment {
         return 7; // > 1008 or unknown → progress 7 (MAX)
     }
     
-    private void setupImageEncodingThreadsSeekBar() {
-        seekBarImageEncodingThreads.setMax(15); // 0-15 for 1-16 threads
-        seekBarImageEncodingThreads.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                int threads = progress + 1; // 0-15 -> 1-16
-                updateImageEncodingThreadsText(threads);
-            }
-            
-            @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {}
-            
-            @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
-        });
-    }
-    
-    private void updateImageEncodingThreadsText(int threads) {
-        textViewImageEncodingThreadsValue.setText(String.valueOf(threads));
-    }
+    // setupImageEncodingThreadsSeekBar和updateImageEncodingThreadsText方法已移除（MNN不支持独立配置）
 }
 

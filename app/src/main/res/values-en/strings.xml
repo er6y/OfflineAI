@@ -845,7 +845,7 @@
     <string name="label_priority_manual_params">Prioritize Manual Parameters</string>
     <string name="label_image_preprocess_size">Image Preprocess Size (112~MAX):</string>
     <string name="text_image_preprocess_size_value">Image Preprocess Size: %s</string>
-    <string name="label_image_encoding_threads">Image Encoding Threads\n(1~16):</string>
+    <!-- label_image_encoding_threads removed (MNN does not support independent configuration) -->
     <string name="title_global_settings">Global Settings</string>
     <string name="label_debug_mode">Debug Mode</string>
     <string name="label_backend_preference">Backend Preference</string>
@@ -1016,10 +1016,18 @@
 
     <!-- Multimodal UI strings -->
     <string name="menu_pick_image">Image</string>
+    <string name="menu_take_photo">Camera</string>
     <string name="desc_image_thumbnail">Image thumbnail</string>
     <string name="desc_delete_image">Delete image</string>
     <string name="toast_image_pick_failed">Failed to pick image</string>
     <string name="toast_image_compress_failed">Failed to compress image</string>
     <string name="toast_image_too_many">Only 3 images can be selected</string>
+    <string name="toast_camera_permission_denied">Camera permission is required to take photos</string>
+    <string name="toast_take_photo_failed">Failed to take photo</string>
     <string name="dialog_title_image_preview">Image preview</string>
+
+    <!-- Chat UI collapsible section titles -->
+    <string name="collapsible_debug">Debug</string>
+    <string name="collapsible_thinking">Thinking</string>
+    <string name="collapsible_performance">Performance</string>
 </resources>

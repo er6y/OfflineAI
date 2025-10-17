@@ -101,7 +101,7 @@ public class ConfigManager {
     public static final String KEY_MAX_SEQUENCE_LENGTH = "maxSequenceLength"; // 最大序列长度
     public static final String KEY_NO_THINKING = "no_thinking"; // 是否禁用思考模式
     public static final String KEY_THREADS = "threads"; // ONNX推理线程数
-    public static final String KEY_IMAGE_ENCODING_THREADS = "image_encoding_threads"; // 图像编码线程数
+    // KEY_IMAGE_ENCODING_THREADS已移除（MNN不支持独立配置）
     public static final String KEY_MAX_NEW_TOKENS = "max_new_tokens"; // 最大输出token数
     public static final String KEY_KV_CACHE_SIZE = "kv_cache_size"; // 兼容性保留，已废弃，使用max_new_tokens
     // ONNX相关配置项已移除
@@ -161,7 +161,7 @@ public class ConfigManager {
     public static final int DEFAULT_MAX_SEQUENCE_LENGTH = 4096;
     public static final boolean DEFAULT_NO_THINKING = false;
     public static final int DEFAULT_THREADS = 4;
-    public static final int DEFAULT_IMAGE_ENCODING_THREADS = 4; // 图像编码线程数默认值
+    // DEFAULT_IMAGE_ENCODING_THREADS已移除（MNN不支持独立配置）
     public static final int DEFAULT_MAX_NEW_TOKENS = 512; // 最大输出token数默认值
     
     // LlamaCpp 相关默认值
@@ -1177,25 +1177,9 @@ public class ConfigManager {
     public static void setThreads(Context context, int threads) {
         setInt(context, KEY_THREADS, threads);
     }
-
-    /**
-     * 获取图像编码线程数
-     * @param context 上下文
-     * @return 图像编码线程数
-     */
-    public static int getImageEncodingThreads(Context context) {
-        return getInt(context, KEY_IMAGE_ENCODING_THREADS, DEFAULT_IMAGE_ENCODING_THREADS);
-    }
     
-    /**
-     * 设置图像编码线程数
-     * @param context 上下文
-     * @param threads 图像编码线程数
-     */
-    public static void setImageEncodingThreads(Context context, int threads) {
-        setInt(context, KEY_IMAGE_ENCODING_THREADS, threads);
-    }
-
+    // getImageEncodingThreads和setImageEncodingThreads方法已移除（MNN不支持独立配置）
+    
     /**
      * 获取最大输出token数
      * @param context 上下文

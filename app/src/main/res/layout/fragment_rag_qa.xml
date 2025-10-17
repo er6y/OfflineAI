@@ -158,30 +158,23 @@
         app:layout_constraintStart_toEndOf="@+id/textViewSystemPromptLabel"
         app:layout_constraintEnd_toEndOf="parent" />
 
-    <ScrollView
-        android:id="@+id/scrollViewResponse"
+    <!-- Chat messages RecyclerView -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/recyclerViewChat"
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:layout_marginTop="4dp"
         android:layout_marginBottom="4dp"
         android:background="@android:color/darker_gray"
+        android:clipToPadding="false"
+        android:paddingStart="2dp"
+        android:paddingEnd="2dp"
+        android:paddingTop="4dp"
+        android:paddingBottom="4dp"
         app:layout_constraintTop_toBottomOf="@+id/editTextSystemPrompt"
         app:layout_constraintBottom_toTopOf="@+id/textViewUserPromptLabel" 
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent">
-
-        <TextView
-            android:id="@+id/textViewResponse"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:padding="8dp"
-            android:textIsSelectable="true"
-            android:longClickable="true"
-            android:contextClickable="true"
-            android:focusable="true"
-            android:textSize="14sp"
-            android:textAppearance="@style/TextAppearance.AppCompat.Body1" />
-    </ScrollView>
+        app:layout_constraintEnd_toEndOf="parent" />
 
     <TextView
         android:id="@+id/textViewUserPromptLabel"

@@ -1,0 +1,291 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_marginEnd="4dp"
+    android:padding="4dp">
+
+    <!-- hide for larger text size-->
+    <ImageView
+        android:id="@+id/ic_header"
+        android:layout_width="0dp"
+        android:layout_height="10dp"
+        android:src="@drawable/logo" />
+
+    <!-- Debug section - FIRST -->
+    <LinearLayout
+        android:id="@+id/ll_debug_toggle"
+        android:layout_width="wrap_content"
+        android:layout_height="30dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tv_debug_header"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            tools:text="Debug"
+            android:textColor="#1976D2"
+            android:textSize="14sp"
+            android:visibility="visible" />
+
+        <ImageView
+            android:id="@+id/iv_debug_header"
+            android:layout_width="15dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical"
+            android:layout_marginStart="10dp"
+            app:srcCompat="@drawable/ic_arrow_up"
+            app:tint="#1976D2" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/ll_debug_container"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toEndOf="@id/ic_header"
+        android:layout_below="@id/ll_debug_toggle"
+        android:orientation="horizontal"
+        tools:visibility="visible"
+        android:visibility="gone"
+        android:padding="@dimen/space10">
+
+        <View
+            android:id="@+id/view_debug_marker"
+            android:layout_width="1dp"
+            android:layout_height="match_parent"
+            android:layout_marginTop="2dp"
+            android:layout_marginEnd="8dp"
+            android:background="#1976D2" />
+
+        <TextView
+            android:id="@+id/tv_chat_debug"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textAppearance="@style/Light"
+            android:textColor="#1976D2"
+            android:textSize="@dimen/h4"
+            tools:text="Debug information..."
+            tools:visibility="visible" />
+    </LinearLayout>
+
+    <!-- Thinking section - SECOND -->
+    <LinearLayout
+        android:id="@+id/ll_thinking_toggle"
+        android:layout_width="wrap_content"
+        android:layout_height="30dp"
+        android:layout_below="@id/ll_debug_container"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/tv_thinking_header"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            tools:text="思考中..."
+            android:textColor="#1976D2"
+            android:textSize="14sp"
+            android:visibility="visible" />
+
+        <ImageView
+            android:id="@+id/iv_thinking_header"
+            android:layout_width="15dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical"
+            android:layout_marginStart="10dp"
+            app:srcCompat="@drawable/ic_arrow_up"
+            app:tint="#1976D2" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/ll_thinking_container"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toEndOf="@id/ic_header"
+        android:layout_below="@id/ll_thinking_toggle"
+        android:orientation="horizontal"
+        tools:visibility="visible"
+        android:visibility="gone"
+        android:padding="@dimen/space10">
+
+        <View
+            android:id="@+id/view_thinking_marker"
+            android:layout_width="1dp"
+            android:layout_height="match_parent"
+            android:layout_marginTop="2dp"
+            android:layout_marginEnd="8dp"
+            android:background="#1976D2" />
+
+        <TextView
+            android:id="@+id/tv_chat_thinking"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textAppearance="@style/Light"
+            android:textColor="#1976D2"
+            android:textSize="@dimen/h4"
+            tools:text="This is the thinking process..."
+            tools:visibility="visible" />
+    </LinearLayout>
+
+    <!-- Main content text - THIRD -->
+    <TextView
+        android:id="@+id/tv_chat_text"
+        tools:text="this is the generated text"
+        android:layout_toEndOf="@id/ic_header"
+        android:layout_below="@id/ll_thinking_container"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:paddingStart="2dp"
+        android:paddingEnd="2dp"
+        android:textAppearance="@style/Light"
+        android:textColor="#000000"
+        android:textSize="@dimen/h3"
+        android:visibility="visible" />
+        
+    <ImageView
+        android:id="@+id/image_generated"
+        android:layout_width="200dp"
+        android:layout_height="200dp"
+        android:layout_marginTop="10dp"
+        android:layout_toEndOf="@id/ic_header"
+        android:layout_below="@id/tv_chat_text"
+        android:scaleType="centerCrop"
+        android:visibility="gone"
+        tools:visibility="visible"
+        android:background="#00f"
+        tools:src="@drawable/testtest"/>
+
+    <!-- Performance section - LAST (after content) -->
+    <LinearLayout
+        android:id="@+id/ll_performance_toggle"
+        android:layout_width="wrap_content"
+        android:layout_height="30dp"
+        android:layout_below="@id/image_generated"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tv_performance_header"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            tools:text="Performance"
+            android:textColor="#1976D2"
+            android:textSize="14sp"
+            android:visibility="visible" />
+
+        <ImageView
+            android:id="@+id/iv_performance_header"
+            android:layout_width="15dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical"
+            android:layout_marginStart="10dp"
+            app:srcCompat="@drawable/ic_arrow_up"
+            app:tint="#1976D2" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/ll_performance_container"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toEndOf="@id/ic_header"
+        android:layout_below="@id/ll_performance_toggle"
+        android:orientation="horizontal"
+        tools:visibility="visible"
+        android:visibility="gone"
+        android:padding="@dimen/space10">
+
+        <View
+            android:id="@+id/view_performance_marker"
+            android:layout_width="1dp"
+            android:layout_height="match_parent"
+            android:layout_marginTop="2dp"
+            android:layout_marginEnd="8dp"
+            android:background="#1976D2" />
+
+        <TextView
+            android:id="@+id/tv_chat_performance"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textAppearance="@style/Light"
+            android:textColor="#1976D2"
+            android:textSize="@dimen/h4"
+            tools:text="Performance metrics..."
+            tools:visibility="visible" />
+    </LinearLayout>
+
+    <!-- Button row above benchmark info -->
+    <LinearLayout
+        android:id="@+id/ll_action_buttons"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/ll_performance_container"
+        android:layout_alignStart="@id/tv_chat_text"
+        android:orientation="horizontal"
+        android:layout_marginBottom="8dp"
+        android:visibility="gone"
+        tools:visibility="visible">
+
+         <ImageView
+             android:id="@+id/btn_report_issue"
+             android:layout_width="32dp"
+             android:layout_height="32dp"
+             android:padding="4dp"
+             android:background="@drawable/ic_button_ripple"
+             android:clickable="true"
+             android:focusable="true"
+             app:srcCompat="@drawable/ic_issue"
+             app:tint="#9b9b9b"/>
+         <ImageView
+             android:id="@+id/btn_toggle_benchmark"
+             android:layout_width="32dp"
+             android:layout_height="32dp"
+             android:padding="4dp"
+             android:background="@drawable/ic_button_ripple"
+             android:clickable="true"
+             android:focusable="true"
+             app:srcCompat="@drawable/ic_statistics"
+             app:tint="#9b9b9b"/>
+
+         <ImageView
+             android:id="@+id/btn_replay_audio"
+             android:layout_width="32dp"
+             android:layout_height="32dp"
+             android:padding="4dp"
+             android:background="@drawable/ic_button_ripple"
+             android:clickable="true"
+             android:focusable="true"
+             app:srcCompat="@drawable/ic_play"
+             app:tint="#9b9b9b"/>
+
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/tv_chat_benchmark"
+        android:layout_below="@id/ll_action_buttons"
+        android:layout_alignStart="@id/tv_chat_text"
+        android:textColor="#9b9b9b"
+        tools:text="prefill: 149 tokens/s decode: 149 tokens/s"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        />
+
+    <com.github.ybq.android.spinkit.SpinKitView
+        android:id="@+id/view_assistant_loading"
+        android:visibility="gone"
+        android:layout_below="@id/image_generated"
+        android:layout_centerVertical="true"
+        android:layout_toEndOf="@id/ic_header"
+        android:layout_marginStart="10dp"
+        style="@style/SpinKitView.Small.FadingCircle"
+        android:layout_width="25dp"
+        android:layout_height="25dp"
+        app:SpinKit_Color="#000000" />
+
+</RelativeLayout>

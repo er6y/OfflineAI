@@ -424,6 +424,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // Map backend preference to MNN backend type
         String mnnBackend = mapBackendToMnn(backendPreference);
         
+        // Fixed chunk size for balanced memory and performance
+        final int CHUNK_SIZE = 256;
+        
         // Build configuration using MnnInference.ConfigBuilder
         MnnInference.ConfigBuilder builder = new MnnInference.ConfigBuilder()
             .backendType(mnnBackend)
@@ -432,6 +435,8 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             .memory("low")     // Hardcoded: runtime dequantization to save memory (4B model)
             .power("high")     // Hardcoded: use big cores for performance
             .maxNewTokens(maxNewTokens)
+            .chunk(CHUNK_SIZE)         // Fixed chunk size for prefill stage
+            .kvcacheLimit(maxSeqLength) // KV cache size limit (context window)
             .reuseKv(true)     // Enable KV cache reuse for multi-turn
             .useMmap(true);    // Use mmap for low memory
         
@@ -471,8 +476,8 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         String config = builder.build();
         
         LogManager.logI(TAG, String.format(
-            "Built MNN config - Backend: %s, Threads: %d, MaxTokens: %d, temp=%.2f, top_p=%.2f, top_k=%d",
-            mnnBackend, threads, maxNewTokens, temperature, topP, topK));
+            "Built MNN config - Backend: %s, Threads: %d, MaxTokens: %d, Chunk: %d, KVLimit: %d, temp=%.2f, top_p=%.2f, top_k=%d",
+            mnnBackend, threads, maxNewTokens, CHUNK_SIZE, maxSeqLength, temperature, topP, topK));
         
         return config;
     }
@@ -556,7 +561,14 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         
         // Simplified performance statistics report format
         StringBuilder stats = new StringBuilder();
-        stats.append("\n\n---\n");
+        stats.append("\n\n<performance>\n");
+        
+        // Add model name at the beginning
+        if (currentModelPath != null) {
+            String modelName = new File(currentModelPath).getName();
+            stats.append(String.format("Model: %s\n", modelName));
+        }
+        
         stats.append(String.format("tokens: %d • Time: %.2fs • Rate: %.2f token/s • JVMUsedMem: %dMB",
             currentSessionTokens.get(),
             elapsedTime / 1000.0,
@@ -593,7 +605,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 currentParams.getTopK(), currentParams.getRepetitionPenalty()));
         }
         
-        stats.append("═══════════════════════════════════════\n");
+        stats.append("</performance>\n");
         
         return stats.toString();
     }
