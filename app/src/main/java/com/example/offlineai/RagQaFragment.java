@@ -1324,6 +1324,16 @@ public class RagQaFragment extends Fragment {
                 LogManager.logD(TAG, "No active RAG task Future to cancel");
             }
             
+            // FIX: Stop loading animation immediately when user clicks stop
+            if (!chatMessages.isEmpty()) {
+                ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
+                if (lastMsg.getType() == ChatViewHolders.ASSISTANT && lastMsg.getLoading()) {
+                    lastMsg.setLoading(false);
+                    chatAdapter.notifyItemChanged(chatMessages.size() - 1);
+                    LogManager.logD(TAG, "Stopped loading animation for AI message");
+                }
+            }
+            
             Toast.makeText(requireContext(), getString(R.string.toast_request_stopped), Toast.LENGTH_SHORT).show();
             appendToResponse("\n" + getString(R.string.toast_request_stopped) + "。");
             LogManager.logD(TAG, "Stop processing initiated");
