@@ -11,6 +11,7 @@
 #include <chrono>
 #include "llm/llm.hpp"
 #include "llm/reranker.hpp"
+#include "diffusion/diffusion.hpp"
 #include "jsonhpp/json.hpp"
 #include "MNN/MNNDefine.h"
 #include "MNN/MNNForwardType.h"
@@ -1533,5 +1534,146 @@ Java_com_offlineai_mnn_MnnInference_releaseReranker(
         LOGI("Reranker session released: %lld", (long long)handle);
     } else {
         LOGW("Reranker handle not found: %lld", (long long)handle);
+    }
+}
+
+// ========== Diffusion (Text2Image) Support ==========
+
+using namespace MNN::DIFFUSION;
+
+// Global diffusion sessions map
+static std::map<jlong, std::unique_ptr<Diffusion>> g_diffusion_sessions;
+static std::mutex g_diffusion_sessions_mutex;
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_offlineai_mnn_MnnInference_createDiffusion(
+    JNIEnv* env, jclass clazz, 
+    jstring jModelDir, jint modelType, jint backendType, jint memoryMode) {
+    
+    try {
+        const char* modelDir = env->GetStringUTFChars(jModelDir, nullptr);
+        LOGI("[DIFFUSION] Creating diffusion session: modelDir=%s, modelType=%d, backend=%d, memory=%d",
+             modelDir, modelType, backendType, memoryMode);
+        
+        // Create Diffusion instance
+        auto diffusion = std::make_unique<Diffusion>(
+            std::string(modelDir),
+            static_cast<DiffusionModelType>(modelType),
+            static_cast<MNNForwardType>(backendType),
+            memoryMode
+        );
+        
+        env->ReleaseStringUTFChars(jModelDir, modelDir);
+        
+        // Load model
+        LOGI("[DIFFUSION] Loading diffusion model...");
+        if (!diffusion->load()) {
+            LOGE("[DIFFUSION] Failed to load diffusion model");
+            return 0;
+        }
+        
+        LOGI("[DIFFUSION] Diffusion model loaded successfully");
+        
+        // Store in global map
+        jlong handle = reinterpret_cast<jlong>(diffusion.get());
+        {
+            std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+            g_diffusion_sessions[handle] = std::move(diffusion);
+        }
+        
+        LOGI("[DIFFUSION] Diffusion session created: %lld", (long long)handle);
+        return handle;
+        
+    } catch (const std::exception& e) {
+        LOGE("[DIFFUSION] Failed to create diffusion session: %s", e.what());
+        return 0;
+    } catch (...) {
+        LOGE("[DIFFUSION] Failed to create diffusion session: unknown error");
+        return 0;
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_offlineai_mnn_MnnInference_generateImage(
+    JNIEnv* env, jclass clazz,
+    jlong handle, jstring jPrompt, jstring jOutputPath, 
+    jint iterNum, jint randomSeed, jobject callback) {
+    
+    try {
+        // Get diffusion instance
+        Diffusion* diffusion = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+            auto it = g_diffusion_sessions.find(handle);
+            if (it == g_diffusion_sessions.end()) {
+                LOGE("[DIFFUSION] Invalid diffusion handle: %lld", (long long)handle);
+                return JNI_FALSE;
+            }
+            diffusion = it->second.get();
+        }
+        
+        // Get strings
+        const char* prompt = env->GetStringUTFChars(jPrompt, nullptr);
+        const char* outputPath = env->GetStringUTFChars(jOutputPath, nullptr);
+        
+        LOGI("[DIFFUSION] Generating image: prompt='%s', output='%s', iter=%d, seed=%d",
+             prompt, outputPath, iterNum, randomSeed);
+        
+        // Prepare progress callback
+        jclass callbackClass = env->GetObjectClass(callback);
+        jmethodID onProgressMethod = env->GetMethodID(callbackClass, "onProgress", "(I)Z");
+        
+        std::function<void(int)> progressCallback = [env, callback, onProgressMethod](int progress) {
+            if (callback && onProgressMethod) {
+                jboolean shouldContinue = env->CallBooleanMethod(callback, onProgressMethod, progress);
+                if (!shouldContinue) {
+                    LOGI("[DIFFUSION] Generation cancelled by user");
+                }
+            }
+        };
+        
+        // Run diffusion
+        auto start = std::chrono::high_resolution_clock::now();
+        bool success = diffusion->run(
+            std::string(prompt),
+            std::string(outputPath),
+            iterNum,
+            randomSeed,
+            progressCallback
+        );
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        
+        env->ReleaseStringUTFChars(jPrompt, prompt);
+        env->ReleaseStringUTFChars(jOutputPath, outputPath);
+        
+        if (success) {
+            LOGI("[DIFFUSION] Image generated successfully in %lld ms", (long long)duration);
+        } else {
+            LOGE("[DIFFUSION] Image generation failed");
+        }
+        
+        return success ? JNI_TRUE : JNI_FALSE;
+        
+    } catch (const std::exception& e) {
+        LOGE("[DIFFUSION] Failed to generate image: %s", e.what());
+        return JNI_FALSE;
+    } catch (...) {
+        LOGE("[DIFFUSION] Failed to generate image: unknown error");
+        return JNI_FALSE;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_offlineai_mnn_MnnInference_releaseDiffusion(
+    JNIEnv* env, jclass clazz, jlong handle) {
+    
+    std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+    auto it = g_diffusion_sessions.find(handle);
+    if (it != g_diffusion_sessions.end()) {
+        g_diffusion_sessions.erase(it);
+        LOGI("[DIFFUSION] Diffusion session released: %lld", (long long)handle);
+    } else {
+        LOGW("[DIFFUSION] Diffusion handle not found: %lld", (long long)handle);
     }
 }

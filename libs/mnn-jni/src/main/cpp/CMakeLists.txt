@@ -13,6 +13,9 @@ message(STATUS "MNN LLM Root: ${MNN_LLM_ROOT}")
 
 # ========== Build Options ==========
 option(MNN_BUILD_LLM "Build MNN LLM" ON)
+option(MNN_BUILD_DIFFUSION "Build MNN Diffusion" ON)
+option(MNN_BUILD_OPENCV "Build OpenCV (required for diffusion)" ON)
+option(MNN_IMGCODECS "Enable image codecs (required for diffusion)" ON)
 option(MNN_OPENCL "Enable OpenCL backend" ON)
 option(MNN_VULKAN "Enable Vulkan backend" ON)
 option(MNN_ARM82 "Enable ARM82 (fp16/dot) support" ON)
@@ -124,6 +127,7 @@ include_directories(
     ${MNN_ROOT}/3rd_party
     ${MNN_LLM_ROOT}/engine/include
     ${MNN_LLM_ROOT}/engine/app
+    ${MNN_ROOT}/transformers/diffusion/engine/include
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -148,6 +152,7 @@ target_link_libraries(mnn_jni
 # ========== Compile Definitions ==========
 target_compile_definitions(mnn_jni PRIVATE
     MNN_BUILD_LLM=1
+    MNN_BUILD_DIFFUSION=1
 )
 
 if(MNN_OPENCL)
@@ -191,6 +196,9 @@ install(TARGETS mnn_jni
 message(STATUS "========== MNN JNI Build Configuration ==========")
 message(STATUS "Android ABI: ${ANDROID_ABI}")
 message(STATUS "MNN_BUILD_LLM: ${MNN_BUILD_LLM}")
+message(STATUS "MNN_BUILD_DIFFUSION: ${MNN_BUILD_DIFFUSION}")
+message(STATUS "MNN_BUILD_OPENCV: ${MNN_BUILD_OPENCV}")
+message(STATUS "MNN_IMGCODECS: ${MNN_IMGCODECS}")
 message(STATUS "MNN_OPENCL: ${MNN_OPENCL}")
 message(STATUS "MNN_VULKAN: ${MNN_VULKAN}")
 message(STATUS "MNN_NNAPI: ${MNN_NNAPI}")

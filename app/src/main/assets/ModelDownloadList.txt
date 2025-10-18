@@ -77,6 +77,19 @@
       "visual.mnn": "https://www.modelscope.cn/models/MNN/MiniCPM-V-4-MNN/resolve/master/visual.mnn",
       "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/MiniCPM-V-4-MNN/resolve/master/visual.mnn.weight",
 	    "comments": "MiniCPM-V-4-MNN-int4 Text-Image2Text, Tested to be good."
+    },
+    "stable-diffusion-v1-5-mnn-opencl-int8": {
+      "configuration.json": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/configuration.json",
+      "text_encoder.mnn": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/text_encoder.mnn",
+      "text_encoder.mnn.weight": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/text_encoder.mnn.weight",
+      "unet.mnn": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/unet.mnn",
+      "unet.mnn.weight": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/unet.mnn.weight",
+      "vae_decoder.mnn": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/vae_decoder.mnn",
+      "vae_decoder.mnn.weight": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/vae_decoder.mnn.weight",
+      "merges.txt": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/merges.txt",
+      "vocab.json": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/vocab.json",
+      "alphas.txt": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/alphas.txt",
+      "comments": "Stable Diffusion v1.5 Text2Image (OpenCL optimized, int8 quantized)"
     }
   }
 }

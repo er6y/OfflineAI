@@ -1112,15 +1112,63 @@ public class LocalLlmHandler {
     private InferenceEngine selectInferenceEngine(File modelDir) {
         LogManager.logI(TAG, "Detecting model type: " + modelDir.getAbsolutePath());
         
-        // Check for MNN model
+        // Check for Diffusion model (Text-to-Image)
+        if (isDiffusionModel(modelDir)) {
+            LogManager.logI(TAG, "Detected DIFFUSION model (Text-to-Image), selecting Diffusion inference engine");
+            return new LocalLLMDiffusionHandler(context);
+        }
+        
+        // Check for MNN LLM model
         if (isMnnModel(modelDir)) {
-            LogManager.logI(TAG, "Detected MNN model, selecting MNN inference engine");
+            LogManager.logI(TAG, "Detected MNN LLM model, selecting MNN inference engine");
             return new LocalLLMMNNHandler(context);
         }
         
         // No compatible model format found
-        LogManager.logW(TAG, "No compatible model format found (supported: MNN only)");
+        LogManager.logW(TAG, "No compatible model format found (supported: MNN LLM, MNN Diffusion)");
         return null;
+    }
+    
+    /**
+     * Check if directory contains Diffusion model (Text-to-Image)
+     * Diffusion models have specific file structure:
+     * - text_encoder.mnn (+ .weight)
+     * - unet.mnn (+ .weight)
+     * - vae_decoder.mnn (+ .weight)
+     * - vocab.json, merges.txt (tokenizer files)
+     * 
+     * @param modelDir Model directory
+     * @return true if Diffusion model files exist
+     */
+    private boolean isDiffusionModel(File modelDir) {
+        if (!modelDir.isDirectory()) {
+            return false;
+        }
+        
+        // Check for Diffusion-specific model files
+        File textEncoder = new File(modelDir, "text_encoder.mnn");
+        File unet = new File(modelDir, "unet.mnn");
+        File vaeDecoder = new File(modelDir, "vae_decoder.mnn");
+        File vocabJson = new File(modelDir, "vocab.json");
+        File mergesTxt = new File(modelDir, "merges.txt");
+        
+        // Log file existence for debugging
+        LogManager.logD(TAG, "Checking Diffusion files in: " + modelDir.getAbsolutePath());
+        LogManager.logD(TAG, "  text_encoder.mnn: " + (textEncoder.exists() ? "✓" : "✗"));
+        LogManager.logD(TAG, "  unet.mnn: " + (unet.exists() ? "✓" : "✗"));
+        LogManager.logD(TAG, "  vae_decoder.mnn: " + (vaeDecoder.exists() ? "✓" : "✗"));
+        LogManager.logD(TAG, "  vocab.json: " + (vocabJson.exists() ? "✓" : "✗"));
+        LogManager.logD(TAG, "  merges.txt: " + (mergesTxt.exists() ? "✓" : "✗"));
+        
+        // A Diffusion model must have all three core model files
+        boolean isDiffusion = textEncoder.exists() && unet.exists() && vaeDecoder.exists();
+        
+        if (isDiffusion) {
+            LogManager.logI(TAG, "✓ DIFFUSION model detected (Stable Diffusion for Text-to-Image)");
+            LogManager.logI(TAG, "  This is NOT an LLM model - use /image command to generate images");
+        }
+        
+        return isDiffusion;
     }
     
     /**

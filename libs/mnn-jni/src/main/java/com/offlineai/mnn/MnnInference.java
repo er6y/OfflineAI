@@ -395,4 +395,53 @@ public class MnnInference {
      * @param rerankerHandle Reranker handle
      */
     public static native void releaseReranker(long rerankerHandle);
+    
+    // ========== Diffusion (Text2Image) Support ==========
+    
+    /**
+     * Create MNN Diffusion session for text-to-image generation
+     * @param modelDir Path to model directory containing text_encoder.mnn, unet.mnn, vae_decoder.mnn, vocab.json, merges.txt
+     * @param modelType Model type: 0=SD1.5, 1=Taiyi Chinese
+     * @param backendType Backend type: 0=CPU, 1=Metal, 3=OpenCL, 7=Vulkan
+     * @param memoryMode Memory mode: 0=saving (slower), 1=enough (faster), 2=balance
+     * @return Diffusion handle (pointer)
+     */
+    public static native long createDiffusion(String modelDir, int modelType, int backendType, int memoryMode);
+    
+    /**
+     * Generate image from text prompt
+     * @param diffusionHandle Diffusion handle returned by createDiffusion
+     * @param prompt Text prompt describing the image to generate
+     * @param outputPath Output image file path (e.g., /sdcard/output.jpg)
+     * @param iterNum Number of denoising iterations (recommended: 10-20)
+     * @param randomSeed Random seed for reproducibility (use -1 for random)
+     * @param callback Progress callback (receives progress percentage 0-100)
+     * @return true if generation succeeded, false otherwise
+     */
+    public static native boolean generateImage(
+        long diffusionHandle, 
+        String prompt, 
+        String outputPath, 
+        int iterNum, 
+        int randomSeed,
+        DiffusionCallback callback
+    );
+    
+    /**
+     * Release diffusion session and free resources
+     * @param diffusionHandle Diffusion handle
+     */
+    public static native void releaseDiffusion(long diffusionHandle);
+    
+    /**
+     * Callback interface for diffusion progress
+     */
+    public interface DiffusionCallback {
+        /**
+         * Called periodically to report generation progress
+         * @param progress Progress percentage (0-100)
+         * @return true to continue, false to stop generation
+         */
+        boolean onProgress(int progress);
+    }
 }

@@ -4484,6 +4484,21 @@ public class RagQaFragment extends Fragment {
             String currentText = lastMsg.text;
             if (currentText == null) currentText = "";
             String newText = currentText + chunk;
+            
+            // Check for image marker [IMAGE:path]
+            if (newText.contains("[IMAGE:")) {
+                int startIdx = newText.indexOf("[IMAGE:");
+                int endIdx = newText.indexOf("]", startIdx);
+                if (endIdx > startIdx) {
+                    String imagePath = newText.substring(startIdx + 7, endIdx);
+                    // Set image URI
+                    lastMsg.imageUri = Uri.fromFile(new File(imagePath));
+                    // Remove marker from text
+                    newText = newText.substring(0, startIdx) + newText.substring(endIdx + 1);
+                    LogManager.logI(TAG, "Image marker detected, path: " + imagePath);
+                }
+            }
+            
             lastMsg.text = newText;
             
             // Parse collapsible sections
