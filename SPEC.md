@@ -1,3 +1,407 @@
+**MNN 上下文窗口配置缺失（CRITICAL BUG FIX #4）**
+- 问题现象：长对话被截断，无法记住完整历史，实际上下文窗口只有2048 tokens
+- 根本原因：**只设置了`max_new_tokens`，缺少`max_all_tokens`配置！**
+  ```cpp
+  // MNN源码：sampler.hpp 第29-32行
+  class SamplerConfig {
+      int max_new_tokens = 512;    // 单次生成的最大token数
+      int max_all_tokens = 2048;   // ⚠️ 总token数（输入+输出）= 上下文窗口
+  };
+  ```
+  
+  ```java
+  // ❌ 原配置（缺少max_all_tokens）
+  builder.maxNewTokens(maxNewTokens);  // 只设置了单次生成限制
+  // max_all_tokens使用默认值2048，不是我们设置的4096！
+  ```
+  
+- **参数含义对照表：**
+  
+  | 我们的参数 | MNN参数 | 含义 | 默认值 | 实际作用 |
+  |-----------|---------|------|--------|---------|
+  | `maxSequenceLength` | `max_all_tokens` | 上下文窗口大小 | 4096 | **控制能记住多少历史** |
+  | `maxNewTokens` | `max_new_tokens` | 单次生成限制 | 512 | 限制单次回复长度 |
+  
+- **实际影响：**
+  ```
+  用户设置：maxSequenceLength = 4096
+  预期效果：能记住约3000字的历史对话
+  
+  实际情况：max_all_tokens = 2048（默认值）
+  实际效果：只能记住约1500字 ❌
+  ```
+  
+- 修复方案：
+  ```java
+  // MnnInference.java - 新增方法
+  public ConfigBuilder maxAllTokens(int tokens) {
+      addField("max_all_tokens", tokens);
+      return this;
+  }
+  ```
+  
+  ```java
+  // LocalLLMMNNHandler.java - 添加配置
+  MnnInference.ConfigBuilder builder = new MnnInference.ConfigBuilder()
+      .maxAllTokens(maxSeqLength)   // ✅ 设置上下文窗口 = maxSequenceLength
+      .maxNewTokens(maxNewTokens)   // ✅ 设置单次生成限制
+      // ...
+  ```
+  
+- 影响范围：
+  - `libs/mnn-jni/src/main/java/com/offlineai/mnn/MnnInference.java` - 新增`maxAllTokens()`方法
+  - `app/src/main/java/com/example/offlineai/api/LocalLLMMNNHandler.java` - 调用`.maxAllTokens(maxSeqLength)`
+  
+- 验证方法：
+  ```bash
+  # 日志中应显示正确的MaxAllTokens值
+  adb logcat -s LocalLLMMNNHandler | grep "MaxAllTokens"
+  # 应该看到：MaxAllTokens: 4096（不是2048）
+  
+  # 测试长对话，应该能记住更多历史
+  ```
+
+---
+
+**MNN ExecutorScope缺失崩溃修复（CRITICAL BUG FIX #3）**
+- 问题现象：程序直接崩溃，Fatal signal 11 (SIGSEGV), Cause: null pointer dereference
+- 崩溃位置：`pool-8-thread-1`，在MNN load/inference时
+- 根本原因：**缺少MNN ExecutorScope，导致MNN在无执行上下文情况下运行**
+  ```
+  Cause: null pointer dereference
+  rax 0000000000000000  (空指针访问)
+  ```
+- 官方示例参考：`libs/mnn/apps/Android/MnnLlmChat/app/src/main/cpp/llm_session.cpp`
+  ```cpp
+  void LlmSession::Load() {
+      // ⚠️ 必须创建ExecutorScope！
+      MNN::BackendConfig backendConfig;
+      auto executor = MNN::Express::Executor::newExecutor(MNN_FORWARD_CPU, backendConfig, 1);
+      MNN::Express::ExecutorScope s(executor);  // 设置MNN执行上下文
+      
+      llm_ = Llm::createLLM(model_path_);
+      llm_->set_config(config_str);
+      llm_->load();
+  }
+  ```
+- 修复方案：
+  ```cpp
+  // mnn_jni.cpp - MnnLlmSession::load()
+  bool load() {
+      // 添加必需的Executor和ExecutorScope
+      MNN::BackendConfig backendConfig;
+      auto executor = MNN::Express::Executor::newExecutor(MNN_FORWARD_CPU, backendConfig, 1);
+      MNN::Express::ExecutorScope scope(executor);
+      
+      // 现在可以安全创建和加载LLM
+      llm_ = Llm::createLLM(config_path);
+      llm_->set_config(config_json_);
+      llm_->load();
+  }
+  ```
+- 影响范围：
+  - 文件：`libs/mnn-jni/src/main/cpp/mnn_jni.cpp`
+    - 新增头文件：`MNN/MNNForwardType.h`, `MNN/expr/Executor.hpp`, `MNN/expr/ExecutorScope.hpp`
+    - 修改：`MnnLlmSession::load()` - 添加ExecutorScope创建
+- 技术原理：
+  - **ExecutorScope作用**：设置线程局部的MNN执行上下文
+  - **为什么必需**：MNN内部很多操作依赖于Executor上下文，没有会导致空指针
+  - **生命周期**：局部变量，在load()期间有效即可（LLM对象内部会保存executor引用）
+- 验证方法：
+  ```bash
+  # 应该能看到成功创建ExecutorScope的日志
+  adb logcat -s MNN_JNI | grep "ExecutorScope"
+  
+  # 不应再崩溃，能正常推理
+  ```
+
+---
+
+**MNN KV Cache Mmap崩溃修复（CRITICAL BUG FIX #2）**
+- 问题现象：CPU后端推理时崩溃，Fatal signal 11 (SIGSEGV)，即使设置了`kvcache_mmap=false`
+- 崩溃日志：
+  ```
+  MNNJNI: Failed to create the file: /tmp/00007C5CEA4EA730.k
+  MNNJNI: Failed to create the file: /tmp/00007C5CEA4EA730.v
+  MNNJNI: Failed to memory-map the kvcache!
+  libc: Fatal signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0
+  ```
+- 根本原因：**`kvcache_limit`单位误解 + 自动文件mmap机制**
+  ```cpp
+  // MNN源码：Interpreter.hpp 第236-238行
+  // size limit of kvcache in memory (for a single layer)
+  // if the size of kvcache exceeds the limit, it will be moved to disk
+  KVCACHE_SIZE_LIMIT = 8,  // ⚠️ 单位是字节（bytes），不是token数量！
+  ```
+  
+  ```cpp
+  // KVCacheManager.cpp 第370-375行
+  // 当KV cache字节大小超过limit时，强制使用文件mmap
+  if (mConfig.mKVCacheSizeLimit != -1 && keySize + valueSize > mConfig.mKVCacheSizeLimit) {
+      createKVCacheFile();  // ⚠️ 强制创建文件，忽略kvcache_mmap设置
+      resetKVCacheFileSize(keySize, valueSize);
+      mmapKVCache(keySize, valueSize);
+      mKVCacheInDisk = true;  // 强制使用磁盘KV cache
+  }
+  ```
+  
+  - **错误设置**：`kvcache_limit=2048`（误把token数当字节数）
+  - **实际需要**：每层约4MB（2048 tokens × 16 heads × 64 dim × 2 bytes）
+  - **比较结果**：`4MB > 2KB` → 触发文件mmap → 使用`/tmp` → 崩溃
+  
+  **KV cache大小计算公式：**
+  ```
+  每层 keySize = kv_heads × max_tokens × head_dim × bytes_per_element
+  每层 valueSize = kv_heads × head_dim × max_tokens × bytes_per_element
+  
+  例如（量化后，1 byte/element）：
+  keySize = 16 × 2048 × 64 × 1 = 2MB
+  valueSize = 16 × 64 × 2048 × 1 = 2MB
+  每层总计 = 4MB
+  24层模型 = 96MB
+  
+  所以 kvcache_limit=2048 (2KB) 远小于实际需求！
+  ```
+  ```cpp
+  // llm.cpp 第134-137行
+  std::string tmpPath = mConfig->tmp_path();
+  if (mConfig->kvcache_mmap()) {  // ⚠️ 默认为false，不设置tmpPath
+      rtg->setExternalPath(tmpPath, MNN::Interpreter::EXTERNAL_PATH_KVCACHE_DIR);
+  }
+  // 如果kvcache_mmap为true但tmpPath为空，MNN使用默认/tmp → 崩溃
+  ```
+- 官方示例参考：`libs/mnn/apps/Android/MnnLlmChat/app/src/main/cpp/llm_session.cpp`
+  ```cpp
+  config["use_mmap"] = use_mmap;  // 只启用weight mmap
+  if (use_mmap) {
+      config["tmp_path"] = temp_dir;
+  }
+  // 注意：没有设置kvcache_mmap！
+  ```
+- 修复方案（双重保险 + 单位正确理解）：
+  1. **kvcache_limit设置为-1**（无限制，推荐）或**MB转字节**
+  2. **kvcache_mmap设置为false**（显式禁用）
+  3. 设置tmpPath为Android缓存目录（仅用于weight mmap）
+  
+  ```java
+  // LocalLLMMNNHandler.java - 方案1：无限制（推荐）
+  final int KV_CACHE_LIMIT_MB = -1;  // -1 = unlimited
+  int kvcacheLimitBytes = (KV_CACHE_LIMIT_MB == -1) ? -1 : KV_CACHE_LIMIT_MB * 1024 * 1024;
+  
+  MnnInference.ConfigBuilder builder = new MnnInference.ConfigBuilder()
+      .kvcacheLimit(kvcacheLimitBytes)  // -1 = 无限制，让MNN自动管理
+      .useMmap(true)                    // ✅ 启用weight mmap（节省内存）
+      .kvcacheMmap(false)               // ✅ 显式禁用KV cache mmap
+      .tmpPath(cacheDir.getAbsolutePath());
+  ```
+  
+  ```java
+  // 方案2：设置MB限制（可选，如果内存紧张）
+  final int KV_CACHE_LIMIT_MB = 10;  // 每层10MB限制
+  int kvcacheLimitBytes = KV_CACHE_LIMIT_MB * 1024 * 1024;  // 转换为字节
+  
+  // 超过10MB的层会触发文件mmap（但Android会崩溃，所以不推荐）
+  ```
+  
+  ```java
+  // MnnInference.java - 新增方法
+  public ConfigBuilder kvcacheMmap(boolean enable) {
+      addField("kvcache_mmap", enable);
+      return this;
+  }
+  ```
+- 影响范围：
+  - 文件：`libs/mnn-jni/src/main/java/com/offlineai/mnn/MnnInference.java`
+    - 新增：`kvcacheMmap()` 方法
+  - 文件：`app/src/main/java/com/example/offlineai/api/LocalLLMMNNHandler.java`
+    - 修改：`buildMnnConfig()` - 添加`.kvcacheMmap(false)`
+- 验证方法：
+  ```bash
+  # 日志中不应再出现 /tmp 相关错误
+  adb logcat -s MNNJNI | grep -E "tmp|kvcache|mmap"
+  
+  # 应该能正常推理，不会崩溃
+  ```
+- 注意事项：
+  - **KV cache自动mmap触发条件**（source/backend/cpu/KVCacheManager.cpp）：
+    ```cpp
+    if (mKVCacheSizeLimit != -1 && actualSize > mKVCacheSizeLimit) {
+        // 自动使用文件mmap，忽略kvcache_mmap设置！
+    }
+    ```
+    - `kvcache_limit != -1` 且实际大小超过限制 → 强制文件mmap
+    - `kvcache_limit = -1` → 始终使用内存，不会文件mmap
+  - **KV cache mmap vs weight mmap**：
+    - `use_mmap=true` + `tmp_path` → weight文件mmap（节省内存）✅
+    - `kvcache_mmap=true` → KV cache文件mmap（Android不支持）❌
+    - `kvcache_limit != -1` → 可能触发自动文件mmap（危险！）⚠️
+  - 禁用KV cache mmap不影响性能，KV cache仍在内存中管理
+  - Android的`/tmp`目录不存在，必须使用app专有目录（如`getCacheDir()`）
+  - **务必设置`kvcache_limit=-1`**，否则无法完全避免文件mmap
+  - **单位理解错误**：
+    ```
+    ❌ 错误：kvcache_limit = maxSeqLength (token数)
+    ✅ 正确：kvcache_limit = 字节数 或 -1（无限制）
+    
+    如需限制：kvcache_limit = MB * 1024 * 1024
+    ```
+  - **性能建议**：
+    - 8GB RAM设备：推荐`-1`（无限制），实际约占100-200MB
+    - 4GB RAM设备：可设置`10 * 1024 * 1024`（10MB/层），但会降低长文本性能
+    - 2GB RAM设备：考虑禁用`reuse_kv`或减少`max_new_tokens`
+
+---
+
+**MNN 后端配置时机修复（CRITICAL BUG FIX #1）**
+- 问题现象：所有后端性能一致，Vulkan/OpenCL/NNAPI都像CPU推理，无加速效果
+- 根本原因：**set_config()在load()之后调用，后端配置无效！**
+  ```cpp
+  // ❌ 错误的顺序（原代码）
+  llm_->load();                // 在load()过程中initRuntime()已确定后端
+  llm_->set_config(config_json_);  // 太晚了，后端已初始化，无法改变
+  
+  // ✅ 正确的顺序（参考官方demo）
+  llm_->set_config(config_json_);  // 必须在load()之前！
+  llm_->load();                // load()时读取config中的backend_type
+  ```
+- 官方参考：`libs/mnn/transformers/llm/engine/demo/llm_demo.cpp`
+  ```cpp
+  std::unique_ptr<Llm> llm(Llm::createLLM(config_path));
+  llm->set_config("{\"tmp_path\":\"tmp\"}");  // 在load()之前
+  bool res = llm->load();  // 此时后端配置才生效
+  ```
+- MNN后端初始化流程（`llm.cpp`）：
+  ```cpp
+  Llm::load() 
+    → Llm::initRuntime()  // 第164行
+      → config.type = backend_type_convert(mConfig->backend_type())  // 读取backend_type
+      → createRuntimeManager(config)  // 创建后端，此时确定！
+  ```
+- 修复方案：
+  - 文件：`libs/mnn-jni/src/main/cpp/mnn_jni.cpp`
+  - 修改：`MnnLlmSession::load()` - 将`set_config()`移到`load()`之前
+  - 日志：添加`BEFORE load`和`AFTER load`标记便于验证
+- 验证方法：
+  ```bash
+  # 查看后端配置日志
+  adb logcat -s MNN_JNI | grep "Backend"
+  
+  # 应该看到：
+  # === MNN Backend Configuration (BEFORE load) ===
+  # Backend type: vulkan  (或 opencl/npu/cpu)
+  # === MNN Backend Activated (AFTER load) ===
+  # Active backend: vulkan  (确认生效)
+  ```
+
+---
+
+MNN 后端支持完善与调试增强（本次重要更新）
+- 问题描述：UI中后端选项不合理（KleidiAI-SME不是独立后端），缺少OpenCL和NNAPI支持，后端初始化日志不足
+- 根本原因：
+  1. **误解KleidiAI**: 将CPU优化库当作独立后端暴露给用户
+  2. **隐藏可用后端**: OpenCL、NNAPI已编译但未在UI显示
+  3. **日志不足**: 无法debug后端是否正确初始化
+- MNN后端类型（参考`MNNForwardType.h`）：
+  ```cpp
+  MNN_FORWARD_CPU = 0       // CPU (KleidiAI自动启用on arm64)
+  MNN_FORWARD_OPENCL = 3    // GPU - OpenCL
+  MNN_FORWARD_NN = 5        // NNAPI (Android 8.1+)
+  MNN_FORWARD_VULKAN = 7    // GPU - Vulkan
+  ```
+- 后端可用性（当前编译配置）：
+  
+  | 后端 | UI名称 | MNN名称 | 编译状态 | 可用设备 |
+  |------|--------|---------|----------|----------|
+  | CPU | "CPU" | "cpu" | ✅ 始终 | 全部 |
+  | Vulkan | "Vulkan" | "vulkan" | ✅ `MNN_VULKAN=ON` | 支持Vulkan的GPU |
+  | OpenCL | "OpenCL" | "opencl" | ✅ `MNN_OPENCL=ON` | 支持OpenCL的GPU |
+  | NNAPI | "NNAPI" | "npu" | ✅ `MNN_NNAPI=ON` (arm64) | Android 8.1+ arm64设备 |
+  | KleidiAI | (自动) | - | ✅ `MNN_KLEIDIAI=ON` | arm64 CPU自动启用 |
+  | HiAI | - | "hiai" | ❌ 未编译 | 华为NPU（不支持） |
+  
+- 重构方案：
+  
+  ### 1. UI后端选项调整 ✅
+  ```java
+  // 修改前（不合理）
+  private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan", "KleidiAI-SME"};
+  
+  // 修改后（合理）
+  private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan", "OpenCL", "NNAPI"};
+  private static final String[] BACKEND_VALUES = {"CPU", "VULKAN", "OPENCL", "NNAPI"};
+  ```
+  
+  ### 2. 后端映射逻辑更新 ✅
+  ```java
+  // LocalLLMMNNHandler.mapBackendToMnn()
+  case "NNAPI":
+      if (MnnInference.isBackendAvailable("nnapi")) {
+          return "npu";  // MNN内部使用"npu"表示NNAPI
+      }
+      return "cpu";  // x86_64模拟器不支持NNAPI
+  ```
+  
+  ### 3. 后端初始化日志增强 ✅
+  ```cpp
+  // mnn_jni.cpp - MnnLlmSession::load()
+  LOGI("=== MNN Backend Configuration ===");
+  LOGI("Backend type: %s", backend_type.c_str());
+  LOGI("Thread num: %d", thread_num);
+  LOGI("=================================");
+  
+  // 加载后记录实际激活的后端
+  LOGI("=== MNN Backend Activated ===");
+  LOGI("Active backend: %s", final_backend.c_str());
+  LOGI("=============================");
+  ```
+  
+- 影响范围：
+  - 文件: `app/src/main/java/com/example/offlineai/SettingsFragment.java`
+    - 修改: `BACKEND_OPTIONS`、`BACKEND_VALUES` - 调整UI选项
+    - 修改: `getBackendPreference()` - 兼容性迁移，废弃值回退
+    - 修改: `loadSettings()`、`saveSettings()` - 更新日志输出
+  - 文件: `app/src/main/java/com/example/offlineai/api/LocalLLMMNNHandler.java`
+    - 修改: `mapBackendToMnn()` - 添加NNAPI支持，增强日志
+  - 文件: `libs/mnn-jni/src/main/cpp/mnn_jni.cpp`
+    - 修改: `MnnLlmSession::load()` - 解析并记录backend_type
+  
+- 验证要点：
+  - ✅ 设置页面显示：CPU、Vulkan、OpenCL、NNAPI
+  - ✅ 选择NNAPI时，x86_64模拟器会fallback到CPU（有警告日志）
+  - ✅ 选择NNAPI时，arm64设备使用NNAPI（日志显示`Active backend: npu`）
+  - ✅ CPU选项注释说明KleidiAI自动启用
+  - ✅ 日志中可见`=== MNN Backend Configuration ===`
+  - ✅ 日志中可见`=== MNN Backend Activated ===`
+  
+- 编译宏检查结果：
+  
+  | 宏 | 状态 | 说明 |
+  |---|------|------|
+  | `MNN_BUILD_LLM=ON` | ✅ | LLM引擎支持 |
+  | `MNN_OPENCL=ON` | ✅ | OpenCL后端 |
+  | `MNN_VULKAN=ON` | ✅ | Vulkan后端 |
+  | `MNN_NNAPI=ON` | ✅ (条件) | arm64启用，x86_64禁用 |
+  | `MNN_ARM82=ON` | ✅ | FP16/DotProd支持 |
+  | `MNN_KLEIDIAI=ON` | ✅ | KleidiAI微内核优化 |
+  | `MNN_HIAI=ON` | ❌ | 未启用（不推荐） |
+  
+- 注意事项：
+  - **KleidiAI不是后端**：它是ARM Neon指令的优化库，在CPU后端自动使用
+  - **NNAPI映射为"npu"**：MNN内部使用`backend_type="npu"`表示Android NNAPI
+  - **HiAI不推荐启用**：仅华为设备可用，需额外SDK，增加复杂度
+  - **后端自动回退**：如果请求的后端不可用，自动回退到CPU
+  - **MNN内部日志标签**：MNN使用`MNNJNI`标签（已编译`MNN_USE_LOGCAT=ON`）
+    ```bash
+    # 查看MNN内部日志（包括后端选择、加载信息等）
+    adb logcat -s MNNJNI MNN_JNI
+    
+    # 或导出到文件
+    adb logcat -s MNNJNI MNN_JNI > mnn_logs.txt
+    ```
+  - **后端日志便于调试**：可通过日志确认实际使用的后端
+
+---
+
 MNN 一站式推理架构重构（本次重大修复）
 - 问题描述：代码过度复杂,Java 层手动解析 config.json 并传递参数给 MNN,违背了 MNN 的一站式设计哲学
 - 根本原因：

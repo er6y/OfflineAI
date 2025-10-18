@@ -13,6 +13,9 @@
 #include "llm/reranker.hpp"
 #include "jsonhpp/json.hpp"
 #include "MNN/MNNDefine.h"
+#include "MNN/MNNForwardType.h"
+#include "MNN/expr/Executor.hpp"
+#include "MNN/expr/ExecutorScope.hpp"
 #include "core/Backend.hpp"
 
 #define LOG_TAG "MNN_JNI"
@@ -179,6 +182,13 @@ public:
             LOGI("=== MNN Session Initialization START ===");
             LOGI("Model directory: %s", model_dir_.c_str());
             
+            // CRITICAL: Create MNN Executor and ExecutorScope (required for MNN to work)
+            // Reference: libs/mnn/apps/Android/MnnLlmChat/app/src/main/cpp/llm_session.cpp
+            MNN::BackendConfig backendConfig;
+            auto executor = MNN::Express::Executor::newExecutor(MNN_FORWARD_CPU, backendConfig, 1);
+            MNN::Express::ExecutorScope scope(executor);
+            LOGI("MNN Executor and ExecutorScope created successfully");
+            
             // Create LLM instance from model directory
             std::string config_path = model_dir_ + "/config.json";
             LOGI("Creating LLM instance from config: %s", config_path.c_str());
@@ -192,25 +202,51 @@ public:
             
             LOGI("LLM instance created successfully");
             
-            LOGI("About to load MNN model from: %s", model_dir_.c_str());
-            LOGI("Config JSON: %s", config_json_.c_str());
+            // CRITICAL: Set runtime config BEFORE load() to ensure backend takes effect
+            // Reference: MNN official demo - llm->set_config() must be called before llm->load()
+            if (!config_json_.empty()) {
+                LOGI("Runtime config JSON: %s", config_json_.c_str());
+                
+                // Parse and log backend type from config JSON
+                try {
+                    json config = json::parse(config_json_);
+                    std::string backend_type = config.value("backend_type", "cpu");
+                    int thread_num = config.value("thread_num", 4);
+                    LOGI("=== MNN Backend Configuration (BEFORE load) ===");
+                    LOGI("Backend type: %s", backend_type.c_str());
+                    LOGI("Thread num: %d", thread_num);
+                    LOGI("===============================================");
+                } catch (...) {
+                    LOGW("Failed to parse runtime config JSON for logging");
+                }
+                
+                LOGI("Calling llm_->set_config() BEFORE load()...");
+                llm_->set_config(config_json_);
+                LOGI("Runtime config merged successfully");
+            }
             
-            // Load model (this reads config.json + llm_config.json)
+            // Load model (this will use the runtime config set above)
+            LOGI("About to load MNN model from: %s", model_dir_.c_str());
             LOGI("Calling llm_->load()...");
             bool success = llm_->load();
             LOGI("llm_->load() returned: %s", success ? "SUCCESS" : "FAILED");
             
             if (success) {
                 LOGI("MNN LLM session loaded successfully");
-                std::string loaded_config = llm_->dump_config();
-                LOGD("Loaded config: %s", loaded_config.c_str());
                 
-                // Now merge runtime parameters (temperature, topP, etc.)
-                // This will NOT overwrite model-specific parameters
-                if (!config_json_.empty()) {
-                    LOGD("Merging runtime config: %s", config_json_.c_str());
-                    llm_->set_config(config_json_);
-                    LOGD("Final config: %s", llm_->dump_config().c_str());
+                // Dump final config to verify backend
+                std::string final_config = llm_->dump_config();
+                LOGD("Final config after load: %s", final_config.c_str());
+                
+                // Log final backend configuration
+                try {
+                    json final_json = json::parse(final_config);
+                    std::string final_backend = final_json.value("backend_type", "cpu");
+                    LOGI("=== MNN Backend Activated (AFTER load) ===");
+                    LOGI("Active backend: %s", final_backend.c_str());
+                    LOGI("==========================================");
+                } catch (...) {
+                    LOGW("Failed to parse final config for backend logging");
                 }
             } else {
                 LOGE("Failed to load MNN LLM model");
@@ -1116,19 +1152,23 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
         return JNI_ERR;
     }
     
-    LOGI("MNN JNI library loaded");
-    
-    // Trigger MNN backend initialization ONCE per library load
-    // This ensures registerBackend() is called before any model loading
-    if (!g_mnn_initialized.exchange(true)) {
-        LOGI("Triggering MNN backend initialization (first time)...");
-        trigger_mnn_initialization();
-    } else {
-        LOGW("MNN backend already initialized, skipping");
-    }
+    LOGI("MNN JNI library loaded, version: JNI_VERSION_1_6");
+    LOGI("===========================================");
+    LOGI("NOTE: MNN internal logs use tag 'MNNJNI'");
+    LOGI("To view MNN logs: adb logcat -s MNNJNI MNN_JNI");
+    LOGI("===========================================");
+    LOGI("Initializing MNN log redirection...");
     
     // Initialize log redirection
     init_log_redirection(env);
+    
+    // Trigger MNN backend initialization (once per process)
+    if (!g_mnn_initialized.exchange(true)) {
+        LOGI("First time initialization, triggering MNN backend registration...");
+        trigger_mnn_initialization();
+    } else {
+        LOGI("MNN already initialized in this process");
+    }
     
     return JNI_VERSION_1_6;
 }

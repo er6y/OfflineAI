@@ -229,6 +229,11 @@ public class MnnInference {
             return this;
         }
         
+        public ConfigBuilder maxAllTokens(int tokens) {
+            addField("max_all_tokens", tokens);
+            return this;
+        }
+        
         public ConfigBuilder temperature(float temp) {
             addField("temperature", temp);
             return this;
@@ -256,6 +261,11 @@ public class MnnInference {
         
         public ConfigBuilder tmpPath(String path) {
             addField("tmp_path", path);
+            return this;
+        }
+        
+        public ConfigBuilder kvcacheMmap(boolean enable) {
+            addField("kvcache_mmap", enable);
             return this;
         }
         

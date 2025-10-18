@@ -42,10 +42,11 @@ import java.io.File;
 public class SettingsFragment extends Fragment {
     private static final String TAG = "SettingsFragment";
     
-    // Backend preference options: expose CPU, Vulkan and KleidiAI-SME in UI
-    // English: Select 'KleidiAI-SME' to toggle SME ON in JNI via GGML_KLEIDIAI_SME=1
-    private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan", "KleidiAI-SME"};
-    private static final String[] BACKEND_VALUES = {"CPU", "VULKAN", "KLEIDIAI-SME"};
+    // Backend preference options: MNN supports CPU, Vulkan, OpenCL and NNAPI
+    // Note: KleidiAI optimizations are auto-enabled on arm64 CPU backend (via MNN_KLEIDIAI=ON)
+    // Note: NNAPI is only available on arm64 devices (disabled on x86_64 emulator)
+    private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan", "OpenCL", "NNAPI"};
+    private static final String[] BACKEND_VALUES = {"CPU", "VULKAN", "OPENCL", "NNAPI"};
     
     // UI组件
     private SeekBar seekBarChunkSize;
@@ -401,9 +402,9 @@ public class SettingsFragment extends Fragment {
                 backendPreference = "CPU";
                 ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
             }
-            // 兼容性迁移：移除 CANN 选项后，如发现旧值，则回退为 CPU
-            if ("CANN".equals(backendPreference)) {
-                LogManager.logW(TAG, "Backend 'CANN' is deprecated and removed from UI. Fallback to 'CPU'.");
+            // 兼容性迁移：移除废弃的后端选项，回退为CPU
+            if ("CANN".equals(backendPreference) || "KLEIDIAI-SME".equals(backendPreference)) {
+                LogManager.logW(TAG, "Backend '" + backendPreference + "' is deprecated. Fallback to 'CPU'.");
                 backendPreference = "CPU";
                 ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
             }
@@ -541,13 +542,21 @@ public class SettingsFragment extends Fragment {
             int selectedIndex = spinnerUseGpu.getSelectedItemPosition();
             String backendPreference = (selectedIndex >= 0 && selectedIndex < BACKEND_VALUES.length) ? 
                 BACKEND_VALUES[selectedIndex] : "CPU";
-            // English logs for backend selection intent
-            if ("KLEIDIAI-SME".equals(backendPreference)) {
-                LogManager.logI(TAG, "Backend selected: KLEIDIAI-SME (SME will be toggled ON in JNI)");
-            } else if ("VULKAN".equals(backendPreference)) {
-                LogManager.logI(TAG, "Backend selected: VULKAN (Vulkan GPU path will be attempted)");
-            } else {
-                LogManager.logI(TAG, "Backend selected: CPU (CPU path; KleidiAI microkernels if compiled)");
+            // Log backend selection for debugging
+            switch (backendPreference) {
+                case "VULKAN":
+                    LogManager.logI(TAG, "Backend selected: VULKAN (GPU via Vulkan API)");
+                    break;
+                case "OPENCL":
+                    LogManager.logI(TAG, "Backend selected: OPENCL (GPU via OpenCL API)");
+                    break;
+                case "NNAPI":
+                    LogManager.logI(TAG, "Backend selected: NNAPI (Android Neural Networks API, arm64 only)");
+                    break;
+                case "CPU":
+                default:
+                    LogManager.logI(TAG, "Backend selected: CPU (KleidiAI microkernels auto-enabled on arm64)");
+                    break;
             }
             
             // ONNX引擎设置获取已移除
@@ -792,24 +801,20 @@ public class SettingsFragment extends Fragment {
         String backendPreference = ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
         // Compatibility: map deprecated values to CPU and write back
         if ("CANN".equals(backendPreference)
-                || "OPENCL".equals(backendPreference)
-                || "BLAS".equals(backendPreference)
-                || "KLEIDIAI".equals(backendPreference)
+                || "GPU".equals(backendPreference)
                 || "KLEIDIAI-SME".equals(backendPreference)) {
-            LogManager.logW(TAG, "Deprecated or hidden backend '" + backendPreference + "' detected. Falling back to 'CPU' and updating config.");
+            LogManager.logW(TAG, "Deprecated backend '" + backendPreference + "' detected. Falling back to 'CPU' and updating config.");
             backendPreference = "CPU";
             ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
         }
         // Validate value
         for (String validValue : BACKEND_VALUES) {
             if (validValue.equals(backendPreference)) {
-                if ("KLEIDIAI-SME".equals(backendPreference)) {
-                    // English: KLEIDIAI-SME is valid and will toggle SME ON at JNI side
-                    LogManager.logD(TAG, "KLEIDIAI-SME backend is valid; SME will be toggled ON in JNI");
-                }
                 return backendPreference;
             }
         }
+        // Default to CPU if invalid value
+        LogManager.logW(TAG, "Invalid backend preference '" + backendPreference + "', defaulting to 'CPU'");
         return "CPU";
     }
     

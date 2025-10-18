@@ -427,6 +427,14 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // Fixed chunk size for balanced memory and performance
         final int CHUNK_SIZE = 256;
         
+        // KV Cache size limit calculation
+        // -1 = unlimited (recommended for best performance)
+        // Or set to bytes: e.g., 10 * 1024 * 1024 = 10MB per layer
+        // Formula: kv_heads × max_tokens × head_dim × bytes_per_element × 2 (key+value)
+        // Example for 2048 tokens: ~4MB per layer (quantized)
+        final int KV_CACHE_LIMIT_MB = -1;  // -1 for unlimited, or set MB limit per layer
+        int kvcacheLimitBytes = (KV_CACHE_LIMIT_MB == -1) ? -1 : KV_CACHE_LIMIT_MB * 1024 * 1024;
+        
         // Build configuration using MnnInference.ConfigBuilder
         MnnInference.ConfigBuilder builder = new MnnInference.ConfigBuilder()
             .backendType(mnnBackend)
@@ -434,13 +442,16 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             .precision("low")  // Use FP16 for better performance
             .memory("low")     // Hardcoded: runtime dequantization to save memory (4B model)
             .power("high")     // Hardcoded: use big cores for performance
-            .maxNewTokens(maxNewTokens)
+            .maxAllTokens(maxSeqLength)  // CRITICAL: Total context window (input + output)
+            .maxNewTokens(maxNewTokens)  // Single response generation limit
             .chunk(CHUNK_SIZE)         // Fixed chunk size for prefill stage
-            .kvcacheLimit(maxSeqLength) // KV cache size limit (context window)
+            .kvcacheLimit(kvcacheLimitBytes)   // CRITICAL: -1 = unlimited, or bytes limit per layer
             .reuseKv(true)     // Enable KV cache reuse for multi-turn
-            .useMmap(true);    // Use mmap for low memory
+            .useMmap(true)     // Use mmap for model weights
+            .kvcacheMmap(false); // CRITICAL: Disable KV cache mmap to avoid /tmp crash on Android
         
-        // Add temp path for mmap
+        // Add temp path for weight mmap (not for kvcache)
+        // Reference: libs/mnn/apps/Android/MnnLlmChat/app/src/main/cpp/llm_session.cpp
         File cacheDir = context.getCacheDir();
         builder.tmpPath(cacheDir.getAbsolutePath());
         
@@ -475,9 +486,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         
         String config = builder.build();
         
+        String kvLimitStr = (KV_CACHE_LIMIT_MB == -1) ? "unlimited" : KV_CACHE_LIMIT_MB + "MB/layer";
         LogManager.logI(TAG, String.format(
-            "Built MNN config - Backend: %s, Threads: %d, MaxTokens: %d, Chunk: %d, KVLimit: %d, temp=%.2f, top_p=%.2f, top_k=%d",
-            mnnBackend, threads, maxNewTokens, CHUNK_SIZE, maxSeqLength, temperature, topP, topK));
+            "Built MNN config - Backend: %s, Threads: %d, MaxAllTokens: %d, MaxNewTokens: %d, Chunk: %d, KVLimit: %s, temp=%.2f, top_p=%.2f, top_k=%d",
+            mnnBackend, threads, maxSeqLength, maxNewTokens, CHUNK_SIZE, kvLimitStr, temperature, topP, topK));
         
         return config;
     }
@@ -629,42 +641,43 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     /**
      * Map backend preference to MNN backend type
      * @param backendPreference Backend preference from settings
-     * @return MNN backend type string
+     * @return MNN backend type string (MNN uses "npu" internally for NNAPI)
      */
     private String mapBackendToMnn(String backendPreference) {
         if (backendPreference == null) {
+            LogManager.logI(TAG, "Backend preference is null, defaulting to CPU");
             return "cpu";
         }
         
         switch (backendPreference.toUpperCase()) {
             case "VULKAN":
                 if (MnnInference.isBackendAvailable("vulkan")) {
-                    LogManager.logI(TAG, "Using Vulkan backend");
+                    LogManager.logI(TAG, "Backend: VULKAN available and selected");
                     return "vulkan";
                 }
-                LogManager.logW(TAG, "Vulkan not available, falling back to CPU");
+                LogManager.logW(TAG, "Backend: VULKAN requested but not available, falling back to CPU");
                 return "cpu";
                 
             case "OPENCL":
             case "GPU":
                 if (MnnInference.isBackendAvailable("opencl")) {
-                    LogManager.logI(TAG, "Using OpenCL backend");
+                    LogManager.logI(TAG, "Backend: OPENCL available and selected");
                     return "opencl";
                 }
-                LogManager.logW(TAG, "OpenCL not available, falling back to CPU");
+                LogManager.logW(TAG, "Backend: OPENCL requested but not available, falling back to CPU");
                 return "cpu";
                 
             case "NNAPI":
                 if (MnnInference.isBackendAvailable("nnapi")) {
-                    LogManager.logI(TAG, "Using NNAPI backend");
-                    return "nnapi";
+                    LogManager.logI(TAG, "Backend: NNAPI available and selected (MNN backend_type='npu')");
+                    return "npu";  // MNN uses "npu" for Android NNAPI
                 }
-                LogManager.logW(TAG, "NNAPI not available, falling back to CPU");
+                LogManager.logW(TAG, "Backend: NNAPI requested but not available (likely x86_64 emulator), falling back to CPU");
                 return "cpu";
                 
             case "CPU":
             default:
-                LogManager.logI(TAG, "Using CPU backend");
+                LogManager.logI(TAG, "Backend: CPU selected (KleidiAI optimizations auto-enabled on arm64)");
                 return "cpu";
         }
     }
