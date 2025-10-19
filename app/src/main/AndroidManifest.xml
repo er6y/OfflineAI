@@ -60,6 +60,25 @@
         <meta-data android:name="android.max_aspect" android:value="2.4" />
         <meta-data android:name="android.allow_multiple_resumed_activities" android:value="true" />
         <meta-data android:name="com.samsung.android.sdk.look.cocktailbar.enabled" android:value="true" />
+        
+        <!-- CRITICAL: 声明使用系统原生库（Android 10+必需）-->
+        <!-- 允许应用访问系统的GPU加速库 -->
+        <uses-native-library
+            android:name="libOpenCL.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libOpenCL-pixel.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libGLES_mali.so"
+            android:required="false" />
+        <uses-native-library
+            android:name="libmali.so"
+            android:required="false" />
+        <uses-library
+            android:name="libcdsprpc.so"
+            android:required="false"/>
+        
         <activity
             android:name=".MainActivity"
             android:exported="true"

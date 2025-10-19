@@ -20,7 +20,7 @@ option(MNN_OPENCL "Enable OpenCL backend" ON)
 option(MNN_VULKAN "Enable Vulkan backend" ON)
 option(MNN_ARM82 "Enable ARM82 (fp16/dot) support" ON)
 option(MNN_SUPPORT_TRANSFORMER_FUSE "Enable transformer fusion" ON)
-option(MNN_LOW_MEMORY "Enable low memory mode" ON)
+option(MNN_LOW_MEMORY "Enable low memory mode" ON)  # Required for weight quant (int4/int8)
 option(MNN_CPU_WEIGHT_DEQUANT_GEMM "Enable CPU weight dequant GEMM" ON)
 option(MNN_USE_LOGCAT "Use Android logcat" ON)
 option(MNN_OPEN_TIME_TRACE "Enable time trace logging" ON)
@@ -137,6 +137,7 @@ include_directories(${MNN_ROOT}/3rd_party/nlohmann)
 # ========== Source Files ==========
 set(JNI_SOURCES
     mnn_jni.cpp
+    opencl_diagnostic.cpp
 )
 
 # ========== Build JNI Library ==========

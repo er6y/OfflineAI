@@ -424,6 +424,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // Map backend preference to MNN backend type
         String mnnBackend = mapBackendToMnn(backendPreference);
         
+        // Log the actual backend being used
+        LogManager.logI(TAG, String.format("🔍 Backend resolution: requested=%s, resolved=%s", 
+            backendPreference, mnnBackend));
+        
         // Fixed chunk size for balanced memory and performance
         final int CHUNK_SIZE = 256;
         
@@ -447,7 +451,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             .chunk(CHUNK_SIZE)         // Fixed chunk size for prefill stage
             .kvcacheLimit(kvcacheLimitBytes)   // CRITICAL: -1 = unlimited, or bytes limit per layer
             .reuseKv(true)     // Enable KV cache reuse for multi-turn
-            .useMmap(true)     // Use mmap for model weights
+            //.useMmap(true)     // Use mmap for model weights, bug here, android do not open
             .kvcacheMmap(false); // CRITICAL: Disable KV cache mmap to avoid /tmp crash on Android
         
         // Add temp path for weight mmap (not for kvcache)
@@ -640,46 +644,40 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     
     /**
      * Map backend preference to MNN backend type
+     * NO FALLBACK - Use exactly what user selected for easier debugging
      * @param backendPreference Backend preference from settings
      * @return MNN backend type string (MNN uses "npu" internally for NNAPI)
      */
     private String mapBackendToMnn(String backendPreference) {
         if (backendPreference == null) {
-            LogManager.logI(TAG, "Backend preference is null, defaulting to CPU");
+            LogManager.logW(TAG, "⚠️ Backend preference is null, using CPU");
             return "cpu";
         }
         
+        String mnnBackend;
         switch (backendPreference.toUpperCase()) {
             case "VULKAN":
-                if (MnnInference.isBackendAvailable("vulkan")) {
-                    LogManager.logI(TAG, "Backend: VULKAN available and selected");
-                    return "vulkan";
-                }
-                LogManager.logW(TAG, "Backend: VULKAN requested but not available, falling back to CPU");
-                return "cpu";
+                mnnBackend = "vulkan";
+                break;
                 
             case "OPENCL":
             case "GPU":
-                if (MnnInference.isBackendAvailable("opencl")) {
-                    LogManager.logI(TAG, "Backend: OPENCL available and selected");
-                    return "opencl";
-                }
-                LogManager.logW(TAG, "Backend: OPENCL requested but not available, falling back to CPU");
-                return "cpu";
+                mnnBackend = "opencl";
+                break;
                 
             case "NNAPI":
-                if (MnnInference.isBackendAvailable("nnapi")) {
-                    LogManager.logI(TAG, "Backend: NNAPI available and selected (MNN backend_type='npu')");
-                    return "npu";  // MNN uses "npu" for Android NNAPI
-                }
-                LogManager.logW(TAG, "Backend: NNAPI requested but not available (likely x86_64 emulator), falling back to CPU");
-                return "cpu";
+                mnnBackend = "npu";  // MNN uses "npu" for Android NNAPI
+                break;
                 
             case "CPU":
             default:
-                LogManager.logI(TAG, "Backend: CPU selected (KleidiAI optimizations auto-enabled on arm64)");
-                return "cpu";
+                mnnBackend = "cpu";
+                break;
         }
+        
+        LogManager.logI(TAG, String.format("🎯 Backend mapping: '%s' -> MNN '%s' (NO FALLBACK)", 
+            backendPreference, mnnBackend));
+        return mnnBackend;
     }
     
     /**

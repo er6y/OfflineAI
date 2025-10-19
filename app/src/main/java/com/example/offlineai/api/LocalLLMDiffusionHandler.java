@@ -34,6 +34,9 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
     // Diffusion session handle
     private long diffusionHandle = 0;
     
+    // Model configuration
+    private LocalLlmHandler.ModelConfig modelConfig;
+    
     // Executor for async operations
     private final ExecutorService executorService;
     
@@ -84,6 +87,7 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
         LogManager.logI(TAG, "Initializing Diffusion handler with model: " + modelPath);
         
         this.currentModelPath = modelPath;
+        this.modelConfig = config;
         
         // Validate model directory
         File modelDir = new File(modelPath);
@@ -109,17 +113,46 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
             throw new Exception("Required Diffusion model files not found");
         }
         
-        // Create Diffusion session
-        LogManager.logI(TAG, "Creating Diffusion session...");
+        // Get user-selected backend from settings - now supports ALL backends including CPU!
+        String backendPreference = com.example.offlineai.SettingsFragment.getBackendPreference(context);
+        int backendType = mapBackendToMnnForwardType(backendPreference);
+        
+        // CPU backend is now supported via custom CPUGroupNorm implementation
+        // User can choose: CPU (slow but compatible), OpenCL, Vulkan, or NNAPI
+        LogManager.logI(TAG, "Creating Diffusion session with user-selected backend: " + backendPreference + " (type=" + backendType + ")");
+        
+        // ⚠️ First load warning for GPU backends
+        if (backendType == 3 || backendType == 7) { // OpenCL or Vulkan
+            LogManager.logW(TAG, "========================================");
+            LogManager.logW(TAG, "⚠️ FIRST-TIME GPU LOAD WARNING ⚠️");
+            LogManager.logW(TAG, "Diffusion model will compile OpenCL/Vulkan kernels");
+            LogManager.logW(TAG, "This may take 5-15 MINUTES on first load!");
+            LogManager.logW(TAG, "Subsequent loads will use cached kernels (much faster)");
+            LogManager.logW(TAG, "Please be patient and don't force-close the app...");
+            LogManager.logW(TAG, "========================================");
+        }
+        
         diffusionHandle = MnnInference.createDiffusion(
             modelPath,
             0, // STABLE_DIFFUSION_1_5
-            3, // MNN_FORWARD_OPENCL
-            1  // memory_enough mode (faster)
+            backendType, // Use user-selected backend
+            0  // CRITICAL: memory_low mode (0=low, 1=enough, 2=balance) - enough mode causes OOM/freeze
         );
         
         if (diffusionHandle == 0) {
-            throw new Exception("Failed to create Diffusion session");
+            // Provide detailed error message based on backend type
+            String errorMsg = "Failed to create Diffusion session with backend: " + backendPreference;
+            if (backendType == 0) { // CPU
+                errorMsg += "\nCPU backend should work now (slower). Please check model files or try GPU backend for better performance.";
+            } else if (backendType == 3) { // OpenCL
+                errorMsg += "\nOpenCL backend failed. Try: CPU (slower but works), Vulkan, or NNAPI.";
+            } else if (backendType == 7) { // Vulkan
+                errorMsg += "\nVulkan backend failed. Try: CPU (slower but works), OpenCL, or NNAPI.";
+            } else {
+                errorMsg += "\nBackend initialization failed. Try CPU backend (slower but most compatible).";
+            }
+            LogManager.logE(TAG, errorMsg);
+            throw new Exception(errorMsg);
         }
         
         LogManager.logI(TAG, "Diffusion session created successfully, handle=" + diffusionHandle);
@@ -254,5 +287,49 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
     @Override
     public String getEngineType() {
         return "diffusion";
+    }
+    
+    /**
+     * Map backend preference to MNN Forward Type integer
+     * NO FALLBACK - Use exactly what user selected for easier debugging
+     * Backend types in MNN native:
+     * - MNN_FORWARD_CPU = 0
+     * - MNN_FORWARD_OPENCL = 3
+     * - MNN_FORWARD_VULKAN = 7
+     * - MNN_FORWARD_NN (NNAPI) = 6
+     * 
+     * @param backendPreference Backend from settings
+     * @return MNN Forward Type integer
+     */
+    private int mapBackendToMnnForwardType(String backendPreference) {
+        if (backendPreference == null) {
+            LogManager.logW(TAG, "⚠️ Backend preference is null, using CPU (0)");
+            return 0; // MNN_FORWARD_CPU
+        }
+        
+        int forwardType;
+        switch (backendPreference.toUpperCase()) {
+            case "VULKAN":
+                forwardType = 7; // MNN_FORWARD_VULKAN
+                break;
+                
+            case "OPENCL":
+            case "GPU":
+                forwardType = 3; // MNN_FORWARD_OPENCL
+                break;
+                
+            case "NNAPI":
+                forwardType = 6; // MNN_FORWARD_NN (Android NNAPI)
+                break;
+                
+            case "CPU":
+            default:
+                forwardType = 0; // MNN_FORWARD_CPU
+                break;
+        }
+        
+        LogManager.logI(TAG, String.format("🎯 Backend mapping: '%s' -> MNN ForwardType %d (NO FALLBACK)", 
+            backendPreference, forwardType));
+        return forwardType;
     }
 }

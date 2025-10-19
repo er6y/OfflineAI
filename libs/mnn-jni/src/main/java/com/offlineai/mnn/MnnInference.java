@@ -164,11 +164,11 @@ public class MnnInference {
      */
     public static native boolean isBackendAvailable(String backendName);
     
-    // ========== Callback Interface ==========
-    
     /**
-     * Callback interface for streaming inference output
+     * Diagnose OpenCL library availability and paths
+     * @return Diagnostic report string
      */
+    public static native String diagnoseOpenCL();
     public interface InferenceCallback {
         /**
          * Called when a new token is generated

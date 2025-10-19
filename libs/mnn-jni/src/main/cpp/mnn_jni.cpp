@@ -183,12 +183,44 @@ public:
             LOGI("=== MNN Session Initialization START ===");
             LOGI("Model directory: %s", model_dir_.c_str());
             
-            // CRITICAL: Create MNN Executor and ExecutorScope (required for MNN to work)
+            // CRITICAL: Parse backend from config BEFORE creating ExecutorScope
+            // Backend MUST be set in ExecutorScope, not in JSON config!
+            MNNForwardType forwardType = MNN_FORWARD_CPU; // Default
+            int thread_num = 4; // Default
+            
+            if (!config_json_.empty()) {
+                try {
+                    json config = json::parse(config_json_);
+                    std::string backend_type = config.value("backend_type", "cpu");
+                    thread_num = config.value("thread_num", 4);
+                    
+                    // Map backend string to MNNForwardType enum
+                    if (backend_type == "opencl") {
+                        forwardType = MNN_FORWARD_OPENCL;
+                    } else if (backend_type == "vulkan") {
+                        forwardType = MNN_FORWARD_VULKAN;
+                    } else if (backend_type == "npu") {
+                        forwardType = MNN_FORWARD_NN; // NNAPI
+                    } else {
+                        forwardType = MNN_FORWARD_CPU;
+                    }
+                    
+                    LOGI("=== Parsed Backend Config ===");
+                    LOGI("Backend string: %s", backend_type.c_str());
+                    LOGI("MNNForwardType: %d (CPU=0, OpenCL=3, Vulkan=7, NNAPI=6)", (int)forwardType);
+                    LOGI("Thread num: %d", thread_num);
+                    LOGI("==============================");
+                } catch (const std::exception& e) {
+                    LOGW("Failed to parse backend from config, using CPU: %s", e.what());
+                }
+            }
+            
+            // CRITICAL: Create MNN Executor with user-selected backend
             // Reference: libs/mnn/apps/Android/MnnLlmChat/app/src/main/cpp/llm_session.cpp
             MNN::BackendConfig backendConfig;
-            auto executor = MNN::Express::Executor::newExecutor(MNN_FORWARD_CPU, backendConfig, 1);
+            auto executor = MNN::Express::Executor::newExecutor(forwardType, backendConfig, thread_num);
             MNN::Express::ExecutorScope scope(executor);
-            LOGI("MNN Executor and ExecutorScope created successfully");
+            LOGI("✅ MNN Executor and ExecutorScope created with forwardType=%d", (int)forwardType);
             
             // Create LLM instance from model directory
             std::string config_path = model_dir_ + "/config.json";
@@ -203,27 +235,12 @@ public:
             
             LOGI("LLM instance created successfully");
             
-            // CRITICAL: Set runtime config BEFORE load() to ensure backend takes effect
-            // Reference: MNN official demo - llm->set_config() must be called before llm->load()
+            // Set runtime config BEFORE load() for other parameters (temp, top_p, etc.)
+            // Note: Backend is already set via ExecutorScope above
             if (!config_json_.empty()) {
-                LOGI("Runtime config JSON: %s", config_json_.c_str());
-                
-                // Parse and log backend type from config JSON
-                try {
-                    json config = json::parse(config_json_);
-                    std::string backend_type = config.value("backend_type", "cpu");
-                    int thread_num = config.value("thread_num", 4);
-                    LOGI("=== MNN Backend Configuration (BEFORE load) ===");
-                    LOGI("Backend type: %s", backend_type.c_str());
-                    LOGI("Thread num: %d", thread_num);
-                    LOGI("===============================================");
-                } catch (...) {
-                    LOGW("Failed to parse runtime config JSON for logging");
-                }
-                
-                LOGI("Calling llm_->set_config() BEFORE load()...");
+                LOGI("Setting runtime config (temperature, top_p, etc.)...");
                 llm_->set_config(config_json_);
-                LOGI("Runtime config merged successfully");
+                LOGI("Runtime config applied successfully");
             }
             
             // Load model (this will use the runtime config set above)
@@ -233,22 +250,13 @@ public:
             LOGI("llm_->load() returned: %s", success ? "SUCCESS" : "FAILED");
             
             if (success) {
-                LOGI("MNN LLM session loaded successfully");
+                LOGI("=== MNN LLM SESSION LOADED SUCCESSFULLY ===");
+                LOGI("Backend (from ExecutorScope): forwardType=%d", (int)forwardType);
+                LOGI("===========================================");
                 
-                // Dump final config to verify backend
+                // Dump final config
                 std::string final_config = llm_->dump_config();
-                LOGD("Final config after load: %s", final_config.c_str());
-                
-                // Log final backend configuration
-                try {
-                    json final_json = json::parse(final_config);
-                    std::string final_backend = final_json.value("backend_type", "cpu");
-                    LOGI("=== MNN Backend Activated (AFTER load) ===");
-                    LOGI("Active backend: %s", final_backend.c_str());
-                    LOGI("==========================================");
-                } catch (...) {
-                    LOGW("Failed to parse final config for backend logging");
-                }
+                LOGD("Final MNN config: %s", final_config.c_str());
             } else {
                 LOGE("Failed to load MNN LLM model");
             }
@@ -290,11 +298,21 @@ public:
             // Generate token-by-token with stop check between each token
             // Do NOT use max_new_tokens=-1 (unlimited), it makes stop impossible!
             
-            int max_new_tokens = 2048; // Max tokens to generate
+            // Parse max_new_tokens from config (官方实现)
+            int max_new_tokens = 2048; // default
+            try {
+                json config = json::parse(config_json_);
+                if (config.contains("max_new_tokens")) {
+                    max_new_tokens = config["max_new_tokens"].get<int>();
+                }
+            } catch (...) {
+                // Use default if parsing fails
+            }
+            
             bool stop_requested = false;
             bool generate_end = false;
             
-            LOGI("[TEXT] About to call llm_->response() with max_new_tokens=%d", max_new_tokens);
+            LOGI("[TEXT] About to call llm_->response() with max_new_tokens=%d (from config)", max_new_tokens);
             LOGI("[TEXT] Prompt: %s", prompt.c_str());
             
             // Initial response (generates first token)
@@ -390,11 +408,21 @@ public:
             
             LOGI("[MULTIMODAL] Starting MNN response() with ChatMessages...");
             
-            int max_new_tokens = 2048; // Max tokens to generate
+            // Parse max_new_tokens from config (官方实现)
+            int max_new_tokens = 2048; // default
+            try {
+                json config = json::parse(config_json_);
+                if (config.contains("max_new_tokens")) {
+                    max_new_tokens = config["max_new_tokens"].get<int>();
+                }
+            } catch (...) {
+                // Use default if parsing fails
+            }
+            
             bool stop_requested = false;
             bool generate_end = false;
             
-            LOGI("[MULTIMODAL] About to call llm_->response() with max_new_tokens=%d", max_new_tokens);
+            LOGI("[MULTIMODAL] About to call llm_->response() with max_new_tokens=%d (from config)", max_new_tokens);
             LOGI("[MULTIMODAL] User prompt: %s", multimodal_prompt.c_str());
             
             // Try to get token IDs to see vision embedding length
@@ -1555,24 +1583,45 @@ Java_com_offlineai_mnn_MnnInference_createDiffusion(
         LOGI("[DIFFUSION] Creating diffusion session: modelDir=%s, modelType=%d, backend=%d, memory=%d",
              modelDir, modelType, backendType, memoryMode);
         
+        // Use user-selected backend directly
+        // CPU backend is now supported via our custom CPUGroupNorm implementation
+        MNNForwardType actualBackend = static_cast<MNNForwardType>(backendType);
+        LOGI("[DIFFUSION] Using user-selected backend: %d (CPU=0, OpenCL=3, Vulkan=7, NNAPI=6)", backendType);
+        
         // Create Diffusion instance
         auto diffusion = std::make_unique<Diffusion>(
             std::string(modelDir),
             static_cast<DiffusionModelType>(modelType),
-            static_cast<MNNForwardType>(backendType),
+            actualBackend,
             memoryMode
         );
         
         env->ReleaseStringUTFChars(jModelDir, modelDir);
         
-        // Load model
-        LOGI("[DIFFUSION] Loading diffusion model...");
+        // Load model (this will compile OpenCL kernels on first run - may take 5-15 minutes!)
+        LOGI("[DIFFUSION] ========================================");
+        LOGI("[DIFFUSION] Starting model load (backend=%d)...", actualBackend);
+        if (actualBackend == MNN_FORWARD_OPENCL || actualBackend == MNN_FORWARD_VULKAN) {
+            LOGW("[DIFFUSION] ⚠️ GPU backend: First load will compile hundreds of kernels");
+            LOGW("[DIFFUSION] ⚠️ This may take 5-15 minutes! Please be patient...");
+            LOGW("[DIFFUSION] ⚠️ Subsequent loads will use cached kernels and be much faster");
+        }
+        LOGI("[DIFFUSION] ========================================");
+        
+        auto start_time = std::chrono::high_resolution_clock::now();
         if (!diffusion->load()) {
             LOGE("[DIFFUSION] Failed to load diffusion model");
+            LOGE("[DIFFUSION] If GPU backend is not available, Diffusion cannot run");
+            LOGE("[DIFFUSION] Please ensure OpenCL or Vulkan is supported on your device");
             return 0;
         }
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
         
-        LOGI("[DIFFUSION] Diffusion model loaded successfully");
+        LOGI("[DIFFUSION] ========================================");
+        LOGI("[DIFFUSION] ✅ Diffusion model loaded successfully in %lld ms (%.1f sec)", 
+             (long long)duration, duration / 1000.0);
+        LOGI("[DIFFUSION] ========================================");
         
         // Store in global map
         jlong handle = reinterpret_cast<jlong>(diffusion.get());
