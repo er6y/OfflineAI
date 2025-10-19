@@ -9,6 +9,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <unistd.h>  // for chdir, getcwd
 #include "llm/llm.hpp"
 #include "llm/reranker.hpp"
 #include "diffusion/diffusion.hpp"
@@ -20,13 +21,185 @@
 #include "core/Backend.hpp"
 
 #define LOG_TAG "MNN_JNI"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+// ========== LogManager Integration (from llama_inference.cpp) ==========
+// Global JNI references for LogManager
+JavaVM* g_jvm = nullptr;
+jclass g_logManagerClass = nullptr;
+jmethodID g_logIMethod = nullptr;
+jmethodID g_logEMethod = nullptr;
+
+// Call LogManager to save logs to file
+void call_log_manager(int level, const char* tag, const char* message) {
+    if (!g_jvm || !g_logManagerClass) {
+        return; // Not initialized yet
+    }
+    
+    JNIEnv* env = nullptr;
+    bool detach = false;
+    
+    int status = g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+    if (status == JNI_EDETACHED) {
+        if (g_jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+            detach = true;
+        } else {
+            return;
+        }
+    }
+    
+    if (env) {
+        jstring jTag = env->NewStringUTF(tag);
+        jstring jMsg = env->NewStringUTF(message);
+        
+        if (jTag && jMsg) {
+            if (level == ANDROID_LOG_ERROR && g_logEMethod) {
+                env->CallStaticVoidMethod(g_logManagerClass, g_logEMethod, jTag, jMsg);
+            } else if (g_logIMethod) {
+                env->CallStaticVoidMethod(g_logManagerClass, g_logIMethod, jTag, jMsg);
+            }
+        }
+        
+        if (jTag) env->DeleteLocalRef(jTag);
+        if (jMsg) env->DeleteLocalRef(jMsg);
+        
+        if (detach) {
+            g_jvm->DetachCurrentThread();
+        }
+    }
+}
+
+// Enhanced log macros that write to BOTH logcat AND LogManager
+#define LOGI(...) do { \
+    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__); \
+    char buffer[2048]; \
+    snprintf(buffer, sizeof(buffer), __VA_ARGS__); \
+    call_log_manager(ANDROID_LOG_INFO, LOG_TAG, buffer); \
+} while(0)
+
+#define LOGD(...) do { \
+    __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__); \
+    char buffer[2048]; \
+    snprintf(buffer, sizeof(buffer), __VA_ARGS__); \
+    call_log_manager(ANDROID_LOG_DEBUG, LOG_TAG, buffer); \
+} while(0)
+
+#define LOGW(...) do { \
+    __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__); \
+    char buffer[2048]; \
+    snprintf(buffer, sizeof(buffer), __VA_ARGS__); \
+    call_log_manager(ANDROID_LOG_WARN, LOG_TAG, buffer); \
+} while(0)
+
+#define LOGE(...) do { \
+    __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__); \
+    char buffer[2048]; \
+    snprintf(buffer, sizeof(buffer), __VA_ARGS__); \
+    call_log_manager(ANDROID_LOG_ERROR, LOG_TAG, buffer); \
+} while(0)
+
+// UI progress log - sends to chat UI with <debug> tags
+#define LOG_UI_PROGRESS(...) do { \
+    char buffer[2048]; \
+    snprintf(buffer, sizeof(buffer), "<debug>" __VA_ARGS__); \
+    strcat(buffer, "</debug>"); \
+    call_log_manager(ANDROID_LOG_INFO, "DIFFUSION_UI", buffer); \
+} while(0)
+
+// ========== MNN Log Redirection to LogManager ==========
+
+// Custom MNN log function that redirects to LogManager
+extern "C" void mnn_custom_log(int level, const char* tag, const char* format, ...) {
+    char buffer[4096];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    
+    // Also print to logcat for immediate debugging
+    __android_log_print(level, tag, "%s", buffer);
+    
+    // Redirect to LogManager if initialized
+    if (g_jvm && g_logManagerClass) {
+        JNIEnv* env = nullptr;
+        bool detach = false;
+        
+        int status = g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
+        if (status == JNI_EDETACHED) {
+            if (g_jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+                detach = true;
+            }
+        }
+        
+        if (env) {
+            jstring jTag = env->NewStringUTF(tag);
+            jstring jMsg = env->NewStringUTF(buffer);
+            
+            if (level == ANDROID_LOG_ERROR && g_logEMethod) {
+                env->CallStaticVoidMethod(g_logManagerClass, g_logEMethod, jTag, jMsg);
+            } else if (g_logIMethod) {
+                env->CallStaticVoidMethod(g_logManagerClass, g_logIMethod, jTag, jMsg);
+            }
+            
+            env->DeleteLocalRef(jTag);
+            env->DeleteLocalRef(jMsg);
+            
+            if (detach) {
+                g_jvm->DetachCurrentThread();
+            }
+        }
+    }
+}
+
+// Override MNN macros to use our custom log function
+#undef MNN_PRINT
+#undef MNN_ERROR
+#define MNN_PRINT(format, ...) mnn_custom_log(ANDROID_LOG_INFO, "MNNJNI", format, ##__VA_ARGS__)
+#define MNN_ERROR(format, ...) mnn_custom_log(ANDROID_LOG_ERROR, "MNNJNI", format, ##__VA_ARGS__)
 
 using namespace MNN::Transformer;
 using json = nlohmann::json;
+
+// ========== Log Redirection Initialization ==========
+
+// Initialize log redirection to LogManager
+static void init_log_redirection(JNIEnv* env) {
+    if (g_logManagerClass) {
+        return; // Already initialized
+    }
+    
+    // Get JavaVM
+    env->GetJavaVM(&g_jvm);
+    
+    // Find LogManager class
+    jclass localClass = env->FindClass("com/example/offlineai/LogManager");
+    if (localClass) {
+        g_logManagerClass = (jclass)env->NewGlobalRef(localClass);
+        env->DeleteLocalRef(localClass);
+        
+        // Get log methods
+        g_logIMethod = env->GetStaticMethodID(g_logManagerClass, "logI", "(Ljava/lang/String;Ljava/lang/String;)V");
+        g_logEMethod = env->GetStaticMethodID(g_logManagerClass, "logE", "(Ljava/lang/String;Ljava/lang/String;)V");
+        
+        if (g_logIMethod && g_logEMethod) {
+            LOGI("✅ MNN log redirection to LogManager initialized");
+            // Test MNN log redirection
+            MNN_PRINT("MNN_PRINT test: This should appear in log file\\n");
+        } else {
+            LOGW("Failed to find LogManager methods");
+        }
+    } else {
+        LOGW("Failed to find LogManager class");
+    }
+}
+
+// Cleanup log redirection
+static void cleanup_log_redirection(JNIEnv* env) {
+    if (g_logManagerClass) {
+        env->DeleteGlobalRef(g_logManagerClass);
+        g_logManagerClass = nullptr;
+    }
+    g_jvm = nullptr;
+}
 
 // ========== Debug Reranker Wrapper ==========
 
@@ -51,111 +224,6 @@ public:
         return scores;
     }
 };
-
-// ========== MNN Log Redirection ==========
-
-// Global JVM and LogManager references
-static JavaVM* g_jvm = nullptr;
-static jclass g_logManagerClass = nullptr;
-static jmethodID g_logIMethod = nullptr;
-static jmethodID g_logDMethod = nullptr;
-static jmethodID g_logWMethod = nullptr;
-static jmethodID g_logEMethod = nullptr;
-static std::mutex g_log_mutex;
-
-// Custom MNN log function
-static void mnn_log_callback(const char* message) {
-    if (!g_jvm || !g_logManagerClass) {
-        // Fallback to Android log
-        __android_log_print(ANDROID_LOG_INFO, "MNN", "%s", message);
-        return;
-    }
-    
-    std::lock_guard<std::mutex> lock(g_log_mutex);
-    
-    JNIEnv* env = nullptr;
-    bool need_detach = false;
-    
-    // Get JNI environment
-    int status = g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
-    if (status == JNI_EDETACHED) {
-        if (g_jvm->AttachCurrentThread(&env, nullptr) != 0) {
-            return;
-        }
-        need_detach = true;
-    }
-    
-    if (env) {
-        // Determine log level from message prefix
-        std::string msg(message);
-        jmethodID method = g_logIMethod;
-        
-        if (msg.find("[E]") == 0 || msg.find("ERROR") != std::string::npos) {
-            method = g_logEMethod;
-        } else if (msg.find("[W]") == 0 || msg.find("WARN") != std::string::npos) {
-            method = g_logWMethod;
-        } else if (msg.find("[D]") == 0 || msg.find("DEBUG") != std::string::npos) {
-            method = g_logDMethod;
-        }
-        
-        jstring tag = env->NewStringUTF("MNN");
-        jstring jmsg = env->NewStringUTF(message);
-        
-        if (tag && jmsg && method) {
-            env->CallStaticVoidMethod(g_logManagerClass, method, tag, jmsg);
-        }
-        
-        if (tag) env->DeleteLocalRef(tag);
-        if (jmsg) env->DeleteLocalRef(jmsg);
-    }
-    
-    if (need_detach) {
-        g_jvm->DetachCurrentThread();
-    }
-}
-
-// Initialize log redirection
-static void init_log_redirection(JNIEnv* env) {
-    if (g_logManagerClass) {
-        return; // Already initialized
-    }
-    
-    // Get JavaVM
-    env->GetJavaVM(&g_jvm);
-    
-    // Find LogManager class
-    jclass localClass = env->FindClass("com/example/offlineai/LogManager");
-    if (localClass) {
-        g_logManagerClass = (jclass)env->NewGlobalRef(localClass);
-        env->DeleteLocalRef(localClass);
-        
-        // Get log methods
-        g_logIMethod = env->GetStaticMethodID(g_logManagerClass, "logI", "(Ljava/lang/String;Ljava/lang/String;)V");
-        g_logDMethod = env->GetStaticMethodID(g_logManagerClass, "logD", "(Ljava/lang/String;Ljava/lang/String;)V");
-        g_logWMethod = env->GetStaticMethodID(g_logManagerClass, "logW", "(Ljava/lang/String;Ljava/lang/String;)V");
-        g_logEMethod = env->GetStaticMethodID(g_logManagerClass, "logE", "(Ljava/lang/String;Ljava/lang/String;)V");
-        
-        if (g_logIMethod && g_logDMethod && g_logWMethod && g_logEMethod) {
-            // NOTE: MNN::MNNSetLogCallBack does not exist in current MNN version
-            // We keep mnn_log_callback for potential future use
-            // MNN::MNNSetLogCallBack(mnn_log_callback);
-            LOGI("MNN log redirection initialized successfully");
-        } else {
-            LOGW("Failed to find LogManager methods");
-        }
-    } else {
-        LOGW("Failed to find LogManager class");
-    }
-}
-
-// Cleanup log redirection
-static void cleanup_log_redirection(JNIEnv* env) {
-    if (g_logManagerClass) {
-        env->DeleteGlobalRef(g_logManagerClass);
-        g_logManagerClass = nullptr;
-    }
-    g_jvm = nullptr;
-}
 
 // ========== Session Wrapper Class ==========
 
@@ -1176,20 +1244,24 @@ static void trigger_mnn_initialization() {
 }
 
 JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
+    // CRITICAL: Use Android log directly (before LogManager init)
+    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "========================================");
+    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "JNI_OnLoad ENTRY - MNN JNI library loading...");
+    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "========================================");
+    
     JNIEnv* env = nullptr;
     if (vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) {
+        __android_log_print(ANDROID_LOG_ERROR, "MNN_JNI", "Failed to get JNIEnv");
         return JNI_ERR;
     }
     
-    LOGI("MNN JNI library loaded, version: JNI_VERSION_1_6");
-    LOGI("===========================================");
-    LOGI("NOTE: MNN internal logs use tag 'MNNJNI'");
-    LOGI("To view MNN logs: adb logcat -s MNNJNI MNN_JNI");
-    LOGI("===========================================");
-    LOGI("Initializing MNN log redirection...");
+    // Save JavaVM for later use (DO NOT init LogManager here - it may not be ready yet!)
+    env->GetJavaVM(&g_jvm);
     
-    // Initialize log redirection
-    init_log_redirection(env);
+    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "JNIEnv obtained, JavaVM saved");
+    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "NOTE: LogManager init deferred to explicit initMnnLogger() call");
+    
+    LOGI("MNN JNI library loaded, version: JNI_VERSION_1_6");
     
     // Trigger MNN backend initialization (once per process)
     if (!g_mnn_initialized.exchange(true)) {
@@ -1199,7 +1271,27 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
         LOGI("MNN already initialized in this process");
     }
     
+    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "========================================");
+    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "JNI_OnLoad EXIT - MNN JNI library loaded successfully");
+    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "Call MnnInference.initMnnLogger() from Java to enable file logging");
+    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "========================================");
+    
     return JNI_VERSION_1_6;
+}
+
+// ========== Public API: Initialize MNN Logger ==========
+// Call this from Application.onCreate() after LogManager is ready
+extern "C" JNIEXPORT void JNICALL
+Java_com_offlineai_mnn_MnnInference_initMnnLogger(JNIEnv* env, jclass) {
+    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "initMnnLogger() called from Java");
+    
+    // Now LogManager should be ready
+    init_log_redirection(env);
+    
+    // Test MNN_PRINT macro
+    MNN_PRINT("🔥 MNN_PRINT TEST - If you see this in log file, redirection works!\\n");
+    
+    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "initMnnLogger() completed - MNN logs will now be saved to file");
 }
 
 JNIEXPORT void JNI_OnUnload(JavaVM* vm, void* reserved) {
@@ -1579,12 +1671,24 @@ Java_com_offlineai_mnn_MnnInference_createDiffusion(
     jstring jModelDir, jint modelType, jint backendType, jint memoryMode) {
     
     try {
+        // Get model directory
         const char* modelDir = env->GetStringUTFChars(jModelDir, nullptr);
+        
         LOGI("[DIFFUSION] Creating diffusion session: modelDir=%s, modelType=%d, backend=%d, memory=%d",
              modelDir, modelType, backendType, memoryMode);
         
-        // Use user-selected backend directly
-        // CPU backend is now supported via our custom CPUGroupNorm implementation
+        // ========== 设置OpenCL kernel缓存目录到模型目录 ==========
+        // 这样.tempcache会保存在模型目录而不是app根目录，更稳定
+        int chdirResult = chdir(modelDir);
+        if (chdirResult == 0) {
+            char cwd[1024];
+            getcwd(cwd, sizeof(cwd));
+            LOGI("[DIFFUSION] Changed working directory to: %s (for .tempcache)", cwd);
+        } else {
+            LOGW("[DIFFUSION] Failed to change working directory, .tempcache will use default location");
+        }
+        
+        // Validate backend type
         MNNForwardType actualBackend = static_cast<MNNForwardType>(backendType);
         LOGI("[DIFFUSION] Using user-selected backend: %d (CPU=0, OpenCL=3, Vulkan=7, NNAPI=6)", backendType);
         
@@ -1668,18 +1772,104 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
         LOGI("[DIFFUSION] Generating image: prompt='%s', output='%s', iter=%d, seed=%d",
              prompt, outputPath, iterNum, randomSeed);
         
-        // Prepare progress callback
+        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] About to prepare callback");
+        
+        // Get callback class and methods
         jclass callbackClass = env->GetObjectClass(callback);
         jmethodID onProgressMethod = env->GetMethodID(callbackClass, "onProgress", "(I)Z");
+        jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
         
-        std::function<void(int)> progressCallback = [env, callback, onProgressMethod](int progress) {
+        // Send initial config info to UI
+        if (onTokenMethod) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "\nPreparing: Steps=%d, CFG=7.5, Scheduler=PLMS, Seed=%s", 
+                     iterNum, randomSeed < 0 ? "Random" : std::to_string(randomSeed).c_str());
+            jstring jmsg = env->NewStringUTF(buf);
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        
+        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Callback prepared, creating lambda");
+        
+        // Track kernel compilation phase
+        static std::atomic<bool> first_run_flag{true};
+        bool is_first_run = first_run_flag.exchange(false);
+        if (is_first_run && onTokenMethod) {
+            jstring jmsg = env->NewStringUTF("\nFirst GPU run: compiling kernels (1-3 min)\nNext run will be faster");
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        
+        int total_steps = iterNum;
+        static int last_step = -1;  // Track last printed step
+        static bool unet_started = false;
+        
+        std::function<void(int)> progressCallback = [env, callback, onProgressMethod, onTokenMethod, total_steps](int progress) {
+            __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Progress callback invoked: %d%%", progress);
+            
+            // Send detailed progress to UI via onToken
+            if (onTokenMethod) {
+                char buf[256];
+                
+                // Text Encoder完成 (progress < 10%)
+                if (progress > 0 && progress < 10 && !unet_started) {
+                    snprintf(buf, sizeof(buf), "\nText Encoder: done\nUNet Steps(%d): ", total_steps);
+                    last_step = 0;
+                    unet_started = true;
+                }
+                // UNet步骤 (10% ~ 95%)
+                else if (progress >= 10 && progress < 95 && unet_started) {
+                    // 计算当前步数：progress从10%开始，95%结束，对应step 1~20
+                    int current_step = ((progress - 10) * total_steps) / 85 + 1;
+                    if (current_step > last_step && current_step <= total_steps) {
+                        snprintf(buf, sizeof(buf), "%d..", current_step);
+                        last_step = current_step;
+                    } else {
+                        buf[0] = '\0';
+                    }
+                }
+                // UNet完成，VAE Decoder开始 (progress >= 95%)
+                else if (progress >= 95 && progress < 100) {
+                    if (unet_started) {
+                        snprintf(buf, sizeof(buf), "%d\nUNet: done\nVAE Decoder: generating...", total_steps);
+                        unet_started = false;
+                    } else {
+                        buf[0] = '\0';
+                    }
+                }
+                // 全部完成 (progress == 100)
+                else if (progress == 100) {
+                    buf[0] = '\0';  // 在后面统一输出Completed
+                }
+                else {
+                    buf[0] = '\0';
+                }
+                
+                if (buf[0] != '\0') {
+                    jstring jmsg = env->NewStringUTF(buf);
+                    env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                    env->DeleteLocalRef(jmsg);
+                }
+            }
+            
+            // Also call standard progress callback
             if (callback && onProgressMethod) {
                 jboolean shouldContinue = env->CallBooleanMethod(callback, onProgressMethod, progress);
                 if (!shouldContinue) {
                     LOGI("[DIFFUSION] Generation cancelled by user");
+                    if (onTokenMethod) {
+                        jstring jmsg = env->NewStringUTF("\nCancelled by user");
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
                 }
             }
         };
+        
+        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ========================================");
+        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ABOUT TO CALL diffusion->run()");
+        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] This will call: tokenizer->encode → text_encoder → unet → vae_decoder");
+        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ========================================");
         
         // Run diffusion
         auto start = std::chrono::high_resolution_clock::now();
@@ -1690,16 +1880,36 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             randomSeed,
             progressCallback
         );
+        
+        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] diffusion->run() RETURNED");
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
         
+        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Releasing strings");
         env->ReleaseStringUTFChars(jPrompt, prompt);
         env->ReleaseStringUTFChars(jOutputPath, outputPath);
         
         if (success) {
             LOGI("[DIFFUSION] Image generated successfully in %lld ms", (long long)duration);
+            __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] SUCCESS - Total time: %lld ms", (long long)duration);
+            
+            // Send completion info to UI (final summary)
+            if (onTokenMethod) {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "\nCompleted (%.1fs)", duration / 1000.0);
+                jstring jmsg = env->NewStringUTF(buf);
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+            }
         } else {
             LOGE("[DIFFUSION] Image generation failed");
+            __android_log_print(ANDROID_LOG_ERROR, "MNN_JNI", "[DIFF_DEBUG] FAILED");
+            
+            if (onTokenMethod) {
+                jstring jmsg = env->NewStringUTF("\nGeneration failed");
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+            }
         }
         
         return success ? JNI_TRUE : JNI_FALSE;

@@ -31,6 +31,14 @@ public class MnnInference {
         }
     }
     
+    // ========== Logger Initialization (MUST call from Application.onCreate) ==========
+    
+    /**
+     * Initialize MNN logger to redirect MNN_PRINT/MNN_ERROR to LogManager
+     * CRITICAL: Must be called from Application.onCreate() after LogManager is initialized
+     */
+    public static native void initMnnLogger();
+    
     // ========== Session Management ==========
     
     /**
@@ -169,6 +177,7 @@ public class MnnInference {
      * @return Diagnostic report string
      */
     public static native String diagnoseOpenCL();
+    
     public interface InferenceCallback {
         /**
          * Called when a new token is generated
@@ -443,5 +452,96 @@ public class MnnInference {
          * @return true to continue, false to stop generation
          */
         boolean onProgress(int progress);
+        
+        /**
+         * Called to report detailed status messages (with <debug> tags)
+         * @param message Status message
+         * @return true to continue, false to stop
+         */
+        boolean onToken(String message);
+    }
+}
+
+class ConfigBuilder {
+    private StringBuilder json = new StringBuilder("{");
+    private boolean first = true;
+
+    public ConfigBuilder temperature(float temp) {
+        addField("temperature", temp);
+        return this;
+    }
+
+    public ConfigBuilder topP(float topP) {
+        addField("topP", topP);
+        return this;
+    }
+
+    public ConfigBuilder topK(int topK) {
+        addField("topK", topK);
+        return this;
+    }
+
+    public ConfigBuilder reuseKv(boolean reuse) {
+        addField("reuse_kv", reuse);
+        return this;
+    }
+
+    public ConfigBuilder useMmap(boolean mmap) {
+        addField("use_mmap", mmap);
+        return this;
+    }
+
+    public ConfigBuilder tmpPath(String path) {
+        addField("tmp_path", path);
+        return this;
+    }
+
+    public ConfigBuilder kvcacheMmap(boolean enable) {
+        addField("kvcache_mmap", enable);
+        return this;
+    }
+
+    public ConfigBuilder systemPrompt(String prompt) {
+        addField("system_prompt", prompt);
+        return this;
+    }
+
+    public ConfigBuilder chunk(int chunkSize) {
+        addField("chunk", chunkSize);
+        return this;
+    }
+
+    public ConfigBuilder kvcacheLimit(int limit) {
+        addField("kvcache_limit", limit);
+        return this;
+    }
+
+    private void addField(String key, String value) {
+        if (!first) json.append(",");
+        json.append("\"").append(key).append("\":\"").append(value).append("\"");
+        first = false;
+    }
+
+    private void addField(String key, int value) {
+        if (!first) json.append(",");
+        json.append("\"").append(key).append("\":").append(value);
+        first = false;
+    }
+
+    private void addField(String key, float value) {
+        if (!first) json.append(",");
+        json.append("\"").append(key).append("\":").append(value);
+        first = false;
+    }
+
+    private void addField(String key, boolean value) {
+        if (!first) json.append(",");
+        json.append("\"").append(key).append("\":").append(value);
+        first = false;
+    }
+
+    public String build() {
+        json.append("}");
+        return json.toString();
     }
 }

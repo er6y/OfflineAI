@@ -28,6 +28,32 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine {
     private static final String TAG = "LocalLLMDiffusionHandler";
     
+    // ========== Diffusion参数配置 (基于Stable Diffusion官方标准) ==========
+    /**
+     * Stable Diffusion标准参数：
+     * - Steps: 50步（CompVis/SD官方默认，NOT "可能10-20"）
+     * - CFG Scale: 7.5（当前MNN硬编码在diffusion.cpp:L261）
+     * - Scheduler: PLMS（固定，MNN当前唯一实现）
+     * - Seed: -1=随机，>=0=固定（可复现）
+     * - MemoryMode: 0=省内存/1=正常/2=平衡
+     * 
+     * 性能参考（基于log.ini实测）：
+     * - 50步 × 13秒/步 = ~10分钟（首次含kernel编译）
+     * - 50步 × 5秒/步 = ~4分钟（二次运行用缓存）
+     * - 20步 × 5秒/步 = ~1.5分钟（快速模式）
+     */
+    
+    // 默认推理步数（可通过maxTokens参数覆盖）
+    private static final int DEFAULT_STEPS = 20;  // 快速模式，平衡质量与速度
+    private static final int MAX_STEPS = 50;      // 标准模式，最佳质量
+    private static final int MIN_STEPS = 10;      // 预览模式，最快速度
+    
+    // CFG Scale（当前MNN硬编码，未来可暴露）
+    private static final float CFG_SCALE = 7.5f;
+    
+    // 调度器（当前固定PLMS）
+    private static final String SCHEDULER = "PLMS";
+    
     // Context reference
     private final Context context;
     
@@ -191,11 +217,35 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
                 
                 LogManager.logI(TAG, "Output path: " + outputPath);
                 
-                // Get denoising steps from params (default 20)
-                int steps = params != null && params.getMaxTokens() > 0 ? Math.min(params.getMaxTokens(), 50) : 20;
+                // 获取推理步数（通过maxTokens参数传递）
+                // 默认20步（快速模式），用户可通过设置调整：
+                // - 10步：预览模式（最快，~1分钟）
+                // - 20步：快速模式（推荐，~2分钟）
+                // - 50步：标准模式（最佳质量，~5-10分钟）
                 
-                // Notify loading
-                callback.onToken("🔄 Loading Stable Diffusion model...\n");
+                // TODO: 调试期间写死20步
+                int steps = 20;
+                LogManager.logI(TAG, "DEBUG: Using fixed steps: " + steps);
+                
+                // int steps = DEFAULT_STEPS;
+                // if (params != null && params.getMaxTokens() > 0) {
+                //     steps = Math.max(MIN_STEPS, Math.min(params.getMaxTokens(), MAX_STEPS));
+                //     LogManager.logI(TAG, "Using custom steps: " + steps + " (from maxTokens param)");
+                // } else {
+                //     LogManager.logI(TAG, "Using default steps: " + steps);
+                // }
+                
+                // 种子（固定种子可复现相同图片，用于调试）
+                int seed = -1;  // -1 = 随机
+                // TODO: 未来可通过params.temperature传递固定种子
+                
+                LogManager.logI(TAG, "Diffusion params: steps=" + steps + ", cfg=" + CFG_SCALE + ", scheduler=" + SCHEDULER + ", seed=" + seed);
+                
+                // 开始debug输出（只输出开头标签）
+                final StringBuilder debugLog = new StringBuilder();
+                debugLog.append("<debug>");
+                callback.onToken(debugLog.toString());
+                debugLog.setLength(0); // 清空，后续追加内容
                 
                 // Generate image
                 final long startTime = System.currentTimeMillis();
@@ -205,39 +255,53 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
                     outputPath,
                     steps,
                     -1, // random seed
-                    progress -> {
-                        // Update progress
-                        if (progress % 10 == 0 || progress == 100) {
-                            String progressText = "\n🎨 Generating image... " + progress + "%";
-                            callback.onToken(progressText);
+                    new MnnInference.DiffusionCallback() {
+                        @Override
+                        public boolean onProgress(int progress) {
+                            // Check if user requested stop
+                            if (shouldStop.get()) {
+                                LogManager.logI(TAG, "Image generation cancelled by user");
+                                return false;
+                            }
+                            return true;
                         }
                         
-                        // Check if user requested stop
-                        if (shouldStop.get()) {
-                            LogManager.logI(TAG, "Image generation cancelled by user");
-                            return false; // Stop generation
+                        @Override
+                        public boolean onToken(String message) {
+                            // 流式追加debug内容（不带标签，因为已经在开头输出<debug>了）
+                            callback.onToken(message);
+                            return !shouldStop.get();
                         }
-                        
-                        return true; // Continue generation
                     }
                 );
                 
                 long duration = System.currentTimeMillis() - startTime;
+                
+                // 关闭debug标签
+                callback.onToken("\n</debug>");
                 
                 // Check if generation succeeded
                 if (success && new File(outputPath).exists()) {
                     // Image generated successfully
                     LogManager.logI(TAG, "Image generated successfully in " + duration + "ms: " + outputPath);
                     
-                    // Send special token to indicate image location
-                    String imageMessage = "\n\n✨ Image generated successfully (" + (duration / 1000.0f) + "s)\n[IMAGE:" + outputPath + "]";
+                    // 输出顺序：debug -> 图片 -> performance
                     
-                    callback.onToken(imageMessage);
-                    callback.onComplete(imageMessage);
+                    // 1. 输出图片路径（使用[IMAGE:path]标记，RagQaFragment会自动处理并显示在chat UI中）
+                    callback.onToken("\n\n[IMAGE:" + outputPath + "]");
+                    
+                    // 2. 输出performance统计
+                    float totalSec = duration / 1000.0f;
+                    float secPerStep = totalSec / steps;
+                    String perfStats = String.format("<performance>Total: %.1fs | Steps: %d | Speed: %.1fs/step</performance>",
+                        totalSec, steps, secPerStep);
+                    callback.onToken("\n\n" + perfStats);
+                    
+                    callback.onComplete("Image generation completed");
                 } else {
-                    // Generation failed
-                    LogManager.logE(TAG, "Image generation failed");
-                    callback.onError("Image generation failed. Please check logs for details.");
+                    String errorMsg = "Failed to generate image";
+                    LogManager.logE(TAG, errorMsg);
+                    callback.onError(errorMsg);
                 }
                 
             } catch (Exception e) {

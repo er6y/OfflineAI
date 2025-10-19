@@ -26,6 +26,7 @@ android {
                           "-DMNN_LOW_MEMORY=ON",
                           "-DMNN_CPU_WEIGHT_DEQUANT_GEMM=ON",
                           "-DMNN_USE_LOGCAT=ON",
+                          "-DMNN_OPEN_TIME_TRACE=ON",
                           "-DMNN_BUILD_OPENCV=ON",
                           "-DMNN_IMGCODECS=ON",
                           "-DMNN_BUILD_AUDIO=OFF",

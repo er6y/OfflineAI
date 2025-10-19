@@ -25,6 +25,15 @@ public class GlobalApplication extends Application {
         
         // 初始化内存监控
         initMemoryMonitoring();
+        
+        // CRITICAL: Initialize MNN logger AFTER LogManager is ready
+        // This redirects MNN_PRINT/MNN_ERROR to LogManager for file logging
+        try {
+            com.offlineai.mnn.MnnInference.initMnnLogger();
+            Log.i(TAG, "✅ MNN logger initialized - MNN logs will be saved to file");
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to initialize MNN logger: " + e.getMessage());
+        }
     }
     
     @Override
