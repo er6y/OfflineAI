@@ -34,6 +34,18 @@ public class GlobalApplication extends Application {
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize MNN logger: " + e.getMessage());
         }
+        
+        // CRITICAL: Register custom CPU operators (e.g., CPUGroupNorm for Diffusion)
+        // Must be called AFTER MNN library is loaded but BEFORE any model loading
+        Log.i(TAG, "🔧 About to register CPUGroupNorm...");
+        try {
+            com.offlineai.mnn.MnnInference.registerCPUGroupNorm();
+            Log.i(TAG, "✅ Custom CPU operators registered (CPUGroupNorm for Diffusion)");
+        } catch (UnsatisfiedLinkError e) {
+            Log.e(TAG, "❌ JNI method not found: " + e.getMessage(), e);
+        } catch (Exception e) {
+            Log.e(TAG, "❌ Failed to register custom CPU operators: " + e.getMessage(), e);
+        }
     }
     
     @Override

@@ -208,3 +208,62 @@ message(STATUS "MNN_SUPPORT_TRANSFORMER_FUSE: ${MNN_SUPPORT_TRANSFORMER_FUSE}")
 message(STATUS "MNN_LOW_MEMORY: ${MNN_LOW_MEMORY}")
 message(STATUS "MNN Libraries: ${MNN_LIBS}")
 message(STATUS "================================================")
+
+# ========== Custom CPU Operators ==========
+# 方案：将自定义算子注入到上游 MNN 的 MNNCPU 目标
+# 
+# 优势：
+# - 源文件由 JNI 项目维护（libs/mnn-jni/src/main/cpp/）
+# - 编译由上游 MNN 管理（注入到 MNNCPU 目标）
+# - 不污染上游 MNN 目录，git pull 不受影响
+# - 只需修改本文件，无需改动上游 CMakeLists.txt
+#
+# 工作原理：
+# 1. target_sources(MNNCPU) 将我们的 .cpp 添加到 MNN 的 CPU backend
+# 2. target_include_directories(MNNCPU) 添加我们的目录到 include path
+# 3. MNN 的构建系统负责编译和链接
+#
+# 未来添加新算子：
+# 1. 在 libs/mnn-jni/src/main/cpp/ 创建 CPUXxxOp.hpp/cpp
+# 2. 使用 #include "CPUXxxOp.hpp" (相对路径)
+# 3. 在下方 CUSTOM_CPU_OPS_SRC 列表中添加
+# 4. 使用 REGISTER_CPU_OP_CREATOR 宏注册
+
+if(MNN_BUILD_FROM_SOURCE)
+    # 自定义算子文件列表（与 mnn_jni.cpp 同目录）
+    set(CUSTOM_CPU_OPS_SRC
+        ${CMAKE_CURRENT_SOURCE_DIR}/CPUGroupNorm.cpp
+        # 未来添加新算子：
+        # ${CMAKE_CURRENT_SOURCE_DIR}/CPUYourOp.cpp
+    )
+    
+    # 检查是否有自定义算子
+    set(CUSTOM_OPS_FOUND FALSE)
+    set(CUSTOM_OPS_LIST "")
+    foreach(src ${CUSTOM_CPU_OPS_SRC})
+        if(EXISTS ${src})
+            set(CUSTOM_OPS_FOUND TRUE)
+            get_filename_component(src_name ${src} NAME)
+            list(APPEND CUSTOM_OPS_LIST ${src_name})
+        endif()
+    endforeach()
+    
+    if(CUSTOM_OPS_FOUND)
+        # 将自定义算子源文件注入到 MNNCPU 目标
+        # MNNCPU 是 MNN 在 source/backend/cpu/CMakeLists.txt 中定义的 OBJECT library
+        target_sources(MNNCPU PRIVATE ${CUSTOM_CPU_OPS_SRC})
+        
+        # 添加当前目录到 MNNCPU 的 include path
+        # 这样 #include "CPUGroupNorm.hpp" 就能找到头文件
+        target_include_directories(MNNCPU PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        
+        message(STATUS "========== Custom CPU Operators ==========")
+        message(STATUS "✅ Injected from: ${CMAKE_CURRENT_SOURCE_DIR}")
+        foreach(op ${CUSTOM_OPS_LIST})
+            message(STATUS "   - ${op}")
+        endforeach()
+        message(STATUS "==========================================")
+    else()
+        message(STATUS "ℹ️  No custom CPU operators found")
+    endif()
+endif()

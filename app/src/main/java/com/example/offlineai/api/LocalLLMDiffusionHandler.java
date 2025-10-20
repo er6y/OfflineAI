@@ -166,6 +166,20 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
         int memoryMode = ConfigManager.getDiffusionMemoryMode(context);
         LogManager.logI(TAG, "Using memory mode from config: " + memoryMode + " (" + ConfigManager.getDiffusionMemoryModeString(context) + ")");
         
+        // CRITICAL: CPU backend doesn't support FmhaV2 operator in models
+        // OpenCL models have FmhaV2 baked in, need to use OpenCL backend
+        // Note: MNN has Attention fallback, but it's not triggered for pre-optimized models
+        boolean isOpenCLModel = modelPath.toLowerCase().contains("opencl");
+        if (backendType == 0 && isOpenCLModel) {
+            LogManager.logW(TAG, "⚠️ Using OpenCL-optimized model with CPU backend");
+            LogManager.logW(TAG, "This model uses FmhaV2 which may not work on CPU");
+            LogManager.logW(TAG, "If it crashes, please:");
+            LogManager.logW(TAG, "1. Switch to OpenCL backend (Settings → Diffusion Backend)");
+            LogManager.logW(TAG, "2. Or download a CPU-compatible Diffusion model");
+            LogManager.logW(TAG, "Attempting to load anyway...");
+            // Don't throw exception - let MNN try (it might work with some models)
+        }
+        
         diffusionHandle = MnnInference.createDiffusion(
             modelPath,
             0, // STABLE_DIFFUSION_1_5
@@ -177,13 +191,14 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
             // Provide detailed error message based on backend type
             String errorMsg = "Failed to create Diffusion session with backend: " + backendPreference;
             if (backendType == 0) { // CPU
-                errorMsg += "\nCPU backend should work now (slower). Please check model files or try GPU backend for better performance.";
+                errorMsg += "\nCPU backend failed. Note: CPU doesn't support FmhaV2 operator used in OpenCL models.";
+                errorMsg += "\nTry: Use OpenCL backend with opencl model, or use a basic CPU model.";
             } else if (backendType == 3) { // OpenCL
-                errorMsg += "\nOpenCL backend failed. Try: CPU (slower but works), Vulkan, or NNAPI.";
+                errorMsg += "\nOpenCL backend failed. Try: Vulkan, NNAPI, or CPU (with CPU-compatible model).";
             } else if (backendType == 7) { // Vulkan
-                errorMsg += "\nVulkan backend failed. Try: CPU (slower but works), OpenCL, or NNAPI.";
+                errorMsg += "\nVulkan backend failed. Try: OpenCL, NNAPI, or CPU (with CPU-compatible model).";
             } else {
-                errorMsg += "\nBackend initialization failed. Try CPU backend (slower but most compatible).";
+                errorMsg += "\nBackend initialization failed. Check model compatibility with selected backend.";
             }
             LogManager.logE(TAG, errorMsg);
             throw new Exception(errorMsg);

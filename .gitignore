@@ -128,3 +128,13 @@ app/release/
 /app/debug
 /Rerankers
 /ref
+
+# ========== MNN Submodule - Custom Operators Protection ==========
+# MNN is a git submodule, but we need to protect our custom CPU operators
+# from being overwritten when updating the submodule
+# Custom operators are in: libs/mnn/source/backend/cpu/CPUGroupNorm.*
+#
+# Note: If MNN uses shallow submodule ignore, add these exceptions:
+# !libs/mnn/source/backend/cpu/CPUGroupNorm.cpp
+# !libs/mnn/source/backend/cpu/CPUGroupNorm.hpp
+# !libs/mnn/source/backend/cpu/README_CUSTOM_OPS.md

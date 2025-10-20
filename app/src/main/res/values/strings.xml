@@ -394,7 +394,7 @@
     <string name="label_search_depth">检索数:</string>
     <string name="label_rerank_count">重排数:</string>
     <string name="label_system_prompt">系统提示词:</string>
-    <string name="label_user_prompt">用户提问:（长按浏览图片）</string>
+    <string name="label_user_prompt">用户提问:（长按浏览图片、相机）</string>
     <string name="label_title">标题:</string>
     <string name="label_content">内容:</string>
     <string name="label_add_progress">添加进度:</string>

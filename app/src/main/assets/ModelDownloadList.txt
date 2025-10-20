@@ -89,7 +89,7 @@
       "merges.txt": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/merges.txt",
       "vocab.json": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/vocab.json",
       "alphas.txt": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/alphas.txt",
-      "comments": "Stable Diffusion v1.5 Text2Image (OpenCL optimized, int8 quantized)"
+      "comments": "Stable Diffusion v1.5 Text2Image (OpenCL optimized, int8 quantized; 只能选OPENCL后端！！！/OpenCL is a mandatory, to be crashing on other backends!)"
     }
   }
 }

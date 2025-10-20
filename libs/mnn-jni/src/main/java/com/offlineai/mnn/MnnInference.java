@@ -39,6 +39,12 @@ public class MnnInference {
      */
     public static native void initMnnLogger();
     
+    /**
+     * Register custom CPU operators (e.g., CPUGroupNorm)
+     * CRITICAL: Must be called after MNN initialization (e.g., in Application.onCreate)
+     */
+    public static native void registerCPUGroupNorm();
+    
     // ========== Session Management ==========
     
     /**

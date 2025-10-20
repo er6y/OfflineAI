@@ -388,7 +388,7 @@
     <string name="label_search_depth">Search Count:</string>
     <string name="label_rerank_count">Rerank Count:</string>
     <string name="label_system_prompt">System Prompt:</string>
-    <string name="label_user_prompt">User Question:(Long press to browse images)</string>
+    <string name="label_user_prompt">User Question:(Long press to browse images, camera)</string>
     <string name="label_title">Title:</string>
     <string name="label_content">Content:</string>
     <string name="label_add_progress">Add Progress:</string>

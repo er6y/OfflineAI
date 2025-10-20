@@ -76,6 +76,16 @@ android {
     }
 }
 
+// ========== Custom MNN Operators Management ==========
+// 自定义算子文件位置：src/main/cpp/CPUGroupNorm.cpp/hpp
+// CMake会自动注入到MNN的MNNCPU目标，见 CMakeLists.txt
+// 
+// 优势：
+// - 所有JNI代码（mnn_jni.cpp + 自定义算子）集中管理
+// - 不污染上游：libs/mnn/ 保持干净，随时可以 git pull
+// - 零冗余：只有一份源文件
+// - 结构清晰：不需要额外的 custom_ops 目录
+
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
