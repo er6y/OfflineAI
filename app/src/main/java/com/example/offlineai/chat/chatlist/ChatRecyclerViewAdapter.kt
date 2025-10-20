@@ -28,6 +28,9 @@ class ChatRecyclerViewAdapter(
     
     // Callback for image preview
     var onImagePreviewCallback: ((String) -> Unit)? = null
+    
+    // Callback for image long press menu
+    var onImageLongPressCallback: ((String) -> Unit)? = null
 
     fun updateModelNameAndItems(modelName: String, items: MutableList<ChatDataItem>) {
         this.modelName = modelName
@@ -73,6 +76,7 @@ class ChatRecyclerViewAdapter(
             (holder as AssistantViewHolder).apply {
                 setTransferToNoteCallback(onTransferToNoteCallback)
                 setImagePreviewCallback(onImagePreviewCallback)
+                setImageLongPressCallback(onImageLongPressCallback)
                 bind(items[position], modelName, null)
             }
         } else if (viewType == ChatViewHolders.USER) {
@@ -96,6 +100,7 @@ class ChatRecyclerViewAdapter(
             (holder as AssistantViewHolder).apply {
                 setTransferToNoteCallback(onTransferToNoteCallback)
                 setImagePreviewCallback(onImagePreviewCallback)
+                setImageLongPressCallback(onImageLongPressCallback)
                 bind(items[position], modelName, payloads)
             }
         } else if (viewType == ChatViewHolders.USER) {

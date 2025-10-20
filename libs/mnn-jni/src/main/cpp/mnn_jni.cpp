@@ -1800,11 +1800,30 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             env->DeleteLocalRef(jmsg);
         }
         
+        // Progress tracking variables
         int total_steps = iterNum;
-        static int last_step = -1;  // Track last printed step
-        static bool unet_started = false;
+        int last_step = 0;
+        bool unet_started = false;
         
-        std::function<void(int)> progressCallback = [env, callback, onProgressMethod, onTokenMethod, total_steps](int progress) {
+        // VAE decoding progress (heartbeat) 
+        std::atomic<bool> vae_decoding{false};
+        std::atomic<bool> should_stop{false};
+        
+        // Heartbeat thread for VAE decoding progress
+        std::thread heartbeat_thread([&]() {
+            while (!should_stop) {
+                if (vae_decoding && onTokenMethod) {
+                    jstring jmsg = env->NewStringUTF(".");
+                    env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                    env->DeleteLocalRef(jmsg);
+                    std::this_thread::sleep_for(std::chrono::seconds(3));
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                }
+            }
+        });
+        
+        std::function<void(int)> progressCallback = [env, callback, onProgressMethod, onTokenMethod, total_steps, &vae_decoding, &last_step, &unet_started](int progress) {
             __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Progress callback invoked: %d%%", progress);
             
             // Send detailed progress to UI via onToken
@@ -1824,11 +1843,16 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
                     if (current_step > last_step && current_step <= total_steps) {
                         snprintf(buf, sizeof(buf), "%d..", current_step);
                         last_step = current_step;
+                        // UNet最后一步完成时，输出VAE Decoder信息
+                        if (current_step == total_steps) {
+                            snprintf(buf, sizeof(buf), "%d\nUNet: done\nVAE Decoder: generating...", total_steps);
+                            unet_started = false;
+                        }
                     } else {
                         buf[0] = '\0';
                     }
                 }
-                // UNet完成，VAE Decoder开始 (progress >= 95%)
+                // UNet完成，VAE Decoder开始 (progress >= 95%) - 备用逻辑
                 else if (progress >= 95 && progress < 100) {
                     if (unet_started) {
                         snprintf(buf, sizeof(buf), "%d\nUNet: done\nVAE Decoder: generating...", total_steps);
@@ -1852,23 +1876,37 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
                 }
             }
             
-            // Also call standard progress callback
-            if (callback && onProgressMethod) {
-                jboolean shouldContinue = env->CallBooleanMethod(callback, onProgressMethod, progress);
-                if (!shouldContinue) {
-                    LOGI("[DIFFUSION] Generation cancelled by user");
-                    if (onTokenMethod) {
-                        jstring jmsg = env->NewStringUTF("\nCancelled by user");
-                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
-                        env->DeleteLocalRef(jmsg);
-                    }
-                }
+            // Enable VAE decoding heartbeat when we reach final stage
+            if (progress >= 95 && progress < 100) {
+                vae_decoding = true;
+            }
+            
+            // Also call standard progress callback for UI progress bar
+            if (onProgressMethod) {
+                env->CallBooleanMethod(callback, onProgressMethod, progress);
             }
         };
         
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ========================================");
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ABOUT TO CALL diffusion->run()");
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] This will call: tokenizer->encode → text_encoder → unet → vae_decoder");
+        
+        // CRITICAL: In non-enough memory mode, need to reload before each run
+        // See MNN diffusion_demo.cpp line 67: if(memory_mode != 1) { diffusion->load(); }
+        static std::atomic<bool> first_generation{true};
+        if (!first_generation.load()) {
+            __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Not first generation, reloading diffusion models...");
+            if (onTokenMethod) {
+                jstring jmsg = env->NewStringUTF("\nReloading models...");
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+            }
+            diffusion->load();
+            __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Diffusion models reloaded");
+        } else {
+            first_generation.store(false);
+        }
+        
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ========================================");
         
         // Run diffusion
@@ -1880,6 +1918,13 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             randomSeed,
             progressCallback
         );
+        
+        // Stop heartbeat thread
+        vae_decoding = false;
+        should_stop = true;
+        if (heartbeat_thread.joinable()) {
+            heartbeat_thread.join();
+        }
         
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] diffusion->run() RETURNED");
         auto end = std::chrono::high_resolution_clock::now();

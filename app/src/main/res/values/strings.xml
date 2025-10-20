@@ -850,6 +850,26 @@
     <string name="label_image_preprocess_size">图片预处理尺寸(112~MAX):</string>
     <string name="text_image_preprocess_size_value">图片预处理尺寸: %s</string>
     <!-- label_image_encoding_threads已移除（MNN不支持独立配置） -->
+    
+    <!-- VL设置 -->
+    <string name="title_vl_settings">VL 设置</string>
+    
+    <!-- 扩散设置 -->
+    <string name="title_diffusion_settings">扩散设置</string>
+    <string name="label_diffusion_memory_mode">内存模式:</string>
+    <string name="label_diffusion_steps">推理步数(1~50):</string>
+    <string name="label_diffusion_seed">随机种子:</string>
+    <string name="hint_diffusion_seed">输入种子值</string>
+    <string name="label_random">随机</string>
+    <string name="text_diffusion_steps_value">Steps: %d</string>
+    
+    <!-- 扩散内存模式选项 -->
+    <string-array name="diffusion_memory_modes">
+        <item>low (省内存)</item>
+        <item>balance (平衡)</item>
+        <item>enough (快速)</item>
+    </string-array>
+    
     <string name="title_global_settings">全局设置</string>
     <string name="label_debug_mode">调试模式</string>
     <string name="label_backend_preference">后端偏好</string>

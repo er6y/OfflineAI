@@ -237,6 +237,13 @@ public class RagQaFragment extends Fragment {
             return null; // Return Unit for Kotlin compatibility
         });
         
+        // Set image long press callback (copy/save/share menu using ActionMode)
+        chatAdapter.setOnImageLongPressCallback(imagePath -> {
+            // Start ActionMode on the RecyclerView (since we don't have direct access to ImageView here)
+            // The ActionMode will be triggered from ChatViewHolders instead
+            return null; // Return Unit for Kotlin compatibility
+        });
+        
         recyclerViewChat.setLayoutManager(new LinearLayoutManager(requireContext()));
         recyclerViewChat.setAdapter(chatAdapter);
         LogManager.logD(TAG, "Chat RecyclerView initialized with callbacks");
@@ -4386,7 +4393,7 @@ public class RagQaFragment extends Fragment {
         try {
             android.graphics.Bitmap bitmap = null;
             
-            // Check if path is content:// URI or file path
+            // Check if path is content:// URI, file:// URI, or plain file path
             if (imagePath.startsWith("content://")) {
                 // Load from content URI using ContentResolver
                 android.net.Uri uri = android.net.Uri.parse(imagePath);
@@ -4396,15 +4403,41 @@ public class RagQaFragment extends Fragment {
                 } catch (java.io.IOException e) {
                     LogManager.logE(TAG, "Failed to load image from content URI: " + imagePath, e);
                 }
+            } else if (imagePath.startsWith("file://")) {
+                // Strip file:// prefix and load from file path
+                String filePath = imagePath.substring(7); // Remove "file://"
+                bitmap = android.graphics.BitmapFactory.decodeFile(filePath);
+                LogManager.logD(TAG, "Loading image from file:// URI: " + filePath);
             } else {
-                // Load from file path
+                // Load from plain file path
                 bitmap = android.graphics.BitmapFactory.decodeFile(imagePath);
+                LogManager.logD(TAG, "Loading image from file path: " + imagePath);
             }
             
             if (bitmap != null) {
                 imageView.setImageBitmap(bitmap);
                 imageView.setAdjustViewBounds(true);
                 imageView.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+                
+                // Make ImageView focusable and clickable to properly handle ActionMode dismissal
+                imageView.setFocusable(true);
+                imageView.setFocusableInTouchMode(true);
+                imageView.setClickable(true);
+                
+                // Add click listener to dismiss ActionMode
+                imageView.setOnClickListener(v -> {
+                    if (currentImageActionMode != null) {
+                        currentImageActionMode.finish();
+                        currentImageActionMode = null;
+                    }
+                });
+                
+                // Add long press listener to start ActionMode (like text selection)
+                String finalImagePath = imagePath;
+                imageView.setOnLongClickListener(v -> {
+                    startImageActionMode(v, finalImagePath);
+                    return true;
+                });
             } else {
                 LogManager.logE(TAG, "Failed to load image bitmap: " + imagePath);
                 android.widget.TextView errorView = new android.widget.TextView(requireContext());
@@ -4429,6 +4462,161 @@ public class RagQaFragment extends Fragment {
         builder.setView(imageView);
         builder.setPositiveButton(android.R.string.ok, null);
         builder.show();
+    }
+    
+    // Store current ActionMode reference to dismiss it when needed
+    private android.view.ActionMode currentImageActionMode = null;
+    
+    /**
+     * Start ActionMode for image operations (copy/save/share) - similar to text selection menu
+     */
+    private void startImageActionMode(View view, String imagePath) {
+        // Strip file:// prefix if present
+        String filePath = imagePath;
+        if (filePath.startsWith("file://")) {
+            filePath = filePath.substring(7);
+        }
+        
+        File imageFile = new File(filePath);
+        if (!imageFile.exists()) {
+            Toast.makeText(requireContext(), "Image file not found", Toast.LENGTH_SHORT).show();
+            LogManager.logE(TAG, "Image file not found: " + filePath);
+            return;
+        }
+        
+        // Create Uri for the file
+        android.net.Uri imageUri = androidx.core.content.FileProvider.getUriForFile(
+            requireContext(),
+            requireContext().getPackageName() + ".fileprovider",
+            imageFile
+        );
+        
+        // Create ActionMode callback (similar to text selection)
+        android.view.ActionMode.Callback callback = new android.view.ActionMode.Callback() {
+            @Override
+            public boolean onCreateActionMode(android.view.ActionMode mode, android.view.Menu menu) {
+                // Don't keep system default menu, we'll add custom items
+                return true;
+            }
+            
+            @Override
+            public boolean onPrepareActionMode(android.view.ActionMode mode, android.view.Menu menu) {
+                // Clear any existing items to avoid duplicates
+                menu.clear();
+                
+                // Add custom image operation menu items (COPY, SAVE, SHARE)
+                // Use order values to control display order: lower values appear first
+                menu.add(android.view.Menu.NONE, android.view.Menu.FIRST + 100, 1, getString(R.string.common_copy));
+                menu.add(android.view.Menu.NONE, android.view.Menu.FIRST + 101, 2, getString(R.string.common_save));
+                menu.add(android.view.Menu.NONE, android.view.Menu.FIRST + 102, 3, getString(R.string.common_share));
+                return true;
+            }
+            
+            @Override
+            public boolean onActionItemClicked(android.view.ActionMode mode, android.view.MenuItem item) {
+                switch (item.getItemId()) {
+                    case android.view.Menu.FIRST + 100: // Copy
+                        copyImageToClipboard(imageUri);
+                        mode.finish();
+                        return true;
+                    case android.view.Menu.FIRST + 101: // Save
+                        saveImageToGallery(imageFile);
+                        mode.finish();
+                        return true;
+                    case android.view.Menu.FIRST + 102: // Share
+                        shareImage(imageUri);
+                        mode.finish();
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+            
+            @Override
+            public void onDestroyActionMode(android.view.ActionMode mode) {
+                // Clean up reference
+                if (currentImageActionMode == mode) {
+                    currentImageActionMode = null;
+                }
+            }
+        };
+        
+        // Dismiss previous ActionMode if exists
+        if (currentImageActionMode != null) {
+            currentImageActionMode.finish();
+        }
+        
+        // Start floating ActionMode (like text selection) instead of primary ActionMode (top bar)
+        currentImageActionMode = view.startActionMode(callback, android.view.ActionMode.TYPE_FLOATING);
+    }
+    
+    /**
+     * Copy image to clipboard
+     */
+    private void copyImageToClipboard(android.net.Uri imageUri) {
+        try {
+            ClipboardManager clipboard = (ClipboardManager) requireContext().getSystemService(Context.CLIPBOARD_SERVICE);
+            ClipData clip = ClipData.newUri(requireContext().getContentResolver(), "Image", imageUri);
+            clipboard.setPrimaryClip(clip);
+            Toast.makeText(requireContext(), "Image copied to clipboard", Toast.LENGTH_SHORT).show();
+            LogManager.logI(TAG, "Image copied to clipboard");
+        } catch (Exception e) {
+            Toast.makeText(requireContext(), "Failed to copy image", Toast.LENGTH_SHORT).show();
+            LogManager.logE(TAG, "Failed to copy image to clipboard", e);
+        }
+    }
+    
+    /**
+     * Save image to gallery
+     */
+    private void saveImageToGallery(File imageFile) {
+        try {
+            // Use MediaStore to save image
+            android.content.ContentValues values = new android.content.ContentValues();
+            values.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "diffusion_" + System.currentTimeMillis() + ".jpg");
+            values.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+            values.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, android.os.Environment.DIRECTORY_PICTURES + "/OfflineAI");
+            
+            android.net.Uri uri = requireContext().getContentResolver().insert(
+                android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+            
+            if (uri != null) {
+                java.io.OutputStream outputStream = requireContext().getContentResolver().openOutputStream(uri);
+                if (outputStream != null) {
+                    java.io.FileInputStream inputStream = new java.io.FileInputStream(imageFile);
+                    byte[] buffer = new byte[8192];
+                    int bytesRead;
+                    while ((bytesRead = inputStream.read(buffer)) != -1) {
+                        outputStream.write(buffer, 0, bytesRead);
+                    }
+                    inputStream.close();
+                    outputStream.close();
+                    
+                    Toast.makeText(requireContext(), "Image saved to gallery", Toast.LENGTH_SHORT).show();
+                    LogManager.logI(TAG, "Image saved to gallery: " + uri);
+                }
+            }
+        } catch (Exception e) {
+            Toast.makeText(requireContext(), "Failed to save image", Toast.LENGTH_SHORT).show();
+            LogManager.logE(TAG, "Failed to save image to gallery", e);
+        }
+    }
+    
+    /**
+     * Share image via system share dialog
+     */
+    private void shareImage(android.net.Uri imageUri) {
+        try {
+            Intent shareIntent = new Intent(Intent.ACTION_SEND);
+            shareIntent.setType("image/jpeg");
+            shareIntent.putExtra(Intent.EXTRA_STREAM, imageUri);
+            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(shareIntent, "Share Image"));
+            LogManager.logI(TAG, "Share image intent launched");
+        } catch (Exception e) {
+            Toast.makeText(requireContext(), "Failed to share image", Toast.LENGTH_SHORT).show();
+            LogManager.logE(TAG, "Failed to share image", e);
+        }
     }
     
     /**

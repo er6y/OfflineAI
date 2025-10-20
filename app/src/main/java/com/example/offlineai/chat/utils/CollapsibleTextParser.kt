@@ -65,8 +65,9 @@ object CollapsibleTextParser {
         // Set display text (remaining text after extraction)
         chatDataItem.displayText = remainingText.trim()
         
-        // If display text is empty but we have sections, show a placeholder
+        // If no display text but has other sections, show hint (except when there's an image)
         if (chatDataItem.displayText.isNullOrEmpty() && 
+            chatDataItem.imageUri == null &&  // Don't show hint if there's an image
             (!chatDataItem.thinkingText.isNullOrEmpty() || 
              !chatDataItem.debugText.isNullOrEmpty() || 
              !chatDataItem.performanceText.isNullOrEmpty())) {

@@ -137,7 +137,7 @@ object ChatViewHolders {
     }
 
     class AssistantViewHolder(view: View) : RecyclerView.ViewHolder(view), 
-        View.OnClickListener {
+        View.OnClickListener, View.OnLongClickListener {
         
         private val viewText: TextView = view.findViewById(R.id.tv_chat_text)
         private val imageGenerated: ImageView = view.findViewById(R.id.image_generated)
@@ -148,6 +148,12 @@ object ChatViewHolders {
         
         // Callback for image preview
         private var imagePreviewCallback: ((String) -> Unit)? = null
+        
+        // Callback for image long press menu
+        private var imageLongPressCallback: ((String) -> Unit)? = null
+        
+        // Store current ActionMode reference for dismissal
+        private var currentImageActionMode: android.view.ActionMode? = null
         
         // Thinking section
         private val thinkingToggle: LinearLayout = view.findViewById(R.id.ll_thinking_toggle)
@@ -181,7 +187,18 @@ object ChatViewHolders {
             setupTextSelection(viewThinking)
             setupTextSelection(viewDebug)
             setupTextSelection(viewPerformance)
-            imageGenerated.setOnClickListener(this)
+            
+            // Set click listener to dismiss ActionMode if active
+            imageGenerated.setOnClickListener {
+                if (currentImageActionMode != null) {
+                    currentImageActionMode?.finish()
+                    currentImageActionMode = null
+                } else {
+                    // Normal click behavior
+                    onClick(it)
+                }
+            }
+            imageGenerated.setOnLongClickListener(this)
             
             // Thinking toggle
             thinkingToggle.setOnClickListener {
@@ -211,6 +228,10 @@ object ChatViewHolders {
         
         fun setImagePreviewCallback(callback: ((String) -> Unit)?) {
             this.imagePreviewCallback = callback
+        }
+        
+        fun setImageLongPressCallback(callback: ((String) -> Unit)?) {
+            this.imageLongPressCallback = callback
         }
         
         private fun setupTextSelection(textView: TextView) {
@@ -415,6 +436,159 @@ object ChatViewHolders {
                         Toast.makeText(itemView.context, "No image to preview", Toast.LENGTH_SHORT).show()
                     }
                 }
+            }
+        }
+        
+        override fun onLongClick(v: View): Boolean {
+            when (v.id) {
+                R.id.image_generated -> {
+                    // Start ActionMode for image operations (copy/save/share) - similar to text selection
+                    val chatDataItem = v.tag as? ChatDataItem
+                    val imageUri = chatDataItem?.imageUri
+                    if (imageUri != null) {
+                        startImageActionMode(v, imageUri.toString())
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+        
+        /**
+         * Start ActionMode for image operations (copy/save/share)
+         */
+        private fun startImageActionMode(view: View, imagePath: String) {
+            val context = view.context
+            
+            // Strip file:// prefix if present
+            val filePath = if (imagePath.startsWith("file://")) {
+                imagePath.substring(7)
+            } else {
+                imagePath
+            }
+            
+            val imageFile = java.io.File(filePath)
+            if (!imageFile.exists()) {
+                Toast.makeText(context, "Image file not found", Toast.LENGTH_SHORT).show()
+                return
+            }
+            
+            // Create Uri for the file
+            val imageUri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                context.packageName + ".fileprovider",
+                imageFile
+            )
+            
+            // Create ActionMode callback (similar to text selection)
+            val callback = object : android.view.ActionMode.Callback {
+                override fun onCreateActionMode(mode: android.view.ActionMode, menu: android.view.Menu): Boolean {
+                    // Don't keep system default menu, we'll add custom items
+                    return true
+                }
+                
+                override fun onPrepareActionMode(mode: android.view.ActionMode, menu: android.view.Menu): Boolean {
+                    // Clear any existing items to avoid duplicates
+                    menu.clear()
+                    
+                    // Add custom image operation menu items (COPY, SAVE, SHARE)
+                    // Use order values to control display order: lower values appear first
+                    menu.add(android.view.Menu.NONE, android.view.Menu.FIRST + 100, 1, context.getString(R.string.common_copy))
+                    menu.add(android.view.Menu.NONE, android.view.Menu.FIRST + 101, 2, context.getString(R.string.common_save))
+                    menu.add(android.view.Menu.NONE, android.view.Menu.FIRST + 102, 3, context.getString(R.string.common_share))
+                    return true
+                }
+                
+                override fun onActionItemClicked(mode: android.view.ActionMode, item: android.view.MenuItem): Boolean {
+                    when (item.itemId) {
+                        android.view.Menu.FIRST + 100 -> { // Copy
+                            copyImageToClipboard(context, imageUri)
+                            mode.finish()
+                            return true
+                        }
+                        android.view.Menu.FIRST + 101 -> { // Save
+                            saveImageToGallery(context, imageFile)
+                            mode.finish()
+                            return true
+                        }
+                        android.view.Menu.FIRST + 102 -> { // Share
+                            shareImage(context, imageUri)
+                            mode.finish()
+                            return true
+                        }
+                    }
+                    return false
+                }
+                
+                override fun onDestroyActionMode(mode: android.view.ActionMode) {
+                    // Clean up reference
+                    if (currentImageActionMode == mode) {
+                        currentImageActionMode = null
+                    }
+                }
+            }
+            
+            // Dismiss previous ActionMode if exists
+            currentImageActionMode?.finish()
+            
+            // Start floating ActionMode (like text selection) instead of primary ActionMode (top bar)
+            currentImageActionMode = view.startActionMode(callback, android.view.ActionMode.TYPE_FLOATING)
+        }
+        
+        /**
+         * Copy image to clipboard
+         */
+        private fun copyImageToClipboard(context: android.content.Context, imageUri: android.net.Uri) {
+            try {
+                val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newUri(context.contentResolver, "Image", imageUri)
+                clipboard.setPrimaryClip(clip)
+                Toast.makeText(context, "Image copied to clipboard", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Toast.makeText(context, "Failed to copy image", Toast.LENGTH_SHORT).show()
+            }
+        }
+        
+        /**
+         * Save image to gallery
+         */
+        private fun saveImageToGallery(context: android.content.Context, imageFile: java.io.File) {
+            try {
+                val values = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "diffusion_${System.currentTimeMillis()}.jpg")
+                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "${android.os.Environment.DIRECTORY_PICTURES}/OfflineAI")
+                }
+                
+                val uri = context.contentResolver.insert(
+                    android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                
+                uri?.let {
+                    context.contentResolver.openOutputStream(it)?.use { outputStream ->
+                        java.io.FileInputStream(imageFile).use { inputStream ->
+                            inputStream.copyTo(outputStream)
+                        }
+                    }
+                    Toast.makeText(context, "Image saved to gallery", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Failed to save image", Toast.LENGTH_SHORT).show()
+            }
+        }
+        
+        /**
+         * Share image via system share dialog
+         */
+        private fun shareImage(context: android.content.Context, imageUri: android.net.Uri) {
+            try {
+                val intent = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                    type = "image/*"
+                    putExtra(android.content.Intent.EXTRA_STREAM, imageUri)
+                    addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                context.startActivity(android.content.Intent.createChooser(intent, "Share Image"))
+            } catch (e: Exception) {
+                Toast.makeText(context, "Failed to share image", Toast.LENGTH_SHORT).show()
             }
         }
 

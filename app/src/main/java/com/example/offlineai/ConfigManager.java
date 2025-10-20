@@ -132,6 +132,12 @@ public class ConfigManager {
     public static final String KEY_PRIORITY_MANUAL_PARAMS = "priority_manual_params"; // 优先手动参数开关
     public static final String KEY_IMAGE_PREPROCESS_SIZE = "image_preprocess_size"; // 图片预处理尺寸
     
+    // Diffusion扩散模型配置键
+    public static final String KEY_DIFFUSION_MEMORY_MODE = "diffusion_memory_mode"; // 内存模式 (0=low, 1=enough, 2=balance)
+    public static final String KEY_DIFFUSION_STEPS = "diffusion_steps"; // 推理步数 (1-50)
+    public static final String KEY_DIFFUSION_SEED = "diffusion_seed"; // 随机种子 (-1=随机)
+    public static final String KEY_DIFFUSION_SEED_RANDOM = "diffusion_seed_random"; // 是否使用随机种子
+    
     // 语言设置配置键
     public static final String KEY_LANGUAGE = "language"; // 语言设置
     
@@ -163,6 +169,12 @@ public class ConfigManager {
     public static final int DEFAULT_THREADS = 4;
     // DEFAULT_IMAGE_ENCODING_THREADS已移除（MNN不支持独立配置）
     public static final int DEFAULT_MAX_NEW_TOKENS = 512; // 最大输出token数默认值
+    
+    // Diffusion扩散模型默认值
+    public static final int DEFAULT_DIFFUSION_MEMORY_MODE = 0; // 0=low (省内存)
+    public static final int DEFAULT_DIFFUSION_STEPS = 20; // 默认20步（平衡质量和速度）
+    public static final int DEFAULT_DIFFUSION_SEED = -1; // -1表示随机
+    public static final boolean DEFAULT_DIFFUSION_SEED_RANDOM = true; // 默认使用随机种子
     
     // LlamaCpp 相关默认值
     public static final String DEFAULT_LLAMACPP_MODEL_PATH = "files/models/llamacpp";
@@ -1205,6 +1217,93 @@ public class ConfigManager {
         setInt(context, KEY_KV_CACHE_SIZE, maxNewTokens);
     }
 
+    /**
+     * 获取Diffusion内存模式
+     * @param context 上下文
+     * @return 内存模式整数值 (0=low, 1=enough, 2=balance)
+     */
+    public static int getDiffusionMemoryMode(Context context) {
+        return getInt(context, KEY_DIFFUSION_MEMORY_MODE, DEFAULT_DIFFUSION_MEMORY_MODE);
+    }
+    
+    /**
+     * 设置Diffusion内存模式
+     * @param context 上下文
+     * @param mode 内存模式 (0=low, 1=enough, 2=balance)
+     */
+    public static void setDiffusionMemoryMode(Context context, int mode) {
+        setInt(context, KEY_DIFFUSION_MEMORY_MODE, mode);
+    }
+    
+    /**
+     * 获取Diffusion内存模式描述文本
+     * @param context 上下文
+     * @return 内存模式描述（low/balance/enough）
+     */
+    public static String getDiffusionMemoryModeString(Context context) {
+        int mode = getDiffusionMemoryMode(context);
+        switch (mode) {
+            case 0: return "low";
+            case 1: return "enough";
+            case 2: return "balance";
+            default: return "low";
+        }
+    }
+    
+    /**
+     * 获取Diffusion推理步数
+     * @param context 上下文
+     * @return 推理步数 (1-50)
+     */
+    public static int getDiffusionSteps(Context context) {
+        return getInt(context, KEY_DIFFUSION_STEPS, DEFAULT_DIFFUSION_STEPS);
+    }
+    
+    /**
+     * 设置Diffusion推理步数
+     * @param context 上下文
+     * @param steps 推理步数 (1-50)
+     */
+    public static void setDiffusionSteps(Context context, int steps) {
+        setInt(context, KEY_DIFFUSION_STEPS, steps);
+    }
+    
+    /**
+     * 获取Diffusion随机种子
+     * @param context 上下文
+     * @return 随机种子 (-1表示随机)
+     */
+    public static int getDiffusionSeed(Context context) {
+        return getInt(context, KEY_DIFFUSION_SEED, DEFAULT_DIFFUSION_SEED);
+    }
+    
+    /**
+     * 设置Diffusion随机种子
+     * @param context 上下文
+     * @param seed 随机种子
+     */
+    public static void setDiffusionSeed(Context context, int seed) {
+        setInt(context, KEY_DIFFUSION_SEED, seed);
+    }
+    
+    /**
+     * 获取Diffusion是否使用随机种子
+     * @param context 上下文
+     * @return true=使用随机种子，false=使用固定种子
+     */
+    public static boolean getDiffusionSeedRandom(Context context) {
+        return getBoolean(context, KEY_DIFFUSION_SEED_RANDOM, DEFAULT_DIFFUSION_SEED_RANDOM);
+    }
+    
+    /**
+     * 设置Diffusion是否使用随机种子
+     * @param context 上下文
+     * @param random true=随机，false=固定
+     */
+    public static void setDiffusionSeedRandom(Context context, boolean random) {
+        setBoolean(context, KEY_DIFFUSION_SEED_RANDOM, random);
+    }
+    
     /**
      * 获取最大输出token数（兼容性方法，已废弃）
      * @deprecated 使用 getMaxNewTokens() 替代

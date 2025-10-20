@@ -591,6 +591,16 @@
                 android:layout_height="wrap_content" />
         </LinearLayout>
         
+        <!-- VL 设置标题 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_vl_settings"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp" />
+        
         <!-- 图片预处理尺寸 -->
         <LinearLayout
             android:layout_width="match_parent"
@@ -630,6 +640,104 @@
         <!-- ONNX引擎开关UI已移除 -->
         
         <!-- 思考模式开关已移动到RAG问答界面 -->
+
+        <!-- 扩散设置标题 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_diffusion_settings"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp" />
+        
+        <!-- 内存模式 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/label_diffusion_memory_mode"
+                android:textSize="16sp" />
+
+            <Spinner
+                android:id="@+id/spinnerDiffusionMemoryMode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="120dp" />
+        </LinearLayout>
+        
+        <!-- Steps滑块 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_diffusion_steps"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarDiffusionSteps"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="49"
+                android:progress="19" />
+
+            <TextView
+                android:id="@+id/textViewDiffusionStepsValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="20"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+        
+        <!-- Seed设置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_diffusion_seed"
+                android:textSize="16sp" />
+
+            <EditText
+                android:id="@+id/editTextDiffusionSeed"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:inputType="number"
+                android:hint="@string/hint_diffusion_seed"
+                android:maxLines="1" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchDiffusionSeedRandom"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/label_random"
+                android:layout_marginStart="8dp"
+                android:checked="true" />
+        </LinearLayout>
 
         <!-- 全局设置 -->
         <TextView

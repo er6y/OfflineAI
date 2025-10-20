@@ -2,8 +2,11 @@ package com.example.offlineai.api;
 
 import android.content.Context;
 import android.net.Uri;
+import android.util.Log;
 
+import com.example.offlineai.ConfigManager;
 import com.example.offlineai.LogManager;
+import com.example.offlineai.SettingsFragment;
 import com.offlineai.mnn.MnnInference;
 
 import java.io.File;
@@ -110,9 +113,10 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
             return;
         }
         
-        LogManager.logI(TAG, "Initializing Diffusion handler with model: " + modelPath);
-        
+        // Save model path for performance stats
         this.currentModelPath = modelPath;
+        
+        LogManager.logI(TAG, "Initializing Diffusion handler with model: " + modelPath);
         this.modelConfig = config;
         
         // Validate model directory
@@ -158,11 +162,15 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
             LogManager.logW(TAG, "========================================");
         }
         
+        // 从ConfigManager获取内存模式配置
+        int memoryMode = ConfigManager.getDiffusionMemoryMode(context);
+        LogManager.logI(TAG, "Using memory mode from config: " + memoryMode + " (" + ConfigManager.getDiffusionMemoryModeString(context) + ")");
+        
         diffusionHandle = MnnInference.createDiffusion(
             modelPath,
             0, // STABLE_DIFFUSION_1_5
             backendType, // Use user-selected backend
-            0  // CRITICAL: memory_low mode (0=low, 1=enough, 2=balance) - enough mode causes OOM/freeze
+            memoryMode  // Use configured memory mode (0=low, 1=enough, 2=balance)
         );
         
         if (diffusionHandle == 0) {
@@ -193,9 +201,27 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
     
     @Override
     public void inference(String prompt, List<String> imagePaths, LocalLlmHandler.InferenceParams params, LocalLlmHandler.StreamingCallback callback) {
-        if (!isInitialized.get() || diffusionHandle == 0) {
-            callback.onError("Diffusion model not initialized");
+        if (isGenerating.get()) {
+            callback.onError("Image generation already in progress");
             return;
+        }
+        
+        // 检查handle是否有效，如果无效则重新初始化
+        if (!isInitialized.get() || diffusionHandle == 0) {
+            LogManager.logW(TAG, "Diffusion handle lost, reinitializing...");
+            try {
+                // 重新初始化（使用上次的配置）
+                if (this.currentModelPath != null) {
+                    initialize(this.currentModelPath, null);
+                } else {
+                    callback.onError("Diffusion not initialized and no model path available");
+                    return;
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to reinitialize Diffusion: " + e.getMessage(), e);
+                callback.onError("Failed to reinitialize Diffusion: " + e.getMessage());
+                return;
+            }
         }
         
         if (isGenerating.get()) {
@@ -217,27 +243,22 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
                 
                 LogManager.logI(TAG, "Output path: " + outputPath);
                 
-                // 获取推理步数（通过maxTokens参数传递）
-                // 默认20步（快速模式），用户可通过设置调整：
-                // - 10步：预览模式（最快，~1分钟）
-                // - 20步：快速模式（推荐，~2分钟）
-                // - 50步：标准模式（最佳质量，~5-10分钟）
+                // 从 ConfigManager 获取 Steps 配置
+                int steps = ConfigManager.getDiffusionSteps(context);
+                // 限制范围 1-50
+                steps = Math.max(MIN_STEPS, Math.min(steps, MAX_STEPS));
+                LogManager.logI(TAG, "Using steps from config: " + steps);
                 
-                // TODO: 调试期间写死20步
-                int steps = 20;
-                LogManager.logI(TAG, "DEBUG: Using fixed steps: " + steps);
-                
-                // int steps = DEFAULT_STEPS;
-                // if (params != null && params.getMaxTokens() > 0) {
-                //     steps = Math.max(MIN_STEPS, Math.min(params.getMaxTokens(), MAX_STEPS));
-                //     LogManager.logI(TAG, "Using custom steps: " + steps + " (from maxTokens param)");
-                // } else {
-                //     LogManager.logI(TAG, "Using default steps: " + steps);
-                // }
-                
-                // 种子（固定种子可复现相同图片，用于调试）
-                int seed = -1;  // -1 = 随机
-                // TODO: 未来可通过params.temperature传递固定种子
+                // 从 ConfigManager 获取 Seed 配置
+                int seed;
+                boolean useRandomSeed = ConfigManager.getDiffusionSeedRandom(context);
+                if (useRandomSeed) {
+                    seed = -1;  // -1 = 随机
+                    LogManager.logI(TAG, "Using random seed");
+                } else {
+                    seed = ConfigManager.getDiffusionSeed(context);
+                    LogManager.logI(TAG, "Using fixed seed from config: " + seed);
+                }
                 
                 LogManager.logI(TAG, "Diffusion params: steps=" + steps + ", cfg=" + CFG_SCALE + ", scheduler=" + SCHEDULER + ", seed=" + seed);
                 
@@ -254,7 +275,7 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
                     prompt,
                     outputPath,
                     steps,
-                    -1, // random seed
+                    seed,
                     new MnnInference.DiffusionCallback() {
                         @Override
                         public boolean onProgress(int progress) {
@@ -290,11 +311,8 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
                     // 1. 输出图片路径（使用[IMAGE:path]标记，RagQaFragment会自动处理并显示在chat UI中）
                     callback.onToken("\n\n[IMAGE:" + outputPath + "]");
                     
-                    // 2. 输出performance统计
-                    float totalSec = duration / 1000.0f;
-                    float secPerStep = totalSec / steps;
-                    String perfStats = String.format("<performance>Total: %.1fs | Steps: %d | Speed: %.1fs/step</performance>",
-                        totalSec, steps, secPerStep);
+                    // 2. 输出完整performance统计（参考LLM格式）
+                    String perfStats = getPerformanceStats(duration, steps, seed, this.currentModelPath);
                     callback.onToken("\n\n" + perfStats);
                     
                     callback.onComplete("Image generation completed");
@@ -312,21 +330,68 @@ public class LocalLLMDiffusionHandler implements LocalLlmHandler.InferenceEngine
             }
         });
     }
-    
     @Override
     public void stopInference() {
         LogManager.logI(TAG, "Stopping image generation");
         shouldStop.set(true);
     }
-    
+
+    /**
+     * Generate complete performance statistics report (similar to LLM)
+     */
+    private String getPerformanceStats(long duration, int steps, int seed, String modelPath) {
+        float totalSec = duration / 1000.0f;
+        float secPerStep = totalSec / steps;
+
+        // Get JVM memory info
+        Runtime runtime = Runtime.getRuntime();
+        long jvmMaxMemory = runtime.maxMemory();
+        long jvmTotalMemory = runtime.totalMemory();
+        long jvmUsedMemory = jvmTotalMemory - runtime.freeMemory();
+
+        StringBuilder stats = new StringBuilder();
+        stats.append("<performance>\n");
+
+        // Model name
+        if (modelPath != null) {
+            String modelName = new File(modelPath).getName();
+            stats.append(String.format("Model: %s\n", modelName));
+        }
+
+        // Performance metrics
+        stats.append(String.format("Time: %.1fs • Speed: %.2fs/step • JVMUsedMem: %dMB\n",
+            totalSec, secPerStep, jvmUsedMemory / (1024 * 1024)));
+
+        // Configuration parameters
+        String backendPreference = SettingsFragment.getBackendPreference(context);
+        String memoryModeStr = ConfigManager.getDiffusionMemoryModeString(context);
+        stats.append(String.format("   • Backend: %s\n", backendPreference));
+        stats.append(String.format("   • Memory Mode: %s\n", memoryModeStr));
+
+        // Diffusion specific parameters
+        stats.append(String.format("   • diffusionParam: steps=%d, cfg=7.5, scheduler=PLMS, seed=%s, size=512x512\n",
+            steps, seed < 0 ? "Random" : String.valueOf(seed)));
+
+        stats.append("</performance>\n");
+
+        return stats.toString();
+    }
+
     @Override
     public void release() {
+        destroy();
+    }
+    
+    /**
+     * Clean up resources
+     */
+    public void destroy() {
         LogManager.logI(TAG, "Releasing Diffusion handler");
-        
+
         try {
             // Stop any ongoing generation
             stopInference();
-            
+
             // Release Diffusion session
             if (diffusionHandle != 0) {
                 MnnInference.releaseDiffusion(diffusionHandle);

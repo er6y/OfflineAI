@@ -93,6 +93,13 @@ public class SettingsFragment extends Fragment {
     private TextView textViewImagePreprocessSizeValue; // 图片预处理尺寸显示
     // 图像编码线程数UI已移除（MNN不支持独立配置）
     
+    // Diffusion扩散设置
+    private Spinner spinnerDiffusionMemoryMode;
+    private SeekBar seekBarDiffusionSteps;
+    private TextView textViewDiffusionStepsValue;
+    private EditText editTextDiffusionSeed;
+    private SwitchCompat switchDiffusionSeedRandom;
+    
     // Activity Result Launchers
     private ActivityResultLauncher<Intent> modelPathLauncher;
     private ActivityResultLauncher<Intent> embeddingModelPathLauncher;
@@ -217,11 +224,24 @@ public class SettingsFragment extends Fragment {
         textViewImagePreprocessSizeValue = view.findViewById(R.id.textViewImagePreprocessSizeValue); // 图片预处理尺寸显示
         // 图像编码线程数UI已移除（MNN不支持独立配置）
         
+        // Diffusion扩散设置控件
+        spinnerDiffusionMemoryMode = view.findViewById(R.id.spinnerDiffusionMemoryMode);
+        seekBarDiffusionSteps = view.findViewById(R.id.seekBarDiffusionSteps);
+        textViewDiffusionStepsValue = view.findViewById(R.id.textViewDiffusionStepsValue);
+        editTextDiffusionSeed = view.findViewById(R.id.editTextDiffusionSeed);
+        switchDiffusionSeedRandom = view.findViewById(R.id.switchDiffusionSeedRandom);
+        
         // 设置后端偏好Spinner适配器
         ArrayAdapter<String> backendAdapter = new ArrayAdapter<>(requireContext(), 
             android.R.layout.simple_spinner_item, BACKEND_OPTIONS);
         backendAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinnerUseGpu.setAdapter(backendAdapter);
+        
+        // 设置Diffusion内存模式Spinner适配器
+        ArrayAdapter<CharSequence> memoryModeAdapter = ArrayAdapter.createFromResource(requireContext(),
+            R.array.diffusion_memory_modes, android.R.layout.simple_spinner_item);
+        memoryModeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerDiffusionMemoryMode.setAdapter(memoryModeAdapter);
         
         // 加载当前设置
         loadSettings();
@@ -288,6 +308,36 @@ public class SettingsFragment extends Fragment {
         
         // 保存设置
         buttonSaveSettings.setOnClickListener(v -> saveSettings());
+        
+        // Diffusion Steps滑块监听器
+        seekBarDiffusionSteps.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                int steps = progress + 1; // 转换为1-50范围
+                textViewDiffusionStepsValue.setText(String.valueOf(steps));
+            }
+            
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        
+        // Diffusion Seed随机复选框监听器
+        switchDiffusionSeedRandom.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            editTextDiffusionSeed.setEnabled(!isChecked);
+            if (isChecked) {
+                editTextDiffusionSeed.setAlpha(0.5f); // 变灰不可编辑
+            } else {
+                editTextDiffusionSeed.setAlpha(1.0f); // 恢复正常
+                // 如果没有值，随机生成一个初始值
+                if (editTextDiffusionSeed.getText().toString().trim().isEmpty()) {
+                    int randomSeed = new java.util.Random().nextInt(1000000);
+                    editTextDiffusionSeed.setText(String.valueOf(randomSeed));
+                }
+            }
+        });
         
         // 设置所有SeekBar监听器
         setupChunkSizeSeekBar();
@@ -485,6 +535,26 @@ public class SettingsFragment extends Fragment {
             
             // 图像编码线程数配置已移除（MNN不支持独立配置）
             
+            // 加载Diffusion扩散设置
+            int diffusionMemoryMode = ConfigManager.getDiffusionMemoryMode(context);
+            spinnerDiffusionMemoryMode.setSelection(diffusionMemoryMode);
+            
+            int diffusionSteps = ConfigManager.getDiffusionSteps(context);
+            seekBarDiffusionSteps.setProgress(diffusionSteps - 1); // SeekBar从0开始，steps从1开始
+            textViewDiffusionStepsValue.setText(String.valueOf(diffusionSteps));
+            
+            boolean useDiffusionSeedRandom = ConfigManager.getDiffusionSeedRandom(context);
+            switchDiffusionSeedRandom.setChecked(useDiffusionSeedRandom);
+            
+            int diffusionSeed = ConfigManager.getDiffusionSeed(context);
+            editTextDiffusionSeed.setText(diffusionSeed >= 0 ? String.valueOf(diffusionSeed) : "");
+            editTextDiffusionSeed.setEnabled(!useDiffusionSeedRandom); // 随机模式禁用输入框
+            if (useDiffusionSeedRandom) {
+                editTextDiffusionSeed.setAlpha(0.5f); // 变灰
+            } else {
+                editTextDiffusionSeed.setAlpha(1.0f);
+            }
+            
             LogManager.logD(TAG, "Settings loaded successfully");
         } catch (Exception e) {
             LogManager.logE(TAG, "Failed to load settings: " + e.getMessage(), e);
@@ -655,6 +725,28 @@ public class SettingsFragment extends Fragment {
             ConfigManager.setImagePreprocessSize(context, imagePreprocessSize);
             
             // 图像编码线程数配置已移除（MNN不支持独立配置）
+            
+            // 保存Diffusion扩散设置
+            int diffusionMemoryMode = spinnerDiffusionMemoryMode.getSelectedItemPosition();
+            ConfigManager.setDiffusionMemoryMode(context, diffusionMemoryMode);
+            
+            int diffusionSteps = seekBarDiffusionSteps.getProgress() + 1; // 转换回1-50范围
+            ConfigManager.setDiffusionSteps(context, diffusionSteps);
+            
+            boolean useDiffusionSeedRandom = switchDiffusionSeedRandom.isChecked();
+            ConfigManager.setDiffusionSeedRandom(context, useDiffusionSeedRandom);
+            
+            if (!useDiffusionSeedRandom && !editTextDiffusionSeed.getText().toString().trim().isEmpty()) {
+                try {
+                    int diffusionSeed = Integer.parseInt(editTextDiffusionSeed.getText().toString().trim());
+                    ConfigManager.setDiffusionSeed(context, diffusionSeed);
+                } catch (NumberFormatException ex) {
+                    // 输入无效，使用默认值
+                    ConfigManager.setDiffusionSeed(context, -1);
+                }
+            } else {
+                ConfigManager.setDiffusionSeed(context, -1);
+            }
             
             // 创建JSON格式的设置摘要
             JSONObject settingsSummary = new JSONObject();

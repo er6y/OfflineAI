@@ -846,6 +846,26 @@
     <string name="label_image_preprocess_size">Image Preprocess Size (112~MAX):</string>
     <string name="text_image_preprocess_size_value">Image Preprocess Size: %s</string>
     <!-- label_image_encoding_threads removed (MNN does not support independent configuration) -->
+    
+    <!-- VL Settings -->
+    <string name="title_vl_settings">VL Settings</string>
+    
+    <!-- Diffusion Settings -->
+    <string name="title_diffusion_settings">Diffusion Settings</string>
+    <string name="label_diffusion_memory_mode">Memory Mode:</string>
+    <string name="label_diffusion_steps">Steps(1~50):</string>
+    <string name="label_diffusion_seed">Seed:</string>
+    <string name="hint_diffusion_seed">Enter seed value</string>
+    <string name="label_random">Random</string>
+    <string name="text_diffusion_steps_value">Steps: %d</string>
+    
+    <!-- Diffusion Memory Mode Options -->
+    <string-array name="diffusion_memory_modes">
+        <item>low (memory saving)</item>
+        <item>balance (balanced)</item>
+        <item>enough (fast)</item>
+    </string-array>
+    
     <string name="title_global_settings">Global Settings</string>
     <string name="label_debug_mode">Debug Mode</string>
     <string name="label_backend_preference">Backend Preference</string>
