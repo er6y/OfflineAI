@@ -465,6 +465,11 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
             transaction.addToBackStack("settings");
             transaction.commit();
             return true;
+        } else if (id == R.id.action_chat_history) {
+            // 打开历史对话界面
+            Intent intent = new Intent(this, ChatHistoryActivity.class);
+            startActivity(intent);
+            return true;
         } else if (id == R.id.action_default_model_download) {
             // 打开默认模型下载界面
             viewPager.setVisibility(View.GONE);

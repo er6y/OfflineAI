@@ -147,6 +147,7 @@
     <string name="menu_help">帮助</string>
     <string name="menu_exit">退出</string>
     <string name="menu_default_model_download">默认模型下载</string>
+    <string name="menu_chat_history">历史对话</string>
 
     <!-- 通用按钮 -->
     <string name="button_new_kb">新建知识库</string>
@@ -387,13 +388,13 @@
     <!-- 界面文本 -->
     <string name="text_new_conversation">新对话</string>
     <string name="text_thinking_mode">思考模式</string>
-    <string name="label_llm_api_url">大模型API地址:</string>
-    <string name="label_llm_api_key">大模型API Key:</string>
+    <string name="label_llm_api_url">API地址:</string>
+    <string name="label_llm_api_key">API Key:</string>
     <string name="label_llm_model">大模型:</string>
     <string name="label_knowledge_base">知识库:</string>
     <string name="label_search_depth">检索数:</string>
     <string name="label_rerank_count">重排数:</string>
-    <string name="label_system_prompt">系统提示词:</string>
+    <string name="label_system_prompt">系统提示:</string>
     <string name="label_user_prompt">用户提问:（长按浏览图片、相机）</string>
     <string name="label_title">标题:</string>
     <string name="label_content">内容:</string>
@@ -872,7 +873,7 @@
     
     <string name="title_global_settings">全局设置</string>
     <string name="label_debug_mode">调试模式</string>
-    <string name="label_backend_preference">后端偏好</string>
+    <string name="label_backend_preference">后端偏好:</string>
 
     <string name="label_font_size">字体大小</string>
     <string name="text_font_size_value">字体大小: 16sp</string>
@@ -1054,4 +1055,22 @@
     <string name="collapsible_debug">调试信息</string>
     <string name="collapsible_thinking">思考过程</string>
     <string name="collapsible_performance">性能指标</string>
+
+    <!-- Chat History strings -->
+    <string name="chat_history_title">对话历史</string>
+    <string name="chat_history_empty">暂无对话历史</string>
+    <string name="chat_history_delete_all">全部删除</string>
+    <string name="chat_history_filter_hint">搜索对话...</string>
+    <string name="chat_history_item_delete">删除</string>
+    <string name="dialog_confirm_delete_chat">确定要删除这个对话吗？</string>
+    <string name="dialog_confirm_delete_all_chats">确定要删除全部对话吗？此操作不可恢复！</string>
+    <string name="hint_chat_history_dir_path">对话历史保存目录</string>
+    <string name="label_chat_history_path">对话历史目录:</string>
+    <string name="toast_chat_history_deleted">对话已删除</string>
+    <string name="toast_chat_history_delete_failed">删除对话失败</string>
+    <string name="toast_all_chat_history_deleted">已删除 %d 个对话</string>
+    <string name="toast_chat_history_loaded">对话已加载</string>
+    <string name="toast_chat_history_load_failed">加载对话失败</string>
+    <string name="toast_chat_history_saved">对话已保存</string>
+    <string name="toast_chat_history_save_failed">保存对话失败</string>
 </resources>

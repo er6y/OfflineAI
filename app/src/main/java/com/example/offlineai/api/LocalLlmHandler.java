@@ -1112,13 +1112,13 @@ public class LocalLlmHandler {
     private InferenceEngine selectInferenceEngine(File modelDir) {
         LogManager.logI(TAG, "Detecting model type: " + modelDir.getAbsolutePath());
         
-        // Check for Diffusion model (Text-to-Image)
+        // Check for MNN models (both LLM and Diffusion)
+        // LocalLLMMNNHandler now handles both LLM and Diffusion models
         if (isDiffusionModel(modelDir)) {
-            LogManager.logI(TAG, "Detected DIFFUSION model (Text-to-Image), selecting Diffusion inference engine");
-            return new LocalLLMDiffusionHandler(context);
+            LogManager.logI(TAG, "Detected MNN DIFFUSION model (Text-to-Image), selecting MNN inference engine");
+            return new LocalLLMMNNHandler(context);
         }
         
-        // Check for MNN LLM model
         if (isMnnModel(modelDir)) {
             LogManager.logI(TAG, "Detected MNN LLM model, selecting MNN inference engine");
             return new LocalLLMMNNHandler(context);

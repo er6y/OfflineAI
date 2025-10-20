@@ -18,27 +18,44 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * MNN Local LLM Inference Handler
- * Implements unified InferenceEngine interface using MNN LLM framework
+ * MNN Inference Handler - Unified handler for all MNN capabilities
+ * Implements unified InferenceEngine interface using MNN framework
+ * 
+ * Supported capabilities:
+ * - LLM: Text generation with autoregressive loop
+ * - Diffusion: Text-to-Image generation (Stable Diffusion)
+ * - VL: Vision-Language understanding (future)
+ * - Audio: Speech recognition/synthesis (future)
  * 
  * Features:
- * - One-shot inference with built-in autoregressive loop
  * - Multiple backend support (CPU, OpenCL, Vulkan, NNAPI, KleidiAI)
  * - Streaming output with token-by-token callback
- * - Automatic KV cache management
- * - Multi-modal support (text, image, audio)
+ * - Automatic resource management
+ * - Multi-modal support
  * 
  * @author OfflineAI Team
- * @version 1.0
+ * @version 2.0
  */
 public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private static final String TAG = "LocalLLMMNNHandler";
     
+    // ========== Diffusion参数配置 (基于Stable Diffusion官方标准) ==========
+    private static final int DEFAULT_DIFFUSION_STEPS = 20;  // 快速模式
+    private static final int MAX_DIFFUSION_STEPS = 50;      // 标准模式
+    private static final int MIN_DIFFUSION_STEPS = 10;      // 预览模式
+    private static final float CFG_SCALE = 7.5f;
+    private static final String SCHEDULER = "PLMS";
+    
     // Context reference
     private final Context context;
     
-    // MNN session handle
-    private long sessionHandle = 0;
+    // MNN session handles
+    private long llmSessionHandle = 0;      // For LLM text generation
+    private long diffusionHandle = 0;       // For Diffusion image generation
+    
+    // Model type detection
+    private enum ModelType { LLM, DIFFUSION, UNKNOWN }
+    private ModelType currentModelType = ModelType.UNKNOWN;
     
     // Executor for async operations
     private final ExecutorService executorService;
@@ -88,11 +105,19 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             return null;
         }
         
-        // MNN uses directory-based model structure
-        // Return directory path if it contains required files
+        // Check for Diffusion model (Text-to-Image)
+        File textEncoder = new File(modelDir, "text_encoder.mnn");
+        if (textEncoder.exists()) {
+            LogManager.logI(TAG, "Found MNN Diffusion model directory: " + modelDir.getAbsolutePath());
+            currentModelType = ModelType.DIFFUSION;
+            return modelDir.getAbsolutePath();
+        }
+        
+        // Check for LLM model
         File llmFile = new File(modelDir, "llm.mnn");
         if (llmFile.exists()) {
-            LogManager.logI(TAG, "Found MNN model directory: " + modelDir.getAbsolutePath());
+            LogManager.logI(TAG, "Found MNN LLM model directory: " + modelDir.getAbsolutePath());
+            currentModelType = ModelType.LLM;
             return modelDir.getAbsolutePath();
         }
         
@@ -118,13 +143,31 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             throw new Exception("Model directory not found: " + modelPath);
         }
         
+        // Route to specific initializer based on model type
+        if (currentModelType == ModelType.DIFFUSION) {
+            initializeDiffusion(modelPath, config);
+        } else if (currentModelType == ModelType.LLM) {
+            initializeLLM(modelPath, config);
+        } else {
+            throw new Exception("Unknown model type");
+        }
+        
+        isInitialized.set(true);
+        LogManager.logI(TAG, "MNN handler initialized successfully");
+    }
+    
+    /**
+     * Initialize LLM model
+     */
+    private void initializeLLM(String modelPath, LocalLlmHandler.ModelConfig config) throws Exception {
         // Check for required files
+        File modelDir = new File(modelPath);
         File configFile = new File(modelDir, "config.json");
         File llmFile = new File(modelDir, "llm.mnn");
         File weightFile = new File(modelDir, "llm.mnn.weight");
         File tokenizerFile = new File(modelDir, "tokenizer.txt");
         
-        LogManager.logI(TAG, "Checking required files:");
+        LogManager.logI(TAG, "Checking LLM required files:");
         LogManager.logI(TAG, "  config.json: " + (configFile.exists() ? "✓ " + configFile.length() + " bytes" : "✗ NOT FOUND"));
         LogManager.logI(TAG, "  llm.mnn: " + (llmFile.exists() ? "✓ " + llmFile.length() + " bytes" : "✗ NOT FOUND"));
         LogManager.logI(TAG, "  llm.mnn.weight: " + (weightFile.exists() ? "✓ " + weightFile.length() + " bytes" : "✗ NOT FOUND"));
@@ -151,14 +194,86 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         LogManager.logI(TAG, "MNN Config: " + mnnConfig);
         
         // Create MNN session
-        sessionHandle = MnnInference.createSession(modelPath, mnnConfig);
+        llmSessionHandle = MnnInference.createSession(modelPath, mnnConfig);
         
-        if (sessionHandle == 0) {
-            throw new Exception("Failed to create MNN session");
+        if (llmSessionHandle == 0) {
+            throw new Exception("Failed to create MNN LLM session");
         }
         
-        isInitialized.set(true);
-        LogManager.logI(TAG, "MNN session created successfully: " + sessionHandle);
+        LogManager.logI(TAG, "MNN LLM session created successfully: " + llmSessionHandle);
+    }
+    
+    /**
+     * Initialize Diffusion model
+     */
+    private void initializeDiffusion(String modelPath, LocalLlmHandler.ModelConfig config) throws Exception {
+        File modelDir = new File(modelPath);
+        
+        // Check for required Diffusion files
+        File textEncoder = new File(modelDir, "text_encoder.mnn");
+        File unet = new File(modelDir, "unet.mnn");
+        File vaeDecoder = new File(modelDir, "vae_decoder.mnn");
+        File vocabJson = new File(modelDir, "vocab.json");
+        File mergesTxt = new File(modelDir, "merges.txt");
+        
+        LogManager.logI(TAG, "Checking Diffusion required files:");
+        LogManager.logI(TAG, "  text_encoder.mnn: " + (textEncoder.exists() ? "✓" : "✗ NOT FOUND"));
+        LogManager.logI(TAG, "  unet.mnn: " + (unet.exists() ? "✓" : "✗ NOT FOUND"));
+        LogManager.logI(TAG, "  vae_decoder.mnn: " + (vaeDecoder.exists() ? "✓" : "✗ NOT FOUND"));
+        LogManager.logI(TAG, "  vocab.json: " + (vocabJson.exists() ? "✓" : "✗ NOT FOUND"));
+        LogManager.logI(TAG, "  merges.txt: " + (mergesTxt.exists() ? "✓" : "✗ NOT FOUND"));
+        
+        if (!textEncoder.exists() || !unet.exists() || !vaeDecoder.exists()) {
+            throw new Exception("Required Diffusion model files not found");
+        }
+        
+        // Get user-selected backend
+        String backendPreference = SettingsFragment.getBackendPreference(context);
+        int backendType = mapBackendToMnnForwardType(backendPreference);
+        
+        LogManager.logI(TAG, "Creating Diffusion session with backend: " + backendPreference + " (type=" + backendType + ")");
+        
+        // First-time GPU load warning
+        if (backendType == 3 || backendType == 7) { // OpenCL or Vulkan
+            LogManager.logW(TAG, "⚠️ FIRST-TIME GPU LOAD: May take 5-15 minutes to compile kernels!");
+        }
+        
+        // Get memory mode from config
+        int memoryMode = ConfigManager.getDiffusionMemoryMode(context);
+        LogManager.logI(TAG, "Using memory mode: " + memoryMode + " (" + ConfigManager.getDiffusionMemoryModeString(context) + ")");
+        
+        // ========== 创建 App-Specific 后端专用缓存目录 ==========
+        // 使用 app-specific 目录避免权限问题，格式:
+        // /Android/data/com.example.offlineai/files/cache/mnn/<model_name>/<backend>/.tempcache
+        String backendName = getBackendName(backendType);
+        String modelName = new File(modelPath).getName(); // 提取模型名称
+        
+        File appCacheRoot = new File(context.getExternalFilesDir(null), "cache/mnn");
+        File modelCacheDir = new File(appCacheRoot, modelName);
+        File backendCacheDir = new File(modelCacheDir, backendName.toLowerCase());
+        
+        if (!backendCacheDir.exists()) {
+            backendCacheDir.mkdirs();
+            LogManager.logI(TAG, "✅ Created app-specific cache directory: " + backendCacheDir.getAbsolutePath());
+        }
+        String cachePath = backendCacheDir.getAbsolutePath();
+        LogManager.logI(TAG, "📁 Cache path: " + cachePath);
+        
+        diffusionHandle = MnnInference.createDiffusion(
+            modelPath,
+            0, // STABLE_DIFFUSION_1_5
+            backendType,
+            memoryMode,
+            cachePath  // 传递缓存目录路径
+        );
+        
+        if (diffusionHandle == 0) {
+            String errorMsg = "Failed to create Diffusion session with backend: " + backendPreference;
+            LogManager.logE(TAG, errorMsg);
+            throw new Exception(errorMsg);
+        }
+        
+        LogManager.logI(TAG, "Diffusion session created successfully, handle=" + diffusionHandle);
     }
     
     @Override
@@ -189,6 +304,22 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             return;
         }
         
+        // Route to specific inference based on model type
+        if (currentModelType == ModelType.DIFFUSION) {
+            inferenceDiffusion(prompt, params, callback);
+        } else if (currentModelType == ModelType.LLM) {
+            inferenceLLM(prompt, imagePaths, params, callback);
+        } else {
+            callback.onError("Unknown model type");
+        }
+    }
+    
+    /**
+     * LLM text generation inference
+     */
+    private void inferenceLLM(String prompt, List<String> imagePaths,
+                             LocalLlmHandler.InferenceParams params,
+                             LocalLlmHandler.StreamingCallback callback) {
         // Reset stop flag and response builder
         shouldStop.set(false);
         isGenerating.set(true);
@@ -299,10 +430,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 if (imagePaths != null && !imagePaths.isEmpty()) {
                     // Multi-modal inference with images
                     String[] imagePathsArray = imagePaths.toArray(new String[0]);
-                    MnnInference.inferenceWithImages(sessionHandle, prompt, imagePathsArray, mnnCallback);
+                    MnnInference.inferenceWithImages(llmSessionHandle, prompt, imagePathsArray, mnnCallback);
                 } else {
                     // Text-only inference
-                    MnnInference.inference(sessionHandle, prompt, mnnCallback);
+                    MnnInference.inference(llmSessionHandle, prompt, mnnCallback);
                 }
                 
             } catch (Exception e) {
@@ -375,9 +506,16 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     public void release() {
         LogManager.logI(TAG, "Releasing MNN handler");
 
-        if (sessionHandle != 0) {
-            MnnInference.destroySession(sessionHandle);
-            sessionHandle = 0;
+        // Release LLM session
+        if (llmSessionHandle != 0) {
+            MnnInference.destroySession(llmSessionHandle);
+            llmSessionHandle = 0;
+        }
+        
+        // Release Diffusion session
+        if (diffusionHandle != 0) {
+            MnnInference.releaseDiffusion(diffusionHandle);
+            diffusionHandle = 0;
         }
 
         isInitialized.set(false);
@@ -396,15 +534,15 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     /**
-     * Reset MNN session - clear KV cache and conversation history
+     * Reset MNN session - clear KV cache and conversation history (LLM only)
      */
     public void resetSession() {
-        if (sessionHandle != 0) {
-            LogManager.logI(TAG, "Resetting MNN session (clearing KV cache)");
-            MnnInference.resetSession(sessionHandle);
-            LogManager.logI(TAG, "MNN session reset completed");
+        if (llmSessionHandle != 0) {
+            LogManager.logI(TAG, "Resetting MNN LLM session (clearing KV cache)");
+            MnnInference.resetSession(llmSessionHandle);
+            LogManager.logI(TAG, "MNN LLM session reset completed");
         } else {
-            LogManager.logW(TAG, "Cannot reset session: session not initialized");
+            LogManager.logW(TAG, "Cannot reset session: LLM session not initialized");
         }
     }
     
@@ -643,26 +781,33 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     /**
+     * Get backend name string for cache directory naming
+     */
+    private static String getBackendName(int backendType) {
+        switch (backendType) {
+            case 0: return "CPU";
+            case 3: return "OpenCL";
+            case 7: return "Vulkan";
+            case 6: return "NNAPI";
+            default: return "Unknown";
+        }
+    }
+    
+    /**
      * Map backend preference to MNN backend type
      * NO FALLBACK - Use exactly what user selected for easier debugging
      * @param backendPreference Backend preference from settings
      * @return MNN backend type string (MNN uses "npu" internally for NNAPI)
      */
     private String mapBackendToMnn(String backendPreference) {
-        if (backendPreference == null) {
-            LogManager.logW(TAG, "⚠️ Backend preference is null, using CPU");
-            return "cpu";
-        }
-        
         String mnnBackend;
-        switch (backendPreference.toUpperCase()) {
-            case "VULKAN":
-                mnnBackend = "vulkan";
+        switch (backendPreference) {
+            case "OPENCL":
+                mnnBackend = "opencl";
                 break;
                 
-            case "OPENCL":
-            case "GPU":
-                mnnBackend = "opencl";
+            case "VULKAN":
+                mnnBackend = "vulkan";
                 break;
                 
             case "NNAPI":
@@ -710,6 +855,222 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
      */
     public boolean isGenerating() {
         return isGenerating.get();
+    }
+    
+    /**
+     * Diffusion image generation inference
+     */
+    private void inferenceDiffusion(String prompt, LocalLlmHandler.InferenceParams params,
+                                    LocalLlmHandler.StreamingCallback callback) {
+        // Check if diffusion handle is valid
+        if (!isInitialized.get() || diffusionHandle == 0) {
+            LogManager.logW(TAG, "Diffusion handle lost, reinitializing...");
+            try {
+                if (this.currentModelPath != null) {
+                    initializeDiffusion(this.currentModelPath, null);
+                } else {
+                    callback.onError("Diffusion not initialized and no model path available");
+                    return;
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to reinitialize Diffusion: " + e.getMessage(), e);
+                callback.onError("Failed to reinitialize Diffusion: " + e.getMessage());
+                return;
+            }
+        }
+        
+        if (isGenerating.get()) {
+            callback.onError("Image generation already in progress");
+            return;
+        }
+        
+        LogManager.logI(TAG, "Starting image generation with prompt: " + prompt);
+        
+        // Submit async task
+        executorService.submit(() -> {
+            try {
+                isGenerating.set(true);
+                shouldStop.set(false);
+                
+                // Get current chat folder
+                String chatFolderPath = ConfigManager.getString(context, 
+                    ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                
+                if (chatFolderPath == null || chatFolderPath.isEmpty()) {
+                    LogManager.logE(TAG, "No chat folder set, cannot save image");
+                    callback.onError("对话文件夹未初始化，请重试");
+                    return;
+                }
+                
+                File outputDir = new File(chatFolderPath);
+                if (!outputDir.exists()) {
+                    LogManager.logE(TAG, "Chat folder doesn't exist: " + chatFolderPath);
+                    callback.onError("对话文件夹不存在，请重试");
+                    return;
+                }
+                
+                String outputPath = new File(outputDir, "diffusion_" + System.currentTimeMillis() + ".jpg").getAbsolutePath();
+                LogManager.logI(TAG, "Output path: " + outputPath);
+                
+                // Get steps and seed from config
+                int steps = ConfigManager.getDiffusionSteps(context);
+                steps = Math.max(MIN_DIFFUSION_STEPS, Math.min(steps, MAX_DIFFUSION_STEPS));
+                LogManager.logI(TAG, "Using steps from config: " + steps);
+                
+                int seed;
+                boolean useRandomSeed = ConfigManager.getDiffusionSeedRandom(context);
+                if (useRandomSeed) {
+                    seed = -1;
+                    LogManager.logI(TAG, "Using random seed");
+                } else {
+                    seed = ConfigManager.getDiffusionSeed(context);
+                    LogManager.logI(TAG, "Using fixed seed from config: " + seed);
+                }
+                
+                LogManager.logI(TAG, "Diffusion params: steps=" + steps + ", cfg=" + CFG_SCALE + ", scheduler=" + SCHEDULER + ", seed=" + seed);
+                
+                // Output debug tag
+                final StringBuilder debugLog = new StringBuilder();
+                debugLog.append("<debug>");
+                callback.onToken(debugLog.toString());
+                debugLog.setLength(0);
+                
+                // Generate image
+                final long startTime = System.currentTimeMillis();
+                boolean success = MnnInference.generateImage(
+                    diffusionHandle,
+                    prompt,
+                    outputPath,
+                    steps,
+                    seed,
+                    new MnnInference.DiffusionCallback() {
+                        @Override
+                        public boolean onProgress(int progress) {
+                            if (shouldStop.get()) {
+                                LogManager.logI(TAG, "Image generation cancelled by user");
+                                return false;
+                            }
+                            return true;
+                        }
+                        
+                        @Override
+                        public boolean onToken(String message) {
+                            callback.onToken(message);
+                            return !shouldStop.get();
+                        }
+                    }
+                );
+                
+                long duration = System.currentTimeMillis() - startTime;
+                
+                // Close debug tag
+                callback.onToken("\n</debug>");
+                
+                // Check if generation succeeded
+                if (success && new File(outputPath).exists()) {
+                    LogManager.logI(TAG, "Image generated successfully in " + duration + "ms: " + outputPath);
+                    
+                    // Note: Cache is automatically saved by MNN when session is released
+                    // Using app-specific directory, no manual save or JNI callback needed
+                    
+                    // Output image path
+                    callback.onToken("\n\n[IMAGE:" + outputPath + "]");
+                    
+                    // Output performance stats
+                    String perfStats = getDiffusionPerformanceStats(duration, steps, seed, this.currentModelPath);
+                    callback.onToken("\n\n" + perfStats);
+                    
+                    callback.onComplete("Image generation completed");
+                } else {
+                    String errorMsg = "Failed to generate image";
+                    LogManager.logE(TAG, errorMsg);
+                    callback.onError(errorMsg);
+                }
+                
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Error during image generation", e);
+                callback.onError("Image generation error: " + e.getMessage());
+            } finally {
+                isGenerating.set(false);
+            }
+        });
+    }
+    
+    /**
+     * Generate performance statistics for Diffusion
+     */
+    private String getDiffusionPerformanceStats(long duration, int steps, int seed, String modelPath) {
+        float totalSec = duration / 1000.0f;
+        float secPerStep = totalSec / steps;
+
+        // Get JVM memory info
+        long jvmMaxMemory = runtime.maxMemory();
+        long jvmTotalMemory = runtime.totalMemory();
+        long jvmUsedMemory = jvmTotalMemory - runtime.freeMemory();
+
+        StringBuilder stats = new StringBuilder();
+        stats.append("<performance>\n");
+
+        // Model name
+        if (modelPath != null) {
+            String modelName = new File(modelPath).getName();
+            stats.append(String.format("Model: %s\n", modelName));
+        }
+
+        // Performance metrics
+        stats.append(String.format("Time: %.1fs • Speed: %.2fs/step • JVMUsedMem: %dMB\n",
+            totalSec, secPerStep, jvmUsedMemory / (1024 * 1024)));
+
+        // Configuration parameters
+        String backendPreference = SettingsFragment.getBackendPreference(context);
+        String memoryModeStr = ConfigManager.getDiffusionMemoryModeString(context);
+        stats.append(String.format("   • Backend: %s\n", backendPreference));
+        stats.append(String.format("   • Memory Mode: %s\n", memoryModeStr));
+
+        // Diffusion specific parameters
+        stats.append(String.format("   • diffusionParam: steps=%d, cfg=7.5, scheduler=PLMS, seed=%s, size=512x512\n",
+            steps, seed < 0 ? "Random" : String.valueOf(seed)));
+
+        stats.append("</performance>\n");
+
+        return stats.toString();
+    }
+    
+    /**
+     * Map backend preference to MNN Forward Type integer (for Diffusion)
+     * @param backendPreference Backend from settings
+     * @return MNN Forward Type integer
+     */
+    private int mapBackendToMnnForwardType(String backendPreference) {
+        if (backendPreference == null) {
+            LogManager.logW(TAG, "⚠️ Backend preference is null, using CPU (0)");
+            return 0; // MNN_FORWARD_CPU
+        }
+        
+        int forwardType;
+        switch (backendPreference.toUpperCase()) {
+            case "VULKAN":
+                forwardType = 7; // MNN_FORWARD_VULKAN
+                break;
+                
+            case "OPENCL":
+            case "GPU":
+                forwardType = 3; // MNN_FORWARD_OPENCL
+                break;
+                
+            case "NNAPI":
+                forwardType = 6; // MNN_FORWARD_NN (Android NNAPI)
+                break;
+                
+            case "CPU":
+            default:
+                forwardType = 0; // MNN_FORWARD_CPU
+                break;
+        }
+        
+        LogManager.logI(TAG, String.format("🎯 Backend mapping: '%s' -> MNN ForwardType %d (NO FALLBACK)", 
+            backendPreference, forwardType));
+        return forwardType;
     }
     
     @Override

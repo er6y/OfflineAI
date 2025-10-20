@@ -419,9 +419,10 @@ public class MnnInference {
      * @param modelType Model type: 0=SD1.5, 1=Taiyi Chinese
      * @param backendType Backend type: 0=CPU, 1=Metal, 3=OpenCL, 7=Vulkan
      * @param memoryMode Memory mode: 0=saving (slower), 1=enough (faster), 2=balance
+     * @param cachePath Path to cache directory where .tempcache will be saved (backend-specific)
      * @return Diffusion handle (pointer)
      */
-    public static native long createDiffusion(String modelDir, int modelType, int backendType, int memoryMode);
+    public static native long createDiffusion(String modelDir, int modelType, int backendType, int memoryMode, String cachePath);
     
     /**
      * Generate image from text prompt

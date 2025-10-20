@@ -124,9 +124,15 @@ public class RagQaFragment extends Fragment {
     private static final String TAG = "OfflineAI_RagQa"; // Add TAG for log printing
     private static final String LOG_FILE = "api_log.txt"; // Log file name
     private static final int MAX_IMAGES = 3; // Maximum number of images allowed
+    
+    // Backend preference options (same as SettingsFragment)
+    private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan", "OpenCL", "NNAPI"};
+    private static final String[] BACKEND_VALUES = {"CPU", "VULKAN", "OPENCL", "NNAPI"};
 
     private Spinner spinnerApiUrl;
     private EditText editTextApiKey;
+    private Spinner spinnerBackendPreference; // Backend preference spinner (replaces API Key for local models)
+    private TextView textViewApiKeyLabel; // Label for API Key / Backend Preference
     private Spinner spinnerApiModel;
     private Spinner spinnerKnowledgeBase;
     private EditText editTextSystemPrompt;
@@ -146,6 +152,9 @@ public class RagQaFragment extends Fragment {
     private RecyclerView recyclerViewChat; // Chat message list
     private ChatRecyclerViewAdapter chatAdapter; // Chat adapter
     private List<ChatDataItem> chatMessages = new ArrayList<>(); // Chat messages
+    
+    // Current chat folder path for saving images and conversation
+    private String currentChatFolderPath = null;
     
     // Image picker launcher for Android 13+
     private ActivityResultLauncher<PickVisualMediaRequest> pickMedia;
@@ -208,6 +217,8 @@ public class RagQaFragment extends Fragment {
         // Initialize UI elements
         spinnerApiUrl = view.findViewById(R.id.spinnerApiUrl);
         editTextApiKey = view.findViewById(R.id.editTextApiKey);
+        spinnerBackendPreference = view.findViewById(R.id.spinnerBackendPreference); // Backend preference spinner
+        textViewApiKeyLabel = view.findViewById(R.id.textViewApiKeyLabel); // API Key label
         spinnerApiModel = view.findViewById(R.id.spinnerApiModel);
         spinnerKnowledgeBase = view.findViewById(R.id.spinnerKnowledgeBase);
         editTextSystemPrompt = view.findViewById(R.id.editTextSystemPrompt);
@@ -290,6 +301,9 @@ public class RagQaFragment extends Fragment {
         // Initialize rerank count spinner
         initializeRerankCountSpinner();
         
+        // Initialize backend preference spinner
+        initializeBackendPreferenceSpinner();
+        
         // Load API URL list, including custom URLs from configuration
         loadApiUrlList();
         
@@ -297,7 +311,7 @@ public class RagQaFragment extends Fragment {
         setupSpinner(spinnerApiModel, new String[]{getString(R.string.common_loading)});
         setupSpinner(spinnerKnowledgeBase, new String[]{getString(R.string.common_loading)});
         
-        // Add selection listener for API URL Spinner to automatically load corresponding API Key
+        // Add selection listener for API URL Spinner to automatically load corresponding API Key / Backend Preference
         spinnerApiUrl.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
@@ -308,6 +322,9 @@ public class RagQaFragment extends Fragment {
                     showAddApiUrlDialog();
                     return;
                 }
+                
+                // Dynamically switch between API Key and Backend Preference
+                updateApiKeyOrBackendDisplay(selectedApiUrl);
                 
                 loadApiKeyForUrl(selectedApiUrl);
                 fetchModelsForApi(); // Automatically fetch model list
@@ -535,6 +552,9 @@ public class RagQaFragment extends Fragment {
 
         // 加载配置以初始化界面控件状态（包含思考模式复选框）
         loadConfig();
+        
+        // Load chat history if available
+        loadChatHistory();
     }
     
     // The following methods are copied from MainActivity and adjusted for Fragment needs
@@ -614,6 +634,98 @@ public class RagQaFragment extends Fragment {
     }
     
     /**
+     * Initialize backend preference dropdown (same as SettingsFragment)
+     */
+    private void initializeBackendPreferenceSpinner() {
+        // Use same options as SettingsFragment
+        setupSpinner(spinnerBackendPreference, BACKEND_OPTIONS);
+        
+        // Load current backend preference from ConfigManager (same as SettingsFragment)
+        String backendPreference = ConfigManager.getString(requireContext(), 
+            ConfigManager.KEY_USE_GPU, "CPU");
+        
+        // Compatibility: map deprecated values to CPU (same as SettingsFragment)
+        if ("true".equals(backendPreference)) {
+            backendPreference = "VULKAN";
+            ConfigManager.setString(requireContext(), ConfigManager.KEY_USE_GPU, backendPreference);
+        } else if ("false".equals(backendPreference)) {
+            backendPreference = "CPU";
+            ConfigManager.setString(requireContext(), ConfigManager.KEY_USE_GPU, backendPreference);
+        }
+        if ("CANN".equals(backendPreference) || "KLEIDIAI-SME".equals(backendPreference)) {
+            LogManager.logW(TAG, "Backend '" + backendPreference + "' is deprecated. Fallback to 'CPU'.");
+            backendPreference = "CPU";
+            ConfigManager.setString(requireContext(), ConfigManager.KEY_USE_GPU, backendPreference);
+        }
+        
+        // Set spinner selection by matching BACKEND_VALUES
+        int selectedIndex = 0;
+        for (int i = 0; i < BACKEND_VALUES.length; i++) {
+            if (BACKEND_VALUES[i].equals(backendPreference)) {
+                selectedIndex = i;
+                break;
+            }
+        }
+        spinnerBackendPreference.setSelection(selectedIndex);
+        
+        // Add listener to save preference when changed (same logic as SettingsFragment)
+        spinnerBackendPreference.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (!isUpdatingUiFromConfig) {
+                    // Save using BACKEND_VALUES (uppercase)
+                    String selectedBackend = (position >= 0 && position < BACKEND_VALUES.length) ? 
+                        BACKEND_VALUES[position] : "CPU";
+                    ConfigManager.setString(requireContext(), 
+                        ConfigManager.KEY_USE_GPU, selectedBackend);
+                    LogManager.logI(TAG, "Backend preference changed to: " + selectedBackend);
+                }
+            }
+            
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        
+        LogManager.logD(TAG, "Backend preference Spinner initialized, current value: " + backendPreference);
+    }
+    
+    /**
+     * Setup listener for API URL spinner to dynamically switch between API Key and Backend Preference
+     */
+    private void setupApiUrlSwitchListener() {
+        spinnerApiUrl.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                String selectedApiUrl = parent.getItemAtPosition(position).toString();
+                updateApiKeyOrBackendDisplay(selectedApiUrl);
+            }
+            
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+    }
+    
+    /**
+     * Update display to show API Key input or Backend Preference spinner based on selected API
+     */
+    private void updateApiKeyOrBackendDisplay(String apiUrlDisplay) {
+        String apiUrlValue = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
+        if (AppConstants.ApiUrl.LOCAL.equals(apiUrlValue)) {
+            // Local model selected: show backend preference, hide API key
+            editTextApiKey.setVisibility(View.GONE);
+            spinnerBackendPreference.setVisibility(View.VISIBLE);
+            textViewApiKeyLabel.setText(R.string.label_backend_preference);
+            LogManager.logD(TAG, "Switched to backend preference mode");
+        } else {
+            // Online model selected: show API key, hide backend preference
+            editTextApiKey.setVisibility(View.VISIBLE);
+            spinnerBackendPreference.setVisibility(View.GONE);
+            textViewApiKeyLabel.setText(R.string.label_llm_api_key);
+            LogManager.logD(TAG, "Switched to API key mode");
+        }
+    }
+    
+    /**
      * Load configuration file
      */
     private void loadConfig() {
@@ -671,6 +783,12 @@ public class RagQaFragment extends Fragment {
             checkBoxThinkingMode.setChecked(!noThinking);
             LogManager.logD(TAG, "Loaded thinking mode setting: " + (!noThinking ? "enabled" : "disabled"));
             isUpdatingUiFromConfig = false;
+            
+            // Update initial display based on API URL (show API Key or Backend Preference)
+            if (!apiUrl.isEmpty()) {
+                String apiUrlDisplayText = StateDisplayManager.getApiUrlDisplayText(requireContext(), apiUrl);
+                updateApiKeyOrBackendDisplay(apiUrlDisplayText);
+            }
             
             LogManager.logD(TAG, "Configuration loading completed");
         } catch (Exception e) {
@@ -1090,6 +1208,52 @@ public class RagQaFragment extends Fragment {
                 LogManager.logE(TAG, "Error while cleaning previous state before new send", th);
             }
 
+            // Check if need to create new chat folder (before any validation)
+            String currentChatFolder = ConfigManager.getString(getContext(), 
+                ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            if (chatMessages.isEmpty() || currentChatFolder.isEmpty()) {
+                // Create new chat folder
+                String newFolder = ChatHistoryManager.createNewChatFolder(getContext());
+                if (newFolder != null) {
+                    ConfigManager.setString(getContext(), 
+                        ConfigManager.KEY_CURRENT_CHAT_FOLDER, newFolder);
+                    currentChatFolderPath = newFolder; // Update instance variable
+                    LogManager.logD(TAG, "[CHAT_HISTORY] Created new chat folder: " + newFolder);
+                } else {
+                    // Failed to create chat folder - abort sending
+                    LogManager.logE(TAG, "[CHAT_HISTORY] Failed to create new chat folder, aborting");
+                    restoreSendStateAfterValidationFailure("failed to create chat folder");
+                    Toast.makeText(requireContext(), "无法创建对话文件夹，请检查存储权限", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+            } else {
+                // Use existing folder, verify it exists
+                File existingFolder = new File(currentChatFolder);
+                if (!existingFolder.exists()) {
+                    LogManager.logW(TAG, "[CHAT_HISTORY] Current chat folder doesn't exist, creating new one");
+                    String newFolder = ChatHistoryManager.createNewChatFolder(getContext());
+                    if (newFolder != null) {
+                        ConfigManager.setString(getContext(), 
+                            ConfigManager.KEY_CURRENT_CHAT_FOLDER, newFolder);
+                        currentChatFolderPath = newFolder;
+                        LogManager.logD(TAG, "[CHAT_HISTORY] Created new chat folder: " + newFolder);
+                    } else {
+                        LogManager.logE(TAG, "[CHAT_HISTORY] Failed to create new chat folder, aborting");
+                        restoreSendStateAfterValidationFailure("failed to create chat folder");
+                        Toast.makeText(requireContext(), "无法创建对话文件夹，请检查存储权限", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                } else {
+                    currentChatFolderPath = currentChatFolder;
+                }
+            }
+            
+            // Set chat folder path for image adapter (images will be saved to history folder)
+            if (imageThumbnailAdapter != null && currentChatFolderPath != null) {
+                imageThumbnailAdapter.setChatFolderPath(currentChatFolderPath);
+                LogManager.logD(TAG, "[CHAT_HISTORY] Set image adapter chat folder: " + currentChatFolderPath);
+            }
+            
             // Basic validation
             if (userPrompt.trim().isEmpty()) {
                 LogManager.logW(TAG, "[SEND][VALIDATION] Failed: empty user prompt");
@@ -1413,6 +1577,9 @@ public class RagQaFragment extends Fragment {
         }
         
         isSending.set(false); // Use atomic operation to reset sending state
+        
+        // Save conversation to markdown after AI response completes
+        saveChatHistory();
         
         // Auto-collapse collapsible sections after streaming completes
         if (!chatMessages.isEmpty()) {
@@ -2872,6 +3039,10 @@ public class RagQaFragment extends Fragment {
     private void handleNewChatClick() {
         // New chat debug log removed
         
+        // Clear current chat folder setting (new conversation will create new folder)
+        ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+        LogManager.logD(TAG, "[CHAT_HISTORY] Cleared current chat folder setting for new conversation");
+        
         updateProgressOnUiThread("");
         editTextUserPrompt.setText("");
         
@@ -3971,6 +4142,44 @@ public class RagQaFragment extends Fragment {
         // Re-apply font size when page resumes, so it takes effect immediately after modification in settings page
         applyGlobalTextSize();
         
+        // Check if chat folder changed (e.g., user switched conversation from history)
+        String configFolder = ConfigManager.getString(getContext(), 
+            ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+        if (!configFolder.equals(currentChatFolderPath)) {
+            LogManager.logD(TAG, "[CHAT_HISTORY] Detected conversation switch: " + configFolder);
+            currentChatFolderPath = configFolder;
+            
+            // Reload conversation
+            loadChatHistory();
+            
+            // Update image adapter folder path
+            if (imageThumbnailAdapter != null && currentChatFolderPath != null) {
+                imageThumbnailAdapter.setChatFolderPath(currentChatFolderPath);
+            }
+        }
+        
+        // Sync backend preference from settings (in case user changed it in SettingsFragment)
+        // Always sync, regardless of visibility, so it's ready when user switches to local model
+        if (spinnerBackendPreference != null) {
+            isUpdatingUiFromConfig = true;
+            String backendPreference = ConfigManager.getString(getContext(), 
+                ConfigManager.KEY_USE_GPU, "CPU");
+            
+            // Update spinner selection
+            int selectedIndex = 0;
+            for (int i = 0; i < BACKEND_VALUES.length; i++) {
+                if (BACKEND_VALUES[i].equals(backendPreference)) {
+                    selectedIndex = i;
+                    break;
+                }
+            }
+            if (spinnerBackendPreference.getSelectedItemPosition() != selectedIndex) {
+                spinnerBackendPreference.setSelection(selectedIndex);
+                LogManager.logD(TAG, "Synced backend preference from settings: " + backendPreference);
+            }
+            isUpdatingUiFromConfig = false;
+        }
+        
         // Remove automatic query recovery logic to avoid unexpected query execution when app starts
         // If query recovery function is needed, it should be triggered by explicit user action
         /*
@@ -4702,6 +4911,81 @@ public class RagQaFragment extends Fragment {
             
         } catch (Exception e) {
             LogManager.logE(TAG, "Failed to update chat message", e);
+        }
+    }
+    
+    /**
+     * Save chat history to markdown file
+     */
+    private void saveChatHistory() {
+        try {
+            String currentFolder = ConfigManager.getString(getContext(), 
+                ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            
+            if (currentFolder.isEmpty()) {
+                LogManager.logD(TAG, "[CHAT_HISTORY] No current chat folder, skipping save");
+                return;
+            }
+            
+            if (chatMessages == null || chatMessages.isEmpty()) {
+                LogManager.logD(TAG, "[CHAT_HISTORY] No messages to save");
+                return;
+            }
+            
+            boolean success = ChatHistoryManager.saveConversation(getContext(), chatMessages, currentFolder);
+            if (success) {
+                LogManager.logD(TAG, "[CHAT_HISTORY] Conversation saved successfully");
+            } else {
+                LogManager.logE(TAG, "[CHAT_HISTORY] Failed to save conversation");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[CHAT_HISTORY] Error saving conversation", e);
+        }
+    }
+    
+    /**
+     * Load chat history from markdown file
+     * Anti-foolproof mechanism: If folder doesn't exist, silently maintain empty chat UI
+     */
+    private void loadChatHistory() {
+        try {
+            String currentFolder = ConfigManager.getString(getContext(), 
+                ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            
+            if (currentFolder.isEmpty()) {
+                LogManager.logD(TAG, "[CHAT_HISTORY] No previous chat history to load");
+                return;
+            }
+            
+            // Anti-foolproof: Check if folder exists before loading
+            File folder = new File(currentFolder);
+            if (!folder.exists()) {
+                LogManager.logW(TAG, "[CHAT_HISTORY] Chat folder does not exist, clearing setting and maintaining empty UI");
+                ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                // Silently maintain empty chat UI, no toast to avoid annoying user
+                return;
+            }
+            
+            // Try to load conversation
+            List<ChatDataItem> history = ChatHistoryManager.loadConversation(getContext(), currentFolder);
+            if (history != null && !history.isEmpty()) {
+                chatMessages.clear();
+                chatMessages.addAll(history);
+                if (chatAdapter != null) {
+                    chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
+                }
+                LogManager.logI(TAG, "[CHAT_HISTORY] Loaded " + history.size() + " messages from history");
+                // Successfully loaded, no toast needed (silent load for better UX)
+            } else {
+                LogManager.logD(TAG, "[CHAT_HISTORY] No messages in history file, maintaining empty UI");
+                // Empty conversation file is valid, silently maintain empty UI
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[CHAT_HISTORY] Error loading conversation", e);
+            // Clear the problematic folder setting to prevent repeated failures
+            ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            // Only show toast for real errors
+            Toast.makeText(getContext(), R.string.toast_chat_history_load_failed, Toast.LENGTH_SHORT).show();
         }
     }
     

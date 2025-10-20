@@ -91,6 +91,8 @@ public class ConfigManager {
     public static final String KEY_EMBEDDING_MODEL_PATH = "embedding_model_path";
     public static final String KEY_RERANKER_MODEL_PATH = "reranker_model_path";
     public static final String KEY_KNOWLEDGE_BASE_PATH = "knowledge_base_path";
+    public static final String KEY_CHAT_HISTORY_PATH = "chat_history_path"; // 对话历史保存目录
+    public static final String KEY_CURRENT_CHAT_FOLDER = "current_chat_folder"; // 当前对话文件夹路径
     public static final String KEY_SEARCH_DEPTH = "search_depth";
     public static final String KEY_RERANK_COUNT = "rerank_count";
     public static final String KEY_RETRIEVAL_COUNT = "retrieval_count";
@@ -158,6 +160,7 @@ public class ConfigManager {
     public static final String DEFAULT_EMBEDDING_MODEL_PATH = "/storage/emulated/0/Download/OfflineAIData/embeddings";
     public static final String DEFAULT_RERANKER_MODEL_PATH = "/storage/emulated/0/Download/OfflineAIData/rerankers";
     public static final String DEFAULT_KNOWLEDGE_BASE_PATH = "/storage/emulated/0/Download/OfflineAIData/knowledge_bases";
+    public static final String DEFAULT_CHAT_HISTORY_PATH = "/storage/emulated/0/Download/OfflineAIData/chathistory";
     public static final int DEFAULT_SEARCH_DEPTH = 20;
     public static final int DEFAULT_RERANK_COUNT = 5;
 

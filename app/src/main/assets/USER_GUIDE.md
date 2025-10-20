@@ -110,6 +110,8 @@ OfflineAI is an Android offline-first AI application that allows users to build 
 - **完全本地化 / Fully Local**：所有处理和存储都在设备本地进行，保护数据隐私 / All processing and storage are performed locally on the device, protecting data privacy
 - **多格式支持 / Multi-format Support**：支持PDF、Word、Excel、PPT、文本等多种文档格式 / Supports PDF, Word, Excel, PPT, text and other document formats
 - **多模态推理 / Multimodal Inference**：支持图像-文本多模态模型（如 LLaVA、Qwen-VL、InternVL 等），在离线环境进行多模态理解与回答 / Supports vision-language models (e.g., LLaVA, Qwen-VL, InternVL) for multimodal understanding and answering offline
+- **AI绘图 / AI Image Generation**：支持Stable Diffusion文本生成图像（Text-to-Image），在本地设备进行AI绘图创作 / Supports Stable Diffusion text-to-image generation for AI art creation on local devices
+- **聊天历史管理 / Chat History Management**：支持查看、保存、加载和切换多个聊天会话，方便管理对话历史 / Supports viewing, saving, loading and switching between multiple chat sessions for easy conversation history management
 - **知识笔记 / Knowledge Notes**：支持创建和管理知识笔记，方便整理和扩充知识库 / Supports creating and managing knowledge notes for easy organization and expansion of knowledge base
 - **灵活配置 / Flexible Configuration**：支持自定义嵌入模型、分块大小、API设置等 / Supports custom embedding models, chunk sizes, API settings, etc.
 - **性能优化 / Performance Optimization**：优化内存使用和处理速度，支持大文件处理 / Optimized memory usage and processing speed, supports large file processing
@@ -173,7 +175,14 @@ The OfflineAI app contains three main pages, accessible through the bottom navig
    - 点击发送按钮开始问答 / Click send button to start Q&A
    - 可随时点击停止按钮中断生成 / Can click stop button anytime to interrupt generation
 
-6. **其他功能 / Other Features**：
+6. **聊天历史管理 / Chat History Management**：
+   - **查看历史 / View History**：点击界面右上角的"历史"按钮查看所有聊天会话 / Click "History" button in top-right corner to view all chat sessions
+   - **切换会话 / Switch Session**：在历史列表中点击任意会话即可切换并加载该对话 / Click any session in history list to switch and load that conversation
+   - **保存会话 / Save Session**：当前对话会自动保存，支持多个独立会话并存 / Current conversation is automatically saved, supports multiple independent sessions
+   - **删除会话 / Delete Session**：在历史列表中长按会话可删除不需要的对话 / Long-press session in history list to delete unwanted conversations
+   - **会话命名 / Session Naming**：会话自动以时间戳命名，方便识别和管理 / Sessions are automatically named with timestamps for easy identification and management
+
+7. **其他功能 / Other Features**：
    - 可以通过长按回答文本进行复制或转为笔记 / Can long-press answer text to copy or convert to notes
    - 点击停止按钮可以中断生成过程 / Click stop button to interrupt generation process
 
@@ -236,6 +245,86 @@ OfflineAI supports multimodal models (Vision-Language Models, VLM) for local ima
 - ⚠️ 如果当前选择的模型不支持多模态，图像输入按钮不会显示 / If current model doesn't support multimodal, image input button won't appear
 - ⚠️ 不同模型的图像输入尺寸和预处理方式可能不同 / Different models may have different image input sizes and preprocessing methods
 - ⚠️ 多模态推理比纯文本推理消耗更多资源 / Multimodal inference consumes more resources than text-only inference
+
+#### AI绘图（Diffusion）/ AI Image Generation (Diffusion)
+
+OfflineAI 支持 Stable Diffusion 文本生成图像（Text-to-Image），可以在本地设备上进行AI绘图创作，无需云端服务。
+
+OfflineAI supports Stable Diffusion text-to-image generation for AI art creation on local devices without cloud services.
+
+**支持的模型 / Supported Models**：
+- **Stable Diffusion 1.5**：经典版本，速度快，适合移动设备 / Classic version, fast speed, suitable for mobile devices
+- **太乙（Taiyi）中文SD**：针对中文提示词优化的版本 / Version optimized for Chinese prompts
+
+**使用步骤 / Usage Steps**：
+
+1. **下载Diffusion模型 / Download Diffusion Model**
+   - 通过"默认模型下载"功能获取预设的Diffusion模型 / Get preset Diffusion models through "Default Model Download"
+   - 或手动下载MNN格式的Diffusion模型 / Or manually download MNN format Diffusion models
+   - 模型目录需包含：`text_encoder.mnn`、`unet.mnn`、`vae_decoder.mnn`、`vocab.json`、`merges.txt` / Model directory must contain: `text_encoder.mnn`, `unet.mnn`, `vae_decoder.mnn`, `vocab.json`, `merges.txt`
+
+2. **选择Diffusion模型 / Select Diffusion Model**
+   - 在问答页面的模型选择下拉框中选择Diffusion模型 / Select Diffusion model in model selection dropdown on Q&A page
+   - 应用会自动识别Diffusion模型（检测到text_encoder.mnn文件）/ App automatically recognizes Diffusion models (detects text_encoder.mnn file)
+   - 界面会切换到图像生成模式 / Interface switches to image generation mode
+
+3. **输入提示词 / Input Prompt**
+   - 在文本框中输入描述想要生成的图像的提示词 / Enter prompt describing the desired image in text box
+   - **英文提示词**：Stable Diffusion 1.5 使用英文提示词效果更好 / English prompts work better with Stable Diffusion 1.5
+   - **中文提示词**：太乙中文SD支持中文提示词 / Taiyi Chinese SD supports Chinese prompts
+   - 提示词示例 / Prompt examples:
+     - "a beautiful landscape with mountains and lake, sunset, high quality"
+     - "一只可爱的猫咪，坐在窗台上，阳光明媚"
+     - "cyberpunk city, neon lights, futuristic, 8k, detailed"
+
+4. **调整生成参数 / Adjust Generation Parameters**
+   - 在设置页面可配置生成参数（详见"Diffusion设置"章节）/ Configure generation parameters in settings page (see "Diffusion Settings" section)
+   - **步数（Steps）**：控制生成质量和时间，推荐15-20步 / Controls generation quality and time, recommend 15-20 steps
+   - **随机种子（Seed）**：固定种子可复现相同结果，-1表示随机 / Fixed seed reproduces same result, -1 means random
+   - **内存模式（Memory Mode）**：根据设备内存选择合适模式 / Choose appropriate mode based on device memory
+
+5. **生成图像 / Generate Image**
+   - 点击发送按钮开始生成 / Click send button to start generation
+   - 生成过程会显示详细进度信息（UNet去噪、VAE解码等）/ Generation process shows detailed progress (UNet denoising, VAE decoding, etc.)
+   - 生成完成后，图像会自动保存到当前聊天文件夹 / After generation, image is automatically saved to current chat folder
+   - 图像会在聊天界面中显示，可以点击查看大图 / Image displays in chat interface, click to view full size
+
+**提示词技巧 / Prompt Tips**：
+
+- **质量关键词 / Quality Keywords**：添加 "high quality", "detailed", "8k", "masterpiece" 等提升质量 / Add "high quality", "detailed", "8k", "masterpiece" to improve quality
+- **风格关键词 / Style Keywords**：指定艺术风格，如 "oil painting", "watercolor", "photorealistic", "anime style" / Specify art style like "oil painting", "watercolor", "photorealistic", "anime style"
+- **负面提示词 / Negative Prompts**：描述不想要的内容（当前版本暂不支持，未来会添加）/ Describe unwanted content (not supported in current version, will be added in future)
+- **详细描述 / Detailed Description**：越详细的描述，生成的图像越符合预期 / More detailed descriptions produce images that better match expectations
+- **避免模糊词汇 / Avoid Vague Terms**：使用具体的形容词和名词 / Use specific adjectives and nouns
+
+**性能优化建议 / Performance Optimization Recommendations**：
+
+- **设备选择 / Device Selection**
+  - 推荐6GB+内存的设备 / Recommend devices with 6GB+ RAM
+  - 4GB设备建议使用"省内存"模式 / 4GB devices should use "Memory Saving" mode
+  - 8GB+设备可以使用"充足内存"或"平衡"模式 / 8GB+ devices can use "Enough Memory" or "Balance" mode
+
+- **后端选择 / Backend Selection**
+  - **GPU（OpenCL/Vulkan）**：速度最快，推荐优先使用 / Fastest speed, recommended first choice
+  - **CPU**：速度较慢但稳定，兼容性最好 / Slower but stable, best compatibility
+  - **NNAPI**：部分设备支持，速度介于CPU和GPU之间 / Some devices support, speed between CPU and GPU
+
+- **步数调整 / Steps Adjustment**
+  - **快速预览（10-15步）**：生成速度快，质量略低 / Fast preview (10-15 steps): Quick generation, slightly lower quality
+  - **标准质量（15-20步）**：平衡速度和质量，推荐 / Standard quality (15-20 steps): Balanced speed and quality, recommended
+  - **高质量（20-30步）**：质量更好但耗时更长 / High quality (20-30 steps): Better quality but longer time
+
+**生成时间参考 / Generation Time Reference**：
+- 骁龙8系列（OpenCL）：15步约30-60秒 / Snapdragon 8 series (OpenCL): ~30-60s for 15 steps
+- 骁龙7系列（OpenCL）：15步约60-120秒 / Snapdragon 7 series (OpenCL): ~60-120s for 15 steps
+- CPU模式：15步约3-5分钟 / CPU mode: ~3-5 minutes for 15 steps
+
+**注意事项 / Notes**：
+- ⚠️ **首次使用耗时较长**：首次加载Diffusion模型需要初始化，可能需要1-2分钟 / First-time loading takes longer, may need 1-2 minutes for initialization
+- ⚠️ **图像尺寸固定**：当前版本生成512x512像素图像 / Current version generates 512x512 pixel images
+- ⚠️ **显存/内存占用**：图像生成占用较多资源，建议关闭其他应用 / Image generation consumes significant resources, recommend closing other apps
+- ⚠️ **生成质量**：受模型版本、提示词质量和生成参数影响 / Generation quality affected by model version, prompt quality and generation parameters
+- ⚠️ **版权与伦理**：请遵守当地法律法规，不要生成违法或不当内容 / Please comply with local laws, do not generate illegal or inappropriate content
 
 ### 3.3 构建知识库页面 / Build Knowledge Base Page
 
@@ -340,8 +429,38 @@ OfflineAI supports multimodal models (Vision-Language Models, VLM) for local ima
    - 手动重复惩罚：减少重复内容的生成（1.0-2.0） / Manual Repetition Penalty: Reduce repetitive content generation (1.0-2.0)
    - 优先手动参数：启用时使用手动设置的参数而非模型默认参数 / Prioritize Manual Parameters: Use manually set parameters instead of model defaults when enabled
 
-4. **全局设置 / Global Settings**
-   - GPU加速：启用GPU加速处理（需设备支持） / GPU Acceleration: Enable GPU acceleration processing (requires device support)
+4. **Diffusion生成设置 / Diffusion Generation Settings**
+   - **去噪步数 / Denoising Steps**：控制图像生成的质量和时间（10-50步）/ Controls image generation quality and time (10-50 steps)
+     - 10-15步：快速预览，质量较低 / Quick preview, lower quality
+     - 15-20步：标准质量，推荐 / Standard quality, recommended
+     - 20-30步：高质量，耗时更长 / High quality, longer time
+     - 30-50步：最高质量，显著增加生成时间 / Highest quality, significantly increases generation time
+   - **随机种子 / Random Seed**：控制图像生成的随机性 / Controls image generation randomness
+     - 使用随机种子：每次生成不同的图像（默认）/ Use random seed: generates different images each time (default)
+     - 固定种子值：输入特定数值可复现相同的图像 / Fixed seed value: input specific number to reproduce same image
+   - **内存模式 / Memory Mode**：根据设备内存选择合适的生成模式 / Choose appropriate generation mode based on device memory
+     - 省内存模式：适合4GB内存设备，速度较慢 / Memory Saving: suitable for 4GB RAM devices, slower speed
+     - 平衡模式：适合6GB内存设备，平衡速度和质量（推荐）/ Balance: suitable for 6GB RAM devices, balanced speed and quality (recommended)
+     - 充足内存模式：适合8GB+设备，速度最快 / Enough Memory: suitable for 8GB+ devices, fastest speed
+
+5. **GPU后端设置 / GPU Backend Settings**
+   - **后端选择 / Backend Selection**：选择推理使用的计算后端 / Select computational backend for inference
+     - **CPU**：纯CPU推理，兼容性最好但速度较慢 / Pure CPU inference, best compatibility but slower speed
+     - **OpenCL**：GPU加速，适合大多数安卓设备，速度快 / GPU acceleration, suitable for most Android devices, fast speed
+     - **Vulkan**：高性能GPU加速，部分设备支持，速度最快 / High-performance GPU acceleration, some devices support, fastest speed
+     - **NNAPI**：Android神经网络API，部分设备支持 / Android Neural Networks API, some devices support
+   - **后端兼容性说明 / Backend Compatibility Notes**：
+     - ⚠️ 不是所有设备都支持所有后端 / Not all devices support all backends
+     - ⚠️ 如果选择的后端不支持，可能导致应用崩溃 / If selected backend is not supported, app may crash
+     - ⚠️ 建议先使用CPU后端测试，确认模型正常工作后再尝试GPU / Recommend testing with CPU backend first, then try GPU after confirming model works
+     - ⚠️ GPU后端失败时会在日志中显示错误信息 / GPU backend failures will show error messages in logs
+   - **后端推荐 / Backend Recommendations**：
+     - 骁龙8系列：推荐OpenCL或Vulkan / Snapdragon 8 series: recommend OpenCL or Vulkan
+     - 骁龙7系列：推荐OpenCL / Snapdragon 7 series: recommend OpenCL
+     - 联发科天玑：推荐OpenCL / MediaTek Dimensity: recommend OpenCL
+     - 老旧设备：建议使用CPU / Older devices: recommend CPU
+
+6. **全局设置 / Global Settings**
    - 调试模式：启用详细日志输出 / Debug Mode: Enable detailed log output
    - 字体大小：调整应用中文本的显示大小 / Font Size: Adjust text display size in the application
 
@@ -592,6 +711,55 @@ Text chunking and overlap sizes can be configured in settings, with multiple pre
   - 注意：需要确保设备有足够内存 / Note: Ensure device has sufficient memory
   - 参考上文"LLM推理设置详解"选择合适的值 / Refer to "LLM Inference Settings Explained" above to choose appropriate value
 
+**问题：使用GPU后端时应用崩溃 / Issue: App crashes when using GPU backend**
+- **原因 / Cause**：
+  - 设备不支持所选的GPU后端（OpenCL/Vulkan/NNAPI）/ Device does not support selected GPU backend
+  - 驱动程序过时或不兼容 / Outdated or incompatible drivers
+  - GPU内存不足 / Insufficient GPU memory
+  - 特定模型与GPU后端不兼容 / Specific model incompatible with GPU backend
+- **诊断步骤 / Diagnostic Steps**：
+  1. 查看应用日志（菜单 → 查看日志）/ Check app logs (Menu → View Logs)
+  2. 搜索关键词："Backend", "OpenCL", "Vulkan", "NNAPI", "crash" / Search keywords: "Backend", "OpenCL", "Vulkan", "NNAPI", "crash"
+  3. 确认错误信息类型 / Identify error message type
+- **解决方案 / Solution**：
+  - **立即操作 / Immediate Action**：切换到CPU后端（设置 → GPU后端设置 → 选择CPU）/ Switch to CPU backend (Settings → GPU Backend Settings → Select CPU)
+  - **测试其他后端 / Test Other Backends**：按顺序尝试：CPU → OpenCL → Vulkan → NNAPI / Try in order: CPU → OpenCL → Vulkan → NNAPI
+  - **更新系统 / Update System**：确保Android系统和GPU驱动为最新版本 / Ensure Android system and GPU drivers are up-to-date
+  - **降低负载 / Reduce Load**：
+    - 使用更小的模型（如1B而非3B）/ Use smaller models (e.g., 1B instead of 3B)
+    - 降低最大序列长度 / Reduce max sequence length
+    - Diffusion使用"省内存"模式 / Use "Memory Saving" mode for Diffusion
+- **后端兼容性测试 / Backend Compatibility Testing**：
+  - 在设置中选择后端后，先用简单任务测试（如短文本生成）/ After selecting backend in settings, test with simple tasks first (e.g., short text generation)
+  - 成功后再进行复杂任务（如长对话、图像生成）/ After success, proceed with complex tasks (e.g., long conversations, image generation)
+  - 记录哪些后端可用，避免使用不兼容的后端 / Record which backends work, avoid using incompatible backends
+- **已知设备问题 / Known Device Issues**：
+  - 某些设备的Vulkan实现不完整，建议使用OpenCL / Some devices have incomplete Vulkan implementation, recommend OpenCL
+  - 部分低端设备NNAPI支持有限，可能崩溃 / Some low-end devices have limited NNAPI support, may crash
+  - x86_64模拟器可能不支持GPU后端 / x86_64 emulators may not support GPU backends
+
+**问题：Diffusion图像生成失败或质量差 / Issue: Diffusion image generation fails or poor quality**
+- **原因 / Cause**：
+  - 提示词不够具体或包含错误 / Prompt not specific enough or contains errors
+  - 去噪步数设置过低 / Denoising steps set too low
+  - 内存模式选择不当 / Inappropriate memory mode selection
+  - GPU后端不支持或不稳定 / GPU backend not supported or unstable
+- **解决方案 / Solution**：
+  - **提示词优化 / Prompt Optimization**：
+    - 使用英文提示词（Stable Diffusion 1.5）/ Use English prompts (Stable Diffusion 1.5)
+    - 添加质量关键词："high quality", "detailed", "8k" / Add quality keywords: "high quality", "detailed", "8k"
+    - 使用具体描述词，避免抽象概念 / Use specific descriptions, avoid abstract concepts
+  - **参数调整 / Parameter Adjustment**：
+    - 增加去噪步数至20-30步 / Increase denoising steps to 20-30
+    - 尝试不同的随机种子 / Try different random seeds
+    - 根据设备内存调整内存模式 / Adjust memory mode based on device RAM
+  - **后端切换 / Backend Switching**：
+    - 如果GPU崩溃，切换到CPU后端测试 / If GPU crashes, switch to CPU backend for testing
+    - CPU模式虽慢但更稳定 / CPU mode is slower but more stable
+  - **模型检查 / Model Check**：
+    - 确认模型文件完整（text_encoder.mnn、unet.mnn、vae_decoder.mnn）/ Confirm model files are complete
+    - 重新下载损坏的模型文件 / Re-download corrupted model files
+
 ### 5.2 日志分析 / Log Analysis
 
 当遇到问题时，可以通过查看日志来诊断：
@@ -780,7 +948,181 @@ Viewing logs can help locate the cause of problems, especially when processing l
 - 图片越清晰、提示词越具体，越能提升答案质量 / Clearer images and more specific prompts improve answer quality
 - 首次加载多模态模型可能耗时较长，属于正常现象 / First-time loading of multimodal models may take longer, this is normal
 
-### 8.3 重排模型使用建议 / Rerank Model Usage Recommendations
+### 8.3 聊天历史管理最佳实践 / Chat History Management Best Practices
+
+OfflineAI 支持多会话管理，合理使用可以提高工作效率：
+
+OfflineAI supports multi-session management, proper use can improve work efficiency:
+
+**会话组织策略 / Session Organization Strategy**：
+- **按主题分类 / Categorize by Topic**：为不同主题创建独立会话（如工作、学习、创作等）/ Create independent sessions for different topics (e.g., work, study, creation)
+- **长期项目 / Long-term Projects**：重要项目保持独立会话，方便追溯和继续 / Keep independent sessions for important projects for easy tracking and continuation
+- **临时咨询 / Temporary Consultation**：短期问题可以使用临时会话，完成后删除 / Use temporary sessions for short-term issues, delete after completion
+
+**会话切换技巧 / Session Switching Tips**：
+- **快速识别 / Quick Identification**：会话自动以时间戳命名，建议记住关键时间 / Sessions automatically named with timestamps, recommend remembering key times
+- **定期清理 / Regular Cleanup**：删除不再需要的会话，保持列表整洁 / Delete unnecessary sessions to keep list tidy
+- **重要会话 / Important Sessions**：建议截图或导出重要对话内容 / Recommend taking screenshots or exporting important conversation content
+
+**使用建议 / Usage Recommendations**：
+- 每个会话独立维护对话历史，不会相互影响 / Each session maintains independent conversation history without affecting others
+- 切换会话时会自动保存当前对话 / Automatically saves current conversation when switching sessions
+- 长时间对话建议适当分割为多个会话，避免上下文过长 / Recommend splitting long conversations into multiple sessions to avoid excessive context
+
+### 8.4 Diffusion图像生成最佳实践 / Diffusion Image Generation Best Practices
+
+AI绘图需要技巧和经验积累，以下是一些实用建议：
+
+AI art requires skills and experience, here are some practical recommendations:
+
+**提示词编写技巧 / Prompt Writing Tips**：
+
+1. **结构化提示词 / Structured Prompts**：
+   ```
+   [主体] + [动作/姿态] + [环境] + [风格] + [质量词]
+   [Subject] + [Action/Pose] + [Environment] + [Style] + [Quality]
+   
+   示例 / Example:
+   "A cute cat, sitting on windowsill, sunny room with plants, watercolor style, high quality, detailed"
+   ```
+
+2. **权重使用（未来版本）/ Weight Usage (Future Version)**：
+   - 某些提示词可以加权重，如 `(beautiful:1.5)` 表示强调"美丽" / Some prompts can be weighted, e.g., `(beautiful:1.5)` emphasizes "beautiful"
+   - 当前版本暂不支持，建议多次重复重要词汇 / Not supported in current version, recommend repeating important words
+
+3. **避免常见错误 / Avoid Common Mistakes**：
+   - ❌ 提示词过于简单："a cat" / Too simple: "a cat"
+   - ✅ 提示词详细："a fluffy orange cat sitting on a red cushion, natural lighting, photorealistic" / Detailed: "a fluffy orange cat sitting on a red cushion, natural lighting, photorealistic"
+   - ❌ 中英混合（SD 1.5）："beautiful 风景" / Mixed Chinese-English (SD 1.5): "beautiful 风景"
+   - ✅ 统一语言："beautiful landscape" 或 "美丽的风景"（使用太乙中文SD）/ Unified language: "beautiful landscape" or "美丽的风景" (with Taiyi Chinese SD)
+
+**参数调优策略 / Parameter Tuning Strategy**：
+
+1. **快速迭代 / Quick Iteration**：
+   - 第一次生成使用10-15步，快速查看效果 / First generation use 10-15 steps to quickly check result
+   - 满意后增加到20-30步获得高质量版本 / If satisfied, increase to 20-30 steps for high-quality version
+
+2. **种子复用 / Seed Reuse**：
+   - 生成满意图像后，记录种子值 / After generating satisfactory image, record seed value
+   - 使用相同种子和微调提示词可以生成相似但不同的图像 / Using same seed with adjusted prompts generates similar but different images
+
+3. **内存模式选择 / Memory Mode Selection**：
+   - 测试阶段使用"省内存"模式，确保稳定性 / Use "Memory Saving" mode during testing to ensure stability
+   - 正式生成使用"平衡"或"充足内存"模式提升速度 / Use "Balance" or "Enough Memory" mode for formal generation to improve speed
+
+**后端性能对比 / Backend Performance Comparison**：
+
+| 后端 Backend | 速度 Speed | 兼容性 Compatibility | 推荐场景 Recommended Scenario |
+|-------------|-----------|---------------------|----------------------------|
+| CPU | ★☆☆☆☆ | ★★★★★ | 测试、老旧设备 / Testing, old devices |
+| OpenCL | ★★★★☆ | ★★★★☆ | 大多数安卓设备（推荐）/ Most Android devices (Recommended) |
+| Vulkan | ★★★★★ | ★★★☆☆ | 高端设备、追求极致速度 / High-end devices, maximum speed |
+| NNAPI | ★★★☆☆ | ★★☆☆☆ | 特定设备、实验性 / Specific devices, experimental |
+
+**创作流程建议 / Creative Workflow Recommendations**：
+
+1. **概念阶段 / Concept Phase**：
+   - 使用简单提示词和低步数（10步）快速探索风格 / Use simple prompts and low steps (10) to quickly explore styles
+   - 尝试不同的风格关键词找到合适方向 / Try different style keywords to find suitable direction
+
+2. **细化阶段 / Refinement Phase**：
+   - 增加提示词细节，提升到15-20步 / Add prompt details, increase to 15-20 steps
+   - 使用固定种子进行微调 / Use fixed seed for fine-tuning
+
+3. **最终输出 / Final Output**：
+   - 使用完整详细的提示词，25-30步生成高质量图像 / Use complete detailed prompts, 25-30 steps for high-quality image
+   - 在"充足内存"模式下加速生成 / Accelerate generation in "Enough Memory" mode
+
+**常见主题提示词参考 / Common Theme Prompt References**：
+
+- **风景画 / Landscape**：
+  "beautiful mountain landscape, sunset colors, lake reflection, dramatic clouds, high detail, 8k, masterpiece"
+
+- **人物肖像 / Portrait**：
+  "portrait of a young woman, natural lighting, soft focus, detailed face, photorealistic, professional photography"
+
+- **科幻场景 / Sci-Fi Scene**：
+  "futuristic cyberpunk city, neon lights, flying cars, rainy night, highly detailed, 8k, cinematic lighting"
+
+- **动物 / Animals**：
+  "cute fluffy kitten, big eyes, soft fur, sitting pose, natural lighting, high quality, detailed"
+
+- **建筑 / Architecture**：
+  "modern architecture, glass building, minimalist design, blue sky, geometric, professional photography, high detail"
+
+### 8.5 GPU后端选择最佳实践 / GPU Backend Selection Best Practices
+
+合理选择计算后端可以显著提升性能：
+
+Proper backend selection can significantly improve performance:
+
+**首次使用建议 / First-Time Use Recommendations**：
+
+1. **从CPU开始 / Start with CPU**：
+   - 先使用CPU后端确认模型可以正常加载和运行 / First use CPU backend to confirm model loads and runs normally
+   - CPU模式虽慢但最稳定，适合验证 / CPU mode is slow but most stable, suitable for verification
+
+2. **逐步尝试GPU / Gradually Try GPU**：
+   - 按顺序测试：CPU → OpenCL → Vulkan → NNAPI / Test in order: CPU → OpenCL → Vulkan → NNAPI
+   - 每次切换后用简单任务测试，避免直接进行复杂任务 / Test with simple tasks after each switch, avoid complex tasks immediately
+
+3. **记录兼容性 / Record Compatibility**：
+   - 记录哪些后端可用，哪些会崩溃 / Record which backends work and which crash
+   - 不同模型可能对后端兼容性不同 / Different models may have different backend compatibility
+
+**性能优化策略 / Performance Optimization Strategy**：
+
+1. **LLM文本生成 / LLM Text Generation**：
+   - OpenCL通常是最佳选择，兼容性和性能平衡 / OpenCL usually best choice, balanced compatibility and performance
+   - Vulkan在支持的设备上可能更快 / Vulkan may be faster on supported devices
+   - CPU适合短文本生成和测试 / CPU suitable for short text generation and testing
+
+2. **Diffusion图像生成 / Diffusion Image Generation**：
+   - **强烈推荐GPU加速**：CPU生成速度极慢（3-5分钟）/ **Strongly recommend GPU acceleration**: CPU generation very slow (3-5 minutes)
+   - OpenCL或Vulkan可将生成时间降至30-120秒 / OpenCL or Vulkan can reduce generation time to 30-120 seconds
+   - 如果GPU崩溃，检查内存模式是否设置正确 / If GPU crashes, check if memory mode is set correctly
+
+3. **多模态推理 / Multimodal Inference**：
+   - 视觉编码器通常对GPU要求较高 / Vision encoder usually has high GPU requirements
+   - 建议先用CPU测试，确认稳定后再使用GPU / Recommend testing with CPU first, use GPU after confirming stability
+
+**故障恢复流程 / Fault Recovery Procedure**：
+
+如果GPU后端崩溃，按以下步骤恢复：
+If GPU backend crashes, follow these steps to recover:
+
+1. **立即切换 / Immediate Switch**：
+   - 设置 → GPU后端设置 → 选择CPU / Settings → GPU Backend Settings → Select CPU
+   - 重启应用确保设置生效 / Restart app to ensure settings take effect
+
+2. **日志分析 / Log Analysis**：
+   - 查看崩溃前的日志信息 / Check log information before crash
+   - 搜索"Backend", "OpenCL", "Vulkan"等关键词 / Search keywords "Backend", "OpenCL", "Vulkan"
+
+3. **逐步测试 / Gradual Testing**：
+   - 在CPU模式下确认模型正常工作 / Confirm model works normally in CPU mode
+   - 尝试其他GPU后端（如从Vulkan换到OpenCL）/ Try other GPU backends (e.g., switch from Vulkan to OpenCL)
+   - 降低负载（使用更小模型、降低序列长度）/ Reduce load (use smaller model, reduce sequence length)
+
+**设备特定建议 / Device-Specific Recommendations**：
+
+- **旗舰设备（骁龙8系列、天玑9000+）/ Flagship Devices (Snapdragon 8, Dimensity 9000+)**：
+  - 优先使用Vulkan或OpenCL / Prioritize Vulkan or OpenCL
+  - 可以使用"充足内存"模式进行Diffusion生成 / Can use "Enough Memory" mode for Diffusion generation
+  - 支持较大的最大序列长度（4096-6144）/ Support larger max sequence length (4096-6144)
+
+- **中端设备（骁龙7系列、天玑8000系列）/ Mid-range Devices (Snapdragon 7, Dimensity 8000)**：
+  - 推荐OpenCL / Recommend OpenCL
+  - Diffusion使用"平衡"模式 / Use "Balance" mode for Diffusion
+  - 最大序列长度建议2048-4096 / Max sequence length recommend 2048-4096
+
+- **入门设备（骁龙6系列及以下）/ Entry Devices (Snapdragon 6 and below)**：
+  - 可以尝试OpenCL，但CPU可能更稳定 / Can try OpenCL, but CPU may be more stable
+  - 使用"省内存"模式 / Use "Memory Saving" mode
+  - 最大序列长度建议1024-2048 / Max sequence length recommend 1024-2048
+  - 避免同时运行多个应用 / Avoid running multiple apps simultaneously
+
+### 8.6 重排模型使用建议 / Rerank Model Usage Recommendations
 
 重排模型是提升检索质量的重要工具，但需要合理配置和使用：
 

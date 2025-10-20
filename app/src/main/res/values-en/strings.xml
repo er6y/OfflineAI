@@ -147,6 +147,7 @@
     <string name="menu_help">Help</string>
     <string name="menu_exit">Exit</string>
     <string name="menu_default_model_download">Default Model Download</string>
+    <string name="menu_chat_history">Chat History</string>
 
     <!-- Common buttons -->
     <string name="button_new_kb">New Knowledge Base</string>
@@ -381,13 +382,13 @@
     <!-- UI text -->
     <string name="text_new_conversation">New Conversation</string>
     <string name="text_thinking_mode">Thinking Mode</string>
-    <string name="label_llm_api_url">LLM API URL:</string>
-    <string name="label_llm_api_key">LLM API Key:</string>
-    <string name="label_llm_model">LLM Model:</string>
-    <string name="label_knowledge_base">Knowledge Base:</string>
+    <string name="label_llm_api_url">API URL:</string>
+    <string name="label_llm_api_key">API Key:</string>
+    <string name="label_llm_model">Model:</string>
+    <string name="label_knowledge_base">K.B. :</string>
     <string name="label_search_depth">Search Count:</string>
     <string name="label_rerank_count">Rerank Count:</string>
-    <string name="label_system_prompt">System Prompt:</string>
+    <string name="label_system_prompt">SysPrmpt:</string>
     <string name="label_user_prompt">User Question:(Long press to browse images, camera)</string>
     <string name="label_title">Title:</string>
     <string name="label_content">Content:</string>
@@ -868,7 +869,7 @@
     
     <string name="title_global_settings">Global Settings</string>
     <string name="label_debug_mode">Debug Mode</string>
-    <string name="label_backend_preference">Backend Preference</string>
+    <string name="label_backend_preference">Backend:</string>
 
     <string name="label_font_size">Font Size</string>
     <string name="text_font_size_value">Font Size: 16sp</string>
@@ -1050,4 +1051,22 @@
     <string name="collapsible_debug">Debug</string>
     <string name="collapsible_thinking">Thinking</string>
     <string name="collapsible_performance">Performance</string>
+
+    <!-- Chat History strings -->
+    <string name="chat_history_title">Chat History</string>
+    <string name="chat_history_empty">No chat history</string>
+    <string name="chat_history_delete_all">Delete All</string>
+    <string name="chat_history_filter_hint">Search conversations...</string>
+    <string name="chat_history_item_delete">Delete</string>
+    <string name="dialog_confirm_delete_chat">Are you sure you want to delete this conversation?</string>
+    <string name="dialog_confirm_delete_all_chats">Are you sure you want to delete all conversations? This action cannot be undone!</string>
+    <string name="hint_chat_history_dir_path">Chat history save directory</string>
+    <string name="label_chat_history_path">Chat History Directory:</string>
+    <string name="toast_chat_history_deleted">Conversation deleted</string>
+    <string name="toast_chat_history_delete_failed">Failed to delete conversation</string>
+    <string name="toast_all_chat_history_deleted">Deleted %d conversations</string>
+    <string name="toast_chat_history_loaded">Conversation loaded</string>
+    <string name="toast_chat_history_load_failed">Failed to load conversation</string>
+    <string name="toast_chat_history_saved">Conversation saved</string>
+    <string name="toast_chat_history_save_failed">Failed to save conversation</string>
 </resources>

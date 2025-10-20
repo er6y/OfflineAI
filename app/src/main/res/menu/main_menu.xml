@@ -9,6 +9,12 @@
         app:showAsAction="never" />
         
     <item
+        android:id="@+id/action_chat_history"
+        android:title="@string/menu_chat_history"
+        android:orderInCategory="110"
+        app:showAsAction="never" />
+        
+    <item
         android:id="@+id/action_default_model_download"
         android:title="@string/menu_default_model_download"
         android:orderInCategory="125"

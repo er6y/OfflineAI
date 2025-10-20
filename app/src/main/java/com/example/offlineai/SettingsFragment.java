@@ -59,10 +59,12 @@ public class SettingsFragment extends Fragment {
     private EditText editTextEmbeddingModelPath;
     private EditText editTextRerankerModelPath;
     private EditText editTextKnowledgeBasePath;
+    private EditText editTextChatHistoryPath;
     private Button buttonSelectModelPath;
     private Button buttonSelectEmbeddingModelPath;
     private Button buttonSelectRerankerModelPath;
     private Button buttonSelectKnowledgeBasePath;
+    private Button buttonSelectChatHistoryPath;
     private Button buttonSaveSettings;
     private SwitchCompat switchDebugMode;
     private Spinner spinnerUseGpu;
@@ -105,6 +107,7 @@ public class SettingsFragment extends Fragment {
     private ActivityResultLauncher<Intent> embeddingModelPathLauncher;
     private ActivityResultLauncher<Intent> rerankerModelPathLauncher;
     private ActivityResultLauncher<Intent> knowledgeBasePathLauncher;
+    private ActivityResultLauncher<Intent> chatHistoryPathLauncher;
     // 思考模式开关已移动到RAG问答界面
     
     // 设置变更监听器
@@ -115,6 +118,7 @@ public class SettingsFragment extends Fragment {
     private static final int REQUEST_CODE_EMBEDDING_MODEL_PATH = 1002;
     private static final int REQUEST_CODE_RERANKER_MODEL_PATH = 1003;
     private static final int REQUEST_CODE_KNOWLEDGE_BASE_PATH = 1004;
+    private static final int REQUEST_CODE_CHAT_HISTORY_PATH = 1005;
     
     // 设置监听器接口
     public interface SettingsChangeListener {
@@ -171,6 +175,15 @@ public class SettingsFragment extends Fragment {
                 }
             }
         );
+        
+        chatHistoryPathLauncher = registerForActivityResult(
+            new ActivityResultContracts.StartActivityForResult(),
+            result -> {
+                if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
+                    handleDirectorySelection(result.getData().getData(), editTextChatHistoryPath);
+                }
+            }
+        );
     }
     
     @Nullable
@@ -189,10 +202,12 @@ public class SettingsFragment extends Fragment {
         editTextEmbeddingModelPath = view.findViewById(R.id.editTextEmbeddingModelPath);
         editTextRerankerModelPath = view.findViewById(R.id.editTextRerankerModelPath);
         editTextKnowledgeBasePath = view.findViewById(R.id.editTextKnowledgeBasePath);
+        editTextChatHistoryPath = view.findViewById(R.id.editTextChatHistoryPath);
         buttonSelectModelPath = view.findViewById(R.id.buttonSelectModelPath);
         buttonSelectEmbeddingModelPath = view.findViewById(R.id.buttonSelectEmbeddingModelPath);
         buttonSelectRerankerModelPath = view.findViewById(R.id.buttonSelectRerankerModelPath);
         buttonSelectKnowledgeBasePath = view.findViewById(R.id.buttonSelectKnowledgeBasePath);
+        buttonSelectChatHistoryPath = view.findViewById(R.id.buttonSelectChatHistoryPath);
         buttonSaveSettings = view.findViewById(R.id.buttonSaveSettings);
         switchDebugMode = view.findViewById(R.id.switchDebugMode);
         spinnerUseGpu = view.findViewById(R.id.spinnerBackendPreference);
@@ -304,6 +319,12 @@ public class SettingsFragment extends Fragment {
         buttonSelectKnowledgeBasePath.setOnClickListener(v -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
             knowledgeBasePathLauncher.launch(intent);
+        });
+        
+        // 选择对话历史目录
+        buttonSelectChatHistoryPath.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            chatHistoryPathLauncher.launch(intent);
         });
         
         // 保存设置
@@ -484,6 +505,13 @@ public class SettingsFragment extends Fragment {
             editTextEmbeddingModelPath.setText(embeddingModelPath);
             editTextRerankerModelPath.setText(rerankerModelPath);
             editTextKnowledgeBasePath.setText(knowledgeBasePath);
+            
+            // 加载对话历史路径
+            String chatHistoryPath = ConfigManager.getString(context, 
+                ConfigManager.KEY_CHAT_HISTORY_PATH, 
+                ConfigManager.DEFAULT_CHAT_HISTORY_PATH);
+            editTextChatHistoryPath.setText(chatHistoryPath);
+            
             switchDebugMode.setChecked(debugMode);
             
             // 设置后端偏好Spinner
@@ -700,6 +728,11 @@ public class SettingsFragment extends Fragment {
             ConfigManager.setString(context, ConfigManager.KEY_EMBEDDING_MODEL_PATH, embeddingModelPath);
             ConfigManager.setString(context, ConfigManager.KEY_RERANKER_MODEL_PATH, rerankerModelPath);
             ConfigManager.setString(context, ConfigManager.KEY_KNOWLEDGE_BASE_PATH, knowledgeBasePath);
+            
+            // 保存对话历史路径
+            String chatHistoryPath = editTextChatHistoryPath.getText().toString().trim();
+            ConfigManager.setString(context, ConfigManager.KEY_CHAT_HISTORY_PATH, chatHistoryPath);
+            
             ConfigManager.setBoolean(context, ConfigManager.KEY_DEBUG_MODE, debugMode);
             ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
             // ONNX引擎配置保存已移除

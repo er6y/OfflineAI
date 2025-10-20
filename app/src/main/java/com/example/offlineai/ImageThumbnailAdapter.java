@@ -31,6 +31,7 @@ public class ImageThumbnailAdapter extends RecyclerView.Adapter<ImageThumbnailAd
     private final List<ImageItem> imageItems = new ArrayList<>();
     private OnImageActionListener listener;
     private Context context;
+    private String chatFolderPath; // Chat folder path for saving preprocessed images
 
     /**
      * Data class for image item
@@ -123,6 +124,14 @@ public class ImageThumbnailAdapter extends RecyclerView.Adapter<ImageThumbnailAd
     public void setOnImageActionListener(OnImageActionListener listener) {
         this.listener = listener;
     }
+    
+    /**
+     * Set chat folder path for saving preprocessed images
+     * @param chatFolderPath Path to chat folder
+     */
+    public void setChatFolderPath(String chatFolderPath) {
+        this.chatFolderPath = chatFolderPath;
+    }
 
     /**
      * Add image by URI (will compress later based on model requirements)
@@ -157,6 +166,7 @@ public class ImageThumbnailAdapter extends RecyclerView.Adapter<ImageThumbnailAd
      * Get original image files (convert content:// URI to file paths)
      * Copies URI bytes to temp files without any processing
      * JNI/llama.cpp will handle all compression based on model requirements
+     * Uses cached path if already processed to avoid duplicate saves
      * @return List of temporary file paths
      */
     public List<String> getOriginalImageFiles() {
@@ -168,13 +178,22 @@ public class ImageThumbnailAdapter extends RecyclerView.Adapter<ImageThumbnailAd
         List<String> filePaths = new ArrayList<>();
         for (ImageItem item : imageItems) {
             try {
-                // Convert content:// URI to file path by copying bytes
-                String tempPath = copyUriToTempFile(context, item.getOriginalUri());
-                if (tempPath != null) {
-                    filePaths.add(tempPath);
-                    LogManager.logI("ImageThumbnailAdapter", "Converted URI to file: " + tempPath);
+                // Check if already processed (cached)
+                if (item.isCompressed()) {
+                    // Reuse cached path
+                    filePaths.add(item.getCompressedPath());
+                    LogManager.logD("ImageThumbnailAdapter", "Reusing cached image: " + item.getCompressedPath());
                 } else {
-                    LogManager.logW("ImageThumbnailAdapter", "Failed to convert URI to file");
+                    // Convert content:// URI to file path by copying bytes
+                    String tempPath = copyUriToTempFile(context, item.getOriginalUri(), chatFolderPath);
+                    if (tempPath != null) {
+                        // Cache the path for future calls
+                        item.setCompressedPath(tempPath);
+                        filePaths.add(tempPath);
+                        LogManager.logI("ImageThumbnailAdapter", "Converted URI to file: " + tempPath);
+                    } else {
+                        LogManager.logW("ImageThumbnailAdapter", "Failed to convert URI to file");
+                    }
                 }
             } catch (Exception e) {
                 LogManager.logE("ImageThumbnailAdapter", "Error converting URI to file", e);
@@ -188,9 +207,10 @@ public class ImageThumbnailAdapter extends RecyclerView.Adapter<ImageThumbnailAd
      * Implements smart resize similar to Qwen2.5-VL's min_pixels/max_pixels logic
      * @param context Application context
      * @param sourceUri Source image URI
+     * @param chatFolderPath Chat folder path (null to use cache)
      * @return Path to temp file, or null if failed
      */
-    private static String copyUriToTempFile(Context context, Uri sourceUri) {
+    private static String copyUriToTempFile(Context context, Uri sourceUri, String chatFolderPath) {
         try {
             // Load bitmap from URI
             android.graphics.Bitmap originalBitmap;
@@ -223,15 +243,23 @@ public class ImageThumbnailAdapter extends RecyclerView.Adapter<ImageThumbnailAd
                 originalBitmap.recycle();
             }
             
-            // Create cache directory
-            java.io.File cacheDir = new java.io.File(context.getCacheDir(), "multimodal");
-            if (!cacheDir.exists()) {
-                cacheDir.mkdirs();
+            // Get chat folder (should already be set by RagQaFragment)
+            if (chatFolderPath == null || chatFolderPath.isEmpty()) {
+                LogManager.logE("ImageThumbnailAdapter", "No chat folder set, cannot save image");
+                return null;
             }
+            
+            java.io.File outputDir = new java.io.File(chatFolderPath);
+            if (!outputDir.exists()) {
+                LogManager.logE("ImageThumbnailAdapter", "Chat folder doesn't exist: " + chatFolderPath);
+                return null;
+            }
+            
+            LogManager.logI("ImageThumbnailAdapter", "Saving image to chat folder: " + chatFolderPath);
             
             // Save as JPEG with quality 95
             String fileName = "img_" + System.currentTimeMillis() + ".jpg";
-            java.io.File outputFile = new java.io.File(cacheDir, fileName);
+            java.io.File outputFile = new java.io.File(outputDir, fileName);
             
             java.io.FileOutputStream fos = new java.io.FileOutputStream(outputFile);
             processedBitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 95, fos);

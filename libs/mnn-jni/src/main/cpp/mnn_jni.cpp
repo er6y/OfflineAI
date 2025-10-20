@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <unistd.h>  // for chdir, getcwd
+#include <cerrno>    // for errno
 #include "llm/llm.hpp"
 #include "llm/reranker.hpp"
 #include "diffusion/diffusion.hpp"
@@ -380,24 +381,21 @@ public:
             bool stop_requested = false;
             bool generate_end = false;
             
-            LOGI("[TEXT] About to call llm_->response() with max_new_tokens=%d (from config)", max_new_tokens);
-            LOGI("[TEXT] Prompt: %s", prompt.c_str());
+            LOGI("[TEXT] Starting generation with max_new_tokens=%d", max_new_tokens);
+            // LOGI("[TEXT] Prompt: %s", prompt.c_str());  // Too verbose
             
             // Initial response (generates first token)
-            LOGI("[TEXT] Calling llm_->response(history, stream, \"<eop>\", 1)...");
             llm_->response(history, &output_stream, "<eop>", 1);
             int current_size = 1;
-            LOGI("[TEXT] llm_->response() returned, current_size=%d", current_size);
             
             // Generate remaining tokens one by one
             // Note: MNN's generate() will return early if EOS token is detected
             // We check stop flags set by StreamBuffer callback
-            LOGI("[TEXT] Starting generation loop, max_new_tokens=%d", max_new_tokens);
             while (!stop_requested && !generate_end && current_size < max_new_tokens) {
-                LOGD("[TEXT] Calling llm_->generate(1), current_size=%d", current_size);
+                // LOGD("[TEXT] Calling llm_->generate(1), current_size=%d", current_size);  // Too verbose
                 llm_->generate(1);
                 current_size++;
-                LOGD("[TEXT] After generate(), current_size=%d", current_size);
+                // LOGD("[TEXT] After generate(), current_size=%d", current_size);  // Too verbose
                 
                 // Check flags set by StreamBuffer
                 stop_requested = stream_buffer.isStopRequested();
@@ -534,10 +532,10 @@ public:
             // We check stop flags set by StreamBuffer callback
             LOGI("[MULTIMODAL] Starting generation loop, max_new_tokens=%d", max_new_tokens);
             while (!stop_requested && !generate_end && current_size < max_new_tokens) {
-                LOGD("[MULTIMODAL] Calling llm_->generate(1), current_size=%d", current_size);
+                // LOGD("[MULTIMODAL] Calling llm_->generate(1), current_size=%d", current_size);  // Too verbose
                 llm_->generate(1);
                 current_size++;
-                LOGD("[MULTIMODAL] After generate(), current_size=%d", current_size);
+                // LOGD("[MULTIMODAL] After generate(), current_size=%d", current_size);  // Too verbose
                 
                 // Check flags set by StreamBuffer
                 stop_requested = stream_buffer.isStopRequested();
@@ -1668,24 +1666,30 @@ static std::mutex g_diffusion_sessions_mutex;
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_offlineai_mnn_MnnInference_createDiffusion(
     JNIEnv* env, jclass clazz, 
-    jstring jModelDir, jint modelType, jint backendType, jint memoryMode) {
+    jstring jModelDir, jint modelType, jint backendType, jint memoryMode, jstring jCachePath) {
     
     try {
+        
         // Get model directory
         const char* modelDir = env->GetStringUTFChars(jModelDir, nullptr);
+        const char* cachePath = env->GetStringUTFChars(jCachePath, nullptr);
         
         LOGI("[DIFFUSION] Creating diffusion session: modelDir=%s, modelType=%d, backend=%d, memory=%d",
              modelDir, modelType, backendType, memoryMode);
+        LOGI("[DIFFUSION] Cache directory (backend-specific): %s", cachePath);
         
-        // ========== 设置OpenCL kernel缓存目录到模型目录 ==========
-        // 这样.tempcache会保存在模型目录而不是app根目录，更稳定
-        int chdirResult = chdir(modelDir);
+        // ========== 切换工作目录到后端缓存目录 ==========
+        // Java 已经创建好目录，格式: <model_path>/<backend>/.tempcache
+        // chdir 后，MNN 的 fopen(".tempcache", "wb") 会直接写到这个目录
+        int chdirResult = chdir(cachePath);
         if (chdirResult == 0) {
             char cwd[1024];
             getcwd(cwd, sizeof(cwd));
-            LOGI("[DIFFUSION] Changed working directory to: %s (for .tempcache)", cwd);
+            LOGI("[DIFFUSION] ✅ Changed working directory to: %s", cwd);
+            LOGI("[DIFFUSION] .tempcache will be saved here (backend-specific cache)");
         } else {
-            LOGW("[DIFFUSION] Failed to change working directory, .tempcache will use default location");
+            LOGE("[DIFFUSION] ❌ Failed to chdir to: %s (errno=%d)", cachePath, errno);
+            LOGW("[DIFFUSION] .tempcache will use default location (may not be writable)");
         }
         
         // Validate backend type
@@ -1701,6 +1705,7 @@ Java_com_offlineai_mnn_MnnInference_createDiffusion(
         );
         
         env->ReleaseStringUTFChars(jModelDir, modelDir);
+        env->ReleaseStringUTFChars(jCachePath, cachePath);
         
         // Load model (this will compile OpenCL kernels on first run - may take 5-15 minutes!)
         LOGI("[DIFFUSION] ========================================");
@@ -1805,25 +1810,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
         int last_step = 0;
         bool unet_started = false;
         
-        // VAE decoding progress (heartbeat) 
-        std::atomic<bool> vae_decoding{false};
-        std::atomic<bool> should_stop{false};
-        
-        // Heartbeat thread for VAE decoding progress
-        std::thread heartbeat_thread([&]() {
-            while (!should_stop) {
-                if (vae_decoding && onTokenMethod) {
-                    jstring jmsg = env->NewStringUTF(".");
-                    env->CallBooleanMethod(callback, onTokenMethod, jmsg);
-                    env->DeleteLocalRef(jmsg);
-                    std::this_thread::sleep_for(std::chrono::seconds(3));
-                } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                }
-            }
-        });
-        
-        std::function<void(int)> progressCallback = [env, callback, onProgressMethod, onTokenMethod, total_steps, &vae_decoding, &last_step, &unet_started](int progress) {
+        std::function<void(int)> progressCallback = [env, callback, onProgressMethod, onTokenMethod, total_steps, &last_step, &unet_started](int progress) {
             __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Progress callback invoked: %d%%", progress);
             
             // Send detailed progress to UI via onToken
@@ -1863,7 +1850,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
                 }
                 // 全部完成 (progress == 100)
                 else if (progress == 100) {
-                    buf[0] = '\0';  // 在后面统一输出Completed
+                    snprintf(buf, sizeof(buf), "\nVAE Decoder: done");
                 }
                 else {
                     buf[0] = '\0';
@@ -1874,11 +1861,6 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
                     env->CallBooleanMethod(callback, onTokenMethod, jmsg);
                     env->DeleteLocalRef(jmsg);
                 }
-            }
-            
-            // Enable VAE decoding heartbeat when we reach final stage
-            if (progress >= 95 && progress < 100) {
-                vae_decoding = true;
             }
             
             // Also call standard progress callback for UI progress bar
@@ -1918,13 +1900,6 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             randomSeed,
             progressCallback
         );
-        
-        // Stop heartbeat thread
-        vae_decoding = false;
-        should_stop = true;
-        if (heartbeat_thread.joinable()) {
-            heartbeat_thread.join();
-        }
         
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] diffusion->run() RETURNED");
         auto end = std::chrono::high_resolution_clock::now();
