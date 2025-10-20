@@ -13,7 +13,7 @@ import com.example.offlineai.chat.chatlist.ChatViewHolders.UserViewHolder
 import com.example.offlineai.chat.model.ChatDataItem
 
 class ChatRecyclerViewAdapter(
-    context: Context?
+    @Suppress("UNUSED_PARAMETER") context: Context?
 ) :
     RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
@@ -119,7 +119,7 @@ class ChatRecyclerViewAdapter(
     val recentItem: ChatDataItem?
         get() = if (!items.isEmpty()) items[items.size - 1] else null
 
-    fun updateRecentItem(item: ChatDataItem?) {
+    fun updateRecentItem(@Suppress("UNUSED_PARAMETER") item: ChatDataItem?) {
         notifyItemChanged(items.size - 1, Any())
     }
 

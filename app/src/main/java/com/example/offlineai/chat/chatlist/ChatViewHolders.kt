@@ -287,7 +287,7 @@ object ChatViewHolders {
             }
         }
 
-        fun bind(data: ChatDataItem, modelName: String?, payloads: List<Any?>?) {
+        fun bind(data: ChatDataItem, @Suppress("UNUSED_PARAMETER") modelName: String?, payloads: List<Any?>?) {
             // Apply global text size
             applyGlobalTextSize()
             

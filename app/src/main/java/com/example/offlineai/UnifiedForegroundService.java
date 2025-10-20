@@ -25,14 +25,43 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * 知识库构建服务
- * 作为前台服务运行，确保在应用切换到后台或屏幕关闭时能继续构建知识库
+ * 统一前台服务（UnifiedForegroundService）
+ * 功能：
+ * 1. 保持app进程存活，防止被系统杀死（即使熄屏、切后台）
+ * 2. 支持多种任务类型：知识库构建、模型下载、长时间推理等
+ * 3. 通过通知栏告知用户任务状态
+ * 4. 管理WakeLock，确保长时间任务完成
+ * 5. 保存app现场状态
  */
-public class KnowledgeBaseBuilderService extends Service {
-    private static final String TAG = "KnowledgeBaseService";
+public class UnifiedForegroundService extends Service {
+    private static final String TAG = "UnifiedForegroundService";
     private static final int NOTIFICATION_ID = 1001;
-    private static final String CHANNEL_ID = "knowledge_base_builder_channel";
-    private static final String CHANNEL_NAME = "知识库构建服务";
+    private static final String CHANNEL_ID = "unified_foreground_channel";
+    private static final String CHANNEL_NAME = "离线AI后台服务";
+    
+    /**
+     * 任务类型枚举
+     */
+    public enum TaskType {
+        IDLE("空闲"),              // 空闲状态，只保持进程存活
+        KB_BUILD("知识库构建"),     // 知识库构建任务
+        MODEL_DOWNLOAD("模型下载"), // 模型下载任务
+        INFERENCE("推理中");        // 长时间推理任务
+        
+        private final String displayName;
+        
+        TaskType(String displayName) {
+            this.displayName = displayName;
+        }
+        
+        public String getDisplayName() {
+            return displayName;
+        }
+    }
+    
+    // 当前任务类型
+    private TaskType currentTaskType = TaskType.IDLE;
+    private boolean hasActiveTask = false;
 
     // 绑定器
     private final IBinder binder = new LocalBinder();
@@ -79,8 +108,8 @@ public class KnowledgeBaseBuilderService extends Service {
     
     // 本地绑定器类
     public class LocalBinder extends Binder {
-        public KnowledgeBaseBuilderService getService() {
-            return KnowledgeBaseBuilderService.this;
+        public UnifiedForegroundService getService() {
+            return UnifiedForegroundService.this;
         }
     }
     
@@ -112,19 +141,25 @@ public class KnowledgeBaseBuilderService extends Service {
     
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        LogManager.logD(TAG, "服务启动命令接收");
+        LogManager.logI(TAG, "统一前台服务启动");
         
         // 立即启动前台服务以避免ANR错误
-        startForeground(NOTIFICATION_ID, createNotification("准备构建知识库...", 0));
-        LogManager.logD(TAG, "前台服务已启动");
+        startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0));
+        LogManager.logD(TAG, "前台服务已启动，保持进程存活");
         
-        return START_NOT_STICKY; // 服务被杀死后不自动重启
+        // 不使用START_STICKY，用户主动关闭app时应该清除服务
+        // 只在有活动任务时保持运行，空闲时允许被清理
+        return START_NOT_STICKY;
     }
     
     @Override
     public void onDestroy() {
         super.onDestroy();
-        LogManager.logD(TAG, "知识库构建服务已销毁");
+        LogManager.logI(TAG, "统一前台服务已销毁");
+        
+        // 停止前台服务并移除通知
+        // minSdk=26 >= Android N(24)，直接使用新API
+        stopForeground(STOP_FOREGROUND_REMOVE);
         
         // 释放唤醒锁
         if (wakeLock != null && wakeLock.isHeld()) {
@@ -134,6 +169,26 @@ public class KnowledgeBaseBuilderService extends Service {
         
         // 关闭执行器
         executor.shutdownNow();
+        
+        LogManager.logI(TAG, "服务已完全清理，通知已移除");
+    }
+    
+    /**
+     * 处理用户从最近任务中清除app的情况
+     * 这时应该停止服务，清除通知
+     */
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        super.onTaskRemoved(rootIntent);
+        LogManager.logI(TAG, "用户从最近任务清除app，停止服务");
+        
+        // 如果没有活动任务，直接停止服务
+        if (!hasActiveTask) {
+            stopSelf();
+        } else {
+            // 有活动任务时，等任务完成后再停止
+            LogManager.logI(TAG, "有活动任务运行中，等待任务完成后停止");
+        }
     }
     
     /**
@@ -146,7 +201,7 @@ public class KnowledgeBaseBuilderService extends Service {
                 CHANNEL_NAME,
                 NotificationManager.IMPORTANCE_LOW // 使用低重要性避免声音和震动
             );
-            channel.setDescription("用于在后台构建知识库的通知");
+            channel.setDescription("保持应用在后台运行，支持长时间任务和状态保存");
             
             NotificationManager notificationManager = getSystemService(NotificationManager.class);
             notificationManager.createNotificationChannel(channel);
@@ -167,15 +222,20 @@ public class KnowledgeBaseBuilderService extends Service {
         PendingIntent pendingIntent = PendingIntent.getActivity(
             this, 0, notificationIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         
+        // 根据任务类型设置标题
+        String title = hasActiveTask ? 
+            "离线AI - " + currentTaskType.getDisplayName() : 
+            "离线AI助手";
+        
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("知识库构建服务")
+            .setContentTitle(title)
             .setContentText(contentText)
             .setContentIntent(pendingIntent)
-            .setPriority(NotificationCompat.PRIORITY_HIGH) // 提高优先级
+            .setPriority(NotificationCompat.PRIORITY_LOW) // 低优先级，不打扰用户
             .setOngoing(true) // 设置为持续通知
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE) // 立即显示前台服务通知
-            .setCategory(NotificationCompat.CATEGORY_SERVICE); // 设置为服务类别
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE);
         
         if (progress > 0) {
             builder.setProgress(100, progress, false);
@@ -287,6 +347,70 @@ public class KnowledgeBaseBuilderService extends Service {
     }
     
     /**
+     * 通用任务开始方法
+     * @param taskType 任务类型
+     * @param taskDescription 任务描述
+     */
+    public void startTask(TaskType taskType, String taskDescription) {
+        LogManager.logI(TAG, "开始任务: " + taskType.getDisplayName() + " - " + taskDescription);
+        currentTaskType = taskType;
+        hasActiveTask = true;
+        
+        // 获取唤醒锁
+        acquireWakeLock();
+        
+        // 更新通知
+        updateNotification(taskDescription, 0);
+    }
+    
+    /**
+     * 通用任务结束方法
+     */
+    public void endTask() {
+        LogManager.logI(TAG, "任务完成: " + currentTaskType.getDisplayName());
+        hasActiveTask = false;
+        currentTaskType = TaskType.IDLE;
+        
+        // 释放唤醒锁
+        releaseWakeLock();
+        
+        // 任务完成后，延迟停止服务，避免通知驻留
+        LogManager.logI(TAG, "任务完成，1秒后停止服务并清除通知");
+        new android.os.Handler(getMainLooper()).postDelayed(() -> {
+            stopSelf();
+            LogManager.logI(TAG, "服务已停止，通知已清除");
+        }, 1000); // 延迟1秒，确保回调完成
+    }
+    
+    /**
+     * 获取唤醒锁
+     */
+    private void acquireWakeLock() {
+        if (wakeLock != null && !wakeLock.isHeld()) {
+            try {
+                wakeLock.acquire(10 * 60 * 60 * 1000L); // 最长10小时
+                LogManager.logD(TAG, "唤醒锁已获取");
+            } catch (Exception e) {
+                LogManager.logE(TAG, "获取唤醒锁失败: " + e.getMessage());
+            }
+        }
+    }
+    
+    /**
+     * 释放唤醒锁
+     */
+    private void releaseWakeLock() {
+        if (wakeLock != null && wakeLock.isHeld()) {
+            try {
+                wakeLock.release();
+                LogManager.logD(TAG, "唤醒锁已释放");
+            } catch (Exception e) {
+                LogManager.logE(TAG, "释放唤醒锁失败: " + e.getMessage());
+            }
+        }
+    }
+    
+    /**
      * 开始构建知识库
      * @param knowledgeBaseName 知识库名称
      * @param embeddingModel 嵌入模型路径
@@ -298,22 +422,8 @@ public class KnowledgeBaseBuilderService extends Service {
         
         LogManager.logD(TAG, "开始构建知识库: " + knowledgeBaseName + ", 文件数量: " + selectedFiles.size() + ", 模型: " + embeddingModel);
         
-        // 获取唤醒锁，设置超时时间为10小时，确保长时间任务能够完成
-        if (!wakeLock.isHeld()) {
-            wakeLock.acquire(10 * 60 * 60 * 1000L); // 最多持有10小时
-            LogManager.logD(TAG, "已获取唤醒锁，超时时间设置为10小时，wakeLock状态: " + (wakeLock.isHeld() ? "已持有" : "未持有"));
-        } else {
-            LogManager.logD(TAG, "唤醒锁已经持有，无需重新获取");
-        }
-        
-        // 更新前台服务通知内容
-        try {
-            NotificationManager notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-            notificationManager.notify(NOTIFICATION_ID, createNotification("开始构建知识库: " + knowledgeBaseName, 0));
-            LogManager.logD(TAG, "已更新前台服务通知内容");
-        } catch (Exception e) {
-            LogManager.logE(TAG, "更新通知失败: " + e.getMessage());
-        }
+        // 使用通用任务管理
+        startTask(TaskType.KB_BUILD, "构建知识库: " + knowledgeBaseName);
         
         // 在后台线程中执行构建任务
         executor.execute(() -> {
@@ -335,12 +445,8 @@ public class KnowledgeBaseBuilderService extends Service {
                     }
                 }
                 
-                // 更新最终通知 - 已注释掉通知更新
-                String finalStatus = success ? getString(R.string.kb_build_completed, knowledgeBaseName) : getString(R.string.kb_build_cancelled);
-                // updateNotification(finalStatus, success ? 100 : 0);
-                
-                // 延迟停止服务
-                stopSelfDelayed();
+                // 结束任务
+                endTask();
                 
             } catch (Exception e) {
                 LogManager.logE(TAG, getString(R.string.kb_build_failed_log), e);
@@ -350,11 +456,8 @@ public class KnowledgeBaseBuilderService extends Service {
                     progressCallback.onTaskCompleted(false, "知识库构建失败: " + e.getMessage());
                 }
                 
-                // 更新错误通知 - 已注释掉通知更新
-                // updateNotification("知识库构建失败: " + e.getMessage(), 0);
-                
-                // 延迟停止服务
-                stopSelfDelayed();
+                // 结束任务
+                endTask();
             } finally {
                 // 确保在任何情况下都释放资源
                 LogManager.logD(TAG, "知识库构建过程结束，释放资源");
@@ -366,29 +469,7 @@ public class KnowledgeBaseBuilderService extends Service {
     }
     
     /**
-     * 延迟停止服务
-     */
-    private void stopSelfDelayed() {
-        // 立即停止前台服务，移除通知栏 - 已注释掉因为没有前台服务
-        // stopForeground(STOP_FOREGROUND_REMOVE);
-        LogManager.logD(TAG, "知识库构建服务准备停止");
-        
-        // 延迟1秒后停止服务，确保资源释放
-        android.os.Handler mainHandler = new android.os.Handler(getMainLooper());
-        mainHandler.postDelayed(() -> {
-            // 确保唤醒锁已释放
-            if (wakeLock != null && wakeLock.isHeld()) {
-                wakeLock.release();
-                LogManager.logD(TAG, "停止服务前确保唤醒锁已释放");
-            }
-            
-            stopSelf();
-            LogManager.logD(TAG, "服务已完全停止");
-        }, 1000); // 将延迟时间从5秒减少到1秒
-    }
-    
-    /**
-     * 取消当前任务
+     * 取消任务
      */
     public void cancelTask() {
         isTaskCancelled.set(true);
@@ -601,5 +682,18 @@ public class KnowledgeBaseBuilderService extends Service {
             // 清理失败不影响知识库构建，继续执行
         }
     }
+    
+    /**
+     * 检查是否有活动任务
+     */
+    public boolean hasActiveTask() {
+        return hasActiveTask;
+    }
+    
+    /**
+     * 获取当前任务类型
+     */
+    public TaskType getCurrentTaskType() {
+        return currentTaskType;
+    }
 }
-

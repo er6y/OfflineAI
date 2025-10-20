@@ -13,6 +13,7 @@ import androidx.viewpager2.adapter.FragmentStateAdapter;
 import androidx.viewpager2.widget.ViewPager2;
 
 import android.content.res.Configuration;
+import java.util.List;
 import java.util.Locale;
 
 import com.google.android.material.bottomnavigation.BottomNavigationView;
@@ -65,7 +66,7 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
     private StateDisplayManager stateDisplayManager;
     
     private boolean isInForeground = false;
-    private KnowledgeBaseBuilderService knowledgeBaseBuilderService;
+    private UnifiedForegroundService unifiedForegroundService;
     private ServiceConnection serviceConnection;
     
     // ActivityResultLauncher替代startActivityForResult
@@ -210,6 +211,11 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         
         // 绑定到知识库构建服务
         bindToKnowledgeBaseBuilderService();
+        
+        // 尝试恢复上Fragment状态（如果存在）
+        if (savedInstanceState != null) {
+            restoreFragmentsState(savedInstanceState);
+        }
     }
     
     /**
@@ -596,9 +602,9 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         isInForeground = true;
         
         // 如果服务正在运行，通知服务应用已切换到前台
-        if (knowledgeBaseBuilderService != null) {
-            knowledgeBaseBuilderService.onAppForegrounded();
-            LogManager.logD(TAG, "Notified knowledge base build service: app switched to foreground");
+        if (unifiedForegroundService != null) {
+            unifiedForegroundService.onAppForegrounded();
+            LogManager.logD(TAG, "Notified unified foreground service: app switched to foreground");
         }
     }
     
@@ -609,65 +615,160 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         isInForeground = false;
         
         // 如果服务正在运行，通知服务应用已切换到后台
-        if (knowledgeBaseBuilderService != null) {
-            knowledgeBaseBuilderService.onAppBackgrounded();
-            LogManager.logD(TAG, "Notified knowledge base build service: app switched to background");
+        if (unifiedForegroundService != null) {
+            unifiedForegroundService.onAppBackgrounded();
+            LogManager.logD(TAG, "Notified unified foreground service: app switched to background");
         }
     }
     
     /**
-     * 绑定到知识库构建服务
+     * 启动并绑定统一前台服务
      */
     private void bindToKnowledgeBaseBuilderService() {
-        LogManager.logD(TAG, "尝试绑定到知识库构建服务");
+        LogManager.logI(TAG, "启动并绑定统一前台服务");
+        
+        // 先启动前台服务
+        Intent intent = new Intent(this, UnifiedForegroundService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
+        
         if (serviceConnection == null) {
             serviceConnection = new ServiceConnection() {
                 @Override
                 public void onServiceConnected(ComponentName name, IBinder service) {
-                    KnowledgeBaseBuilderService.LocalBinder binder = (KnowledgeBaseBuilderService.LocalBinder) service;
-                    knowledgeBaseBuilderService = binder.getService();
-                    LogManager.logD(TAG, "已成功绑定到知识库构建服务");
+                    UnifiedForegroundService.LocalBinder binder = (UnifiedForegroundService.LocalBinder) service;
+                    unifiedForegroundService = binder.getService();
+                    LogManager.logD(TAG, "已成功绑定到统一前台服务");
                     
                     // 如果应用当前在后台，通知服务
-                    if (!isInForeground && knowledgeBaseBuilderService != null) {
-                        knowledgeBaseBuilderService.onAppBackgrounded();
+                    if (!isInForeground && unifiedForegroundService != null) {
+                        unifiedForegroundService.onAppBackgrounded();
                         LogManager.logD(TAG, "绑定后通知服务：应用在后台");
                     }
                 }
                 
                 @Override
                 public void onServiceDisconnected(ComponentName name) {
-                    LogManager.logD(TAG, "与知识库构建服务的连接已断开");
-                    knowledgeBaseBuilderService = null;
+                    LogManager.logW(TAG, "与统一前台服务的连接已断开");
+                    unifiedForegroundService = null;
                 }
             };
         }
         
-        Intent intent = new Intent(this, KnowledgeBaseBuilderService.class);
         bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE);
     }
     
     /**
-     * 解绑知识库构建服务
+     * 解绑统一前台服务
      */
     private void unbindKnowledgeBaseBuilderService() {
         if (serviceConnection != null) {
             try {
                 unbindService(serviceConnection);
-                LogManager.logD(TAG, "已解绑知识库构建服务");
+                LogManager.logD(TAG, "已解绑统一前台服务");
             } catch (IllegalArgumentException e) {
                 LogManager.logE(TAG, "解绑服务失败：" + e.getMessage());
             }
-            knowledgeBaseBuilderService = null;
+            unifiedForegroundService = null;
         }
+    }
+    
+    /**
+     * 获取统一前台服务实例
+     */
+    public UnifiedForegroundService getUnifiedForegroundService() {
+        return unifiedForegroundService;
+    }
+    
+    @Override
+    protected void onSaveInstanceState(@NonNull Bundle outState) {
+        super.onSaveInstanceState(outState);
+        LogManager.logI(TAG, "保存应用状态");
+        
+        // 保存ViewPager当前页
+        outState.putInt("current_page", viewPager.getCurrentItem());
+        LogManager.logD(TAG, "保存当前页: " + viewPager.getCurrentItem());
+        
+        // 遍历所有Fragment，保存实现了StatefulFragment接口的Fragment状态
+        List<Fragment> fragments = getSupportFragmentManager().getFragments();
+        for (Fragment fragment : fragments) {
+            if (fragment instanceof StatefulFragment && fragment.isAdded()) {
+                StatefulFragment statefulFragment = (StatefulFragment) fragment;
+                try {
+                    Bundle fragmentState = statefulFragment.saveState();
+                    if (fragmentState != null) {
+                        String fragmentId = statefulFragment.getFragmentId();
+                        outState.putBundle(fragmentId, fragmentState);
+                        LogManager.logD(TAG, "已保存Fragment状态: " + fragmentId);
+                    }
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "保存Fragment状态失败: " + fragment.getClass().getSimpleName(), e);
+                }
+            }
+        }
+        
+        LogManager.logI(TAG, "应用状态保存完成");
+    }
+    
+    @Override
+    protected void onRestoreInstanceState(@NonNull Bundle savedInstanceState) {
+        super.onRestoreInstanceState(savedInstanceState);
+        LogManager.logI(TAG, "恢复应用状态");
+        
+        // 恢复ViewPager当前页
+        int currentPage = savedInstanceState.getInt("current_page", 0);
+        viewPager.setCurrentItem(currentPage, false);
+        LogManager.logD(TAG, "恢复当前页: " + currentPage);
+        
+        // Fragment状态的恢复在restoreFragmentsState()中处理
+    }
+    
+    /**
+     * 恢复Fragment状态
+     * 需要在Fragment创建后调用
+     */
+    private void restoreFragmentsState(Bundle savedInstanceState) {
+        // 使用Handler延迟恢复，确保Fragment的View已经创建
+        new android.os.Handler(Looper.getMainLooper()).postDelayed(() -> {
+            List<Fragment> fragments = getSupportFragmentManager().getFragments();
+            for (Fragment fragment : fragments) {
+                if (fragment instanceof StatefulFragment && fragment.isAdded()) {
+                    StatefulFragment statefulFragment = (StatefulFragment) fragment;
+                    String fragmentId = statefulFragment.getFragmentId();
+                    Bundle fragmentState = savedInstanceState.getBundle(fragmentId);
+                    
+                    if (fragmentState != null) {
+                        try {
+                            statefulFragment.restoreState(fragmentState);
+                            LogManager.logD(TAG, "已恢复Fragment状态: " + fragmentId);
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "恢复Fragment状态失败: " + fragmentId, e);
+                        }
+                    }
+                }
+            }
+        }, 500); // 延迟500ms，确保Fragment的View已创建
     }
     
     @Override
     protected void onDestroy() {
         super.onDestroy();
         LogManager.logD(TAG, "MainActivity.onDestroy()");
-        // 解绑知识库构建服务
+        
+        // 先解绑服务
         unbindKnowledgeBaseBuilderService();
+        
+        // 如果是用户主动退出（isFinishing()为true），停止服务并清除通知
+        if (isFinishing()) {
+            LogManager.logI(TAG, "用户主动退出app，停止前台服务并清除通知");
+            Intent serviceIntent = new Intent(this, UnifiedForegroundService.class);
+            stopService(serviceIntent);
+        } else {
+            LogManager.logD(TAG, "app被系统回收（非用户主动退出），保留服务");
+        }
     }
     
     /**

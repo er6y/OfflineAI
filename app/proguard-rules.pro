@@ -575,3 +575,37 @@
     @com.fasterxml.jackson.annotation.* <fields>;
     @com.fasterxml.jackson.annotation.* <methods>;
 }
+
+# ===== Apache POI 和 PDFBox AWT 警告抑制 =====
+# 这些库使用了 java.awt 包，但 Android 不支持
+# R8 会自动标记这些方法为不可达，可以安全忽略
+
+# Apache POI - 忽略 AWT 相关警告
+-dontwarn org.apache.poi.hwmf.record.HwmfDraw
+-dontwarn org.apache.poi.hwmf.record.HwmfRegionMode
+-dontwarn org.apache.poi.xslf.draw.SVGUserAgent
+-dontwarn java.awt.**
+-dontwarn java.awt.geom.**
+
+# Apache PDFBox - 忽略 AWT 相关警告
+-dontwarn org.apache.pdfbox.rendering.TilingPaintFactory
+-dontwarn org.apache.pdfbox.pdmodel.graphics.**
+
+# 通用 AWT 警告抑制（Android 不支持 AWT）
+-dontwarn javax.swing.**
+-dontwarn java.beans.**
+-dontwarn java.awt.image.**
+
+# 直接移除这些不可达的方法，避免R8类型检查警告
+-assumenosideeffects class org.apache.poi.hwmf.record.HwmfDraw {
+    public static java.awt.geom.Rectangle2D normalizeBounds(...);
+}
+-assumenosideeffects class org.apache.poi.hwmf.record.HwmfRegionMode {
+    public static java.awt.Shape andOp(...);
+}
+-assumenosideeffects class org.apache.poi.xslf.draw.SVGUserAgent {
+    public java.awt.geom.Rectangle2D getViewbox();
+}
+-assumenosideeffects class org.apache.pdfbox.rendering.TilingPaintFactory {
+    public static java.awt.Paint create(...);
+}

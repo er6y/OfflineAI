@@ -141,20 +141,20 @@ public class BuildKnowledgeBaseFragment extends Fragment {
     // 状态显示管理器
     private StateDisplayManager stateDisplayManager;
     
-    // 知识库构建服务
-    private KnowledgeBaseBuilderService builderService;
+    // 统一前台服务
+    private UnifiedForegroundService builderService;
     private boolean isServiceBound = false;
     
     // 服务连接
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder service) {
-            KnowledgeBaseBuilderService.LocalBinder binder = (KnowledgeBaseBuilderService.LocalBinder) service;
+            UnifiedForegroundService.LocalBinder binder = (UnifiedForegroundService.LocalBinder) service;
             builderService = binder.getService();
             isServiceBound = true;
             
             // 设置进度回调
-            builderService.setProgressCallback(new KnowledgeBaseBuilderService.ProgressCallback() {
+            builderService.setProgressCallback(new UnifiedForegroundService.ProgressCallback() {
                 @Override
                 public void onProgressUpdate(int progress, String status) {
                     // 在UI线程更新进度
@@ -1602,7 +1602,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
      */
     private void bindBuilderService() {
         if (!isServiceBound) {
-            Intent intent = new Intent(requireContext(), KnowledgeBaseBuilderService.class);
+            Intent intent = new Intent(requireContext(), UnifiedForegroundService.class);
             requireContext().bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE);
             LogManager.logD(TAG, "正在绑定知识库构建服务");
         }
@@ -1623,7 +1623,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
      * 启动知识库构建服务
      */
     private void startBuilderService() {
-        Intent intent = new Intent(requireContext(), KnowledgeBaseBuilderService.class);
+        Intent intent = new Intent(requireContext(), UnifiedForegroundService.class);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             requireContext().startForegroundService(intent);
         } else {
@@ -1636,7 +1636,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
      * 停止知识库构建服务
      */
     private void stopBuilderService() {
-        Intent intent = new Intent(requireContext(), KnowledgeBaseBuilderService.class);
+        Intent intent = new Intent(requireContext(), UnifiedForegroundService.class);
         requireContext().stopService(intent);
         LogManager.logD(TAG, "已停止知识库构建服务");
     }

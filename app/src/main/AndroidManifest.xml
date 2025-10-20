@@ -96,9 +96,9 @@
             android:enabled="true"
             android:exported="false" />
             
-        <!-- 知识库构建前台服务 -->
+        <!-- 统一前台服务 - 保持app存活和支持长时间任务 -->
         <service
-            android:name=".KnowledgeBaseBuilderService"
+            android:name=".UnifiedForegroundService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />

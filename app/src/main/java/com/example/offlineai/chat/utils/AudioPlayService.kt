@@ -41,12 +41,12 @@ class AudioPlayService private constructor() {
             // Monitor progress
             monitorProgress()
 
-            mediaPlayer!!.setOnCompletionListener { mp: MediaPlayer? ->
+            mediaPlayer!!.setOnCompletionListener { _ ->
                 callback?.onPlayFinish()
                 resetMediaPlayer()
             }
 
-            mediaPlayer!!.setOnErrorListener { mp: MediaPlayer?, what: Int, extra: Int ->
+            mediaPlayer!!.setOnErrorListener { _, _, _ ->
                 callback?.onPlayError()
                 resetMediaPlayer()
                 true
@@ -57,7 +57,7 @@ class AudioPlayService private constructor() {
         }
     }
 
-    fun pauseAudio(audioPath: String?) {
+    fun pauseAudio(@Suppress("UNUSED_PARAMETER") audioPath: String?) {
         try {
             if (mediaPlayer != null && mediaPlayer!!.isPlaying) {
                 mediaPlayer!!.pause()

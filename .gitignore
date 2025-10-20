@@ -127,3 +127,4 @@ app/release/
 /log.ini
 /app/debug
 /Rerankers
+/ref
