@@ -4975,6 +4975,14 @@ public class RagQaFragment extends Fragment {
                     chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
                 }
                 LogManager.logI(TAG, "[CHAT_HISTORY] Loaded " + history.size() + " messages from history");
+                
+                // Auto-scroll to bottom after loading history
+                if (recyclerViewChat != null) {
+                    recyclerViewChat.post(() -> {
+                        recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
+                        LogManager.logD(TAG, "[CHAT_HISTORY] Auto-scrolled to bottom");
+                    });
+                }
                 // Successfully loaded, no toast needed (silent load for better UX)
             } else {
                 LogManager.logD(TAG, "[CHAT_HISTORY] No messages in history file, maintaining empty UI");

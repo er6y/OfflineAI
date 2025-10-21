@@ -766,6 +766,14 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         // 先解绑服务
         unbindKnowledgeBaseBuilderService();
         
+        // 释放LocalLlmAdapter资源（保存kernel cache）
+        try {
+            LocalLlmAdapter.getInstance(this).onDestroy();
+            LogManager.logI(TAG, "LocalLlmAdapter resources released (kernel cache saved)");
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to release LocalLlmAdapter", e);
+        }
+        
         // 如果是用户主动退出（isFinishing()为true），停止服务并清除通知
         if (isFinishing()) {
             LogManager.logI(TAG, "用户主动退出app，停止前台服务并清除通知");

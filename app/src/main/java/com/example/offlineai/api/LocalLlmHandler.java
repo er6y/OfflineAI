@@ -550,7 +550,20 @@ public class LocalLlmHandler {
                 }
                 
                 ModelConfig config = createBasicModelConfig(modelPath);
-                engine.initialize(modelPath, config);
+                
+                // Create StreamingCallback wrapper for engine initialization
+                StreamingCallback engineCallback = new StreamingCallback() {
+                    @Override
+                    public void onToken(String token) {
+                        callback.onToken(token);
+                    }
+                    @Override
+                    public void onComplete(String fullResponse) {}
+                    @Override
+                    public void onError(String errorMessage) {}
+                };
+                
+                engine.initialize(modelPath, config, engineCallback);
                 
                 setInferenceEngine(engine);
                 currentModelName = modelName;
@@ -1342,9 +1355,10 @@ public class LocalLlmHandler {
          * 初始化推理引擎
          * @param modelPath 模型路径
          * @param config 模型配置
+         * @param callback 可选的流式回调，用于显示加载进度
          * @throws Exception 初始化异常
          */
-        void initialize(String modelPath, ModelConfig config) throws Exception;
+        void initialize(String modelPath, ModelConfig config, StreamingCallback callback) throws Exception;
         
         /**
          * 执行推理

@@ -11,6 +11,7 @@
 #include <chrono>
 #include <unistd.h>  // for chdir, getcwd
 #include <cerrno>    // for errno
+#include <sys/stat.h> // for stat
 #include "llm/llm.hpp"
 #include "llm/reranker.hpp"
 #include "diffusion/diffusion.hpp"
@@ -1659,14 +1660,24 @@ Java_com_offlineai_mnn_MnnInference_releaseReranker(
 
 using namespace MNN::DIFFUSION;
 
-// Global diffusion sessions map
+// Struct to store diffusion creation parameters
+struct DiffusionParams {
+    std::string modelPath;
+    DiffusionModelType modelType;
+    MNNForwardType backendType;
+    int memoryMode;
+};
+
+// Global map to store diffusion sessions, memory modes, and creation parameters
 static std::map<jlong, std::unique_ptr<Diffusion>> g_diffusion_sessions;
+static std::map<jlong, int> g_diffusion_memory_modes;
+static std::map<jlong, DiffusionParams> g_diffusion_params;
 static std::mutex g_diffusion_sessions_mutex;
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_offlineai_mnn_MnnInference_createDiffusion(
     JNIEnv* env, jclass clazz, 
-    jstring jModelDir, jint modelType, jint backendType, jint memoryMode, jstring jCachePath) {
+    jstring jModelDir, jint modelType, jint backendType, jint memoryMode, jstring jCachePath, jobject callback) {
     
     try {
         
@@ -1677,6 +1688,34 @@ Java_com_offlineai_mnn_MnnInference_createDiffusion(
         LOGI("[DIFFUSION] Creating diffusion session: modelDir=%s, modelType=%d, backend=%d, memory=%d",
              modelDir, modelType, backendType, memoryMode);
         LOGI("[DIFFUSION] Cache directory (backend-specific): %s", cachePath);
+        
+        // Get callback method
+        jmethodID onTokenMethod = nullptr;
+        if (callback != nullptr) {
+            jclass callbackClass = env->GetObjectClass(callback);
+            onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+        }
+        
+        // Print <debug> tag (createDiffusion always opens debug block)
+        if (onTokenMethod) {
+            jstring jmsg = env->NewStringUTF("<debug>");
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        
+        // Print model name
+        if (onTokenMethod) {
+            std::string modelDirStr(modelDir);
+            size_t lastSlash = modelDirStr.find_last_of('/');
+            if (lastSlash != std::string::npos) {
+                std::string modelName = modelDirStr.substr(lastSlash + 1);
+                char buf[512];
+                snprintf(buf, sizeof(buf), "\nModel: %s", modelName.c_str());
+                jstring jmsg = env->NewStringUTF(buf);
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+            }
+        }
         
         // ========== 切换工作目录到后端缓存目录 ==========
         // Java 已经创建好目录，格式: <model_path>/<backend>/.tempcache
@@ -1692,9 +1731,37 @@ Java_com_offlineai_mnn_MnnInference_createDiffusion(
             LOGW("[DIFFUSION] .tempcache will use default location (may not be writable)");
         }
         
+        // Check cache status
+        struct stat buffer;
+        bool cacheExists = (stat(".tempcache", &buffer) == 0);
+        
+        // Print cache status
+        if (onTokenMethod) {
+            char buf[512];
+            if (cacheExists) {
+                long cacheSize = buffer.st_size / 1024; // KB
+                snprintf(buf, sizeof(buf), "\nGPU Kernel Cache: EXISTS (%ld KB)", cacheSize);
+            } else {
+                snprintf(buf, sizeof(buf), "\nGPU Kernel Cache: None");
+            }
+            jstring jmsg = env->NewStringUTF(buf);
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        
         // Validate backend type
         MNNForwardType actualBackend = static_cast<MNNForwardType>(backendType);
         LOGI("[DIFFUSION] Using user-selected backend: %d (CPU=0, OpenCL=3, Vulkan=7, NNAPI=6)", backendType);
+        
+        // Print "Loading models..." right before actual loading
+        if (onTokenMethod) {
+            jstring jmsg = env->NewStringUTF("\nLoading models...");
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        
+        // Note: Kernel compilation happens during first run(), not during load()
+        // So we don't print "Compiling kernels" here
         
         // Create Diffusion instance
         auto diffusion = std::make_unique<Diffusion>(
@@ -1707,36 +1774,44 @@ Java_com_offlineai_mnn_MnnInference_createDiffusion(
         env->ReleaseStringUTFChars(jModelDir, modelDir);
         env->ReleaseStringUTFChars(jCachePath, cachePath);
         
-        // Load model (this will compile OpenCL kernels on first run - may take 5-15 minutes!)
-        LOGI("[DIFFUSION] ========================================");
-        LOGI("[DIFFUSION] Starting model load (backend=%d)...", actualBackend);
-        if (actualBackend == MNN_FORWARD_OPENCL || actualBackend == MNN_FORWARD_VULKAN) {
-            LOGW("[DIFFUSION] ⚠️ GPU backend: First load will compile hundreds of kernels");
-            LOGW("[DIFFUSION] ⚠️ This may take 5-15 minutes! Please be patient...");
-            LOGW("[DIFFUSION] ⚠️ Subsequent loads will use cached kernels and be much faster");
-        }
-        LOGI("[DIFFUSION] ========================================");
+        // Start loading models (this is where compilation happens if no cache)
+        LOGI("[DIFFUSION] Starting diffusion->load() (backend=%d)...", actualBackend);
         
         auto start_time = std::chrono::high_resolution_clock::now();
         if (!diffusion->load()) {
             LOGE("[DIFFUSION] Failed to load diffusion model");
             LOGE("[DIFFUSION] If GPU backend is not available, Diffusion cannot run");
             LOGE("[DIFFUSION] Please ensure OpenCL or Vulkan is supported on your device");
+            
+            // Print error message (no closing debug tag, user will see error in Java layer)
+            if (onTokenMethod) {
+                jstring jmsg = env->NewStringUTF("\nFailed to load diffusion model");
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+            }
             return 0;
         }
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
         
-        LOGI("[DIFFUSION] ========================================");
-        LOGI("[DIFFUSION] ✅ Diffusion model loaded successfully in %lld ms (%.1f sec)", 
-             (long long)duration, duration / 1000.0);
-        LOGI("[DIFFUSION] ========================================");
+        LOGI("[DIFFUSION] Model loaded in %.1f sec", duration / 1000.0);
         
-        // Store in global map
+        // Model loaded, generateImage will print success message
+        
+        // Store in global map with memory mode and creation parameters
         jlong handle = reinterpret_cast<jlong>(diffusion.get());
         {
             std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
             g_diffusion_sessions[handle] = std::move(diffusion);
+            g_diffusion_memory_modes[handle] = memoryMode;
+            
+            // Save creation parameters for potential recreation
+            DiffusionParams params;
+            params.modelPath = std::string(modelDir);
+            params.modelType = static_cast<DiffusionModelType>(modelType);
+            params.backendType = actualBackend;
+            params.memoryMode = memoryMode;
+            g_diffusion_params[handle] = params;
         }
         
         LOGI("[DIFFUSION] Diffusion session created: %lld", (long long)handle);
@@ -1744,9 +1819,33 @@ Java_com_offlineai_mnn_MnnInference_createDiffusion(
         
     } catch (const std::exception& e) {
         LOGE("[DIFFUSION] Failed to create diffusion session: %s", e.what());
+        
+        // Print exception message (no closing debug tag)
+        if (callback != nullptr) {
+            jclass callbackClass = env->GetObjectClass(callback);
+            jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+            if (onTokenMethod) {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "\nException: %s", e.what());
+                jstring jmsg = env->NewStringUTF(buf);
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+            }
+        }
         return 0;
     } catch (...) {
         LOGE("[DIFFUSION] Failed to create diffusion session: unknown error");
+        
+        // Print error message (no closing debug tag)
+        if (callback != nullptr) {
+            jclass callbackClass = env->GetObjectClass(callback);
+            jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+            if (onTokenMethod) {
+                jstring jmsg = env->NewStringUTF("\nUnknown error");
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+            }
+        }
         return 0;
     }
 }
@@ -1758,8 +1857,9 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
     jint iterNum, jint randomSeed, jobject callback) {
     
     try {
-        // Get diffusion instance
+        // Get diffusion instance and memory mode
         Diffusion* diffusion = nullptr;
+        int memoryMode = 0;
         {
             std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
             auto it = g_diffusion_sessions.find(handle);
@@ -1768,14 +1868,19 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
                 return JNI_FALSE;
             }
             diffusion = it->second.get();
+            
+            auto memIt = g_diffusion_memory_modes.find(handle);
+            if (memIt != g_diffusion_memory_modes.end()) {
+                memoryMode = memIt->second;
+            }
         }
         
         // Get strings
         const char* prompt = env->GetStringUTFChars(jPrompt, nullptr);
         const char* outputPath = env->GetStringUTFChars(jOutputPath, nullptr);
         
-        LOGI("[DIFFUSION] Generating image: prompt='%s', output='%s', iter=%d, seed=%d",
-             prompt, outputPath, iterNum, randomSeed);
+        LOGI("[DIFFUSION] Generating image: prompt='%s', output='%s', iter=%d, seed=%d, memoryMode=%d",
+             prompt, outputPath, iterNum, randomSeed, memoryMode);
         
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] About to prepare callback");
         
@@ -1784,7 +1889,167 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
         jmethodID onProgressMethod = env->GetMethodID(callbackClass, "onProgress", "(I)Z");
         jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
         
-        // Send initial config info to UI
+        // Track first run (first_run = true means createDiffusion just executed)
+        static std::atomic<bool> first_run{true};
+        bool is_first = first_run.exchange(false);
+        
+        // Step 1: Print <debug> tag (only if not first run, createDiffusion already opened it)
+        if (!is_first && onTokenMethod) {
+            jstring jmsg = env->NewStringUTF("<debug>");
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        
+        // Step 2: Print model name (extract from current working directory)
+        if (onTokenMethod) {
+            char cwd[1024];
+            getcwd(cwd, sizeof(cwd));
+            std::string cwdStr(cwd);
+            size_t lastSlash = cwdStr.find_last_of('/');
+            if (lastSlash != std::string::npos) {
+                cwdStr = cwdStr.substr(0, lastSlash); // Remove backend folder
+                lastSlash = cwdStr.find_last_of('/');
+                if (lastSlash != std::string::npos) {
+                    std::string modelName = cwdStr.substr(lastSlash + 1);
+                    char buf[512];
+                    snprintf(buf, sizeof(buf), "\nModel: %s", modelName.c_str());
+                    jstring jmsg = env->NewStringUTF(buf);
+                    env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                    env->DeleteLocalRef(jmsg);
+                }
+            }
+        }
+        
+        // Step 3: Check and print GPU Kernel Cache status
+        if (onTokenMethod) {
+            struct stat buffer;
+            bool cacheExists = (stat(".tempcache", &buffer) == 0);
+            
+            char buf[512];
+            if (cacheExists) {
+                long cacheSize = buffer.st_size / 1024; // KB
+                snprintf(buf, sizeof(buf), "\nGPU Kernel Cache: EXISTS (%ld KB)", cacheSize);
+            } else {
+                snprintf(buf, sizeof(buf), "\nGPU Kernel Cache: None");
+            }
+            jstring jmsg = env->NewStringUTF(buf);
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        
+        // Step 4: Print model status and reload if needed
+        if (is_first && onTokenMethod) {
+            // First generation: models just loaded successfully from createDiffusion
+            jstring jmsg = env->NewStringUTF("\nModels loaded successfully!");
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        } else {
+            // Subsequent runs: check if reload needed based on memory mode
+            // MNN memory modes: 0=Low(省内存), 1=Enough(快速), 2=Balance(平衡)
+            // In Low/Balance mode, models are freed after run(), must reload
+            if (memoryMode != 1) {
+                const char* modeStr = (memoryMode == 0) ? "Low" : "Balance";
+                
+                // Check if kernel cache exists
+                struct stat buffer;
+                bool cacheExists = (stat(".tempcache", &buffer) == 0);
+                
+                if (!cacheExists) {
+                    // No cache yet: release old session to save cache, then recreate
+                    if (onTokenMethod) {
+                        char buf[256];
+                        snprintf(buf, sizeof(buf), "\nNo kernel cache detected, saving for next run (Memory: %s)...", modeStr);
+                        jstring jmsg = env->NewStringUTF(buf);
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
+                    
+                    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFFUSION] No cache, releasing to save");
+                    
+                    // Get creation parameters before erasing
+                    DiffusionParams params;
+                    {
+                        std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+                        auto paramIt = g_diffusion_params.find(handle);
+                        if (paramIt != g_diffusion_params.end()) {
+                            params = paramIt->second;
+                        }
+                    }
+                    
+                    // Release old session (saves cache)
+                    {
+                        std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+                        g_diffusion_sessions.erase(handle);
+                        g_diffusion_memory_modes.erase(handle);
+                        g_diffusion_params.erase(handle);
+                    }
+                    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFFUSION] Old session released, cache saved");
+                    
+                    // Wait for cache to be written
+                    usleep(100000); // 100ms
+                    
+                    // Create new session
+                    if (onTokenMethod) {
+                        jstring jmsg = env->NewStringUTF("\nReloading models...");
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
+                    
+                    auto new_diffusion = std::make_unique<Diffusion>(
+                        params.modelPath,
+                        params.modelType,
+                        params.backendType,
+                        params.memoryMode
+                    );
+                    new_diffusion->load();
+                    
+                    // Update global map
+                    {
+                        std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+                        g_diffusion_sessions[handle] = std::move(new_diffusion);
+                        g_diffusion_memory_modes[handle] = memoryMode;
+                        g_diffusion_params[handle] = params;
+                        diffusion = g_diffusion_sessions[handle].get();
+                    }
+                    
+                    if (onTokenMethod) {
+                        jstring jmsg = env->NewStringUTF("\nModels reloaded (cache will be faster next time)!");
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
+                } else {
+                    // Cache exists: just reload (fast, 3-4s)
+                    if (onTokenMethod) {
+                        char buf[256];
+                        long cacheSize = buffer.st_size / 1024; // KB
+                        snprintf(buf, sizeof(buf), "\nReloading models (Cache: %ld KB, Memory: %s)...", cacheSize, modeStr);
+                        jstring jmsg = env->NewStringUTF(buf);
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
+                    
+                    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFFUSION] Cache exists, fast reload");
+                    diffusion->load();
+                    
+                    if (onTokenMethod) {
+                        jstring jmsg = env->NewStringUTF("\nModels reloaded (fast with cache)!");
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
+                }
+            } else {
+                // Enough mode: models stay in memory
+                if (onTokenMethod) {
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), "\nStatus: Ready (Memory: Enough, models cached)");
+                    jstring jmsg = env->NewStringUTF(buf);
+                    env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                    env->DeleteLocalRef(jmsg);
+                }
+            }
+        }
+        
+        // Step 5: Print "Preparing..."
         if (onTokenMethod) {
             char buf[512];
             snprintf(buf, sizeof(buf), "\nPreparing: Steps=%d, CFG=7.5, Scheduler=PLMS, Seed=%s", 
@@ -1795,15 +2060,6 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
         }
         
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Callback prepared, creating lambda");
-        
-        // Track kernel compilation phase
-        static std::atomic<bool> first_run_flag{true};
-        bool is_first_run = first_run_flag.exchange(false);
-        if (is_first_run && onTokenMethod) {
-            jstring jmsg = env->NewStringUTF("\nFirst GPU run: compiling kernels (1-3 min)\nNext run will be faster");
-            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
-            env->DeleteLocalRef(jmsg);
-        }
         
         // Progress tracking variables
         int total_steps = iterNum;
@@ -1872,23 +2128,6 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ========================================");
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ABOUT TO CALL diffusion->run()");
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] This will call: tokenizer->encode → text_encoder → unet → vae_decoder");
-        
-        // CRITICAL: In non-enough memory mode, need to reload before each run
-        // See MNN diffusion_demo.cpp line 67: if(memory_mode != 1) { diffusion->load(); }
-        static std::atomic<bool> first_generation{true};
-        if (!first_generation.load()) {
-            __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Not first generation, reloading diffusion models...");
-            if (onTokenMethod) {
-                jstring jmsg = env->NewStringUTF("\nReloading models...");
-                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
-                env->DeleteLocalRef(jmsg);
-            }
-            diffusion->load();
-            __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Diffusion models reloaded");
-        } else {
-            first_generation.store(false);
-        }
-        
         __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ========================================");
         
         // Run diffusion
@@ -1916,7 +2155,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             // Send completion info to UI (final summary)
             if (onTokenMethod) {
                 char buf[256];
-                snprintf(buf, sizeof(buf), "\nCompleted (%.1fs)", duration / 1000.0);
+                snprintf(buf, sizeof(buf), "\nCompleted (%.1fs)\n</debug>", duration / 1000.0);
                 jstring jmsg = env->NewStringUTF(buf);
                 env->CallBooleanMethod(callback, onTokenMethod, jmsg);
                 env->DeleteLocalRef(jmsg);
@@ -1926,7 +2165,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             __android_log_print(ANDROID_LOG_ERROR, "MNN_JNI", "[DIFF_DEBUG] FAILED");
             
             if (onTokenMethod) {
-                jstring jmsg = env->NewStringUTF("\nGeneration failed");
+                jstring jmsg = env->NewStringUTF("\nGeneration failed\n</debug>");
                 env->CallBooleanMethod(callback, onTokenMethod, jmsg);
                 env->DeleteLocalRef(jmsg);
             }
@@ -1936,9 +2175,29 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
         
     } catch (const std::exception& e) {
         LOGE("[DIFFUSION] Failed to generate image: %s", e.what());
+        
+        // Close debug tag on exception
+        jclass callbackClass = env->GetObjectClass(callback);
+        jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+        if (onTokenMethod) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "\nException: %s\n</debug>", e.what());
+            jstring jmsg = env->NewStringUTF(buf);
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
         return JNI_FALSE;
     } catch (...) {
         LOGE("[DIFFUSION] Failed to generate image: unknown error");
+        
+        // Close debug tag on exception
+        jclass callbackClass = env->GetObjectClass(callback);
+        jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+        if (onTokenMethod) {
+            jstring jmsg = env->NewStringUTF("\nUnknown error\n</debug>");
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
         return JNI_FALSE;
     }
 }
@@ -1951,6 +2210,8 @@ Java_com_offlineai_mnn_MnnInference_releaseDiffusion(
     auto it = g_diffusion_sessions.find(handle);
     if (it != g_diffusion_sessions.end()) {
         g_diffusion_sessions.erase(it);
+        g_diffusion_memory_modes.erase(handle);
+        g_diffusion_params.erase(handle);
         LOGI("[DIFFUSION] Diffusion session released: %lld", (long long)handle);
     } else {
         LOGW("[DIFFUSION] Diffusion handle not found: %lld", (long long)handle);

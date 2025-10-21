@@ -864,11 +864,11 @@
     <string name="label_random">随机</string>
     <string name="text_diffusion_steps_value">Steps: %d</string>
     
-    <!-- 扩散内存模式选项 -->
+    <!-- 扩散内存模式选项（顺序必须和 MNN 定义一致：0=low, 1=enough, 2=balance） -->
     <string-array name="diffusion_memory_modes">
         <item>low (省内存)</item>
-        <item>balance (平衡)</item>
         <item>enough (快速)</item>
+        <item>balance (平衡)</item>
     </string-array>
     
     <string name="title_global_settings">全局设置</string>

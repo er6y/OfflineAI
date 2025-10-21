@@ -860,11 +860,11 @@
     <string name="label_random">Random</string>
     <string name="text_diffusion_steps_value">Steps: %d</string>
     
-    <!-- Diffusion Memory Mode Options -->
+    <!-- Diffusion Memory Mode Options (Order must match MNN: 0=low, 1=enough, 2=balance) -->
     <string-array name="diffusion_memory_modes">
         <item>low (memory saving)</item>
-        <item>balance (balanced)</item>
         <item>enough (fast)</item>
+        <item>balance (balanced)</item>
     </string-array>
     
     <string name="title_global_settings">Global Settings</string>

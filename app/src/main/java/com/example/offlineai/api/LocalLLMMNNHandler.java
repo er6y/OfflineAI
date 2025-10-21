@@ -126,7 +126,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     @Override
-    public void initialize(String modelPath, LocalLlmHandler.ModelConfig config) throws Exception {
+    public void initialize(String modelPath, LocalLlmHandler.ModelConfig config, LocalLlmHandler.StreamingCallback callback) throws Exception {
         if (isInitialized.get()) {
             LogManager.logI(TAG, "Handler already initialized, skipping");
             return;
@@ -145,7 +145,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         
         // Route to specific initializer based on model type
         if (currentModelType == ModelType.DIFFUSION) {
-            initializeDiffusion(modelPath, config);
+            initializeDiffusion(modelPath, config, callback);
         } else if (currentModelType == ModelType.LLM) {
             initializeLLM(modelPath, config);
         } else {
@@ -207,6 +207,26 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
      * Initialize Diffusion model
      */
     private void initializeDiffusion(String modelPath, LocalLlmHandler.ModelConfig config) throws Exception {
+        initializeDiffusion(modelPath, config, null);
+    }
+    
+    /**
+     * Initialize Diffusion model with optional UI callback
+     */
+    private void initializeDiffusion(String modelPath, LocalLlmHandler.ModelConfig config, LocalLlmHandler.StreamingCallback callback) throws Exception {
+        // Release old Diffusion session if exists (to save kernel cache)
+        if (diffusionHandle != 0) {
+            LogManager.logI(TAG, "Releasing old Diffusion session to save kernel cache...");
+            MnnInference.releaseDiffusion(diffusionHandle);
+            diffusionHandle = 0;
+            // Give MNN time to save cache
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                // Ignore
+            }
+        }
+        
         File modelDir = new File(modelPath);
         
         // Check for required Diffusion files
@@ -259,12 +279,33 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         String cachePath = backendCacheDir.getAbsolutePath();
         LogManager.logI(TAG, "📁 Cache path: " + cachePath);
         
+        // All printing is now done in JNI layer
+        LogManager.logI(TAG, "Initializing diffusion model...");
+        
+        // Create DiffusionCallback adapter
+        MnnInference.DiffusionCallback diffusionCallback = null;
+        if (callback != null) {
+            diffusionCallback = new MnnInference.DiffusionCallback() {
+                @Override
+                public boolean onToken(String token) {
+                    callback.onToken(token);
+                    return false; // Don't stop
+                }
+                
+                @Override
+                public boolean onProgress(int progress) {
+                    return false; // Don't stop
+                }
+            };
+        }
+        
         diffusionHandle = MnnInference.createDiffusion(
             modelPath,
             0, // STABLE_DIFFUSION_1_5
             backendType,
             memoryMode,
-            cachePath  // 传递缓存目录路径
+            cachePath,  // 传递缓存目录路径
+            diffusionCallback    // 传递 callback 到 JNI 层进行打印
         );
         
         if (diffusionHandle == 0) {
@@ -274,6 +315,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         }
         
         LogManager.logI(TAG, "Diffusion session created successfully, handle=" + diffusionHandle);
+        // JNI layer already printed "Models loaded successfully!"
     }
     
     @Override
@@ -862,23 +904,6 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
      */
     private void inferenceDiffusion(String prompt, LocalLlmHandler.InferenceParams params,
                                     LocalLlmHandler.StreamingCallback callback) {
-        // Check if diffusion handle is valid
-        if (!isInitialized.get() || diffusionHandle == 0) {
-            LogManager.logW(TAG, "Diffusion handle lost, reinitializing...");
-            try {
-                if (this.currentModelPath != null) {
-                    initializeDiffusion(this.currentModelPath, null);
-                } else {
-                    callback.onError("Diffusion not initialized and no model path available");
-                    return;
-                }
-            } catch (Exception e) {
-                LogManager.logE(TAG, "Failed to reinitialize Diffusion: " + e.getMessage(), e);
-                callback.onError("Failed to reinitialize Diffusion: " + e.getMessage());
-                return;
-            }
-        }
-        
         if (isGenerating.get()) {
             callback.onError("Image generation already in progress");
             return;
@@ -886,11 +911,32 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         
         LogManager.logI(TAG, "Starting image generation with prompt: " + prompt);
         
-        // Submit async task
+        // Submit async task (including initialization to avoid blocking UI)
         executorService.submit(() -> {
             try {
                 isGenerating.set(true);
                 shouldStop.set(false);
+                
+                // Check if diffusion handle is valid
+                if (!isInitialized.get() || diffusionHandle == 0) {
+                    LogManager.logW(TAG, "Diffusion handle lost, reinitializing...");
+                    try {
+                        if (this.currentModelPath != null) {
+                            // Reinitialize (JNI will print cache status and loading progress)
+                            initializeDiffusion(this.currentModelPath, null, callback);
+                        } else {
+                            callback.onError("Diffusion not initialized and no model path available");
+                            return;
+                        }
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Failed to reinitialize Diffusion: " + e.getMessage(), e);
+                        callback.onError("Failed to reinitialize Diffusion: " + e.getMessage());
+                        return;
+                    }
+                } else {
+                    // Already initialized
+                    LogManager.logI(TAG, "Using existing Diffusion session (handle=" + diffusionHandle + ")");
+                }
                 
                 // Get current chat folder
                 String chatFolderPath = ConfigManager.getString(context, 
@@ -929,13 +975,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 
                 LogManager.logI(TAG, "Diffusion params: steps=" + steps + ", cfg=" + CFG_SCALE + ", scheduler=" + SCHEDULER + ", seed=" + seed);
                 
-                // Output debug tag
-                final StringBuilder debugLog = new StringBuilder();
-                debugLog.append("<debug>");
-                callback.onToken(debugLog.toString());
-                debugLog.setLength(0);
-                
-                // Generate image
+                // Generate image (debug tag already opened at the beginning)
                 final long startTime = System.currentTimeMillis();
                 boolean success = MnnInference.generateImage(
                     diffusionHandle,
@@ -963,8 +1003,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 
                 long duration = System.currentTimeMillis() - startTime;
                 
-                // Close debug tag
-                callback.onToken("\n</debug>");
+                // JNI layer already closed </debug> tag
                 
                 // Check if generation succeeded
                 if (success && new File(outputPath).exists()) {

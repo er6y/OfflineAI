@@ -332,7 +332,9 @@ public class LocalLlmAdapter {
             localLlmHandler.loadModel(modelName, new LocalLlmHandler.StreamingCallback() {
                 @Override
                 public void onToken(String token) {
-                    // 模型加载过程中不需要处理token
+                    // Forward model loading progress to UI (cache status, loading messages)
+                    LogManager.print(token);
+                    callback.onStreamingData(token);
                 }
                 
                 @Override
@@ -559,5 +561,25 @@ public class LocalLlmAdapter {
     public String getModelArchitecture() {
         return localLlmHandler.getModelArchitecture();
     }
+    
+    /**
+     * 释放资源（在APP退出时调用以保存kernel cache）
+     */
+    public void onDestroy() {
+        LogManager.logI(TAG, "onDestroy: Releasing resources...");
+        if (localLlmHandler != null) {
+            try {
+                // Call InferenceEngine.release() to trigger Diffusion destructor
+                if (localLlmHandler.getInferenceEngine() != null) {
+                    localLlmHandler.getInferenceEngine().release();
+                    LogManager.logI(TAG, "InferenceEngine released successfully (kernel cache saved)");
+                } else {
+                    localLlmHandler.unloadModel();
+                    LogManager.logI(TAG, "Model unloaded successfully");
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to release LocalLlmHandler", e);
+            }
+        }
+    }
 }
-
