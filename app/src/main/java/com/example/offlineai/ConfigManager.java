@@ -87,11 +87,7 @@ public class ConfigManager {
     public static final String KEY_LAST_SELECTED_RERANKER_MODEL = "last_selected_reranker_model"; // 重排模型相关键
     
     // 设置相关的键
-    public static final String KEY_MODEL_PATH = "model_path";
-    public static final String KEY_EMBEDDING_MODEL_PATH = "embedding_model_path";
-    public static final String KEY_RERANKER_MODEL_PATH = "reranker_model_path";
-    public static final String KEY_KNOWLEDGE_BASE_PATH = "knowledge_base_path";
-    public static final String KEY_CHAT_HISTORY_PATH = "chat_history_path"; // 对话历史保存目录
+    public static final String KEY_DATA_ROOT_PATH = "data_root_path"; // 数据根目录
     public static final String KEY_CURRENT_CHAT_FOLDER = "current_chat_folder"; // 当前对话文件夹路径
     public static final String KEY_SEARCH_DEPTH = "search_depth";
     public static final String KEY_RERANK_COUNT = "rerank_count";
@@ -156,13 +152,16 @@ public class ConfigManager {
     public static final int DEFAULT_BLOCK_SIZE = DEFAULT_CHUNK_SIZE;
     public static final int DEFAULT_OVERLAP_SIZE = 100;
     public static final int DEFAULT_MIN_CHUNK_SIZE = 10; // 修改为200，与PC端保持一致
-    public static final String DEFAULT_MODEL_PATH = "/storage/emulated/0/Download/OfflineAIData/models";
-    public static final String DEFAULT_EMBEDDING_MODEL_PATH = "/storage/emulated/0/Download/OfflineAIData/embeddings";
-    public static final String DEFAULT_RERANKER_MODEL_PATH = "/storage/emulated/0/Download/OfflineAIData/rerankers";
-    public static final String DEFAULT_KNOWLEDGE_BASE_PATH = "/storage/emulated/0/Download/OfflineAIData/knowledge_bases";
-    public static final String DEFAULT_CHAT_HISTORY_PATH = "/storage/emulated/0/Download/OfflineAIData/chathistory";
+    public static final String DEFAULT_DATA_ROOT_PATH = "/storage/emulated/0/Download/OfflineAIData";
     public static final int DEFAULT_SEARCH_DEPTH = 20;
     public static final int DEFAULT_RERANK_COUNT = 5;
+    
+    // 硬编码的子目录名称
+    private static final String SUBDIR_MODELS = "models";
+    private static final String SUBDIR_EMBEDDINGS = "embeddings";
+    private static final String SUBDIR_RERANKERS = "rerankers";
+    private static final String SUBDIR_KNOWLEDGE_BASES = "knowledge_bases";
+    private static final String SUBDIR_CHAT_HISTORY = "chathistory";
 
     public static final float DEFAULT_TEXT_SIZE = 14f;
     
@@ -375,10 +374,9 @@ public class ConfigManager {
             // 验证配置是否包含必要的配置项
             boolean needReset = false;
             String[] requiredKeys = {
-                KEY_MODEL_PATH, KEY_EMBEDDING_MODEL_PATH, KEY_KNOWLEDGE_BASE_PATH,
+                KEY_DATA_ROOT_PATH,
                 KEY_CHUNK_SIZE, KEY_OVERLAP_SIZE, KEY_SEARCH_DEPTH,
                 KEY_API_URL, KEY_MODEL_NAME, KEY_KNOWLEDGE_BASE
-                // ONNX推理引擎配置项已移除
             };
             
             // 创建一个默认配置，仅在需要时使用
@@ -455,7 +453,7 @@ public class ConfigManager {
             
             // 检查是否需要清理配置
             String[] requiredKeys = {
-                KEY_MODEL_PATH, KEY_EMBEDDING_MODEL_PATH, KEY_KNOWLEDGE_BASE_PATH,
+                KEY_DATA_ROOT_PATH,
                 KEY_CHUNK_SIZE, KEY_OVERLAP_SIZE, KEY_SEARCH_DEPTH,
                 KEY_API_URL, KEY_MODEL_NAME, KEY_KNOWLEDGE_BASE, KEY_SYSTEM_PROMPT
             };
@@ -715,7 +713,7 @@ public class ConfigManager {
      */
     public static String getKnowledgeBaseEmbeddingModel(Context context, String knowledgeBaseName) {
         // 获取设置中的知识库路径
-        String knowledgeBasePath = SettingsFragment.getKnowledgeBasePath(context);
+        String knowledgeBasePath = getKnowledgeBasePath(context);
         File knowledgeBaseDir = new File(knowledgeBasePath, knowledgeBaseName);
         
         LogManager.logD(TAG, getLogString(context, R.string.config_try_read_metadata) + ": " + knowledgeBaseName);
@@ -740,7 +738,7 @@ public class ConfigManager {
                         
                         if (embeddingModel != null && !embeddingModel.isEmpty()) {
                             // 获取设置中的嵌入模型路径
-                            String embeddingModelPath = SettingsFragment.getEmbeddingModelPath(context);
+                            String embeddingModelPath = getEmbeddingModelPath(context);
                             
                             // 检查嵌入模型文件是否存在
                             File modelFile = new File(embeddingModel);
@@ -787,7 +785,7 @@ public class ConfigManager {
                         
                         if (embeddingModel != null && !embeddingModel.isEmpty()) {
                             // 获取设置中的嵌入模型路径
-                            String embeddingModelPath = SettingsFragment.getEmbeddingModelPath(context);
+                            String embeddingModelPath = getEmbeddingModelPath(context);
                             
                             // 检查嵌入模型文件是否存在
                             File modelFile = new File(embeddingModel);
@@ -968,57 +966,48 @@ public class ConfigManager {
     }
 
     /**
-     * 获取模型路径
+     * 获取数据根目录
+     * @param context 上下文
+     * @return 数据根目录路径
+     */
+    public static String getDataRootPath(Context context) {
+        return getString(context, KEY_DATA_ROOT_PATH, DEFAULT_DATA_ROOT_PATH);
+    }
+
+    /**
+     * 设置数据根目录
+     * @param context 上下文
+     * @param dataRootPath 数据根目录路径
+     */
+    public static void setDataRootPath(Context context, String dataRootPath) {
+        setString(context, KEY_DATA_ROOT_PATH, dataRootPath);
+    }
+
+    /**
+     * 获取模型路径（根目录 + models）
      * @param context 上下文
      * @return 模型路径
      */
     public static String getModelPath(Context context) {
-        return getString(context, KEY_MODEL_PATH, DEFAULT_MODEL_PATH);
+        return new File(getDataRootPath(context), SUBDIR_MODELS).getAbsolutePath();
     }
 
     /**
-     * 设置模型路径
-     * @param context 上下文
-     * @param modelPath 模型路径
-     */
-    public static void setModelPath(Context context, String modelPath) {
-        setString(context, KEY_MODEL_PATH, modelPath);
-    }
-
-    /**
-     * 获取嵌入模型路径
+     * 获取嵌入模型路径（根目录 + embeddings）
      * @param context 上下文
      * @return 嵌入模型路径
      */
     public static String getEmbeddingModelPath(Context context) {
-        return getString(context, KEY_EMBEDDING_MODEL_PATH, DEFAULT_EMBEDDING_MODEL_PATH);
+        return new File(getDataRootPath(context), SUBDIR_EMBEDDINGS).getAbsolutePath();
     }
 
     /**
-     * 设置嵌入模型路径
-     * @param context 上下文
-     * @param embeddingModelPath 嵌入模型路径
-     */
-    public static void setEmbeddingModelPath(Context context, String embeddingModelPath) {
-        setString(context, KEY_EMBEDDING_MODEL_PATH, embeddingModelPath);
-    }
-
-    /**
-     * 获取重排模型路径
+     * 获取重排模型路径（根目录 + rerankers）
      * @param context 上下文
      * @return 重排模型路径
      */
     public static String getRerankerModelPath(Context context) {
-        return getString(context, KEY_RERANKER_MODEL_PATH, DEFAULT_RERANKER_MODEL_PATH);
-    }
-
-    /**
-     * 设置重排模型路径
-     * @param context 上下文
-     * @param rerankerModelPath 重排模型路径
-     */
-    public static void setRerankerModelPath(Context context, String rerankerModelPath) {
-        setString(context, KEY_RERANKER_MODEL_PATH, rerankerModelPath);
+        return new File(getDataRootPath(context), SUBDIR_RERANKERS).getAbsolutePath();
     }
 
     /**
@@ -1058,21 +1047,21 @@ public class ConfigManager {
     }
 
     /**
-     * 获取知识库路径
+     * 获取知识库路径（根目录 + knowledge_bases）
      * @param context 上下文
      * @return 知识库路径
      */
     public static String getKnowledgeBasePath(Context context) {
-        return getString(context, KEY_KNOWLEDGE_BASE_PATH, DEFAULT_KNOWLEDGE_BASE_PATH);
+        return new File(getDataRootPath(context), SUBDIR_KNOWLEDGE_BASES).getAbsolutePath();
     }
 
     /**
-     * 设置知识库路径
+     * 获取对话历史路径（根目录 + chathistory）
      * @param context 上下文
-     * @param knowledgeBasePath 知识库路径
+     * @return 对话历史路径
      */
-    public static void setKnowledgeBasePath(Context context, String knowledgeBasePath) {
-        setString(context, KEY_KNOWLEDGE_BASE_PATH, knowledgeBasePath);
+    public static String getChatHistoryPath(Context context) {
+        return new File(getDataRootPath(context), SUBDIR_CHAT_HISTORY).getAbsolutePath();
     }
 
     /**
@@ -1472,10 +1461,9 @@ public class ConfigManager {
             
             // 确保包含所有必要的配置项
             String[] requiredKeys = {
-                KEY_MODEL_PATH, KEY_EMBEDDING_MODEL_PATH, KEY_KNOWLEDGE_BASE_PATH,
+                KEY_DATA_ROOT_PATH,
                 KEY_CHUNK_SIZE, KEY_OVERLAP_SIZE, KEY_SEARCH_DEPTH,
                 KEY_API_URL, KEY_MODEL_NAME, KEY_KNOWLEDGE_BASE
-                // ONNX推理引擎配置项已移除
             };
             
             for (String key : requiredKeys) {
@@ -2016,11 +2004,8 @@ public class ConfigManager {
         try {
             JSONObject config = new JSONObject();
             
-            // 基本路径设置 - 使用绝对路径而非相对路径
-            config.put(KEY_MODEL_PATH, DEFAULT_MODEL_PATH);
-            config.put(KEY_EMBEDDING_MODEL_PATH, DEFAULT_EMBEDDING_MODEL_PATH);
-            config.put(KEY_RERANKER_MODEL_PATH, DEFAULT_RERANKER_MODEL_PATH);
-            config.put(KEY_KNOWLEDGE_BASE_PATH, DEFAULT_KNOWLEDGE_BASE_PATH);
+            // 基本路径设置 - 只设置根目录，子目录硬编码
+            config.put(KEY_DATA_ROOT_PATH, DEFAULT_DATA_ROOT_PATH);
             
             // 分块设置
             config.put(KEY_CHUNK_SIZE, 1000);

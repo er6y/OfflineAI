@@ -511,7 +511,7 @@ public class ModelDownloadFragment extends Fragment {
     // === JSON 加载与 UI 构建 ===
     private void ensureAndLoadModelList() {
         try {
-            File baseDir = new File(ConfigManager.getModelPath(requireContext()));
+            File baseDir = new File(ConfigManager.getDataRootPath(requireContext()));
             if (!baseDir.exists()) baseDir.mkdirs();
             File listFile = new File(baseDir, "ModelDownloadList.txt");
             if (!listFile.exists()) {

@@ -1055,7 +1055,7 @@ public class RagQaFragment extends Fragment {
         setupSpinner(spinnerKnowledgeBase, new String[]{StateDisplayManager.getKnowledgeBaseStatusDisplayText(requireContext(), AppConstants.KNOWLEDGE_BASE_STATUS_LOADING)});
         
         // Get knowledge base path from settings
-        String knowledgeBasePath = ConfigManager.getString(requireContext(), ConfigManager.KEY_KNOWLEDGE_BASE_PATH, ConfigManager.DEFAULT_KNOWLEDGE_BASE_PATH);
+        String knowledgeBasePath = ConfigManager.getKnowledgeBasePath(requireContext());
         LogManager.logD(TAG, "Retrieved knowledge base path from settings: " + knowledgeBasePath);
         
         // Get knowledge base directory
@@ -1920,7 +1920,7 @@ public class RagQaFragment extends Fragment {
             }
 
             // Get knowledge base directory - use configured knowledge base path
-            String knowledgeBasePath = ConfigManager.getString(requireContext(), ConfigManager.KEY_KNOWLEDGE_BASE_PATH, ConfigManager.DEFAULT_KNOWLEDGE_BASE_PATH);
+            String knowledgeBasePath = ConfigManager.getKnowledgeBasePath(requireContext());
             LogManager.logD(TAG, "Retrieved knowledge base path from settings: " + knowledgeBasePath);
 
             // Get knowledge base directory
@@ -3947,7 +3947,7 @@ public class RagQaFragment extends Fragment {
             }
             
             // Get knowledge base directory
-            String knowledgeBasePath = ConfigManager.getString(requireContext(), ConfigManager.KEY_KNOWLEDGE_BASE_PATH, ConfigManager.DEFAULT_KNOWLEDGE_BASE_PATH);
+            String knowledgeBasePath = ConfigManager.getKnowledgeBasePath(requireContext());
             File knowledgeBaseDir = new File(knowledgeBasePath, knowledgeBase);
             
             // Update database metadata

@@ -408,10 +408,14 @@ OfflineAI supports Stable Diffusion text-to-image generation for AI art creation
 #### 界面元素说明 / Interface Elements
 
 1. **目录设置 / Directory Settings**
-   - 模型目录：本地LLM模型的存储目录路径 / Model Directory: Storage directory path for local LLM models
-   - 嵌入模型目录：设置存储嵌入模型的目录路径 / Embedding Model Directory: Set storage directory path for embedding models
-   - 重排模型目录：设置存储重排模型的目录路径 / Rerank Model Directory: Set storage directory path for rerank models
-   - 知识库目录：设置存储知识库的目录路径 / Knowledge Base Directory: Set storage directory path for knowledge bases
+   - **数据根目录 / Data Root Directory**：设置应用数据的统一存储根目录（默认：`/sdcard/Download/OfflineAIData`）/ Set unified root directory for app data storage (default: `/sdcard/Download/OfflineAIData`)
+   - **自动子目录结构 / Automatic Subdirectory Structure**：应用会在根目录下自动创建以下子目录 / App automatically creates the following subdirectories under root:
+     - `models/` - 本地LLM模型存储目录 / Local LLM models storage
+     - `embeddings/` - 嵌入模型存储目录 / Embedding models storage
+     - `rerankers/` - 重排模型存储目录 / Rerank models storage
+     - `knowledge_bases/` - 知识库存储目录 / Knowledge bases storage
+     - `chathistory/` - 聊天历史存储目录 / Chat history storage
+   - **配置简化 / Configuration Simplification**：只需设置一个根目录，所有数据自动组织管理 / Only need to set one root directory, all data automatically organized
 
 2. **文本分块设置 / Text Chunking Settings**
    - 分块大小：设置文本分块的大小（默认1000字符） / Chunk Size: Set text chunk size (default 1000 characters)

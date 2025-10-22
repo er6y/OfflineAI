@@ -158,130 +158,7 @@
             android:layout_marginTop="16dp"
             android:layout_marginBottom="8dp" />
 
-        <!-- 模型目录设置 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginBottom="8dp">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/label_model_directory"
-                android:textSize="16sp"
-                android:layout_marginBottom="4dp" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical">
-
-                <EditText
-                    android:id="@+id/editTextModelPath"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginEnd="8dp"
-                    android:inputType="text"
-                    android:hint="@string/hint_model_path" />
-
-                <Button
-                    android:id="@+id/buttonSelectModelPath"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/button_select"
-                    android:textSize="14sp"
-                    android:padding="4dp"
-                    android:minWidth="60dp"
-                    android:minHeight="36dp" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- 嵌入模型目录设置 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginBottom="8dp">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/label_embedding_model_directory"
-                android:textSize="16sp"
-                android:layout_marginBottom="4dp" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical">
-
-                <EditText
-                    android:id="@+id/editTextEmbeddingModelPath"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginEnd="8dp"
-                    android:inputType="text"
-                    android:hint="@string/hint_embedding_model_path" />
-
-                <Button
-                    android:id="@+id/buttonSelectEmbeddingModelPath"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/button_select"
-                    android:textSize="14sp"
-                    android:padding="4dp"
-                    android:minWidth="60dp"
-                    android:minHeight="36dp" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- 重排模型目录设置 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginBottom="8dp">
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/label_reranker_model_directory"
-                android:textSize="16sp"
-                android:layout_marginBottom="4dp" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical">
-
-                <EditText
-                    android:id="@+id/editTextRerankerModelPath"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginEnd="8dp"
-                    android:inputType="text"
-                    android:hint="@string/hint_reranker_model_path" />
-
-                <Button
-                    android:id="@+id/buttonSelectRerankerModelPath"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/button_select"
-                    android:textSize="14sp"
-                    android:padding="4dp"
-                    android:minWidth="60dp"
-                    android:minHeight="36dp" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- 知识库目录设置 -->
+        <!-- 数据根目录设置 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -291,49 +168,16 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/label_knowledge_base_directory"
+                android:text="@string/label_data_root_directory"
                 android:textSize="16sp"
                 android:layout_marginBottom="4dp" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical">
-
-                <EditText
-                    android:id="@+id/editTextKnowledgeBasePath"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:layout_marginEnd="8dp"
-                    android:inputType="text"
-                    android:hint="@string/hint_knowledge_base_path" />
-
-                <Button
-                    android:id="@+id/buttonSelectKnowledgeBasePath"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/button_select"
-                    android:textSize="14sp"
-                    android:padding="4dp"
-                    android:minWidth="60dp"
-                    android:minHeight="36dp" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- 对话历史目录 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:layout_marginTop="8dp">
 
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/label_chat_history_path"
-                android:textSize="16sp"
+                android:text="@string/hint_data_root_subdirs"
+                android:textSize="12sp"
+                android:textColor="?android:attr/textColorSecondary"
                 android:layout_marginBottom="4dp" />
 
             <LinearLayout
@@ -343,16 +187,16 @@
                 android:gravity="center_vertical">
 
                 <EditText
-                    android:id="@+id/editTextChatHistoryPath"
+                    android:id="@+id/editTextDataRootPath"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:layout_marginEnd="8dp"
                     android:inputType="text"
-                    android:hint="@string/hint_chat_history_dir_path" />
+                    android:hint="@string/hint_data_root_path" />
 
                 <Button
-                    android:id="@+id/buttonSelectChatHistoryPath"
+                    android:id="@+id/buttonSelectDataRootPath"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="@string/button_select"

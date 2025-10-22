@@ -55,16 +55,8 @@ public class SettingsFragment extends Fragment {
     private TextView textViewOverlapSizeValue;
     private SeekBar seekBarMinChunkSize;
     private TextView textViewMinChunkSizeValue;
-    private EditText editTextModelPath;
-    private EditText editTextEmbeddingModelPath;
-    private EditText editTextRerankerModelPath;
-    private EditText editTextKnowledgeBasePath;
-    private EditText editTextChatHistoryPath;
-    private Button buttonSelectModelPath;
-    private Button buttonSelectEmbeddingModelPath;
-    private Button buttonSelectRerankerModelPath;
-    private Button buttonSelectKnowledgeBasePath;
-    private Button buttonSelectChatHistoryPath;
+    private EditText editTextDataRootPath;
+    private Button buttonSelectDataRootPath;
     private Button buttonSaveSettings;
     private SwitchCompat switchDebugMode;
     private Spinner spinnerUseGpu;
@@ -103,22 +95,14 @@ public class SettingsFragment extends Fragment {
     private SwitchCompat switchDiffusionSeedRandom;
     
     // Activity Result Launchers
-    private ActivityResultLauncher<Intent> modelPathLauncher;
-    private ActivityResultLauncher<Intent> embeddingModelPathLauncher;
-    private ActivityResultLauncher<Intent> rerankerModelPathLauncher;
-    private ActivityResultLauncher<Intent> knowledgeBasePathLauncher;
-    private ActivityResultLauncher<Intent> chatHistoryPathLauncher;
+    private ActivityResultLauncher<Intent> dataRootPathLauncher;
     // 思考模式开关已移动到RAG问答界面
     
     // 设置变更监听器
     private SettingsChangeListener settingsChangeListener;
     
     // 请求码
-    private static final int REQUEST_CODE_MODEL_PATH = 1001;
-    private static final int REQUEST_CODE_EMBEDDING_MODEL_PATH = 1002;
-    private static final int REQUEST_CODE_RERANKER_MODEL_PATH = 1003;
-    private static final int REQUEST_CODE_KNOWLEDGE_BASE_PATH = 1004;
-    private static final int REQUEST_CODE_CHAT_HISTORY_PATH = 1005;
+    private static final int REQUEST_CODE_DATA_ROOT_PATH = 1001;
     
     // 设置监听器接口
     public interface SettingsChangeListener {
@@ -140,47 +124,11 @@ public class SettingsFragment extends Fragment {
         super.onCreate(savedInstanceState);
         
         // 初始化Activity Result Launchers
-        modelPathLauncher = registerForActivityResult(
+        dataRootPathLauncher = registerForActivityResult(
             new ActivityResultContracts.StartActivityForResult(),
             result -> {
                 if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
-                    handleDirectorySelection(result.getData().getData(), editTextModelPath);
-                }
-            }
-        );
-        
-        embeddingModelPathLauncher = registerForActivityResult(
-            new ActivityResultContracts.StartActivityForResult(),
-            result -> {
-                if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
-                    handleDirectorySelection(result.getData().getData(), editTextEmbeddingModelPath);
-                }
-            }
-        );
-        
-        rerankerModelPathLauncher = registerForActivityResult(
-            new ActivityResultContracts.StartActivityForResult(),
-            result -> {
-                if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
-                    handleDirectorySelection(result.getData().getData(), editTextRerankerModelPath);
-                }
-            }
-        );
-        
-        knowledgeBasePathLauncher = registerForActivityResult(
-            new ActivityResultContracts.StartActivityForResult(),
-            result -> {
-                if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
-                    handleDirectorySelection(result.getData().getData(), editTextKnowledgeBasePath);
-                }
-            }
-        );
-        
-        chatHistoryPathLauncher = registerForActivityResult(
-            new ActivityResultContracts.StartActivityForResult(),
-            result -> {
-                if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
-                    handleDirectorySelection(result.getData().getData(), editTextChatHistoryPath);
+                    handleDirectorySelection(result.getData().getData(), editTextDataRootPath);
                 }
             }
         );
@@ -198,16 +146,8 @@ public class SettingsFragment extends Fragment {
         textViewOverlapSizeValue = view.findViewById(R.id.textViewOverlapSizeValue);
         seekBarMinChunkSize = view.findViewById(R.id.seekBarMinChunkSize);
         textViewMinChunkSizeValue = view.findViewById(R.id.textViewMinChunkSizeValue);
-        editTextModelPath = view.findViewById(R.id.editTextModelPath);
-        editTextEmbeddingModelPath = view.findViewById(R.id.editTextEmbeddingModelPath);
-        editTextRerankerModelPath = view.findViewById(R.id.editTextRerankerModelPath);
-        editTextKnowledgeBasePath = view.findViewById(R.id.editTextKnowledgeBasePath);
-        editTextChatHistoryPath = view.findViewById(R.id.editTextChatHistoryPath);
-        buttonSelectModelPath = view.findViewById(R.id.buttonSelectModelPath);
-        buttonSelectEmbeddingModelPath = view.findViewById(R.id.buttonSelectEmbeddingModelPath);
-        buttonSelectRerankerModelPath = view.findViewById(R.id.buttonSelectRerankerModelPath);
-        buttonSelectKnowledgeBasePath = view.findViewById(R.id.buttonSelectKnowledgeBasePath);
-        buttonSelectChatHistoryPath = view.findViewById(R.id.buttonSelectChatHistoryPath);
+        editTextDataRootPath = view.findViewById(R.id.editTextDataRootPath);
+        buttonSelectDataRootPath = view.findViewById(R.id.buttonSelectDataRootPath);
         buttonSaveSettings = view.findViewById(R.id.buttonSaveSettings);
         switchDebugMode = view.findViewById(R.id.switchDebugMode);
         spinnerUseGpu = view.findViewById(R.id.spinnerBackendPreference);
@@ -297,34 +237,10 @@ public class SettingsFragment extends Fragment {
     }
     
     private void setupListeners() {
-        // 选择模型目录
-        buttonSelectModelPath.setOnClickListener(v -> {
+        // 选择数据根目录
+        buttonSelectDataRootPath.setOnClickListener(v -> {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-            modelPathLauncher.launch(intent);
-        });
-        
-        // 选择嵌入模型目录
-        buttonSelectEmbeddingModelPath.setOnClickListener(v -> {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-            embeddingModelPathLauncher.launch(intent);
-        });
-        
-        // 选择重排模型目录
-        buttonSelectRerankerModelPath.setOnClickListener(v -> {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-            rerankerModelPathLauncher.launch(intent);
-        });
-        
-        // 选择知识库目录
-        buttonSelectKnowledgeBasePath.setOnClickListener(v -> {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-            knowledgeBasePathLauncher.launch(intent);
-        });
-        
-        // 选择对话历史目录
-        buttonSelectChatHistoryPath.setOnClickListener(v -> {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-            chatHistoryPathLauncher.launch(intent);
+            dataRootPathLauncher.launch(intent);
         });
         
         // 保存设置
@@ -454,11 +370,8 @@ public class SettingsFragment extends Fragment {
             int overlapSize = ConfigManager.getInt(context, ConfigManager.KEY_OVERLAP_SIZE, ConfigManager.DEFAULT_OVERLAP_SIZE);
             int minChunkSize = ConfigManager.getMinChunkSize(context); // 获取最小分块限制
             
-            // 加载模型路径
-            String modelPath = ConfigManager.getModelPath(context);
-            String embeddingModelPath = ConfigManager.getEmbeddingModelPath(context);
-            String rerankerModelPath = ConfigManager.getRerankerModelPath(context);
-            String knowledgeBasePath = ConfigManager.getKnowledgeBasePath(context);
+            // 加载数据根目录
+            String dataRootPath = ConfigManager.getDataRootPath(context);
             
             // 加载调试模式设置
             boolean debugMode = ConfigManager.getBoolean(context, ConfigManager.KEY_DEBUG_MODE, false);
@@ -501,16 +414,7 @@ public class SettingsFragment extends Fragment {
             updateOverlapSizeText((overlapSize - 20) / 20);
             seekBarMinChunkSize.setProgress((minChunkSize - 10) / 10);
             updateMinChunkSizeText((minChunkSize - 10) / 10);
-            editTextModelPath.setText(modelPath);
-            editTextEmbeddingModelPath.setText(embeddingModelPath);
-            editTextRerankerModelPath.setText(rerankerModelPath);
-            editTextKnowledgeBasePath.setText(knowledgeBasePath);
-            
-            // 加载对话历史路径
-            String chatHistoryPath = ConfigManager.getString(context, 
-                ConfigManager.KEY_CHAT_HISTORY_PATH, 
-                ConfigManager.DEFAULT_CHAT_HISTORY_PATH);
-            editTextChatHistoryPath.setText(chatHistoryPath);
+            editTextDataRootPath.setText(dataRootPath);
             
             switchDebugMode.setChecked(debugMode);
             
@@ -598,10 +502,7 @@ public class SettingsFragment extends Fragment {
             int chunkSize = (seekBarChunkSize.getProgress() * 100) + 100;
             int overlapSize = (seekBarOverlapSize.getProgress() * 20) + 20;
             int minChunkSize = (seekBarMinChunkSize.getProgress() * 10) + 10;
-            String modelPathStr = editTextModelPath.getText().toString().trim();
-            String embeddingModelPathStr = editTextEmbeddingModelPath.getText().toString().trim();
-            String rerankerModelPathStr = editTextRerankerModelPath.getText().toString().trim();
-            String knowledgeBasePathStr = editTextKnowledgeBasePath.getText().toString().trim();
+            String dataRootPath = editTextDataRootPath.getText().toString().trim();
             
             // 数值已经从SeekBar获取，无需验证输入格式
             
@@ -621,15 +522,9 @@ public class SettingsFragment extends Fragment {
                 return;
             }
             
-            // 获取路径设置
-            String modelPath = editTextModelPath.getText().toString().trim();
-            String embeddingModelPath = editTextEmbeddingModelPath.getText().toString().trim();
-            String rerankerModelPath = editTextRerankerModelPath.getText().toString().trim();
-            String knowledgeBasePath = editTextKnowledgeBasePath.getText().toString().trim();
-            
-            // 验证路径
-            if (modelPath.isEmpty() || embeddingModelPath.isEmpty() || rerankerModelPath.isEmpty() || knowledgeBasePath.isEmpty()) {
-                Toast.makeText(context, getString(R.string.toast_please_set_all_paths), Toast.LENGTH_SHORT).show();
+            // 验证根目录
+            if (dataRootPath.isEmpty()) {
+                Toast.makeText(context, getString(R.string.toast_please_set_data_root_path), Toast.LENGTH_SHORT).show();
                 return;
             }
             
@@ -724,14 +619,7 @@ public class SettingsFragment extends Fragment {
             ConfigManager.setChunkSize(context, chunkSize);
             ConfigManager.setInt(context, ConfigManager.KEY_OVERLAP_SIZE, overlapSize);
             ConfigManager.setMinChunkSize(context, minChunkSize); // 保存最小分块限制
-            ConfigManager.setString(context, ConfigManager.KEY_MODEL_PATH, modelPath);
-            ConfigManager.setString(context, ConfigManager.KEY_EMBEDDING_MODEL_PATH, embeddingModelPath);
-            ConfigManager.setString(context, ConfigManager.KEY_RERANKER_MODEL_PATH, rerankerModelPath);
-            ConfigManager.setString(context, ConfigManager.KEY_KNOWLEDGE_BASE_PATH, knowledgeBasePath);
-            
-            // 保存对话历史路径
-            String chatHistoryPath = editTextChatHistoryPath.getText().toString().trim();
-            ConfigManager.setString(context, ConfigManager.KEY_CHAT_HISTORY_PATH, chatHistoryPath);
+            ConfigManager.setDataRootPath(context, dataRootPath);
             
             ConfigManager.setBoolean(context, ConfigManager.KEY_DEBUG_MODE, debugMode);
             ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
@@ -786,10 +674,7 @@ public class SettingsFragment extends Fragment {
             settingsSummary.put("chunkSize", chunkSize);
             settingsSummary.put("overlapSize", overlapSize);
             settingsSummary.put("minChunkSize", minChunkSize); // 添加最小分块限制
-            settingsSummary.put("modelPath", modelPath);
-            settingsSummary.put("embeddingModelPath", embeddingModelPath);
-            settingsSummary.put("rerankerModelPath", rerankerModelPath);
-            settingsSummary.put("knowledgeBasePath", knowledgeBasePath);
+            settingsSummary.put("dataRootPath", dataRootPath);
             settingsSummary.put("debugMode", debugMode);
             settingsSummary.put("backendPreference", backendPreference);
             // ONNX引擎设置摘要已移除
@@ -896,17 +781,6 @@ public class SettingsFragment extends Fragment {
         return ConfigManager.getMinChunkSize(context);
     }
     
-    public static String getModelPath(Context context) {
-        return ConfigManager.getModelPath(context);
-    }
-    
-    public static String getEmbeddingModelPath(Context context) {
-        return ConfigManager.getEmbeddingModelPath(context);
-    }
-    
-    public static String getKnowledgeBasePath(Context context) {
-        return ConfigManager.getKnowledgeBasePath(context);
-    }
     
     /**
      * 获取是否启用调试模式

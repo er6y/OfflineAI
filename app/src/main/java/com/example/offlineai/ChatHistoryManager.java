@@ -58,9 +58,7 @@ public class ChatHistoryManager {
      */
     public static String createNewChatFolder(Context context) {
         try {
-            String chatHistoryPath = ConfigManager.getString(context, 
-                ConfigManager.KEY_CHAT_HISTORY_PATH, 
-                ConfigManager.DEFAULT_CHAT_HISTORY_PATH);
+            String chatHistoryPath = ConfigManager.getChatHistoryPath(context);
             
             // 确保父目录存在
             File parentDir = new File(chatHistoryPath);
@@ -437,9 +435,7 @@ public class ChatHistoryManager {
         List<ChatHistoryItem> historyList = new ArrayList<>();
         
         try {
-            String chatHistoryPath = ConfigManager.getString(context, 
-                ConfigManager.KEY_CHAT_HISTORY_PATH, 
-                ConfigManager.DEFAULT_CHAT_HISTORY_PATH);
+            String chatHistoryPath = ConfigManager.getChatHistoryPath(context);
             
             File parentDir = new File(chatHistoryPath);
             if (!parentDir.exists() || !parentDir.isDirectory()) {
