@@ -356,6 +356,12 @@ public:
         }
         
         try {
+            // Check if prompt contains audio tag
+            bool has_audio = (prompt.find("<audio>") != std::string::npos);
+            bool has_image = (prompt.find("<img>") != std::string::npos);
+            
+            const char* mode_tag = has_audio ? "[AUDIO]" : (has_image ? "[IMAGE]" : "[TEXT]");
+            
             // Create ChatMessages format (same as official MNN app)
             ChatMessages history;
             history.emplace_back("user", prompt);
@@ -382,8 +388,7 @@ public:
             bool stop_requested = false;
             bool generate_end = false;
             
-            LOGI("[TEXT] Starting generation with max_new_tokens=%d", max_new_tokens);
-            // LOGI("[TEXT] Prompt: %s", prompt.c_str());  // Too verbose
+            LOGI("%s Starting generation with max_new_tokens=%d", mode_tag, max_new_tokens);
             
             // Initial response (generates first token)
             llm_->response(history, &output_stream, "<eop>", 1);
@@ -403,19 +408,19 @@ public:
                 generate_end = stream_buffer.isGenerateEnd();
                 
                 if (stop_requested) {
-                    LOGI("[TEXT] Stop requested at token %d", current_size);
+                    LOGI("%s Stop requested at token %d", mode_tag, current_size);
                 }
                 if (generate_end) {
-                    LOGI("[TEXT] Generation ended (EOS/<eop>) at token %d", current_size);
+                    LOGI("%s Generation ended (EOS/<eop>) at token %d", mode_tag, current_size);
                 }
             }
-            LOGI("[TEXT] Generation loop finished: current_size=%d, stop=%d, end=%d", 
-                 current_size, stop_requested, generate_end);
+            LOGI("%s Generation loop finished: current_size=%d, stop=%d, end=%d", 
+                 mode_tag, current_size, stop_requested, generate_end);
             
             if (stop_requested) {
-                LOGI("[TEXT] Inference stopped by user after %d tokens", current_size);
+                LOGI("%s Inference stopped by user after %d tokens", mode_tag, current_size);
             } else {
-                LOGI("[TEXT] Inference completed, generated %d tokens", current_size);
+                LOGI("%s Inference completed, generated %d tokens", mode_tag, current_size);
             }
             
             // Get context with statistics
@@ -556,6 +561,13 @@ public:
                 LOGI("[MULTIMODAL] Inference stopped by user after %d tokens", current_size);
             } else {
                 LOGI("[MULTIMODAL] Inference completed, generated %d tokens", current_size);
+                
+                // Warn if suspiciously few tokens generated with multimodal input
+                if (current_size < 10 && !image_paths.empty()) {
+                    LOGW("[MULTIMODAL] Warning: Only %d tokens generated for image input!", current_size);
+                    LOGW("[MULTIMODAL] This may indicate a vision encoder or multimodal fusion problem.");
+                    LOGW("[MULTIMODAL] Consider trying a different multimodal model.");
+                }
             }
             
             // Get context

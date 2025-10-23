@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@android:color/transparent"
+    android:gravity="center">
+
+    <!-- 录音卡片 -->
+    <androidx.cardview.widget.CardView
+        android:layout_width="280dp"
+        android:layout_height="wrap_content"
+        android:layout_margin="32dp"
+        android:elevation="8dp"
+        app:cardCornerRadius="16dp"
+        app:cardBackgroundColor="#F5F5F5"
+        xmlns:app="http://schemas.android.com/apk/res-auto">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="24dp"
+            android:gravity="center">
+
+            <!-- 麦克风图标 -->
+            <ImageView
+                android:id="@+id/imageViewMic"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:src="@android:drawable/ic_btn_speak_now"
+                android:tint="#FF5722"
+                android:contentDescription="@string/recording" />
+
+            <!-- 录音时长 -->
+            <TextView
+                android:id="@+id/textViewDuration"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="00:00"
+                android:textSize="32sp"
+                android:textStyle="bold"
+                android:textColor="#212121"
+                android:fontFamily="sans-serif-medium" />
+
+            <!-- 波形提示（简化版） -->
+            <TextView
+                android:id="@+id/textViewWaveHint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="●●●●●"
+                android:textSize="16sp"
+                android:textColor="#FF5722"
+                android:letterSpacing="0.2" />
+
+            <!-- 提示文本 -->
+            <TextView
+                android:id="@+id/textViewHint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="@string/release_to_send"
+                android:textSize="14sp"
+                android:textColor="#757575"
+                android:gravity="center" />
+
+            <!-- 上滑取消提示 -->
+            <TextView
+                android:id="@+id/textViewCancelHint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/slide_up_to_cancel"
+                android:textSize="12sp"
+                android:textColor="#9E9E9E"
+                android:visibility="gone" />
+
+        </LinearLayout>
+
+    </androidx.cardview.widget.CardView>
+
+</LinearLayout>

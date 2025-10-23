@@ -350,16 +350,83 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         if (currentModelType == ModelType.DIFFUSION) {
             inferenceDiffusion(prompt, params, callback);
         } else if (currentModelType == ModelType.LLM) {
-            inferenceLLM(prompt, imagePaths, params, callback);
+            inferenceLLM(prompt, imagePaths, null, params, callback);
         } else {
             callback.onError("Unknown model type");
         }
     }
     
     /**
-     * LLM text generation inference
+     * Multimodal inference with audio support
+     * @param prompt Text prompt
+     * @param audioPaths Audio file paths
+     * @param params Inference parameters
+     * @param callback Streaming callback
      */
-    private void inferenceLLM(String prompt, List<String> imagePaths,
+    public void inferenceWithAudio(String prompt, List<String> audioPaths,
+                                   LocalLlmHandler.InferenceParams params,
+                                   LocalLlmHandler.StreamingCallback callback) {
+        if (!isInitialized.get()) {
+            LogManager.logE(TAG, "Handler not initialized");
+            if (callback != null) {
+                callback.onError("Handler not initialized");
+            }
+            return;
+        }
+        
+        if (isGenerating.get()) {
+            LogManager.logW(TAG, "Inference already in progress");
+            if (callback != null) {
+                callback.onError("Inference already in progress");
+            }
+            return;
+        }
+        
+        if (currentModelType == ModelType.LLM) {
+            inferenceLLM(prompt, null, audioPaths, params, callback);
+        } else {
+            callback.onError("Audio inference only supported for LLM models");
+        }
+    }
+    
+    /**
+     * Full multimodal inference with image and audio support
+     * @param prompt Text prompt
+     * @param imagePaths Image file paths
+     * @param audioPaths Audio file paths
+     * @param params Inference parameters
+     * @param callback Streaming callback
+     */
+    public void inferenceMultimodal(String prompt, List<String> imagePaths, List<String> audioPaths,
+                                    LocalLlmHandler.InferenceParams params,
+                                    LocalLlmHandler.StreamingCallback callback) {
+        if (!isInitialized.get()) {
+            LogManager.logE(TAG, "Handler not initialized");
+            if (callback != null) {
+                callback.onError("Handler not initialized");
+            }
+            return;
+        }
+        
+        if (isGenerating.get()) {
+            LogManager.logW(TAG, "Inference already in progress");
+            if (callback != null) {
+                callback.onError("Inference already in progress");
+            }
+            return;
+        }
+        
+        if (currentModelType == ModelType.LLM) {
+            inferenceLLM(prompt, imagePaths, audioPaths, params, callback);
+        } else {
+            callback.onError("Multimodal inference only supported for LLM models");
+        }
+    }
+    
+    /**
+     * LLM text generation inference with full multimodal support
+     */
+    private void inferenceLLM(String prompt, List<String> imagePaths, List<String> audioPaths,
                              LocalLlmHandler.InferenceParams params,
                              LocalLlmHandler.StreamingCallback callback) {
         // Reset stop flag and response builder
@@ -468,13 +535,29 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                     }
                 };
                 
-                // Perform inference
-                if (imagePaths != null && !imagePaths.isEmpty()) {
-                    // Multi-modal inference with images
+                // Perform inference based on modality
+                boolean hasImages = imagePaths != null && !imagePaths.isEmpty();
+                boolean hasAudio = audioPaths != null && !audioPaths.isEmpty();
+                
+                if (hasImages && hasAudio) {
+                    // Full multimodal: text + images + audio
+                    // Note: MNN may not support both simultaneously, prioritize audio
+                    LogManager.logI(TAG, "Multimodal inference: text + images + audio");
+                    String[] audioPathsArray = audioPaths.toArray(new String[0]);
+                    MnnInference.inferenceWithAudio(llmSessionHandle, prompt, audioPathsArray, mnnCallback);
+                } else if (hasAudio) {
+                    // Audio + text
+                    LogManager.logI(TAG, "Audio inference: text + audio");
+                    String[] audioPathsArray = audioPaths.toArray(new String[0]);
+                    MnnInference.inferenceWithAudio(llmSessionHandle, prompt, audioPathsArray, mnnCallback);
+                } else if (hasImages) {
+                    // Image + text
+                    LogManager.logI(TAG, "Image inference: text + images");
                     String[] imagePathsArray = imagePaths.toArray(new String[0]);
                     MnnInference.inferenceWithImages(llmSessionHandle, prompt, imagePathsArray, mnnCallback);
                 } else {
-                    // Text-only inference
+                    // Text-only
+                    LogManager.logI(TAG, "Text inference");
                     MnnInference.inference(llmSessionHandle, prompt, mnnCallback);
                 }
                 
@@ -619,6 +702,13 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         final int KV_CACHE_LIMIT_MB = -1;  // -1 for unlimited, or set MB limit per layer
         int kvcacheLimitBytes = (KV_CACHE_LIMIT_MB == -1) ? -1 : KV_CACHE_LIMIT_MB * 1024 * 1024;
         
+        // Auto-detect audio support (Qwen2.5-Omni, etc.)
+        File audioModel = new File(currentModelPath, "audio.mnn");
+        boolean hasAudioSupport = audioModel.exists();
+        if (hasAudioSupport) {
+            LogManager.logI(TAG, "✅ AUTO-DETECTED: audio.mnn found, enabling audio support (Omni model)");
+        }
+        
         // Build configuration using MnnInference.ConfigBuilder
         MnnInference.ConfigBuilder builder = new MnnInference.ConfigBuilder()
             .backendType(mnnBackend)
@@ -633,6 +723,14 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             .reuseKv(true)     // Enable KV cache reuse for multi-turn
             //.useMmap(true)     // Use mmap for model weights, bug here, android do not open
             .kvcacheMmap(false); // CRITICAL: Disable KV cache mmap to avoid /tmp crash on Android
+        
+        // Enable audio support if audio.mnn exists
+        if (hasAudioSupport) {
+            builder.isAudio(true).audioModel("audio.mnn");
+            // Qwen2.5-Omni audio pad token (from official config)
+            builder.audioPad(151666);
+            LogManager.logI(TAG, "🎤 Audio support enabled: audio_model=audio.mnn, audio_pad=151666");
+        }
         
         // Add temp path for weight mmap (not for kvcache)
         // Reference: libs/mnn/apps/Android/MnnLlmChat/app/src/main/cpp/llm_session.cpp

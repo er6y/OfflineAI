@@ -29,7 +29,7 @@ android {
                           "-DMNN_OPEN_TIME_TRACE=ON",
                           "-DMNN_BUILD_OPENCV=ON",
                           "-DMNN_IMGCODECS=ON",
-                          "-DMNN_BUILD_AUDIO=OFF",
+                          "-DMNN_BUILD_AUDIO=ON",  // FIXED: Enable audio support for Omni models
                           "-DMNN_BUILD_DIFFUSION=ON",
                           "-DMNN_SEP_BUILD=OFF",
                           "-DMNN_KLEIDIAI=ON",

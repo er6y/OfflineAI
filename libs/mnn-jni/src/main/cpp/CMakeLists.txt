@@ -33,15 +33,6 @@ option(MNN_KLEIDIAI "Enable KleidiAI" ON)
 # We keep logging enabled but disable debug assertions and optimizations
 set(MNN_DEBUG OFF CACHE BOOL "Disable MNN debug mode (use Release settings)" FORCE)
 
-# Conditionally enable NNAPI only for ARM architectures (x86_64 has FP16 symbol issues)
-if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "armeabi-v7a")
-    set(MNN_NNAPI ON CACHE BOOL "Enable NNAPI backend" FORCE)
-    message(STATUS "NNAPI enabled for ${ANDROID_ABI}")
-else()
-    set(MNN_NNAPI OFF CACHE BOOL "Disable NNAPI backend" FORCE)
-    message(STATUS "NNAPI disabled for ${ANDROID_ABI} (FP16 symbol issues)")
-endif()
-
 # ========== Compiler Flags ==========
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fexceptions -frtti")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wno-unused-function")
@@ -85,6 +76,13 @@ set(MNN_BUILD_FROM_SOURCE ON)
 
 if(MNN_BUILD_FROM_SOURCE)
     message(STATUS "Building MNN from source")
+    
+    # Note: Most MNN options (MNN_BUILD_AUDIO, MNN_OPENCL, etc.) are set via build.gradle arguments
+    # Exception: NNAPI must be conditionally disabled for x86_64 due to FP16 symbol issues
+    if(ANDROID_ABI STREQUAL "x86_64")
+        set(MNN_NNAPI OFF CACHE BOOL "Disable NNAPI for x86_64 (FP16 symbol missing)" FORCE)
+        message(STATUS "⚠️ NNAPI disabled for ${ANDROID_ABI} (FP16 symbol issues)")
+    endif()
     
     # Add MNN as subdirectory
     add_subdirectory(${MNN_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/mnn_build)
@@ -146,6 +144,7 @@ add_library(mnn_jni SHARED ${JNI_SOURCES})
 # Link libraries
 target_link_libraries(mnn_jni
     ${MNN_LIBS}
+    llm             # CRITICAL: Link MNN LLM library (includes audio/vision support)
     android
     log
 )
@@ -155,6 +154,18 @@ target_compile_definitions(mnn_jni PRIVATE
     MNN_BUILD_LLM=1
     MNN_BUILD_DIFFUSION=1
 )
+
+# Enable audio support if MNN_BUILD_AUDIO is ON
+if(MNN_BUILD_AUDIO)
+    target_compile_definitions(mnn_jni PRIVATE LLM_SUPPORT_AUDIO=1)
+    message(STATUS "✅ Audio support enabled (LLM_SUPPORT_AUDIO)")
+endif()
+
+# Enable vision support if LLMNN_SUPPORT_VISION is ON
+if(LLMNN_SUPPORT_VISION)
+    target_compile_definitions(mnn_jni PRIVATE LLM_SUPPORT_VISION=1)
+    message(STATUS "✅ Vision support enabled (LLM_SUPPORT_VISION)")
+endif()
 
 if(MNN_OPENCL)
     target_compile_definitions(mnn_jni PRIVATE MNN_OPENCL=1)

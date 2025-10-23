@@ -400,7 +400,7 @@
     <string name="label_content">内容:</string>
     <string name="label_add_progress">添加进度:</string>
     <string name="content_description_delete_api_url">删除API地址</string>
-    <string name="button_send">发送 ▶</string>
+    <string name="button_send">发送 ▶（长按语音）</string>
     <string name="dialog_model_not_found">找不到原始模型，请选择替代模型</string>
     <string name="dialog_select_embedding_model">请选择要使用的嵌入模型：</string>
     <string name="dialog_select_reranker_model">请选择要使用的重排模型：</string>
@@ -480,6 +480,7 @@
     <string name="log_trying_backup_url">尝试备用地址</string>
     <string name="log_download_failed">下载失败</string>
     <string name="log_download_completed">下载完成</string>
+    <string name="log_file_already_complete">文件已存在且完整</string>
     <string name="log_download_failed_http_code">下载失败，HTTP响应码</string>
     <string name="log_start_download_file_size">开始下载，文件大小</string>
     <string name="log_download_was_interrupted">下载已被中断</string>
@@ -1069,4 +1070,16 @@
     <string name="toast_chat_history_load_failed">加载对话失败</string>
     <string name="toast_chat_history_saved">对话已保存</string>
     <string name="toast_chat_history_save_failed">保存对话失败</string>
+
+    <!-- 语音录制相关 -->
+    <string name="recording">正在录音</string>
+    <string name="release_to_send">松开发送</string>
+    <string name="slide_up_to_cancel">上滑取消</string>
+    <string name="recording_canceled">录音已取消</string>
+    <string name="recording_too_short">录音时间太短</string>
+    <string name="recording_max_duration">已达最大录音时长</string>
+    <string name="permission_record_audio_denied">需要录音权限才能使用语音功能</string>
+    <string name="audio_playback">播放音频</string>
+    <string name="audio_pause">暂停</string>
+    <string name="audio_playing">播放中</string>
 </resources>

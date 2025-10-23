@@ -141,6 +141,17 @@ public class RagQaFragment extends Fragment {
     private Button buttonNewChat;
     private Spinner spinnerSearchDepth; // Search depth dropdown
     private Spinner spinnerRerankCount; // Rerank count dropdown
+    
+    // Voice recording components
+    private AudioRecorderHelper audioRecorderHelper;
+    private VoiceRecordingDialog recordingDialog;
+    private boolean isRecordingVoice = false;
+    private long pressStartTime = 0;
+    private float initialTouchY = 0;
+    private static final int LONG_PRESS_DURATION_MS = 600;  // 长按阈值 600ms
+    private static final int CANCEL_THRESHOLD_PX = 180;     // 上滑取消阈值 180px (参考微信)
+    private static final int REQUEST_RECORD_AUDIO_PERMISSION = 200;
+    private Handler longPressHandler;  // Handler for long press detection
     private TextView textViewResponse; // Response text view
     private CheckBox checkBoxThinkingMode; // Thinking mode checkbox
     private RecyclerView recyclerViewImageThumbnails; // Image thumbnail container
@@ -165,6 +176,8 @@ public class RagQaFragment extends Fragment {
     private Uri cameraCaptureUri; // Temporary URI for camera capture
     // Camera permission launcher
     private ActivityResultLauncher<String> cameraPermissionLauncher;
+    // Audio recording permission launcher
+    private ActivityResultLauncher<String> recordAudioPermissionLauncher;
     
     // Markdown renderer
     private Markwon markwon;
@@ -285,18 +298,6 @@ public class RagQaFragment extends Fragment {
                 LogManager.logI(TAG, "Deleted image at position: " + position);
             }
         });
-        
-        // Add enter key listener for user prompt text box
-        editTextUserPrompt.setOnEditorActionListener((v, actionId, event) -> {
-            if (actionId == android.view.inputmethod.EditorInfo.IME_ACTION_SEND) {
-                handleSendStopClick();
-                return true;
-            }
-            return false;
-        });
-        
-        // Initialize search depth spinner
-        initializeSearchDepthSpinner();
         
         // Initialize rerank count spinner
         initializeRerankCountSpinner();
@@ -467,8 +468,13 @@ public class RagQaFragment extends Fragment {
             LogManager.logD(TAG, "Saved thinking mode setting: " + (isChecked ? "enabled" : "disabled"));
         });
         
-        // Set button listeners
-        buttonSendStop.setOnClickListener(v -> handleSendStopClick());
+        // Initialize voice recording components
+        audioRecorderHelper = new AudioRecorderHelper();
+        recordingDialog = new VoiceRecordingDialog(requireContext());
+        longPressHandler = new Handler(Looper.getMainLooper());
+        
+        // Set button listeners - use OnTouchListener for long press recording
+        buttonSendStop.setOnTouchListener((v, event) -> handleSendButtonTouch(event));
         buttonNewChat.setOnClickListener(v -> handleNewChatClick());
         
         // Load knowledge base list
@@ -4429,6 +4435,20 @@ public class RagQaFragment extends Fragment {
                         LogManager.logW(TAG, "Camera permission denied by user");
                     }
                 });
+        
+        // Initialize audio recording permission launcher
+        recordAudioPermissionLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestPermission(),
+                granted -> {
+                    if (granted) {
+                        // Permission granted, retry recording
+                        startVoiceRecording();
+                    } else {
+                        // Permission denied
+                        Toast.makeText(requireContext(), R.string.permission_record_audio_denied, Toast.LENGTH_LONG).show();
+                        LogManager.logW(TAG, "Audio recording permission denied by user");
+                    }
+                });
     }
     
     /**
@@ -5023,5 +5043,347 @@ public class RagQaFragment extends Fragment {
         }
         
         LogManager.logD(TAG, "Thread pools shutdown completed");
+        
+        // Clean up recording resources
+        if (audioRecorderHelper != null && audioRecorderHelper.isRecording()) {
+            audioRecorderHelper.cancelRecording();
+        }
+        if (recordingDialog != null && recordingDialog.isShowing()) {
+            recordingDialog.dismiss();
+        }
+    }
+    
+    // ==================== Voice Recording Methods ====================
+    
+    /**
+     * Handle send button touch events (for long press voice recording)
+     */
+    private boolean handleSendButtonTouch(MotionEvent event) {
+    switch (event.getAction()) {
+        case MotionEvent.ACTION_DOWN:
+            pressStartTime = System.currentTimeMillis();
+            initialTouchY = event.getRawY();  // 使用屏幕绝对坐标，避免View布局变化影响
+            
+            // Post delayed task to check for long press
+            longPressHandler.postDelayed(() -> {
+                long pressDuration = System.currentTimeMillis() - pressStartTime;
+                if (pressDuration >= LONG_PRESS_DURATION_MS && !isRecordingVoice) {
+                    // Trigger voice recording
+                    startVoiceRecording();
+                }
+            }, LONG_PRESS_DURATION_MS);
+            return true;
+            
+        case MotionEvent.ACTION_MOVE:
+            if (isRecordingVoice) {
+                // Check for slide up to cancel
+                float deltaY = initialTouchY - event.getRawY();  // 使用屏幕绝对坐标
+                if (deltaY > CANCEL_THRESHOLD_PX) {
+                    recordingDialog.showCancelState();
+                } else {
+                    recordingDialog.showNormalState();
+                }
+            }
+            return true;
+            
+        case MotionEvent.ACTION_UP:
+        case MotionEvent.ACTION_CANCEL:
+            longPressHandler.removeCallbacksAndMessages(null);
+            
+            long pressDuration = System.currentTimeMillis() - pressStartTime;
+            
+            if (isRecordingVoice) {
+                // Recording in progress - either send or cancel
+                float deltaY = initialTouchY - event.getRawY();  // 使用屏幕绝对坐标
+                LogManager.logD(TAG, String.format("[VOICE] ACTION_UP: deltaY=%.1fpx, threshold=%dpx, isRecording=%b, rawY=%.1f, initialY=%.1f", 
+                    deltaY, CANCEL_THRESHOLD_PX, isRecordingVoice, event.getRawY(), initialTouchY));
+                
+                if (deltaY > CANCEL_THRESHOLD_PX) {
+                    LogManager.logI(TAG, "[VOICE] Canceling recording (slide up detected)");
+                    cancelVoiceRecording();
+                } else {
+                    LogManager.logI(TAG, "[VOICE] Sending voice message");
+                    sendVoiceMessage();
+                }
+            } else if (pressDuration < LONG_PRESS_DURATION_MS) {
+                // Short press - normal send
+                LogManager.logD(TAG, String.format("[VOICE] Short press detected (%dms), normal send", pressDuration));
+                handleSendStopClick();
+            } else {
+                LogManager.logW(TAG, String.format("[VOICE] Long press completed but not recording (duration=%dms)", pressDuration));
+            }
+            return true;
+    }
+    return false;
+}
+
+/**
+ * Start voice recording
+ */
+private void startVoiceRecording() {
+    // Check recording permission
+    if (ContextCompat.checkSelfPermission(requireContext(), 
+            Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+        
+        // 重置录音状态（防止权限请求dialog卡住UI）
+        isRecordingVoice = false;
+        longPressHandler.removeCallbacksAndMessages(null);
+        
+        LogManager.logI(TAG, "Requesting RECORD_AUDIO permission");
+        
+        // Request permission using new API
+        recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO);
+        return;
+    }
+    
+    // Vibrate feedback (加长震动时间到200ms，更容易感知)
+    LogManager.logD(TAG, "[VOICE] Attempting vibrate feedback, SDK=" + android.os.Build.VERSION.SDK_INT);
+    try {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            android.os.VibratorManager vibratorManager = (android.os.VibratorManager) 
+                requireContext().getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
+            if (vibratorManager != null) {
+                android.os.Vibrator vibrator = vibratorManager.getDefaultVibrator();
+                vibrator.vibrate(android.os.VibrationEffect.createOneShot(200, android.os.VibrationEffect.DEFAULT_AMPLITUDE));
+                LogManager.logD(TAG, "[VOICE] Vibrated (API 31+)");
+            } else {
+                LogManager.logW(TAG, "[VOICE] VibratorManager is null");
+            }
+        } else {
+            android.os.Vibrator vibrator = (android.os.Vibrator) 
+                requireContext().getSystemService(Context.VIBRATOR_SERVICE);
+            if (vibrator != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                vibrator.vibrate(android.os.VibrationEffect.createOneShot(200, android.os.VibrationEffect.DEFAULT_AMPLITUDE));
+                LogManager.logD(TAG, "[VOICE] Vibrated (API 26+)");
+            } else if (vibrator != null) {
+                vibrator.vibrate(200);
+                LogManager.logD(TAG, "[VOICE] Vibrated (legacy API)");
+            } else {
+                LogManager.logW(TAG, "[VOICE] Vibrator service is null");
+            }
+        }
+    } catch (Exception e) {
+        LogManager.logE(TAG, "[VOICE] Vibrate failed: " + e.getMessage(), e);
+    }
+    
+    // Show recording dialog
+    recordingDialog.show();
+    
+    // Ensure chat folder exists
+    String chatFolder = ConfigManager.getString(requireContext(), 
+        ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+    if (chatFolder.isEmpty()) {
+        chatFolder = ChatHistoryManager.createNewChatFolder(requireContext());
+        if (chatFolder != null) {
+            ConfigManager.setString(requireContext(), 
+                ConfigManager.KEY_CURRENT_CHAT_FOLDER, chatFolder);
+            currentChatFolderPath = chatFolder;
+        } else {
+            LogManager.logE(TAG, "Failed to create chat folder for audio");
+            Toast.makeText(requireContext(), "无法创建对话文件夹", Toast.LENGTH_SHORT).show();
+            recordingDialog.dismiss();
+            return;
+        }
+    } else {
+        currentChatFolderPath = chatFolder;
+    }
+    
+    // Create audio file
+    File audioFile = new File(currentChatFolderPath, 
+        "audio_" + System.currentTimeMillis() + "_user.wav");
+    
+    // Start recording
+    boolean started = audioRecorderHelper.startRecording(audioFile, new AudioRecorderHelper.RecordingCallback() {
+        @Override
+        public void onAmplitudeUpdate(int amplitude) {
+            if (recordingDialog.isShowing()) {
+                recordingDialog.updateWaveform(amplitude);
+            }
+        }
+        
+        @Override
+        public void onDurationUpdate(long durationMs) {
+            if (recordingDialog.isShowing()) {
+                recordingDialog.updateDuration(durationMs);
+            }
+        }
+        
+        @Override
+        public void onMaxDurationReached() {
+            Toast.makeText(requireContext(), R.string.recording_max_duration, Toast.LENGTH_SHORT).show();
+            sendVoiceMessage();
+        }
+        
+        @Override
+        public void onError(String error) {
+            LogManager.logE(TAG, "Recording error: " + error);
+            Toast.makeText(requireContext(), error, Toast.LENGTH_SHORT).show();
+            cancelVoiceRecording();
+        }
+    });
+    
+    if (started) {
+        isRecordingVoice = true;
+        LogManager.logI(TAG, "Voice recording started: " + audioFile.getName());
+    } else {
+        recordingDialog.dismiss();
+        Toast.makeText(requireContext(), "录音启动失败", Toast.LENGTH_SHORT).show();
     }
 }
+
+/**
+ * Send voice message
+ */
+private void sendVoiceMessage() {
+    if (!isRecordingVoice) {
+        return;
+    }
+    
+    recordingDialog.dismiss();
+    
+    // Stop recording and get file
+    File audioFile = audioRecorderHelper.stopRecording();
+    isRecordingVoice = false;
+    
+    if (audioFile == null || !audioFile.exists()) {
+        LogManager.logW(TAG, "Audio file not found after recording");
+        Toast.makeText(requireContext(), "录音文件无效", Toast.LENGTH_SHORT).show();
+        return;
+    }
+    
+    // Check minimum duration (0.5 seconds)
+    long duration = audioRecorderHelper.getCurrentDuration();
+    if (duration < 500) {
+        LogManager.logW(TAG, "Recording too short: " + duration + "ms");
+        Toast.makeText(requireContext(), R.string.recording_too_short, Toast.LENGTH_SHORT).show();
+        audioFile.delete();
+        return;
+    }
+    
+    LogManager.logI(TAG, "Voice message recorded: " + audioFile.getName() + 
+        ", duration: " + duration + "ms, size: " + audioFile.length() + " bytes");
+    
+    // Create user message with audio (不显示"[语音消息]"文本，纯语音UI)
+    String userPrompt = editTextUserPrompt.getText().toString().trim();
+    ChatDataItem userMsg = ChatDataItem.Companion.createAudioInputData(
+        getCurrentTime(), 
+        userPrompt,  // 直接使用用户输入，为空则不显示文本
+        audioFile.getAbsolutePath(), 
+        duration / 1000.0f
+    );
+    
+    // Add to chat
+    chatMessages.add(userMsg);
+    chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+    recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+    
+    // Clear input
+    editTextUserPrompt.setText("");
+    
+    // Send to model for inference (check if already sending)
+    if (isSending.get()) {
+        Toast.makeText(requireContext(), "正在生成中，请稍候", Toast.LENGTH_SHORT).show();
+        // Remove the just-added message
+        chatMessages.remove(chatMessages.size() - 1);
+        chatAdapter.notifyItemRemoved(chatMessages.size());
+        return;
+    }
+    
+    // Trigger audio inference
+    sendAudioToModel(audioFile.getAbsolutePath(), userPrompt);
+}
+
+/**
+ * Send audio to model for inference
+ * Note: User message with audioUri has already been created and added to chat
+ */
+private void sendAudioToModel(String audioPath, String textPrompt) {
+    String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
+    String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
+    String apiKey = editTextApiKey.getText().toString();
+    String model = spinnerApiModel.getSelectedItem().toString();
+    String knowledgeBase = spinnerKnowledgeBase.getSelectedItem().toString();
+    String systemPrompt = editTextSystemPrompt.getText().toString();
+    
+    // Only local models support audio for now
+    if (!AppConstants.ApiUrl.LOCAL.equals(apiUrl)) {
+        Toast.makeText(requireContext(), "音频推理目前仅支持本地模型", Toast.LENGTH_LONG).show();
+        // Remove the user message
+        chatMessages.remove(chatMessages.size() - 1);
+        chatAdapter.notifyItemRemoved(chatMessages.size());
+        return;
+    }
+    
+    LogManager.logI(TAG, "[AUDIO] Sending audio to model: " + audioPath + ", selected model: " + model);
+    
+    // No need to check model state - let executeRagQuery handle model loading automatically
+    // (same as text-only send flow)
+    sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
+}
+
+/**
+ * Internal method to send audio after model is confirmed ready
+ */
+private void sendAudioToModelInternal(String audioPath, String textPrompt, String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt) {
+    LogManager.logI(TAG, "[AUDIO] Starting audio inference with model: " + model);
+    
+    // Set sending state
+    isSending.set(true);
+    buttonSendStop.setText(getString(R.string.button_stop_with_icon));
+    
+    // Create AI response placeholder
+    ChatDataItem aiMsg = new ChatDataItem(ChatViewHolders.ASSISTANT);
+    aiMsg.setLoading(true);
+    chatMessages.add(aiMsg);
+    chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+    recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+    
+    // Construct prompt with <audio> tag (for model inference)
+    // Format: <audio>path</audio>text (add newline if text exists)
+    String audioPrompt = String.format("<audio>%s</audio>%s", audioPath, 
+        textPrompt.isEmpty() ? "" : ("\n" + textPrompt));
+    
+    LogManager.logI(TAG, "[AUDIO] Constructed prompt: " + audioPrompt);
+    
+    // Submit RAG task (similar to handleSendStopClick flow)
+    LogManager.logI(TAG, "[AUDIO] Submitting audio RAG task to executor");
+    
+    ragTaskFuture = ragQueryExecutor.submit(() -> {
+        LogManager.logI(TAG, "[AUDIO] Audio RAG task started - thread=" + Thread.currentThread().getName());
+        
+        // Reset local LLM stop flag
+        if (AppConstants.ApiUrl.LOCAL.equals(apiUrl)) {
+            try {
+                com.example.offlineai.api.LocalLlmAdapter localAdapter = com.example.offlineai.api.LocalLlmAdapter.getInstance(requireContext());
+                localAdapter.resetStopFlag();
+                LogManager.logD(TAG, "[AUDIO] Reset local LLM stop flag");
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[AUDIO] Error resetting local LLM stop flag", e);
+            }
+        }
+        
+        // Execute RAG query with audio prompt
+        executeRagQuery(apiUrl, apiKey, model, knowledgeBase, systemPrompt, audioPrompt);
+    });
+}
+
+/**
+ * Cancel voice recording
+ */
+private void cancelVoiceRecording() {
+    if (!isRecordingVoice) {
+        return;
+    }
+    
+    recordingDialog.dismiss();
+    audioRecorderHelper.cancelRecording();
+    isRecordingVoice = false;
+    
+    Toast.makeText(requireContext(), R.string.recording_canceled, Toast.LENGTH_SHORT).show();
+    LogManager.logI(TAG, "Voice recording canceled");
+}
+
+// Note: onRequestPermissionsResult has been removed in favor of ActivityResultContracts
+// See recordAudioPermissionLauncher and cameraPermissionLauncher initialization
+
+}  // End of RagQaFragment class

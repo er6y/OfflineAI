@@ -394,7 +394,7 @@
     <string name="label_content">Content:</string>
     <string name="label_add_progress">Add Progress:</string>
     <string name="content_description_delete_api_url">Delete API URL</string>
-    <string name="button_send">Send ▶</string>
+    <string name="button_send">Send ▶ (Press For Voice)</string>
     <string name="dialog_model_not_found">Original model not found, please select alternative model</string>
     <string name="dialog_select_embedding_model">Please select the embedding model to use:</string>
     <string name="dialog_select_reranker_model">Please select the reranker model to use:</string>
@@ -476,6 +476,7 @@
     <string name="log_trying_backup_url">Trying backup URL</string>
     <string name="log_download_failed">Download failed</string>
     <string name="log_download_completed">Download completed</string>
+    <string name="log_file_already_complete">File already exists and complete</string>
     <string name="log_download_failed_http_code">Download failed, HTTP response code</string>
     <string name="log_start_download_file_size">Start download, file size</string>
     <string name="log_download_was_interrupted">Download was interrupted</string>

@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:padding="10dp"
+    android:paddingBottom="16dp"
+    android:gravity="end">
+
+    <!-- 音频块 - 参考MnnLlmChat布局 -->
+    <RelativeLayout
+        android:layout_width="140dp"
+        android:layout_height="40dp"
+        android:background="@android:color/holo_blue_light"
+        android:elevation="2dp">
+
+        <!-- 播放/暂停按钮 -->
+        <ImageView
+            android:id="@+id/btnPlayPause"
+            android:layout_width="25dp"
+            android:layout_height="25dp"
+            android:layout_marginStart="10dp"
+            android:layout_centerVertical="true"
+            android:src="@android:drawable/ic_media_play"
+            android:clickable="true"
+            android:contentDescription="@string/audio_playback" />
+
+        <!-- 音频时长 -->
+        <TextView
+            android:id="@+id/textViewAudioDuration"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_centerVertical="true"
+            android:layout_alignParentEnd="true"
+            android:layout_marginEnd="10dp"
+            android:text="3s"
+            android:textColor="@android:color/white"
+            android:textSize="16sp" />
+
+        <!-- 进度条 -->
+        <SeekBar
+            android:id="@+id/seekBarAudioProgress"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_centerVertical="true"
+            android:progressTint="@android:color/white"
+            android:thumbTint="@android:color/white"
+            android:background="@null"
+            android:layout_toEndOf="@id/btnPlayPause"
+            android:layout_toStartOf="@id/textViewAudioDuration"
+            android:max="100"
+            android:progress="0" />
+
+    </RelativeLayout>
+
+</LinearLayout>

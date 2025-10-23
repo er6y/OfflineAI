@@ -473,11 +473,18 @@ public class ModelDownloadFragment extends Fragment {
             }
             String filename = entry.getKey();
             String url = entry.getValue();
+            File targetFile = new File(targetDir, filename);
+            
+            // 先检查文件是否已完整下载，如果是则跳过
+            if (isFileCompletelyDownloaded(url, targetFile)) {
+                mainHandler.post(() -> appendProgress(getString(R.string.log_downloading_file) + ": " + filename + " - " + getString(R.string.log_file_already_complete) + "\n"));
+                continue;
+            }
             
             mainHandler.post(() -> appendProgress(getString(R.string.log_downloading_file) + ": " + filename + "\n"));
             
             // 仅使用来自 JSON 的主地址进行下载（移除备份地址逻辑）
-            boolean success = downloadFileWithRetry(url, new File(targetDir, filename));
+            boolean success = downloadFileWithRetry(url, targetFile);
             
             if (!success) {
                 mainHandler.post(() -> appendProgress(getString(R.string.log_download_failed) + ": " + filename + "\n"));
@@ -740,27 +747,157 @@ public class ModelDownloadFragment extends Fragment {
                 }
                 
                 URL url = new URL(urlString);
-                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-                connection.setConnectTimeout(CONNECT_TIMEOUT);
-                connection.setReadTimeout(READ_TIMEOUT);
+                String finalUrl = urlString;
+                long serverFileSize = -1;
+                int headResponseCode = 0;
+                HttpURLConnection connection = null;
                 
-                // 首先获取文件总大小来检查是否已完整下载
-                connection.setRequestMethod("HEAD");
-                int headResponseCode = connection.getResponseCode();
-                long serverFileSize = connection.getContentLengthLong();
-                connection.disconnect();
+                // 第一步：手动处理重定向，获取真实下载URL
+                // 参考 MnnLlmChat 的做法：先发请求看是否有重定向
+                HttpURLConnection redirectCheckConn = (HttpURLConnection) url.openConnection();
+                redirectCheckConn.setConnectTimeout(CONNECT_TIMEOUT);
+                redirectCheckConn.setReadTimeout(READ_TIMEOUT);
+                redirectCheckConn.setInstanceFollowRedirects(false); // 不自动跟随，手动处理
+                redirectCheckConn.setRequestMethod("HEAD");
                 
-                // 检查文件是否已经完整下载
-                if (existingFileSize > 0 && serverFileSize > 0 && existingFileSize >= serverFileSize) {
-                    LogManager.logI(TAG, "File already completely downloaded, size: " + existingFileSize + " bytes");
-                    mainHandler.post(() -> appendProgress("File already exists and complete.\n"));
-                    return true;
+                int redirectCode = redirectCheckConn.getResponseCode();
+                LogManager.logI(TAG, "Initial HEAD response code: " + redirectCode);
+                
+                // 处理重定向 (301, 302, 303, 307, 308)
+                if (redirectCode >= 301 && redirectCode <= 308) {
+                    String redirectLocation = redirectCheckConn.getHeaderField("Location");
+                    if (redirectLocation != null && !redirectLocation.isEmpty()) {
+                        finalUrl = redirectLocation;
+                        LogManager.logI(TAG, "Redirect detected, final URL: " + finalUrl);
+                    }
+                    redirectCheckConn.disconnect();
+                    
+                    // 第二步：使用最终URL进行HEAD请求获取文件大小
+                    connection = (HttpURLConnection) new URL(finalUrl).openConnection();
+                    connection.setConnectTimeout(CONNECT_TIMEOUT);
+                    connection.setReadTimeout(READ_TIMEOUT);
+                    connection.setInstanceFollowRedirects(true);
+                    connection.setRequestMethod("HEAD");
+                    
+                    headResponseCode = connection.getResponseCode();
+                    serverFileSize = connection.getContentLengthLong();
+                    
+                    if (serverFileSize <= 0) {
+                        String contentLengthHeader = connection.getHeaderField("Content-Length");
+                        if (contentLengthHeader != null && !contentLengthHeader.isEmpty()) {
+                            try {
+                                serverFileSize = Long.parseLong(contentLengthHeader);
+                            } catch (NumberFormatException e) {
+                                LogManager.logW(TAG, "Failed to parse Content-Length header: " + contentLengthHeader);
+                            }
+                        }
+                    }
+                    connection.disconnect();
+                } else {
+                    // 没有重定向，直接从第一次请求获取文件大小
+                    headResponseCode = redirectCode;
+                    serverFileSize = redirectCheckConn.getContentLengthLong();
+                    
+                    if (serverFileSize <= 0) {
+                        // 如果 getContentLengthLong() 失败，尝试手动从响应头获取
+                        String contentLengthHeader = redirectCheckConn.getHeaderField("Content-Length");
+                        if (contentLengthHeader != null && !contentLengthHeader.isEmpty()) {
+                            try {
+                                serverFileSize = Long.parseLong(contentLengthHeader);
+                            } catch (NumberFormatException e) {
+                                LogManager.logW(TAG, "Failed to parse Content-Length header: " + contentLengthHeader);
+                            }
+                        }
+                    }
+                    redirectCheckConn.disconnect();
                 }
                 
-                // 重新建立连接进行下载
-                connection = (HttpURLConnection) url.openConnection();
+                // 打印所有响应头用于调试
+                LogManager.logI(TAG, "HEAD response: " + headResponseCode + ", server file size: " + serverFileSize + ", local file size: " + existingFileSize);
+                
+                // 检查HEAD请求是否成功且返回了有效的文件大小
+                if (headResponseCode == HttpURLConnection.HTTP_OK && serverFileSize > 0) {
+                    // 比较本地文件大小和服务器文件大小
+                    if (existingFileSize == serverFileSize) {
+                        // 本地文件大小等于服务器文件大小，文件完整
+                        LogManager.logI(TAG, "File already completely downloaded (size: " + existingFileSize + " bytes)");
+                        mainHandler.post(() -> appendProgress("File already exists and complete.\n"));
+                        return true;
+                    } else if (existingFileSize > serverFileSize) {
+                        // 本地文件大于服务器文件，文件已损坏，删除重新下载
+                        LogManager.logW(TAG, "Local file is corrupted (local: " + existingFileSize + " > server: " + serverFileSize + "), deleting...");
+                        targetFile.delete();
+                        existingFileSize = 0;
+                        mainHandler.post(() -> appendProgress("Corrupted file detected, redownloading...\n"));
+                    } else if (existingFileSize > 0) {
+                        // 本地文件小于服务器文件，断点续传
+                        final long resumeSize = existingFileSize;
+                        final long totalSize = serverFileSize;
+                        LogManager.logI(TAG, "File partially downloaded, will resume (local: " + resumeSize + "/" + totalSize + ")");
+                        mainHandler.post(() -> appendProgress("Resuming from " + resumeSize + " bytes...\n"));
+                    }
+                } else if (existingFileSize > 0) {
+                    // HEAD 请求失败，尝试用 GET 请求获取文件大小（fallback）
+                    LogManager.logW(TAG, "HEAD request failed, trying GET request to obtain file size");
+                    try {
+                        HttpURLConnection getConnection = (HttpURLConnection) new URL(finalUrl).openConnection();
+                        getConnection.setConnectTimeout(CONNECT_TIMEOUT);
+                        getConnection.setReadTimeout(READ_TIMEOUT);
+                        getConnection.setInstanceFollowRedirects(true);
+                        getConnection.setRequestMethod("GET");
+                        
+                        int getResponseCode = getConnection.getResponseCode();
+                        long getServerFileSize = getConnection.getContentLengthLong();
+                        
+                        if (getServerFileSize <= 0) {
+                            String contentLengthHeader = getConnection.getHeaderField("Content-Length");
+                            if (contentLengthHeader != null && !contentLengthHeader.isEmpty()) {
+                                try {
+                                    getServerFileSize = Long.parseLong(contentLengthHeader);
+                                } catch (NumberFormatException e) {
+                                    LogManager.logW(TAG, "Failed to parse Content-Length from GET: " + contentLengthHeader);
+                                }
+                            }
+                        }
+                        
+                        getConnection.disconnect();
+                        
+                        LogManager.logI(TAG, "GET response: " + getResponseCode + ", server file size: " + getServerFileSize);
+                        
+                        if (getResponseCode == HttpURLConnection.HTTP_OK && getServerFileSize > 0) {
+                            serverFileSize = getServerFileSize;
+                            
+                            if (existingFileSize == serverFileSize) {
+                                LogManager.logI(TAG, "File already completely downloaded (size: " + existingFileSize + " bytes)");
+                                mainHandler.post(() -> appendProgress("File already exists and complete.\n"));
+                                return true;
+                            } else if (existingFileSize > serverFileSize) {
+                                LogManager.logW(TAG, "Local file is corrupted (local: " + existingFileSize + " > server: " + serverFileSize + "), deleting...");
+                                targetFile.delete();
+                                existingFileSize = 0;
+                                mainHandler.post(() -> appendProgress("Corrupted file detected, redownloading...\n"));
+                            } else {
+                                final long resumeSize = existingFileSize;
+                                final long totalSize = serverFileSize;
+                                LogManager.logI(TAG, "File partially downloaded, will resume (local: " + resumeSize + "/" + totalSize + ")");
+                                mainHandler.post(() -> appendProgress("Resuming from " + resumeSize + " bytes...\n"));
+                            }
+                        } else {
+                            LogManager.logW(TAG, "GET request also failed to get file size, will attempt download anyway");
+                        }
+                    } catch (Exception e) {
+                        LogManager.logW(TAG, "GET fallback failed", e);
+                    }
+                } else {
+                    // HEAD请求失败且没有本地文件，记录警告但继续尝试下载
+                    LogManager.logW(TAG, "HEAD request failed or returned invalid size, will attempt download anyway");
+                }
+                
+                // 重新建立连接进行下载，使用重定向后的最终URL
+                connection = (HttpURLConnection) new URL(finalUrl).openConnection();
                 connection.setConnectTimeout(CONNECT_TIMEOUT);
                 connection.setReadTimeout(READ_TIMEOUT);
+                connection.setInstanceFollowRedirects(true); // 确保下载时也跟随重定向
                 
                 // 设置断点续传请求头
                 if (existingFileSize > 0) {
@@ -781,6 +918,13 @@ public class ModelDownloadFragment extends Fragment {
                         targetFile.delete();
                         existingFileSize = 0;
                     }
+                } else if (responseCode == 416) {
+                    // HTTP 416: Requested Range Not Satisfiable
+                    // 说明请求的范围超出文件大小，文件已完整下载
+                    LogManager.logI(TAG, "HTTP 416: File already completely downloaded (Range Not Satisfiable)");
+                    connection.disconnect();
+                    mainHandler.post(() -> appendProgress("File already complete (HTTP 416).\n"));
+                    return true;
                 } else {
                     LogManager.logE(TAG, "Download failed, HTTP response code: " + responseCode + ", attempt: " + attempt);
                     connection.disconnect();
@@ -889,6 +1033,35 @@ public class ModelDownloadFragment extends Fragment {
         return false;
     }
     
+    private boolean isFileCompletelyDownloaded(String urlString, File targetFile) {
+        if (!targetFile.exists() || targetFile.length() == 0) {
+            return false;
+        }
+        
+        try {
+            URL url = new URL(urlString);
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("HEAD");
+            connection.setConnectTimeout(10000);
+            connection.setReadTimeout(10000);
+            
+            int responseCode = connection.getResponseCode();
+            if (responseCode == HttpURLConnection.HTTP_OK) {
+                long serverFileSize = connection.getContentLengthLong();
+                long localFileSize = targetFile.length();
+                connection.disconnect();
+                
+                // 如果本地文件大小大于等于服务器文件大小，认为已完整下载
+                return serverFileSize > 0 && localFileSize >= serverFileSize;
+            }
+            connection.disconnect();
+        } catch (Exception e) {
+            LogManager.logW(TAG, "Failed to check file completeness: " + targetFile.getName(), e);
+        }
+        
+        return false;
+    }
+    
     private void appendProgress(String text) {
         // Append text to progress buffer
         progressText.append(text);
@@ -935,7 +1108,7 @@ public class ModelDownloadFragment extends Fragment {
     
     private void finishDownload() {
         isDownloading = false;
-        buttonDownload.setText("Download Selected Models");
+        buttonDownload.setText(R.string.button_download_selected_models);
         releaseWakeLocks();
     }
     
@@ -951,7 +1124,7 @@ public class ModelDownloadFragment extends Fragment {
             
             mainHandler.post(() -> {
                 appendProgress("\nDownload interrupted\n");
-                buttonDownload.setText("Download Selected Models");
+                buttonDownload.setText(R.string.button_download_selected_models);
                 releaseWakeLocks();
             });
         }

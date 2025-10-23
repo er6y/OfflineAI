@@ -299,6 +299,21 @@ public class MnnInference {
             return this;
         }
         
+        public ConfigBuilder isAudio(boolean enable) {
+            addField("is_audio", enable);
+            return this;
+        }
+        
+        public ConfigBuilder audioModel(String modelPath) {
+            addField("audio_model", modelPath);
+            return this;
+        }
+        
+        public ConfigBuilder audioPad(int padToken) {
+            addField("audio_pad", padToken);
+            return this;
+        }
+        
         private void addField(String key, String value) {
             if (!first) json.append(",");
             json.append("\"").append(key).append("\":\"").append(value).append("\"");

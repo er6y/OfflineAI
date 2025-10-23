@@ -32,6 +32,7 @@ public class ChatHistoryManager {
     private static final String TAG = "ChatHistoryManager";
     private static final String CONVERSATION_FILE_NAME = "conversation.md";
     private static final String IMAGE_PREFIX = "img_";
+    private static final String AUDIO_PREFIX = "audio_";
     private static final String SEPARATOR = "\n\n---\n\n";
     
     /**
@@ -171,7 +172,7 @@ public class ChatHistoryManager {
         
         // 处理用户消息
         if (item.getType() == ChatViewHolders.USER) {
-            // 用户消息：先输出图片，再输出文本
+            // 用户消息：先输出图片，然后音频，再输出文本
             // 注意：图片已经由ImageThumbnailAdapter预处理并保存到对话文件夹了，无需复制
             if (item.imageUri != null) {
                 String imagePath = item.imageUri.getPath();
@@ -180,6 +181,38 @@ public class ChatHistoryManager {
                     // 只记录图片文件名（相对路径）
                     markdown.append("![](").append(imageFile.getName()).append(")\n\n");
                     LogManager.logD(TAG, "Image reference added: " + imageFile.getName());
+                }
+            }
+            
+            // 处理音频文件（如果有）
+            if (item.audioUri != null) {
+                String audioPath = item.audioUri.getPath();
+                if (!TextUtils.isEmpty(audioPath)) {
+                    File audioFile = new File(audioPath);
+                    if (audioFile.exists()) {
+                        // 记录音频文件引用（Markdown格式）
+                        markdown.append("🎙️ [音频: ").append(audioFile.getName());
+                        if (item.getAudioDuration() > 0) {
+                            markdown.append(String.format(" (%.1fs)", item.getAudioDuration()));
+                        }
+                        markdown.append("](").append(audioFile.getName()).append(")\n\n");
+                        LogManager.logD(TAG, "Audio reference added: " + audioFile.getName());
+                    }
+                }
+            }
+            
+            // 处理多个音频文件（如果有）
+            if (item.audioUris != null && !item.audioUris.isEmpty()) {
+                for (android.net.Uri audioUri : item.audioUris) {
+                    String audioPath = audioUri.getPath();
+                    if (!TextUtils.isEmpty(audioPath)) {
+                        File audioFile = new File(audioPath);
+                        if (audioFile.exists()) {
+                            markdown.append("🎙️ [音频: ").append(audioFile.getName())
+                                .append("](").append(audioFile.getName()).append(")\n\n");
+                            LogManager.logD(TAG, "Additional audio reference added: " + audioFile.getName());
+                        }
+                    }
                 }
             }
             
@@ -330,8 +363,71 @@ public class ChatHistoryManager {
             // 解析消息体内容（去掉标题行）
             String bodyContent = lines.length > 1 ? lines[1].trim() : "";
             
-            // 处理用户消息：可能包含图片
+            // 处理用户消息：可能包含图片和音频
             if (type == ChatViewHolders.USER) {
+                // 提取音频（如果有）格式：[音频: filename (duration)](filename)
+                if (bodyContent.contains("[音频:") || bodyContent.contains("🎙️")) {
+                    int audioStart = bodyContent.indexOf("🎙️");
+                    if (audioStart < 0) audioStart = bodyContent.indexOf("[音频:");
+                    
+                    if (audioStart >= 0) {
+                        // CRITICAL: Find the ] first, then find the link (filename) after it
+                        // Format: [音频: audio.wav (3.4s)](audio.wav)
+                        //                              ^   ^         ^
+                        //                           label ]  link (  link )
+                        int labelEnd = bodyContent.indexOf("]", audioStart);
+                        if (labelEnd > audioStart) {
+                            int linkStart = bodyContent.indexOf("(", labelEnd);
+                            int audioLinkEnd = bodyContent.indexOf(")", linkStart);
+                            
+                            if (linkStart > labelEnd && audioLinkEnd > linkStart) {
+                                String audioFileName = bodyContent.substring(linkStart + 1, audioLinkEnd);
+                                File audioFile = new File(folderPath, audioFileName);
+                                
+                                LogManager.logD(TAG, "[HISTORY_LOAD] Parsing audio: fileName=" + audioFileName + ", folderPath=" + folderPath + ", exists=" + audioFile.exists());
+                                
+                                if (audioFile.exists()) {
+                                    // CRITICAL: Only set audioUri (like createAudioInputData does)
+                                    // UI will auto-initialize audioPlayComponent when user clicks play button
+                                    item.audioUri = Uri.fromFile(audioFile);
+                                    
+                                    LogManager.logI(TAG, "[HISTORY_LOAD] ✅ Audio loaded: " + audioFile.getAbsolutePath());
+                                    LogManager.logI(TAG, "[HISTORY_LOAD]    audioUri.scheme=" + item.audioUri.getScheme() + ", path=" + item.audioUri.getPath());
+                                    
+                                    // 提取时长信息（如果有）从label部分：[音频: filename (3.4s)]
+                                    String audioLabel = bodyContent.substring(audioStart, labelEnd);
+                                    int durationStart = audioLabel.indexOf("(");
+                                    int durationEnd = audioLabel.indexOf("s)", durationStart);
+                                    if (durationStart >= 0 && durationEnd > durationStart) {
+                                        try {
+                                            String durationStr = audioLabel.substring(durationStart + 1, durationEnd).trim();
+                                            item.setAudioDuration(Float.parseFloat(durationStr));
+                                            LogManager.logD(TAG, "[HISTORY_LOAD]    duration=" + durationStr + "s");
+                                        } catch (NumberFormatException e) {
+                                            LogManager.logW(TAG, "[HISTORY_LOAD]    Failed to parse duration: " + e.getMessage());
+                                        }
+                                    }
+                                } else {
+                                    LogManager.logE(TAG, "[HISTORY_LOAD] ❌ Audio file NOT found: " + audioFile.getAbsolutePath());
+                                }
+                                
+                                // 移除音频markdown语法，获取纯文本
+                                String beforeAudio = bodyContent.substring(0, audioStart).trim();
+                                String afterAudio = bodyContent.substring(audioLinkEnd + 1).trim();
+                                bodyContent = (beforeAudio + "\n" + afterAudio).trim();
+                            }
+                        }
+                    }
+                }
+                
+                // 检测并警告错误的<audio>标签格式（这是bug产物，不应该被保存）
+                if (bodyContent.contains("<audio>")) {
+                    LogManager.logE(TAG, "[HISTORY] Detected invalid <audio> tag in history file! " +
+                        "This is a bug from older version. File: " + folderPath);
+                    LogManager.logE(TAG, "[HISTORY] Content: " + bodyContent);
+                    // 不处理，让用户看到错误以便修复
+                }
+                
                 // 提取图片（如果有）
                 if (bodyContent.contains("![](")) {
                     int imgStart = bodyContent.indexOf("![](");

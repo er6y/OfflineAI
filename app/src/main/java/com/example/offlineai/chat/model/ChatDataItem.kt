@@ -23,6 +23,10 @@ class ChatDataItem {
 
     @JvmField
     var audioUri: Uri? = null
+    
+    // Support multiple audio files
+    @JvmField
+    var audioUris: MutableList<Uri>? = null
 
     @JvmField
     var benchmarkInfo: String? = null
@@ -67,6 +71,20 @@ class ChatDataItem {
                 return audioUri!!.path
             }
             return null
+        }
+    
+    val audioPaths: List<String>?
+        get() {
+            val paths = mutableListOf<String>()
+            // Add primary audio
+            audioPath?.let { paths.add(it) }
+            // Add additional audios
+            audioUris?.forEach { uri ->
+                if ("file" == uri.scheme && uri.path != null) {
+                    paths.add(uri.path!!)
+                }
+            }
+            return if (paths.isNotEmpty()) paths else null
         }
 
     var showThinking: Boolean = true
