@@ -55,6 +55,9 @@ public class LocalLlmAdapter {
     private volatile boolean isProcessingCall = false;
     private volatile long lastCallStartTime = 0; // 记录最后一次调用开始时间
     
+    // TTS音频路径（最后一次推理产生的）
+    private volatile String lastTtsAudioPath = null;
+    
     /**
      * 调用本地模型进行推理（添加防重复调用机制）
      * 简化的状态处理逻辑：
@@ -63,14 +66,16 @@ public class LocalLlmAdapter {
      * - BUSY: 强制重置并重新处理
      * - UNLOADED: 直接加载
      */
-    public void callLocalModel(String modelName, String prompt, java.util.List<String> imagePaths, LlmApiAdapter.ApiCallback callback) {
+    public void callLocalModel(String modelName, String prompt, java.util.List<String> imagePaths, java.util.List<String> audioPaths, LlmApiAdapter.ApiCallback callback) {
         LogManager.logI(TAG, "DEBUG: Call local model request: " + modelName + ", images: " + 
-                        (imagePaths != null ? imagePaths.size() : 0) + ", thread: " + Thread.currentThread().getName());
+                        (imagePaths != null ? imagePaths.size() : 0) + ", audios: " + 
+                        (audioPaths != null ? audioPaths.size() : 0) + ", thread: " + Thread.currentThread().getName());
         
-        // Store imagePaths for later use in inference
+        // Store imagePaths and audioPaths for later use in inference
         final java.util.List<String> finalImagePaths = imagePaths;
+        final java.util.List<String> finalAudioPaths = audioPaths;
         
-        // Process multimodal prompt if images are provided
+        // Process multimodal prompt if images or audio are provided
         if (imagePaths != null && !imagePaths.isEmpty()) {
             LogManager.logI(TAG, "[MULTIMODAL] Processing prompt with " + imagePaths.size() + " images");
             
@@ -80,6 +85,11 @@ public class LocalLlmAdapter {
             // 2. Prepend markers before the prompt
             // 3. This ensures compatibility with different models (Qwen2-VL, LLaVA, etc.)
             LogManager.logI(TAG, "[MULTIMODAL] Image markers will be added automatically by JNI layer");
+        }
+        
+        if (audioPaths != null && !audioPaths.isEmpty()) {
+            LogManager.logI(TAG, "[MULTIMODAL] Processing prompt with " + audioPaths.size() + " audio files");
+            LogManager.logI(TAG, "[MULTIMODAL] Audio tags <audio>path</audio> will be added to prompt");
         }
         
         long currentTime = System.currentTimeMillis();
@@ -114,10 +124,10 @@ public class LocalLlmAdapter {
                     // 模型已就绪，检查是否为目标模型
                     if (modelName.equals(currentModelName)) {
                         LogManager.logI(TAG, "DEBUG: Model ready and matches, execute inference directly: " + modelName);
-                        executeInference(prompt, finalImagePaths, callback);
+                        executeInference(prompt, finalImagePaths, finalAudioPaths, callback);
                     } else {
                         LogManager.logI(TAG, "DEBUG: Model mismatch, need to load target model: " + modelName + " (current: " + currentModelName + ")");
-                        loadModelAndInference(modelName, prompt, finalImagePaths, callback);
+                        loadModelAndInference(modelName, prompt, finalImagePaths, finalAudioPaths, callback);
                     }
                     break;
                     
@@ -131,7 +141,7 @@ public class LocalLlmAdapter {
                         forceResetCallFlag("Different model loading conflict");
                         // 强制重置状态并重新尝试
                         localLlmHandler.forceSetModelState(LocalLlmHandler.ModelState.UNLOADED);
-                        loadModelAndInference(modelName, prompt, null, callback);
+                        loadModelAndInference(modelName, prompt, null, null, callback);
                     }
                     break;
                     
@@ -148,7 +158,7 @@ public class LocalLlmAdapter {
                 default:
                     // 模型未加载，直接加载
                     LogManager.logI(TAG, "DEBUG: Model unloaded, start loading: " + modelName);
-                    loadModelAndInference(modelName, prompt, finalImagePaths, callback);
+                    loadModelAndInference(modelName, prompt, finalImagePaths, finalAudioPaths, callback);
                     break;
             }
         } catch (Exception e) {
@@ -212,16 +222,16 @@ public class LocalLlmAdapter {
                         
                         if (modelName.equals(currentModel)) {
                             LogManager.logI(TAG, "Model stopped and matches, executing new inference: " + modelName);
-                            executeInference(prompt, imagePaths, callback);
+                            executeInference(prompt, imagePaths, null, callback);
                             return;
                         } else {
                             LogManager.logW(TAG, "Model stopped but mismatch, need to load target model: " + modelName + " (current: " + currentModel + ")");
-                            loadModelAndInference(modelName, prompt, imagePaths, callback);
+                            loadModelAndInference(modelName, prompt, imagePaths, null, callback);
                             return;
                         }
                     } else if (currentState == LocalLlmHandler.ModelState.UNLOADED) {
                         LogManager.logI(TAG, "Model unloaded after stop, loading target model: " + modelName);
-                        loadModelAndInference(modelName, prompt, imagePaths, callback);
+                        loadModelAndInference(modelName, prompt, imagePaths, null, callback);
                         return;
                     }
                     
@@ -237,9 +247,9 @@ public class LocalLlmAdapter {
                 // 检查模型匹配并执行推理
                 String currentModel = localLlmHandler.getCurrentModelName();
                 if (modelName.equals(currentModel)) {
-                    executeInference(prompt, imagePaths, callback);
+                    executeInference(prompt, imagePaths, null, callback);
                 } else {
-                    loadModelAndInference(modelName, prompt, imagePaths, callback);
+                    loadModelAndInference(modelName, prompt, imagePaths, null, callback);
                 }
                 
             } catch (InterruptedException e) {
@@ -282,7 +292,7 @@ public class LocalLlmAdapter {
                         
                         if (modelName.equals(currentModel)) {
                             LogManager.logI(TAG, "Model ready and matches, executing inference: " + modelName);
-                            executeInference(prompt, imagePaths, callback);
+                            executeInference(prompt, imagePaths, null, callback);
                             return;
                         } else {
                             LogManager.logE(TAG, "Model ready but mismatch, expected: " + modelName + ", current: " + currentModel + ". This should not happen during wait!");
@@ -323,10 +333,16 @@ public class LocalLlmAdapter {
      * 加载模型并执行推理
      * @param modelName 模型名称
      * @param prompt 提示词
+     * @param imagePaths 图片路径列表
+     * @param audioPaths 音频路径列表
      * @param callback 回调接口
      */
-    private void loadModelAndInference(String modelName, String prompt, java.util.List<String> imagePaths, LlmApiAdapter.ApiCallback callback) {
+    private void loadModelAndInference(String modelName, String prompt, java.util.List<String> imagePaths, java.util.List<String> audioPaths, LlmApiAdapter.ApiCallback callback) {
         LogManager.logI(TAG, "DEBUG: Starting loadModelAndInference for: " + modelName);
+        
+        // Store paths for lambda use
+        final java.util.List<String> finalImagePaths = imagePaths;
+        final java.util.List<String> finalAudioPaths = audioPaths;
         
         try {
             localLlmHandler.loadModel(modelName, new LocalLlmHandler.StreamingCallback() {
@@ -340,7 +356,7 @@ public class LocalLlmAdapter {
                 @Override
                 public void onComplete(String fullResponse) {
                     LogManager.logI(TAG, "DEBUG: Model loaded successfully, proceeding to inference: " + modelName);
-                    executeInference(prompt, imagePaths, callback);
+                    executeInference(prompt, finalImagePaths, finalAudioPaths, callback);
                 }
                 
                 @Override
@@ -360,34 +376,132 @@ public class LocalLlmAdapter {
     /**
      * 执行推理
      * @param prompt 提示词
-     * @param imagePaths 图片路径列表（可为null）
+     * @param imagePaths 图片路径列表（可为null）- 仅用于当前推理，不影响历史
+     * @param audioPaths 音频路径列表（可为null）- 仅用于当前推理，不影响历史
      * @param callback 回调接口
      */
-    private void executeInference(String prompt, java.util.List<String> imagePaths, LlmApiAdapter.ApiCallback callback) {
+    private void executeInference(String prompt, java.util.List<String> imagePaths, java.util.List<String> audioPaths, LlmApiAdapter.ApiCallback callback) {
         LogManager.logD(TAG, "Execute local LLM inference, prompt length: " + prompt.length() + 
-                        ", images: " + (imagePaths != null ? imagePaths.size() : 0));
+                        ", images: " + (imagePaths != null ? imagePaths.size() : 0) + 
+                        ", audios: " + (audioPaths != null ? audioPaths.size() : 0));
         
-        localLlmHandler.inference(prompt, imagePaths, new LocalLlmHandler.StreamingCallback() {
-            @Override
-            public void onToken(String token) {
-                LogManager.print(token);
-                callback.onStreamingData(token);
+        // Check if we should use conversation history
+        LocalLlmHandler.InferenceEngine engine = localLlmHandler.getInferenceEngine();
+        boolean useHistory = false;
+        
+        if (engine instanceof LocalLLMMNNHandler) {
+            // Get history rounds setting
+            int historyRounds = ConfigManager.getInt(context, ConfigManager.KEY_HISTORY_ROUNDS, 3);
+            // Use history if historyRounds > 0, regardless of current images/audio
+            // (User images will be filtered in history, AI images will be skipped)
+            useHistory = historyRounds > 0;
+            LogManager.logI(TAG, "[HISTORY] useHistory=" + useHistory + " (historyRounds=" + historyRounds + 
+                          ", currentImages=" + (imagePaths != null ? imagePaths.size() : 0) + 
+                          ", currentAudios=" + (audioPaths != null ? audioPaths.size() : 0) + ")");
+        }
+        
+        if (useHistory) {
+            // Use history-aware inference for MNN text-only requests
+            LocalLLMMNNHandler mnnHandler = (LocalLLMMNNHandler) engine;
+            
+            // Build inference params
+            LocalLlmHandler.InferenceParams params = new LocalLlmHandler.InferenceParams();
+            
+            // Get system prompt from config
+            String systemPrompt = ConfigManager.getString(context, ConfigManager.KEY_SYSTEM_PROMPT, "");
+            params.systemPrompt = systemPrompt;
+            
+            // Set TTS output path if supported
+            if (mnnHandler.hasTtsSupport()) {
+                String chatFolder = ConfigManager.getString(context, ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                if (!chatFolder.isEmpty()) {
+                    long timestamp = System.currentTimeMillis();
+                    params.ttsOutputPath = new java.io.File(chatFolder, "audio_" + timestamp + "_ai.wav").getAbsolutePath();
+                    LogManager.logI(TAG, "[TTS] Output path set: " + params.ttsOutputPath);
+                }
             }
             
-            @Override
-            public void onComplete(String fullResponse) {
-                LogManager.logD(TAG, "Local LLM inference completed, response length: " + fullResponse.length());
-                resetCallFlag(); // 推理完成后重置调用标志
-                callback.onSuccess(fullResponse);
-            }
-            
-            @Override
-            public void onError(String errorMessage) {
-                LogManager.logE(TAG, "Local LLM inference failed: " + errorMessage);
-                resetCallFlag(); // 推理失败后重置调用标志
-                callback.onError(errorMessage);
-            }
-        });
+            // Call history-aware inference with multimodal support
+            // CRITICAL: Pass imagePaths and audioPaths for current round
+            LogManager.logI(TAG, "[HISTORY] Calling inferenceWithConversationHistory() with images=" + 
+                          (imagePaths != null ? imagePaths.size() : 0) + ", audios=" + 
+                          (audioPaths != null ? audioPaths.size() : 0));
+            mnnHandler.inferenceWithConversationHistory(prompt, imagePaths, audioPaths, params, new LocalLlmHandler.StreamingCallback() {
+                @Override
+                public void onToken(String token) {
+                    LogManager.print(token);
+                    callback.onStreamingData(token);
+                }
+                
+                @Override
+                public void onComplete(String fullResponse) {
+                    LogManager.logD(TAG, "Local LLM inference (with history) completed, response length: " + fullResponse.length());
+                    
+                    // Check if TTS audio was generated
+                    try {
+                        if (mnnHandler.hasTtsSupport()) {
+                            lastTtsAudioPath = mnnHandler.getTtsAudioOutputPath();
+                            if (lastTtsAudioPath != null) {
+                                LogManager.logI(TAG, "[TTS] Audio generated: " + lastTtsAudioPath);
+                            }
+                        }
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[TTS] Error checking TTS audio", e);
+                    }
+                    
+                    resetCallFlag();
+                    callback.onSuccess(fullResponse);
+                }
+                
+                @Override
+                public void onError(String errorMessage) {
+                    LogManager.logE(TAG, "Local LLM inference (with history) failed: " + errorMessage);
+                    resetCallFlag();
+                    callback.onError(errorMessage);
+                }
+            });
+        } else {
+            // Use standard inference (no history or has images)
+            LogManager.logI(TAG, "[HISTORY] Using standard inference (no history)");
+            localLlmHandler.inference(prompt, imagePaths, new LocalLlmHandler.StreamingCallback() {
+                @Override
+                public void onToken(String token) {
+                    LogManager.print(token);
+                    callback.onStreamingData(token);
+                }
+                
+                @Override
+                public void onComplete(String fullResponse) {
+                    LogManager.logD(TAG, "Local LLM inference completed, response length: " + fullResponse.length());
+                    
+                    // Check if TTS audio was generated
+                    try {
+                        LocalLlmHandler.InferenceEngine eng = localLlmHandler.getInferenceEngine();
+                        if (eng instanceof LocalLLMMNNHandler) {
+                            LocalLLMMNNHandler mnnHandler = (LocalLLMMNNHandler) eng;
+                            if (mnnHandler.hasTtsSupport()) {
+                                lastTtsAudioPath = mnnHandler.getTtsAudioOutputPath();
+                                if (lastTtsAudioPath != null) {
+                                    LogManager.logI(TAG, "[TTS] Audio generated: " + lastTtsAudioPath);
+                                }
+                            }
+                        }
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[TTS] Error checking TTS audio", e);
+                    }
+                    
+                    resetCallFlag();
+                    callback.onSuccess(fullResponse);
+                }
+                
+                @Override
+                public void onError(String errorMessage) {
+                    LogManager.logE(TAG, "Local LLM inference failed: " + errorMessage);
+                    resetCallFlag();
+                    callback.onError(errorMessage);
+                }
+            });
+        }
     }
     
     /**
@@ -560,6 +674,21 @@ public class LocalLlmAdapter {
      */
     public String getModelArchitecture() {
         return localLlmHandler.getModelArchitecture();
+    }
+    
+    /**
+     * Get last TTS audio output path (if available)
+     * @return Audio file path or null
+     */
+    public String getLastTtsAudioPath() {
+        return lastTtsAudioPath;
+    }
+    
+    /**
+     * Clear last TTS audio path
+     */
+    public void clearLastTtsAudioPath() {
+        lastTtsAudioPath = null;
     }
     
     /**

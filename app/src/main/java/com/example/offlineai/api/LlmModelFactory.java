@@ -180,7 +180,7 @@ public class LlmModelFactory {
         if (apiUrl.equalsIgnoreCase(AppConstants.ApiUrl.LOCAL)) {
             updateLocalModelList();
         }
-        apiAdapter.callLlmApi(apiUrl, apiKey, model, prompt, null, callback);
+        apiAdapter.callLlmApi(apiUrl, apiKey, model, prompt, null, null, callback);
     }
     
     /**

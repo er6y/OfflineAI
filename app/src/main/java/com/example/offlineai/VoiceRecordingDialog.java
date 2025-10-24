@@ -114,19 +114,19 @@ public class VoiceRecordingDialog {
      */
     public void updateWaveform(int amplitude) {
         // 根据振幅计算显示等级 (1-7级)
-        // 振幅范围：静音~500, 轻声500~2000, 正常2000~8000, 大声8000+
+        // 振幅范围（提高灵敏度约3倍）：静音~200, 轻声200~800, 正常800~3000, 大声3000~8000+
         int level;
-        if (amplitude < 500) {
+        if (amplitude < 200) {
             level = 1;  // 几乎静音
-        } else if (amplitude < 2000) {
+        } else if (amplitude < 800) {
             level = 2;  // 很轻
-        } else if (amplitude < 4000) {
+        } else if (amplitude < 1500) {
             level = 3;  // 轻声
-        } else if (amplitude < 8000) {
+        } else if (amplitude < 3000) {
             level = 4;  // 正常
-        } else if (amplitude < 12000) {
+        } else if (amplitude < 5000) {
             level = 5;  // 较大
-        } else if (amplitude < 18000) {
+        } else if (amplitude < 8000) {
             level = 6;  // 大声
         } else {
             level = 7;  // 非常大声

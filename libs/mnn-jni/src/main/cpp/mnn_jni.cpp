@@ -24,6 +24,72 @@
 
 #define LOG_TAG "MNN_JNI"
 
+// ========== WAV File Writer Utility ==========
+/**
+ * Write PCM audio data as WAV file
+ * @param pcm_data Float32 audio samples in range [-1.0, 1.0]
+ * @param sample_count Number of samples
+ * @param output_path Output file path
+ * @param sample_rate Sample rate (default: 24000 for Qwen2.5-Omni)
+ * @return true if successful, false otherwise
+ */
+bool writeWavFile(const float* pcm_data, size_t sample_count, const char* output_path, int sample_rate = 24000) {
+    std::ofstream file(output_path, std::ios::binary);
+    if (!file.is_open()) {
+        // Use direct log (this function runs before LogManager init)
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "[TTS] Failed to open file: %s", output_path);
+        return false;
+    }
+    
+    // WAV file parameters (24kHz mono 16-bit)
+    const int num_channels = 1;
+    const int bits_per_sample = 16;
+    const int byte_rate = sample_rate * num_channels * bits_per_sample / 8;
+    const int block_align = num_channels * bits_per_sample / 8;
+    const int data_size = sample_count * block_align;
+    
+    // Write WAV header (44 bytes)
+    file.write("RIFF", 4);  // ChunkID
+    int chunk_size = 36 + data_size;
+    file.write(reinterpret_cast<char*>(&chunk_size), 4);  // ChunkSize
+    file.write("WAVE", 4);  // Format
+    file.write("fmt ", 4);  // Subchunk1ID
+    int subchunk1_size = 16;
+    file.write(reinterpret_cast<char*>(&subchunk1_size), 4);  // Subchunk1Size (PCM)
+    short audio_format = 1;  // PCM
+    file.write(reinterpret_cast<char*>(&audio_format), 2);  // AudioFormat
+    short num_channels_short = num_channels;
+    file.write(reinterpret_cast<char*>(&num_channels_short), 2);  // NumChannels
+    file.write(reinterpret_cast<char*>(&sample_rate), 4);  // SampleRate
+    file.write(reinterpret_cast<const char*>(&byte_rate), 4);  // ByteRate
+    short block_align_short = block_align;
+    file.write(reinterpret_cast<char*>(&block_align_short), 2);  // BlockAlign
+    short bits_per_sample_short = bits_per_sample;
+    file.write(reinterpret_cast<char*>(&bits_per_sample_short), 2);  // BitsPerSample
+    file.write("data", 4);  // Subchunk2ID
+    file.write(reinterpret_cast<const char*>(&data_size), 4);  // Subchunk2Size
+    
+    // Convert float32 to 16-bit PCM and write
+    for (size_t i = 0; i < sample_count; i++) {
+        // Clamp to [-1.0, 1.0] and convert to 16-bit
+        float sample = std::max(-1.0f, std::min(1.0f, pcm_data[i]));
+        short pcm = static_cast<short>(sample * 32767.0f);
+        file.write(reinterpret_cast<char*>(&pcm), 2);
+    }
+    
+    file.close();
+    
+    // Verify file was created
+    struct stat st;
+    if (stat(output_path, &st) == 0 && st.st_size > 0) {
+        __android_log_print(ANDROID_LOG_INFO, LOG_TAG, "[TTS] ✅ WAV file written: %s (%ld bytes)", output_path, st.st_size);
+        return true;
+    } else {
+        __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, "[TTS] ❌ File verification failed: %s", output_path);
+        return false;
+    }
+}
+
 // ========== LogManager Integration (from llama_inference.cpp) ==========
 // Global JNI references for LogManager
 JavaVM* g_jvm = nullptr;
@@ -70,30 +136,27 @@ void call_log_manager(int level, const char* tag, const char* message) {
     }
 }
 
-// Enhanced log macros that write to BOTH logcat AND LogManager
+// Log macros: use call_log_manager for unified logging (logcat + file)
+// Note: call_log_manager calls Java LogManager which handles both logcat and file output
 #define LOGI(...) do { \
-    __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__); \
     char buffer[2048]; \
     snprintf(buffer, sizeof(buffer), __VA_ARGS__); \
     call_log_manager(ANDROID_LOG_INFO, LOG_TAG, buffer); \
 } while(0)
 
 #define LOGD(...) do { \
-    __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__); \
     char buffer[2048]; \
     snprintf(buffer, sizeof(buffer), __VA_ARGS__); \
     call_log_manager(ANDROID_LOG_DEBUG, LOG_TAG, buffer); \
 } while(0)
 
 #define LOGW(...) do { \
-    __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__); \
     char buffer[2048]; \
     snprintf(buffer, sizeof(buffer), __VA_ARGS__); \
     call_log_manager(ANDROID_LOG_WARN, LOG_TAG, buffer); \
 } while(0)
 
 #define LOGE(...) do { \
-    __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__); \
     char buffer[2048]; \
     snprintf(buffer, sizeof(buffer), __VA_ARGS__); \
     call_log_manager(ANDROID_LOG_ERROR, LOG_TAG, buffer); \
@@ -117,10 +180,7 @@ extern "C" void mnn_custom_log(int level, const char* tag, const char* format, .
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
     
-    // Also print to logcat for immediate debugging
-    __android_log_print(level, tag, "%s", buffer);
-    
-    // Redirect to LogManager if initialized
+    // Redirect to LogManager if initialized; otherwise fall back to logcat directly
     if (g_jvm && g_logManagerClass) {
         JNIEnv* env = nullptr;
         bool detach = false;
@@ -129,26 +189,32 @@ extern "C" void mnn_custom_log(int level, const char* tag, const char* format, .
         if (status == JNI_EDETACHED) {
             if (g_jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
                 detach = true;
+            } else {
+                return;
             }
         }
         
         if (env) {
+            jstring jMessage = env->NewStringUTF(buffer);
             jstring jTag = env->NewStringUTF(tag);
-            jstring jMsg = env->NewStringUTF(buffer);
-            
-            if (level == ANDROID_LOG_ERROR && g_logEMethod) {
-                env->CallStaticVoidMethod(g_logManagerClass, g_logEMethod, jTag, jMsg);
-            } else if (g_logIMethod) {
-                env->CallStaticVoidMethod(g_logManagerClass, g_logIMethod, jTag, jMsg);
+
+            if (jMessage && jTag) {
+                if (level == ANDROID_LOG_ERROR && g_logEMethod) {
+                    env->CallStaticVoidMethod(g_logManagerClass, g_logEMethod, jTag, jMessage);
+                } else if (g_logIMethod) {
+                    env->CallStaticVoidMethod(g_logManagerClass, g_logIMethod, jTag, jMessage);
+                }
             }
-            
-            env->DeleteLocalRef(jTag);
-            env->DeleteLocalRef(jMsg);
-            
+
+            if (jMessage) env->DeleteLocalRef(jMessage);
+            if (jTag) env->DeleteLocalRef(jTag);
+
             if (detach) {
                 g_jvm->DetachCurrentThread();
             }
         }
+    } else {
+        __android_log_print(level, tag, "%s", buffer);
     }
 }
 
@@ -236,7 +302,8 @@ public:
 class MnnLlmSession {
 public:
     MnnLlmSession(const std::string& model_dir, const std::string& config_json)
-        : model_dir_(model_dir), config_json_(config_json) {
+        : model_dir_(model_dir), config_json_(config_json), has_tts_(false), 
+          enable_audio_output_(false), stop_requested_(false) {
         LOGI("Creating MNN LLM session: %s", model_dir.c_str());
     }
     
@@ -322,6 +389,44 @@ public:
             if (success) {
                 LOGI("=== MNN LLM SESSION LOADED SUCCESSFULLY ===");
                 LOGI("Backend (from ExecutorScope): forwardType=%d", (int)forwardType);
+                
+                // Check if model has TTS support (talker.mnn)
+                std::string talker_path = model_dir_ + "/talker.mnn";
+                FILE* talker_file = fopen(talker_path.c_str(), "r");
+                if (talker_file) {
+                    fclose(talker_file);
+                    has_tts_ = true;
+                    LOGI("✅ TTS (Talker) model detected");
+                    
+                    // CRITICAL: Set TTS callback AFTER load, like official MnnLlmChat
+                    // Official flow: load() -> SetWavformCallback() -> enableAudioOutput(true) -> Response()
+                    llm_->setWavformCallback([this](const float* data, size_t size, bool isEnd) -> bool {
+                        LOGI("[TTS] Received audio chunk: size=%zu, isEnd=%d", size, isEnd);
+                        // Check enable flag AND stop flag like ChatMNN (Line 205-207)
+                        if (!enable_audio_output_ || stop_requested_) {
+                            LOGW("[TTS] Callback rejected: enable=%d, stop=%d", enable_audio_output_, stop_requested_);
+                            return false;
+                        }
+                        // DEBUG: Log first chunk header once
+                        if (!tts_chunk_header_logged_) {
+                            float s0 = size > 0 ? data[0] : 0.0f;
+                            float s1 = size > 1 ? data[1] : 0.0f;
+                            float s2 = size > 2 ? data[2] : 0.0f;
+                            LOGI("[TTS][DEBUG] First audio chunk header: size=%zu, samples=[%.5f, %.5f, %.5f]...", size, s0, s1, s2);
+                            tts_chunk_header_logged_ = true;
+                        }
+                        // Accumulate audio chunks
+                        tts_audio_buffer_.insert(tts_audio_buffer_.end(), data, data + size);
+                        LOGI("[TTS] Callback received: %zu samples, isEnd=%d, total=%zu", size, isEnd, tts_audio_buffer_.size());
+                        return true; // Continue receiving (ChatMNN returns result of user callback)
+                    });
+                    LOGI("✅ TTS callback set after load (official pattern)");
+                    LOGI("[TTS] Audio callback registered");
+                } else {
+                    has_tts_ = false;
+                    LOGI("❌ TTS (Talker) model not found");
+                }
+                
                 LOGI("===========================================");
                 
                 // Dump final config
@@ -355,40 +460,134 @@ public:
             return false;
         }
         
+        // CRITICAL FIX: Do NOT reset() when multimodal!
+        // 
+        // Reason:
+        // - Java layer builds prompt = history_text + <img>current_image</img>
+        // - If we reset(), KV cache is empty but prompt is very long (includes history)
+        // - MNN tries to insert vision embeddings into long sequence with empty KV cache
+        // - Dimension mismatch: seq_len=506 (history+current) vs kv_cache_len=0
+        // - SIGBUS crash!
+        // 
+        // Correct behavior:
+        // - Let KV cache accumulate naturally (history text tokens)
+        // - MNN correctly inserts vision embeddings at current position
+        // - No dimension mismatch
+        // 
+        // Note: History images are already filtered out by ChatHistoryFilter (Java layer)
+        
+        bool has_audio = (prompt.find("<audio>") != std::string::npos);
+        bool has_image = (prompt.find("<img>") != std::string::npos);
+        
+        if (has_image || has_audio) {
+            LOGI("[MULTIMODAL] Current round has media (image=%d, audio=%d), KV cache preserved", has_image, has_audio);
+        } else {
+            LOGI("[TEXT] Text-only inference, KV cache preserved");
+        }
+        
+        // DEBUG: Mark inference start for TTS diagnosis
+        if (has_tts_) {
+            LOGI("[TTS][DEBUG] ========== Inference START ==========");
+            // Note: Cannot check TalkerEmbeds.size() without modifying MNN base class
+            // Will check via audio output duplication instead
+        }
+        
         try {
-            // Check if prompt contains audio tag
+            // Check if prompt contains media tags (for logging)
             bool has_audio = (prompt.find("<audio>") != std::string::npos);
             bool has_image = (prompt.find("<img>") != std::string::npos);
-            
             const char* mode_tag = has_audio ? "[AUDIO]" : (has_image ? "[IMAGE]" : "[TEXT]");
             
-            // Create ChatMessages format (same as official MNN app)
+            // DEBUG: Print full prompt received from Java
+            LOGI("[DEBUG] ========== C++ RECEIVED PROMPT START ==========");
+            LOGI("[DEBUG] Prompt length: %zu", prompt.length());
+            LOGI("[DEBUG] Has <img>: %d, Has <audio>: %d", has_image, has_audio);
+            LOGI("[DEBUG] Prompt content: %s", prompt.c_str());
+            LOGI("[DEBUG] ========== C++ RECEIVED PROMPT END ==========");
+            
+            // Parse ChatML format string into ChatMessages (like ChatMNN)
+            // Java sends: <|im_start|>role\ncontent<|im_end|>\n<|im_start|>role\ncontent<|im_end|>\n...
+            // NOTE: Last message may be incomplete (e.g., "<|im_start|>assistant\n" without <|im_end|>)
             ChatMessages history;
-            history.emplace_back("user", prompt);
+            size_t pos = 0;
+            while (pos < prompt.length()) {
+                // Find <|im_start|>
+                size_t start_pos = prompt.find("<|im_start|>", pos);
+                if (start_pos == std::string::npos) break;
+                
+                // Find role (between <|im_start|> and \n)
+                size_t role_start = start_pos + 12; // length of "<|im_start|>"
+                size_t role_end = prompt.find("\\n", role_start);
+                if (role_end == std::string::npos) break;
+                
+                std::string role = prompt.substr(role_start, role_end - role_start);
+                
+                // Find content (between \n and <|im_end|>)
+                size_t content_start = role_end + 2; // length of "\\n"
+                size_t content_end = prompt.find("<|im_end|>", content_start);
+                
+                // CRITICAL: Skip incomplete messages (no <|im_end|>)
+                // This happens for the last "<|im_start|>assistant\n" which is just a prompt prefix
+                if (content_end == std::string::npos) {
+                    LOGI("[DEBUG] Skipping incomplete message: role='%s' (no <|im_end|>)", role.c_str());
+                    break;
+                }
+                
+                std::string content = prompt.substr(content_start, content_end - content_start);
+                
+                // Add to history (like ChatMNN Line 72-87)
+                history.emplace_back(role, content);
+                LOGI("[DEBUG] Parsed message: role='%s', content_len=%zu", role.c_str(), content.length());
+                
+                // Move to next message
+                pos = content_end + 11; // length of "<|im_end|>\n"
+            }
+            
+            LOGI("[DEBUG] Parsed %zu messages from prompt (incomplete messages skipped)", history.size());
             
             // Create output stream with custom streambuf
             StreamBuffer stream_buffer(token_callback);
             std::ostream output_stream(&stream_buffer);
             
-            // CRITICAL FIX: Follow official MNN implementation
-            // Generate token-by-token with stop check between each token
-            // Do NOT use max_new_tokens=-1 (unlimited), it makes stop impossible!
-            
-            // Parse max_new_tokens from config (官方实现)
-            int max_new_tokens = 2048; // default
+            // Parse sampling and generation params from runtime config
+            int max_new_tokens = 2048;
+            float temperature = 1.0f;
+            float top_p = 1.0f;
+            int top_k = 40;
+            float presence_penalty = 0.0f;
+            float frequency_penalty = 0.0f;
             try {
-                json config = json::parse(config_json_);
-                if (config.contains("max_new_tokens")) {
-                    max_new_tokens = config["max_new_tokens"].get<int>();
+                if (!config_json_.empty()) {
+                    json config = json::parse(config_json_);
+                    if (config.contains("max_new_tokens")) max_new_tokens = config["max_new_tokens"].get<int>();
+                    if (config.contains("temperature")) temperature = config["temperature"].get<float>();
+                    if (config.contains("top_p")) top_p = config["top_p"].get<float>();
+                    if (config.contains("top_k")) top_k = config["top_k"].get<int>();
+                    if (config.contains("presence_penalty")) presence_penalty = config["presence_penalty"].get<float>();
+                    if (config.contains("frequency_penalty")) frequency_penalty = config["frequency_penalty"].get<float>();
                 }
             } catch (...) {
-                // Use default if parsing fails
+                // Keep defaults if parsing fails
             }
             
-            bool stop_requested = false;
+            // Reset stop flags at start of inference
+            stop_requested_ = false;
             bool generate_end = false;
             
+            // CRITICAL: Enable audio output BEFORE text generation (ChatMNN Line 212)
+            // MNN needs this flag during response() to accumulate TalkerEmbeds
+            if (has_tts_ && !tts_output_path_.empty()) {
+                tts_chunk_header_logged_ = false; // reset first-chunk log flag
+                enable_audio_output_ = true;
+                LOGI("[TTS] Audio output enabled BEFORE text generation");
+            }
+            
+            LOGI("%s Sampling params -> max_new_tokens=%d, temperature=%.3f, top_p=%.3f, top_k=%d, presence_penalty=%.3f, frequency_penalty=%.3f",
+                 mode_tag, max_new_tokens, temperature, top_p, top_k, presence_penalty, frequency_penalty);
             LOGI("%s Starting generation with max_new_tokens=%d", mode_tag, max_new_tokens);
+            
+            // Reset TTS first-chunk flag at generation start (defensive)
+            tts_chunk_header_logged_ = false;
             
             // Initial response (generates first token)
             llm_->response(history, &output_stream, "<eop>", 1);
@@ -397,17 +596,18 @@ public:
             // Generate remaining tokens one by one
             // Note: MNN's generate() will return early if EOS token is detected
             // We check stop flags set by StreamBuffer callback
-            while (!stop_requested && !generate_end && current_size < max_new_tokens) {
+            while (!stop_requested_ && !generate_end && current_size < max_new_tokens) {
                 // LOGD("[TEXT] Calling llm_->generate(1), current_size=%d", current_size);  // Too verbose
                 llm_->generate(1);
                 current_size++;
                 // LOGD("[TEXT] After generate(), current_size=%d", current_size);  // Too verbose
                 
-                // Check flags set by StreamBuffer
-                stop_requested = stream_buffer.isStopRequested();
+                // Check flags set by StreamBuffer and update member variable
+                bool stop_from_buffer = stream_buffer.isStopRequested();
                 generate_end = stream_buffer.isGenerateEnd();
                 
-                if (stop_requested) {
+                if (stop_from_buffer) {
+                    stop_requested_ = true;  // Update member variable for TTS callback
                     LOGI("%s Stop requested at token %d", mode_tag, current_size);
                 }
                 if (generate_end) {
@@ -415,12 +615,99 @@ public:
                 }
             }
             LOGI("%s Generation loop finished: current_size=%d, stop=%d, end=%d", 
-                 mode_tag, current_size, stop_requested, generate_end);
+                 mode_tag, current_size, stop_requested_, generate_end);
             
-            if (stop_requested) {
+            if (stop_requested_) {
                 LOGI("%s Inference stopped by user after %d tokens", mode_tag, current_size);
             } else {
                 LOGI("%s Inference completed, generated %d tokens", mode_tag, current_size);
+            }
+            
+            // DEBUG: Log text generation completion for TTS diagnosis
+            if (has_tts_) {
+                LOGI("[TTS][DEBUG] Text generation completed: %d tokens", current_size);
+            }
+
+            // Summarize the latest decoded text to trace TTS input
+            std::string preview = stream_buffer.getDebugPreview();
+            if (!preview.empty()) {
+                for (char& ch : preview) {
+                    if (ch == '\n' || ch == '\r') {
+                        ch = ' ';
+                    }
+                }
+                LOGI("[TTS][DEBUG] Response preview (tail): %.160s", preview.c_str());
+            } else {
+                LOGI("[TTS][DEBUG] Response preview is empty (no printable tokens captured)");
+            }
+            
+            // Generate TTS audio if supported and output path is set
+            // Follow official MnnLlmChat pattern: callback already set in load()
+            // Check member variable stop_requested_ (like ChatMNN Line 180)
+            bool tts_path_ready = !tts_output_path_.empty();
+            LOGI("[TTS][DEBUG] Audio pre-check: has_tts=%d, path_ready=%d, enable_flag=%d, stop_flag=%d", 
+                 has_tts_, tts_path_ready ? 1 : 0, enable_audio_output_ ? 1 : 0, stop_requested_ ? 1 : 0);
+            if (!stop_requested_ && has_tts_ && tts_path_ready) {
+                LOGI("[TTS] ========== Starting TTS Generation ==========");
+                LOGI("[TTS] Generated text tokens: %d", current_size);
+                
+                // DEBUG: Mark TTS generation start
+                LOGI("[TTS][DEBUG] Calling generateWavform() for %d text tokens...", current_size);
+                
+                try {
+                    // Clear buffer for new generation
+                    tts_audio_buffer_.clear();
+                    
+                    // Audio output already enabled before text generation
+                    LOGI("[TTS] Calling generateWavform()...");
+                    
+                    // Reset first-chunk log flag for audio generation stage
+                    tts_chunk_header_logged_ = false;
+                    
+                    // Generate audio (synchronous, callback already set in load())
+                    auto tts_start = std::chrono::steady_clock::now();
+                    llm_->generateWavform();
+                    auto tts_end = std::chrono::steady_clock::now();
+                    auto tts_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(tts_end - tts_start).count();
+                    
+                    // Disable audio output after generation
+                    enable_audio_output_ = false;
+                    LOGI("[TTS] generateWavform() completed in %lld ms, audio output disabled", (long long)tts_elapsed_ms);
+                    
+                    // DEBUG: Mark TTS generation end
+                    LOGI("[TTS][DEBUG] generateWavform() completed, elapsed=%lld ms", (long long)tts_elapsed_ms);
+                    
+                    // Write WAV file synchronously (Diffusion-style)
+                    if (!tts_audio_buffer_.empty()) {
+                        float duration_sec = tts_audio_buffer_.size() / 24000.0f;
+                        LOGI("[TTS] Writing WAV file: %zu samples (%.2fs) to %s", 
+                             tts_audio_buffer_.size(), duration_sec, tts_output_path_.c_str());
+                        bool success = writeWavFile(tts_audio_buffer_.data(), tts_audio_buffer_.size(), tts_output_path_.c_str());
+                        if (success) {
+                            LOGI("[TTS] ✅ Audio generation SUCCESS: %.2fs audio saved", duration_sec);
+                        } else {
+                            LOGE("[TTS] ❌ Failed to write WAV file");
+                            tts_output_path_.clear(); // Clear path on error
+                        }
+                    } else {
+                        LOGE("[TTS] ❌ No audio data generated (buffer empty!)");
+                        tts_output_path_.clear();
+                    }
+                } catch (const std::exception& e) {
+                    LOGE("[TTS] ❌ Audio generation exception: %s", e.what());
+                    enable_audio_output_ = false;
+                    tts_output_path_.clear();
+                }
+                LOGI("[TTS] =========================================");
+            } else {
+                // TTS not executed (stopped or no path), ensure flag is reset
+                if (enable_audio_output_) {
+                    enable_audio_output_ = false;
+                    LOGI("[TTS] Audio output disabled (TTS skipped)");
+                }
+                if (!stop_requested_ && has_tts_ && !tts_path_ready) {
+                    LOGW("[TTS][DEBUG] Skipping generateWavform: output path not set");
+                }
             }
             
             // Get context with statistics
@@ -433,6 +720,173 @@ public:
             
         } catch (const std::exception& e) {
             LOGE("Exception during inference: %s", e.what());
+            enable_audio_output_ = false;  // Reset flag on error
+            return false;
+        }
+    }
+    
+    // Inference with history (sliding window)
+    bool inferenceWithHistory(const ChatMessages& history,
+                             std::function<bool(const std::string&)> token_callback,
+                             std::function<void(const LlmContext*)> complete_callback) {
+        if (!llm_) {
+            LOGE("LLM not initialized");
+            return false;
+        }
+        
+        // CRITICAL: DO NOT reset() when using history with images!
+        // reset() clears visual embeddings -> SIGSEGV in Omni::embedding()
+        // Only reset in normal inference (Line 454)
+        LOGI("[HISTORY] Skipping reset() to preserve visual embeddings");
+        
+        try {
+            const char* mode_tag = "[HISTORY]";
+            
+            // Create output stream with custom streambuf
+            StreamBuffer stream_buffer(token_callback);
+            std::ostream output_stream(&stream_buffer);
+            
+            // Parse max_new_tokens from config
+            int max_new_tokens = 2048; // default
+            try {
+                json config = json::parse(config_json_);
+                if (config.contains("max_new_tokens")) {
+                    max_new_tokens = config["max_new_tokens"].get<int>();
+                }
+            } catch (...) {
+                // Use default if parsing fails
+            }
+            
+            // Reset stop flags at start of inference
+            stop_requested_ = false;
+            bool generate_end = false;
+            
+            // CRITICAL: Enable audio output BEFORE text generation (ChatMNN Line 212)
+            // MNN needs this flag during response() to accumulate TalkerEmbeds
+            if (has_tts_ && !tts_output_path_.empty()) {
+                tts_chunk_header_logged_ = false; // reset first-chunk log flag
+                enable_audio_output_ = true;
+                LOGI("[TTS] Audio output enabled BEFORE text generation");
+            }
+            
+            LOGI("%s Starting inference with history size=%zu, max_new_tokens=%d", 
+                 mode_tag, history.size(), max_new_tokens);
+            
+            // Print FULL history for debugging (user requested)
+            LOGI("%s ========== FULL HISTORY DUMP START ==========", mode_tag);
+            for (size_t i = 0; i < history.size(); i++) {
+                const auto& item = history[i];
+                LOGI("%s [%zu] role='%s'", mode_tag, i, item.first.c_str());
+                LOGI("%s [%zu] content='%s'", mode_tag, i, item.second.c_str());
+                LOGI("%s [%zu] ---", mode_tag, i);
+            }
+            LOGI("%s ========== FULL HISTORY DUMP END (total: %zu items) ==========", mode_tag, history.size());
+            
+            // Initial response (generates first token)
+            llm_->response(history, &output_stream, "<eop>", 1);
+            int current_size = 1;
+            
+            // Generate remaining tokens one by one
+            while (!stop_requested_ && !generate_end && current_size < max_new_tokens) {
+                llm_->generate(1);
+                current_size++;
+                
+                // Check flags set by StreamBuffer and update member variable
+                bool stop_from_buffer = stream_buffer.isStopRequested();
+                generate_end = stream_buffer.isGenerateEnd();
+                
+                if (stop_from_buffer) {
+                    stop_requested_ = true;  // Update member variable for TTS callback
+                    LOGI("%s Stop requested at token %d", mode_tag, current_size);
+                }
+                if (generate_end) {
+                    LOGI("%s Generation ended (EOS/<eop>) at token %d", mode_tag, current_size);
+                }
+            }
+            LOGI("%s Generation loop finished: current_size=%d, stop=%d, end=%d", 
+                 mode_tag, current_size, stop_requested_, generate_end);
+            
+            if (stop_requested_) {
+                LOGI("%s Inference stopped by user after %d tokens", mode_tag, current_size);
+            } else {
+                LOGI("%s Inference completed, generated %d tokens", mode_tag, current_size);
+            }
+            
+            // Generate TTS audio if supported and output path is set
+            // CRITICAL: Following ChatMNN pattern - directly generate audio on existing context
+            // Reference: libs/mnn/apps/Android/MnnLlmChat/app/src/main/cpp/llm_session.cpp Line 325-327
+            if (!stop_requested_ && has_tts_ && !tts_output_path_.empty()) {
+                LOGI("[TTS] ========== Starting TTS Generation ==========");
+                LOGI("[TTS] Generated text tokens: %d", current_size);
+                
+                // DEBUG: Mark TTS generation start
+                LOGI("[TTS][DEBUG] Calling generateWavform() for %d text tokens...", current_size);
+                
+                try {
+                    // Clear buffer for new generation
+                    tts_audio_buffer_.clear();
+                    
+                    // Audio output already enabled before text generation (Line 738)
+                    // Directly generate audio with accumulated TalkerEmbeds (like ChatMNN)
+                    LOGI("[TTS] Calling generateWavform()...");
+                    
+                    // Reset first-chunk log flag for audio generation stage
+                    tts_chunk_header_logged_ = false;
+                    
+                    // Generate audio (synchronous, callback already set in load())
+                    auto tts_start = std::chrono::steady_clock::now();
+                    llm_->generateWavform();
+                    auto tts_end = std::chrono::steady_clock::now();
+                    auto tts_elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(tts_end - tts_start).count();
+                    
+                    // Disable audio output after generation
+                    enable_audio_output_ = false;
+                    LOGI("[TTS] generateWavform() completed in %lld ms, audio output disabled", (long long)tts_elapsed_ms);
+                    
+                    // DEBUG: Mark TTS generation end
+                    LOGI("[TTS][DEBUG] generateWavform() completed, elapsed=%lld ms", (long long)tts_elapsed_ms);
+                    
+                    // Write WAV file synchronously (Diffusion-style)
+                    if (!tts_audio_buffer_.empty()) {
+                        float duration_sec = tts_audio_buffer_.size() / 24000.0f;
+                        LOGI("[TTS] Writing WAV file: %zu samples (%.2fs) to %s", 
+                             tts_audio_buffer_.size(), duration_sec, tts_output_path_.c_str());
+                        bool success = writeWavFile(tts_audio_buffer_.data(), tts_audio_buffer_.size(), tts_output_path_.c_str());
+                        if (success) {
+                            LOGI("[TTS] ✅ Audio generation SUCCESS: %.2fs audio saved", duration_sec);
+                        } else {
+                            LOGE("[TTS] ❌ Failed to write WAV file");
+                            tts_output_path_.clear(); // Clear path on error
+                        }
+                    } else {
+                        LOGE("[TTS] ❌ No audio data generated (buffer empty!)");
+                        tts_output_path_.clear();
+                    }
+                } catch (const std::exception& e) {
+                    LOGE("[TTS] ❌ Audio generation exception: %s", e.what());
+                    enable_audio_output_ = false;
+                    tts_output_path_.clear();
+                }
+                LOGI("[TTS] =========================================");
+            } else {
+                // TTS not executed (stopped or no path), ensure flag is reset
+                if (enable_audio_output_) {
+                    enable_audio_output_ = false;
+                    LOGI("[TTS] Audio output disabled (TTS skipped)");
+                }
+            }
+            
+            // Get context with statistics
+            const LlmContext* context = llm_->getContext();
+            if (complete_callback) {
+                complete_callback(context);
+            }
+            
+            return true;
+            
+        } catch (const std::exception& e) {
+            LOGE("Exception during history inference: %s", e.what());
+            enable_audio_output_ = false;  // Reset flag on error
             return false;
         }
     }
@@ -491,7 +945,8 @@ public:
                 // Use default if parsing fails
             }
             
-            bool stop_requested = false;
+            // Reset stop flags at start of inference (like ChatMNN Line 130-131)
+            stop_requested_ = false;
             bool generate_end = false;
             
             LOGI("[MULTIMODAL] About to call llm_->response() with max_new_tokens=%d (from config)", max_new_tokens);
@@ -537,17 +992,18 @@ public:
             // Note: MNN's generate() will return early if EOS token is detected
             // We check stop flags set by StreamBuffer callback
             LOGI("[MULTIMODAL] Starting generation loop, max_new_tokens=%d", max_new_tokens);
-            while (!stop_requested && !generate_end && current_size < max_new_tokens) {
+            while (!stop_requested_ && !generate_end && current_size < max_new_tokens) {
                 // LOGD("[MULTIMODAL] Calling llm_->generate(1), current_size=%d", current_size);  // Too verbose
                 llm_->generate(1);
                 current_size++;
                 // LOGD("[MULTIMODAL] After generate(), current_size=%d", current_size);  // Too verbose
                 
-                // Check flags set by StreamBuffer
-                stop_requested = stream_buffer.isStopRequested();
+                // Check flags set by StreamBuffer and update member variable
+                bool stop_from_buffer = stream_buffer.isStopRequested();
                 generate_end = stream_buffer.isGenerateEnd();
                 
-                if (stop_requested) {
+                if (stop_from_buffer) {
+                    stop_requested_ = true;  // Update member variable for TTS callback
                     LOGI("[MULTIMODAL] Stop requested at token %d", current_size);
                 }
                 if (generate_end) {
@@ -555,9 +1011,9 @@ public:
                 }
             }
             LOGI("[MULTIMODAL] Generation loop finished: current_size=%d, stop=%d, end=%d", 
-                 current_size, stop_requested, generate_end);
+                 current_size, stop_requested_, generate_end);
             
-            if (stop_requested) {
+            if (stop_requested_) {
                 LOGI("[MULTIMODAL] Inference stopped by user after %d tokens", current_size);
             } else {
                 LOGI("[MULTIMODAL] Inference completed, generated %d tokens", current_size);
@@ -569,6 +1025,109 @@ public:
                     LOGW("[MULTIMODAL] Consider trying a different multimodal model.");
                 }
             }
+            
+            // Get context
+            const LlmContext* context = llm_->getContext();
+            if (complete_callback) {
+                complete_callback(context);
+            }
+            
+            return true;
+            
+        } catch (const std::exception& e) {
+            LOGE("Exception during multimodal inference: %s", e.what());
+            return false;
+        }
+    }
+    
+    // Multimodal inference with images and/or audio
+    bool inferenceMultimodal(const std::string& prompt,
+                            const std::vector<std::string>& image_paths,
+                            const std::vector<std::string>& audio_paths,
+                            std::function<bool(const std::string&)> token_callback,
+                            std::function<void(const LlmContext*)> complete_callback) {
+        if (!llm_) {
+            LOGE("LLM not initialized");
+            return false;
+        }
+        
+        try {
+            // Build multimodal prompt with tags
+            std::string multimodal_prompt = "";
+            
+            // Add image tags
+            if (!image_paths.empty()) {
+                LOGI("[MULTIMODAL] Processing %zu images", image_paths.size());
+                for (const auto& image_path : image_paths) {
+                    multimodal_prompt += "<img>" + image_path + "</img>";
+                    LOGI("[MULTIMODAL] Embedded image: %s", image_path.c_str());
+                }
+            }
+            
+            // Add audio tags
+            if (!audio_paths.empty()) {
+                LOGI("[MULTIMODAL] Processing %zu audio files", audio_paths.size());
+                for (const auto& audio_path : audio_paths) {
+                    multimodal_prompt += "<audio>" + audio_path + "</audio>";
+                    LOGI("[MULTIMODAL] Embedded audio: %s", audio_path.c_str());
+                }
+            }
+            
+            // Append text prompt
+            multimodal_prompt += prompt;
+            
+            LOGI("[MULTIMODAL] Final prompt length: %zu chars (images=%zu, audios=%zu)", 
+                 multimodal_prompt.length(), image_paths.size(), audio_paths.size());
+            
+            // Use ChatMessages for history-based inference
+            ChatMessages history;
+            history.emplace_back("user", multimodal_prompt);
+            
+            // Create output stream
+            StreamBuffer stream_buffer(token_callback);
+            std::ostream output_stream(&stream_buffer);
+            
+            // Parse max_new_tokens from config
+            int max_new_tokens = 2048;
+            try {
+                json config = json::parse(config_json_);
+                if (config.contains("max_new_tokens")) {
+                    max_new_tokens = config["max_new_tokens"].get<int>();
+                }
+            } catch (...) {
+                // Use default if parsing fails
+            }
+            
+            // Reset stop flags
+            stop_requested_ = false;
+            bool generate_end = false;
+            
+            LOGI("[MULTIMODAL] Starting inference with max_new_tokens=%d", max_new_tokens);
+            
+            // Initial response
+            llm_->response(history, &output_stream, "<eop>", 1);
+            int current_size = 1;
+            
+            // Generate remaining tokens
+            while (!stop_requested_ && !generate_end && current_size < max_new_tokens) {
+                llm_->generate(1);
+                current_size++;
+                
+                // Check flags set by StreamBuffer
+                bool stop_from_buffer = stream_buffer.isStopRequested();
+                generate_end = stream_buffer.isGenerateEnd();
+                
+                if (stop_from_buffer) {
+                    stop_requested_ = true;
+                    LOGI("[MULTIMODAL] Stop requested at token %d", current_size);
+                }
+                if (generate_end) {
+                    LOGI("[MULTIMODAL] Generation ended (EOS/<eop>) at token %d", current_size);
+                }
+            }
+            
+            LOGI("[MULTIMODAL] Generation completed: generated=%d tokens, stopped=%s", 
+                 current_size, (stop_requested_ ? "by_user" : (generate_end ? "by_eos" : "by_limit")));
             
             // Get context
             const LlmContext* context = llm_->getContext();
@@ -602,6 +1161,29 @@ public:
     
     Llm* getLlm() const { return llm_; }
     
+    // TTS support methods
+    bool hasTTS() const {
+        return has_tts_;
+    }
+    
+    void setTtsOutputPath(const std::string& output_path) {
+        tts_output_path_ = output_path;
+        tts_audio_buffer_.clear();
+        LOGI("[TTS] Output path set: %s", output_path.c_str());
+    }
+    
+    std::string getTtsOutputPath() const {
+        return tts_output_path_;
+    }
+    
+    void setWavformCallback(std::function<bool(const float*, size_t, bool)> callback) {
+        waveform_callback_ = std::move(callback);
+        if (llm_ && has_tts_) {
+            llm_->setWavformCallback(waveform_callback_);
+            LOGI("[TTS] Waveform callback set (bridged to MNN)");
+        }
+    }
+    
 private:
     // Custom streambuf for streaming output
     class StreamBuffer : public std::streambuf {
@@ -619,6 +1201,10 @@ private:
         
         bool isGenerateEnd() const {
             return generate_end_;
+        }
+
+        const std::string& getDebugPreview() const {
+            return debug_preview_;
         }
 
     protected:
@@ -664,6 +1250,14 @@ private:
                     LOGD("[STREAM] Callback requested stop");
                     return 0; // signal stop
                 }
+
+                // Update debug preview with the most recent characters, keep last 256 chars
+                if (!completeChars.empty()) {
+                    debug_preview_.append(completeChars);
+                    if (debug_preview_.size() > 256) {
+                        debug_preview_.erase(0, debug_preview_.size() - 256);
+                    }
+                }
             }
 
             return n;
@@ -694,16 +1288,26 @@ private:
             }
         }
 
-        std::string utf8Buffer_;
         std::function<bool(const std::string&)> callback_;
+        std::string utf8Buffer_;
         bool stop_requested_;
         bool generate_end_;
-    };
-    
+        std::string debug_preview_;
+    }; // End of StreamBuffer class
+
+private:
+    // Member variables
     std::string model_dir_;
     std::string config_json_;
     Llm* llm_ = nullptr;
-};
+    bool has_tts_;
+    bool enable_audio_output_;  // CRITICAL: Like ChatMNN Line 150
+    bool stop_requested_;  // CRITICAL: Like ChatMNN Line 141, global stop flag
+    bool tts_chunk_header_logged_ = false; // DEBUG: first-chunk header log flag
+    std::function<bool(const float*, size_t, bool)> waveform_callback_;
+    std::string tts_output_path_;  // TTS output WAV file path
+    std::vector<float> tts_audio_buffer_;  // TTS audio accumulator
+}; // End of MnnLlmSession class
 
 // ========== JNI Helper Functions ==========
 
@@ -934,6 +1538,169 @@ Java_com_offlineai_mnn_MnnInference_inferenceWithImages(
     }
 }
 
+JNIEXPORT jobject JNICALL
+Java_com_offlineai_mnn_MnnInference_inferenceMultimodal(
+    JNIEnv* env, jclass clazz,
+    jlong sessionHandle, jstring prompt, jobjectArray imagePaths, jobjectArray audioPaths, jobject callback) {
+    
+    auto* session = reinterpret_cast<MnnLlmSession*>(sessionHandle);
+    if (!session) {
+        LOGE("Invalid session handle");
+        return nullptr;
+    }
+    
+    std::string prompt_str = jstring2string(env, prompt);
+    std::vector<std::string> image_paths = imagePaths ? jstringArray2vector(env, imagePaths) : std::vector<std::string>();
+    std::vector<std::string> audio_paths = audioPaths ? jstringArray2vector(env, audioPaths) : std::vector<std::string>();
+    
+    // Get callback methods
+    jclass callbackClass = env->GetObjectClass(callback);
+    jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+    jmethodID onCompleteMethod = env->GetMethodID(callbackClass, "onComplete", "(Ljava/util/Map;)V");
+    jmethodID onErrorMethod = env->GetMethodID(callbackClass, "onError", "(Ljava/lang/String;)V");
+    
+    jobject stats = nullptr;
+    
+    try {
+        auto token_callback = [&](const std::string& token) -> bool {
+            jstring jtoken = string2jstring(env, token);
+            jboolean should_stop = env->CallBooleanMethod(callback, onTokenMethod, jtoken);
+            env->DeleteLocalRef(jtoken);
+            return should_stop;
+        };
+        
+        auto complete_callback = [&](const LlmContext* context) {
+            stats = createStatsMap(env, context);
+            env->CallVoidMethod(callback, onCompleteMethod, stats);
+        };
+        
+        bool success = session->inferenceMultimodal(prompt_str, image_paths, audio_paths,
+                                                   token_callback, complete_callback);
+        
+        if (!success) {
+            jstring error = string2jstring(env, "Multimodal inference failed");
+            env->CallVoidMethod(callback, onErrorMethod, error);
+            env->DeleteLocalRef(error);
+        }
+        
+        return stats;
+        
+    } catch (const std::exception& e) {
+        LOGE("Exception in inferenceMultimodal: %s", e.what());
+        jstring error = string2jstring(env, e.what());
+        env->CallVoidMethod(callback, onErrorMethod, error);
+        env->DeleteLocalRef(error);
+        return nullptr;
+    }
+}
+
+JNIEXPORT jobject JNICALL
+Java_com_offlineai_mnn_MnnInference_inferenceWithHistory(
+    JNIEnv* env, jclass clazz,
+    jlong sessionHandle, jobject historyList, jobject callback) {
+    
+    auto* session = reinterpret_cast<MnnLlmSession*>(sessionHandle);
+    if (!session) {
+        LOGE("Invalid session handle");
+        return nullptr;
+    }
+    
+    // Convert Java List<Pair<String, String>> to C++ ChatMessages (ChatMNN approach)
+    ChatMessages history;
+    if (historyList) {
+        // Get List class and methods
+        jclass listClass = env->GetObjectClass(historyList);
+        jmethodID sizeMethod = env->GetMethodID(listClass, "size", "()I");
+        jmethodID getMethod = env->GetMethodID(listClass, "get", "(I)Ljava/lang/Object;");
+        
+        jint listSize = env->CallIntMethod(historyList, sizeMethod);
+        LOGI("[HISTORY] Converting %d history items from Java List", listSize);
+        
+        // Get Pair class and field IDs (android.util.Pair)
+        jclass pairClass = env->FindClass("android/util/Pair");
+        if (!pairClass) {
+            LOGE("[HISTORY] Failed to find android.util.Pair class");
+            return nullptr;
+        }
+        
+        jfieldID firstField = env->GetFieldID(pairClass, "first", "Ljava/lang/Object;");
+        jfieldID secondField = env->GetFieldID(pairClass, "second", "Ljava/lang/Object;");
+        
+        if (!firstField || !secondField) {
+            LOGE("[HISTORY] Failed to get Pair.first/second fields");
+            return nullptr;
+        }
+        
+        // Iterate through List and extract Pairs
+        for (jint i = 0; i < listSize; i++) {
+            jobject pairObj = env->CallObjectMethod(historyList, getMethod, i);
+            if (!pairObj) continue;
+            
+            // Get Pair.first (role) and Pair.second (content)
+            jobject roleObj = env->GetObjectField(pairObj, firstField);
+            jobject contentObj = env->GetObjectField(pairObj, secondField);
+            
+            std::string role;
+            std::string content;
+            
+            if (roleObj) {
+                role = jstring2string(env, (jstring)roleObj);
+                env->DeleteLocalRef(roleObj);
+            }
+            if (contentObj) {
+                content = jstring2string(env, (jstring)contentObj);
+                env->DeleteLocalRef(contentObj);
+            }
+            
+            history.emplace_back(role, content);
+            
+            LOGD("[HISTORY] [%d] %s: %s...", i, role.c_str(), 
+                 content.substr(0, std::min(50, (int)content.length())).c_str());
+            
+            env->DeleteLocalRef(pairObj);
+        }
+    }
+    
+    // Get callback methods
+    jclass callbackClass = env->GetObjectClass(callback);
+    jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+    jmethodID onCompleteMethod = env->GetMethodID(callbackClass, "onComplete", "(Ljava/util/Map;)V");
+    jmethodID onErrorMethod = env->GetMethodID(callbackClass, "onError", "(Ljava/lang/String;)V");
+    
+    jobject stats = nullptr;
+    
+    try {
+        auto token_callback = [&](const std::string& token) -> bool {
+            jstring jtoken = string2jstring(env, token);
+            jboolean should_stop = env->CallBooleanMethod(callback, onTokenMethod, jtoken);
+            env->DeleteLocalRef(jtoken);
+            return should_stop;
+        };
+        
+        auto complete_callback = [&](const LlmContext* context) {
+            stats = createStatsMap(env, context);
+            env->CallVoidMethod(callback, onCompleteMethod, stats);
+        };
+        
+        bool success = session->inferenceWithHistory(history, token_callback, complete_callback);
+        
+        if (!success) {
+            jstring error = string2jstring(env, "History inference failed");
+            env->CallVoidMethod(callback, onErrorMethod, error);
+            env->DeleteLocalRef(error);
+        }
+        
+        return stats;
+        
+    } catch (const std::exception& e) {
+        LOGE("Exception in inferenceWithHistory: %s", e.what());
+        jstring error = string2jstring(env, e.what());
+        env->CallVoidMethod(callback, onErrorMethod, error);
+        env->DeleteLocalRef(error);
+        return nullptr;
+    }
+}
+
 JNIEXPORT void JNICALL
 Java_com_offlineai_mnn_MnnInference_updateConfig(
     JNIEnv* env, jclass clazz,
@@ -986,6 +1753,134 @@ Java_com_offlineai_mnn_MnnInference_isBackendAvailable(
 #endif
     
     return JNI_FALSE;
+}
+
+// ========== TTS (Text-to-Speech) JNI Implementation ==========
+
+/**
+ * Check if model supports TTS (has talker.mnn)
+ * Java signature: public static native boolean hasTTS(long sessionHandle);
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_offlineai_mnn_MnnInference_hasTTS(
+    JNIEnv* env, jclass clazz, jlong sessionHandle) {
+    
+    auto* session = reinterpret_cast<MnnLlmSession*>(sessionHandle);
+    if (!session) {
+        return JNI_FALSE;
+    }
+    return session->hasTTS() ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * Set TTS waveform callback
+ * Java signature: public static native boolean setWavformCallback(long sessionHandle, TtsCallback callback);
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_offlineai_mnn_MnnInference_setWavformCallback(
+    JNIEnv* env, jclass clazz, jlong sessionHandle, jobject callback) {
+    
+    auto* session = reinterpret_cast<MnnLlmSession*>(sessionHandle);
+    if (!session || !callback) {
+        LOGE("[TTS] Invalid session or callback");
+        return JNI_FALSE;
+    }
+    
+    // Create global reference for callback
+    jobject globalCallback = env->NewGlobalRef(callback);
+    JavaVM* jvm;
+    env->GetJavaVM(&jvm);
+    
+    // Get callback method ID
+    jclass callbackClass = env->GetObjectClass(globalCallback);
+    jmethodID onAudioDataMethod = env->GetMethodID(callbackClass, "onAudioData", "([FZ)Z");
+    
+    if (!onAudioDataMethod) {
+        LOGE("[TTS] Failed to find onAudioData method");
+        env->DeleteGlobalRef(globalCallback);
+        return JNI_FALSE;
+    }
+    
+    // Set C++ callback that bridges to Java
+    session->setWavformCallback([jvm, globalCallback, onAudioDataMethod](
+        const float* data, size_t size, bool isEnd) -> bool {
+        
+        JNIEnv* env = nullptr;
+        bool needDetach = false;
+        
+        // Attach thread if needed
+        if (jvm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) {
+            if (jvm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
+                needDetach = true;
+            } else {
+                LOGE("[TTS] Failed to attach thread");
+                return false;
+            }
+        }
+        
+        // Create float array
+        jfloatArray audioDataArray = env->NewFloatArray(size);
+        env->SetFloatArrayRegion(audioDataArray, 0, size, data);
+        
+        // Call Java callback
+        jboolean result = env->CallBooleanMethod(globalCallback, onAudioDataMethod, 
+                                                 audioDataArray, isEnd);
+        
+        // Cleanup
+        env->DeleteLocalRef(audioDataArray);
+        
+        if (needDetach) {
+            jvm->DetachCurrentThread();
+        }
+        
+        return result == JNI_TRUE;
+    });
+    
+    LOGI("[TTS] Waveform callback set successfully");
+    return JNI_TRUE;
+}
+
+/**
+ * Set TTS output file path (NEW METHOD - replaces callback for synchronous file writing)
+ * Java signature: public static native void setTtsOutputPath(long sessionHandle, String outputPath);
+ */
+extern "C" JNIEXPORT void JNICALL
+Java_com_offlineai_mnn_MnnInference_setTtsOutputPath(
+    JNIEnv* env, jclass clazz, jlong sessionHandle, jstring jOutputPath) {
+    
+    auto* session = reinterpret_cast<MnnLlmSession*>(sessionHandle);
+    if (!session) {
+        LOGE("[TTS] Invalid session");
+        return;
+    }
+    
+    if (!jOutputPath) {
+        session->setTtsOutputPath("");
+        LOGI("[TTS] Output path cleared");
+        return;
+    }
+    
+    const char* output_path = env->GetStringUTFChars(jOutputPath, nullptr);
+    session->setTtsOutputPath(std::string(output_path));
+    env->ReleaseStringUTFChars(jOutputPath, output_path);
+}
+
+/**
+ * Get TTS output file path
+ * Java signature: public static native String getTtsOutputPath(long sessionHandle);
+ */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_offlineai_mnn_MnnInference_getTtsOutputPath(
+    JNIEnv* env, jclass clazz, jlong sessionHandle) {
+    
+    auto* session = reinterpret_cast<MnnLlmSession*>(sessionHandle);
+    if (!session) {
+        LOGE("[TTS] Invalid session");
+        return nullptr;
+    }
+    
+    std::string path = session->getTtsOutputPath();
+    return path.empty() ? nullptr : env->NewStringUTF(path.c_str());
 }
 
 // ========== Embedding JNI Implementation ==========
@@ -1894,7 +2789,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
         LOGI("[DIFFUSION] Generating image: prompt='%s', output='%s', iter=%d, seed=%d, memoryMode=%d",
              prompt, outputPath, iterNum, randomSeed, memoryMode);
         
-        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] About to prepare callback");
+        LOGI("[DIFF_DEBUG] About to prepare callback");
         
         // Get callback class and methods
         jclass callbackClass = env->GetObjectClass(callback);
@@ -1976,7 +2871,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
                         env->DeleteLocalRef(jmsg);
                     }
                     
-                    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFFUSION] No cache, releasing to save");
+                    LOGI("[DIFFUSION] No cache, releasing to save");
                     
                     // Get creation parameters before erasing
                     DiffusionParams params;
@@ -1995,7 +2890,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
                         g_diffusion_memory_modes.erase(handle);
                         g_diffusion_params.erase(handle);
                     }
-                    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFFUSION] Old session released, cache saved");
+                    LOGI("[DIFFUSION] Old session released, cache saved");
                     
                     // Wait for cache to be written
                     usleep(100000); // 100ms
@@ -2040,7 +2935,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
                         env->DeleteLocalRef(jmsg);
                     }
                     
-                    __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFFUSION] Cache exists, fast reload");
+                    LOGI("[DIFFUSION] Cache exists, fast reload");
                     diffusion->load();
                     
                     if (onTokenMethod) {
@@ -2071,7 +2966,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             env->DeleteLocalRef(jmsg);
         }
         
-        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Callback prepared, creating lambda");
+        LOGI("[DIFF_DEBUG] Callback prepared, creating lambda");
         
         // Progress tracking variables
         int total_steps = iterNum;
@@ -2079,7 +2974,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
         bool unet_started = false;
         
         std::function<void(int)> progressCallback = [env, callback, onProgressMethod, onTokenMethod, total_steps, &last_step, &unet_started](int progress) {
-            __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Progress callback invoked: %d%%", progress);
+            LOGD("[DIFF_DEBUG] Progress callback invoked: %d%%", progress);
             
             // Send detailed progress to UI via onToken
             if (onTokenMethod) {
@@ -2137,10 +3032,10 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             }
         };
         
-        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ========================================");
-        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ABOUT TO CALL diffusion->run()");
-        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] This will call: tokenizer->encode → text_encoder → unet → vae_decoder");
-        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] ========================================");
+        LOGI("[DIFF_DEBUG] ========================================");
+        LOGI("[DIFF_DEBUG] ABOUT TO CALL diffusion->run()");
+        LOGI("[DIFF_DEBUG] This will call: tokenizer->encode → text_encoder → unet → vae_decoder");
+        LOGI("[DIFF_DEBUG] ========================================");
         
         // Run diffusion
         auto start = std::chrono::high_resolution_clock::now();
@@ -2152,17 +3047,17 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             progressCallback
         );
         
-        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] diffusion->run() RETURNED");
+        LOGI("[DIFF_DEBUG] diffusion->run() RETURNED");
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
         
-        __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] Releasing strings");
+        LOGD("[DIFF_DEBUG] Releasing strings");
         env->ReleaseStringUTFChars(jPrompt, prompt);
         env->ReleaseStringUTFChars(jOutputPath, outputPath);
         
         if (success) {
             LOGI("[DIFFUSION] Image generated successfully in %lld ms", (long long)duration);
-            __android_log_print(ANDROID_LOG_INFO, "MNN_JNI", "[DIFF_DEBUG] SUCCESS - Total time: %lld ms", (long long)duration);
+            LOGI("[DIFF_DEBUG] SUCCESS - Total time: %lld ms", (long long)duration);
             
             // Send completion info to UI (final summary)
             if (onTokenMethod) {
@@ -2174,7 +3069,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             }
         } else {
             LOGE("[DIFFUSION] Image generation failed");
-            __android_log_print(ANDROID_LOG_ERROR, "MNN_JNI", "[DIFF_DEBUG] FAILED");
+            LOGE("[DIFF_DEBUG] FAILED");
             
             if (onTokenMethod) {
                 jstring jmsg = env->NewStringUTF("\nGeneration failed\n</debug>");

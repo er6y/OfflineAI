@@ -146,14 +146,65 @@
         android:textColor="#000000"
         android:textSize="@dimen/h3"
         android:visibility="visible" />
-        
+
+    <!-- TTS Audio Player (matches user audio style) -->
+    <RelativeLayout
+        android:id="@+id/audio_player_container"
+        android:layout_width="140dp"
+        android:layout_height="40dp"
+        android:layout_toEndOf="@id/ic_header"
+        android:layout_below="@id/tv_chat_text"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_audio_assistant"
+        android:elevation="2dp"
+        android:visibility="gone"
+        tools:visibility="visible">
+
+        <!-- Play/Pause button (matches user audio style) -->
+        <ImageView
+            android:id="@+id/btnPlayPauseTts"
+            android:layout_width="25dp"
+            android:layout_height="25dp"
+            android:layout_marginStart="10dp"
+            android:layout_centerVertical="true"
+            android:src="@drawable/ic_audio_play"
+            android:clickable="true"
+            android:contentDescription="Play TTS audio" />
+
+        <!-- Audio duration -->
+        <TextView
+            android:id="@+id/textViewTtsDuration"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_centerVertical="true"
+            android:layout_alignParentEnd="true"
+            android:layout_marginEnd="10dp"
+            android:text="1s"
+            android:textColor="#FFFFFF"
+            android:textSize="16sp" />
+
+        <!-- Progress bar -->
+        <SeekBar
+            android:id="@+id/seekBarTtsProgress"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_centerVertical="true"
+            android:progressTint="#FFFFFF"
+            android:thumbTint="#FFFFFF"
+            android:background="@null"
+            android:layout_toEndOf="@id/btnPlayPauseTts"
+            android:layout_toStartOf="@id/textViewTtsDuration"
+            android:max="100"
+            android:progress="0" />
+    </RelativeLayout>
+
     <ImageView
         android:id="@+id/image_generated"
         android:layout_width="200dp"
         android:layout_height="200dp"
         android:layout_marginTop="10dp"
         android:layout_toEndOf="@id/ic_header"
-        android:layout_below="@id/tv_chat_text"
+        android:layout_below="@id/audio_player_container"
         android:scaleType="centerCrop"
         android:visibility="gone"
         tools:visibility="visible"
@@ -261,7 +312,7 @@
              android:background="@drawable/ic_button_ripple"
              android:clickable="true"
              android:focusable="true"
-             app:srcCompat="@drawable/ic_play"
+             app:srcCompat="@drawable/ic_audio_play"
              app:tint="#9b9b9b"/>
 
     </LinearLayout>

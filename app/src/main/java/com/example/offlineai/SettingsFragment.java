@@ -57,7 +57,6 @@ public class SettingsFragment extends Fragment {
     private TextView textViewMinChunkSizeValue;
     private EditText editTextDataRootPath;
     private Button buttonSelectDataRootPath;
-    private Button buttonSaveSettings;
     private SwitchCompat switchDebugMode;
     private Spinner spinnerUseGpu;
     // ONNX引擎开关已移除
@@ -72,6 +71,8 @@ public class SettingsFragment extends Fragment {
     private TextView textViewThreadsValue;
     private SeekBar seekBarKvCacheSize;
     private TextView textViewKvCacheSizeValue;
+    private SeekBar seekBarHistoryRounds;
+    private TextView textViewHistoryRoundsValue;
     
     // 手动推理参数UI组件
     private SeekBar seekBarManualTemperature;
@@ -93,6 +94,14 @@ public class SettingsFragment extends Fragment {
     private TextView textViewDiffusionStepsValue;
     private EditText editTextDiffusionSeed;
     private SwitchCompat switchDiffusionSeedRandom;
+    
+    // ASR语音识别设置
+    private Spinner spinnerAsrModel;
+    
+    // TTS语音合成设置
+    private Spinner spinnerTtsModel;
+    private SeekBar seekBarTtsDitSteps;
+    private TextView textViewTtsDitStepsValue;
     
     // Activity Result Launchers
     private ActivityResultLauncher<Intent> dataRootPathLauncher;
@@ -148,7 +157,6 @@ public class SettingsFragment extends Fragment {
         textViewMinChunkSizeValue = view.findViewById(R.id.textViewMinChunkSizeValue);
         editTextDataRootPath = view.findViewById(R.id.editTextDataRootPath);
         buttonSelectDataRootPath = view.findViewById(R.id.buttonSelectDataRootPath);
-        buttonSaveSettings = view.findViewById(R.id.buttonSaveSettings);
         switchDebugMode = view.findViewById(R.id.switchDebugMode);
         spinnerUseGpu = view.findViewById(R.id.spinnerBackendPreference);
         // ONNX引擎开关初始化已移除
@@ -161,6 +169,8 @@ public class SettingsFragment extends Fragment {
         textViewThreadsValue = view.findViewById(R.id.textViewThreadsValue);
         seekBarKvCacheSize = view.findViewById(R.id.seekBarKvCacheSize);
         textViewKvCacheSizeValue = view.findViewById(R.id.textViewKvCacheSizeValue);
+        seekBarHistoryRounds = view.findViewById(R.id.seekBarHistoryRounds);
+        textViewHistoryRoundsValue = view.findViewById(R.id.textViewHistoryRoundsValue);
         // switchNoThinking已移动到RAG问答界面
         seekBarFontSize = view.findViewById(R.id.seekBarFontSize); // 字体大小拖动条
         textViewFontSizeValue = view.findViewById(R.id.textViewFontSizeValue); // 字体大小值显示
@@ -186,6 +196,12 @@ public class SettingsFragment extends Fragment {
         editTextDiffusionSeed = view.findViewById(R.id.editTextDiffusionSeed);
         switchDiffusionSeedRandom = view.findViewById(R.id.switchDiffusionSeedRandom);
         
+        // ASR/TTS设置控件
+        spinnerAsrModel = view.findViewById(R.id.spinnerAsrModel);
+        spinnerTtsModel = view.findViewById(R.id.spinnerTtsModel);
+        seekBarTtsDitSteps = view.findViewById(R.id.seekBarTtsDitSteps);
+        textViewTtsDitStepsValue = view.findViewById(R.id.textViewTtsDitStepsValue);
+        
         // 设置后端偏好Spinner适配器
         ArrayAdapter<String> backendAdapter = new ArrayAdapter<>(requireContext(), 
             android.R.layout.simple_spinner_item, BACKEND_OPTIONS);
@@ -197,6 +213,9 @@ public class SettingsFragment extends Fragment {
             R.array.diffusion_memory_modes, android.R.layout.simple_spinner_item);
         memoryModeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinnerDiffusionMemoryMode.setAdapter(memoryModeAdapter);
+        
+        // 设置ASR/TTS模型Spinner适配器
+        setupAsrTtsSpinners();
         
         // 加载当前设置
         loadSettings();
@@ -243,9 +262,6 @@ public class SettingsFragment extends Fragment {
             dataRootPathLauncher.launch(intent);
         });
         
-        // 保存设置
-        buttonSaveSettings.setOnClickListener(v -> saveSettings());
-        
         // Diffusion Steps滑块监听器
         seekBarDiffusionSteps.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
@@ -258,7 +274,10 @@ public class SettingsFragment extends Fragment {
             public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int steps = seekBar.getProgress() + 1;
+                ConfigManager.setDiffusionSteps(requireContext(), steps);
+            }
         });
         
         // Diffusion Seed随机复选框监听器
@@ -274,6 +293,9 @@ public class SettingsFragment extends Fragment {
                     editTextDiffusionSeed.setText(String.valueOf(randomSeed));
                 }
             }
+            boolean isRandom = isChecked;
+            int seed = isRandom ? -1 : Integer.parseInt(editTextDiffusionSeed.getText().toString().trim());
+            ConfigManager.setDiffusionSeed(requireContext(), seed);
         });
         
         // 设置所有SeekBar监听器
@@ -283,12 +305,76 @@ public class SettingsFragment extends Fragment {
         setupMaxSequenceLengthSeekBar();
         setupThreadsSeekBar();
         setupKvCacheSizeSeekBar();
+        setupHistoryRoundsSeekBar();
         setupManualTemperatureSeekBar();
         setupManualTopPSeekBar();
         setupManualTopKSeekBar();
         setupManualRepeatPenaltySeekBar();
         setupImagePreprocessSizeSeekBar();
+        setupTtsDitStepsSeekBar();
         // setupImageEncodingThreadsSeekBar已移除（MNN不支持独立配置）
+        
+        // 设置Spinner监听器
+        spinnerUseGpu.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                String backend = (position >= 0 && position < BACKEND_VALUES.length) ? BACKEND_VALUES[position] : "CPU";
+                // Note: Backend preference uses setString directly as it's a simple string value
+                ConfigManager.setString(requireContext(), ConfigManager.KEY_USE_GPU, backend);
+            }
+            
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        
+        spinnerDiffusionMemoryMode.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                // Use ConfigManager API: 0=low, 1=enough, 2=balance/normal
+                int mode = (position == 0) ? 0 : 2; // 0=low, 2=balance(normal)
+                ConfigManager.setDiffusionMemoryMode(requireContext(), mode);
+            }
+            
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        
+        spinnerAsrModel.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                String model = parent.getItemAtPosition(position).toString();
+                // Note: ASR model uses setString directly as it's a simple string value
+                ConfigManager.setString(requireContext(), ConfigManager.KEY_ASR_MODEL, model);
+            }
+            
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        
+        spinnerTtsModel.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                String model = parent.getItemAtPosition(position).toString();
+                // Note: TTS model uses setString directly as it's a simple string value
+                ConfigManager.setString(requireContext(), ConfigManager.KEY_TTS_MODEL, model);
+            }
+            
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        
+        // 设置Switch监听器
+        switchDebugMode.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            ConfigManager.setDebugMode(requireContext(), isChecked);
+        });
+        
+        switchJsonDatasetSplitting.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            ConfigManager.setJsonDatasetSplittingEnabled(requireContext(), isChecked);
+        });
+        
+        switchPriorityManualParams.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            ConfigManager.setPriorityManualParams(requireContext(), isChecked);
+        });
     }
     
     private void setupFontSizeSeekBar() {
@@ -344,496 +430,15 @@ public class SettingsFragment extends Fragment {
             }
             
             @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {
-                // 不需要处理
-            }
+            public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
-                // 不需要处理
+                int size = (seekBar.getProgress() * 100) + 100;
+                ConfigManager.setChunkSize(requireContext(), size);
             }
         });
-    }
-    
-    private void updateChunkSizeText(int progress) {
-        int chunkSize = (progress * 100) + 100;
-        textViewChunkSizeValue.setText(String.valueOf(chunkSize));
-    }
-    
-    private void loadSettings() {
-        try {
-            // 从ConfigManager加载设置
-            Context context = requireContext();
-            
-            // 加载分块设置
-            int chunkSize = ConfigManager.getChunkSize(context);
-            int overlapSize = ConfigManager.getInt(context, ConfigManager.KEY_OVERLAP_SIZE, ConfigManager.DEFAULT_OVERLAP_SIZE);
-            int minChunkSize = ConfigManager.getMinChunkSize(context); // 获取最小分块限制
-            
-            // 加载数据根目录
-            String dataRootPath = ConfigManager.getDataRootPath(context);
-            
-            // 加载调试模式设置
-            boolean debugMode = ConfigManager.getBoolean(context, ConfigManager.KEY_DEBUG_MODE, false);
-            
-            // 加载后端偏好设置（兼容旧的GPU设置）
-            String backendPreference = ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
-            // 兼容性迁移：如果存储的是布尔值，则转换为字符串
-            if ("true".equals(backendPreference)) {
-                backendPreference = "VULKAN";
-                ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
-            } else if ("false".equals(backendPreference)) {
-                backendPreference = "CPU";
-                ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
-            }
-            // 兼容性迁移：移除废弃的后端选项，回退为CPU
-            if ("CANN".equals(backendPreference) || "KLEIDIAI-SME".equals(backendPreference)) {
-                LogManager.logW(TAG, "Backend '" + backendPreference + "' is deprecated. Fallback to 'CPU'.");
-                backendPreference = "CPU";
-                ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
-            }
-            
-            // ONNX引擎设置加载已移除
-            
-            // 加载JSON训练集分块优化开关
-            boolean jsonDatasetSplitting = ConfigManager.isJsonDatasetSplittingEnabled(context);
-            
-            // 加载字体大小
-            float fontSize = ConfigManager.getGlobalTextSize(context);
-            
-            // 加载 LLM 推理设置
-            int maxSequenceLength = ConfigManager.getMaxSequenceLength(context);
-            int threads = ConfigManager.getThreads(context);
-            int maxNewTokens = ConfigManager.getMaxNewTokens(context);
-            boolean noThinking = ConfigManager.getNoThinking(context);
-            
-            // 设置UI
-            seekBarChunkSize.setProgress((chunkSize - 100) / 100);
-            updateChunkSizeText((chunkSize - 100) / 100);
-            seekBarOverlapSize.setProgress((overlapSize - 20) / 20);
-            updateOverlapSizeText((overlapSize - 20) / 20);
-            seekBarMinChunkSize.setProgress((minChunkSize - 10) / 10);
-            updateMinChunkSizeText((minChunkSize - 10) / 10);
-            editTextDataRootPath.setText(dataRootPath);
-            
-            switchDebugMode.setChecked(debugMode);
-            
-            // 设置后端偏好Spinner
-            int selectedIndex = 0;
-            for (int i = 0; i < BACKEND_VALUES.length; i++) {
-                if (BACKEND_VALUES[i].equals(backendPreference)) {
-                    selectedIndex = i;
-                    break;
-                }
-            }
-            spinnerUseGpu.setSelection(selectedIndex);
-            // ONNX引擎开关设置已移除
-            switchJsonDatasetSplitting.setChecked(jsonDatasetSplitting);
-            seekBarFontSize.setProgress(Math.round(fontSize) - 10);
-            updateFontSizeText(Math.round(fontSize) - 10);
-            
-            // 设置 LLM 推理设置UI
-            seekBarMaxSequenceLength.setProgress((maxSequenceLength - 512) / 512);
-            updateMaxSequenceLengthText((maxSequenceLength - 512) / 512);
-            seekBarThreads.setProgress(threads - 1);
-            updateThreadsText(threads - 1);
-            seekBarKvCacheSize.setProgress((maxNewTokens - 512) / 512);
-            updateKvCacheSizeText((maxNewTokens - 512) / 512);
-            // switchNoThinking已移动到RAG问答界面
-            
-            // 加载手动推理参数
-            float manualTemperature = ConfigManager.getManualTemperature(context);
-            float manualTopP = ConfigManager.getManualTopP(context);
-            int manualTopK = ConfigManager.getManualTopK(context);
-            float manualRepeatPenalty = ConfigManager.getManualRepeatPenalty(context);
-            boolean priorityManualParams = ConfigManager.getBoolean(context, ConfigManager.KEY_PRIORITY_MANUAL_PARAMS, false);
-            
-            // 设置手动推理参数UI
-            seekBarManualTemperature.setProgress((int)(manualTemperature * 10));
-            updateManualTemperatureText((int)(manualTemperature * 10));
-            seekBarManualTopP.setProgress((int)(manualTopP / 0.05f));
-            updateManualTopPText((int)(manualTopP / 0.05f));
-            seekBarManualTopK.setProgress((manualTopK - 10) / 10);
-            updateManualTopKText((manualTopK - 10) / 10);
-            seekBarManualRepeatPenalty.setProgress((int)(manualRepeatPenalty * 10));
-            updateManualRepeatPenaltyText((int)(manualRepeatPenalty * 10));
-            switchPriorityManualParams.setChecked(priorityManualParams);
-            
-            // Load image preprocess size
-            int imagePreprocessSize = ConfigManager.getImagePreprocessSize(context);
-            int imagePreprocessProgress = sizeToProgress(imagePreprocessSize);
-            seekBarImagePreprocessSize.setProgress(imagePreprocessProgress);
-            updateImagePreprocessSizeText(imagePreprocessProgress);
-            
-            // 图像编码线程数配置已移除（MNN不支持独立配置）
-            
-            // 加载Diffusion扩散设置
-            int diffusionMemoryMode = ConfigManager.getDiffusionMemoryMode(context);
-            spinnerDiffusionMemoryMode.setSelection(diffusionMemoryMode);
-            
-            int diffusionSteps = ConfigManager.getDiffusionSteps(context);
-            seekBarDiffusionSteps.setProgress(diffusionSteps - 1); // SeekBar从0开始，steps从1开始
-            textViewDiffusionStepsValue.setText(String.valueOf(diffusionSteps));
-            
-            boolean useDiffusionSeedRandom = ConfigManager.getDiffusionSeedRandom(context);
-            switchDiffusionSeedRandom.setChecked(useDiffusionSeedRandom);
-            
-            int diffusionSeed = ConfigManager.getDiffusionSeed(context);
-            editTextDiffusionSeed.setText(diffusionSeed >= 0 ? String.valueOf(diffusionSeed) : "");
-            editTextDiffusionSeed.setEnabled(!useDiffusionSeedRandom); // 随机模式禁用输入框
-            if (useDiffusionSeedRandom) {
-                editTextDiffusionSeed.setAlpha(0.5f); // 变灰
-            } else {
-                editTextDiffusionSeed.setAlpha(1.0f);
-            }
-            
-            LogManager.logD(TAG, "Settings loaded successfully");
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to load settings: " + e.getMessage(), e);
-            Toast.makeText(requireContext(), getString(R.string.toast_load_settings_failed), Toast.LENGTH_SHORT).show();
-        }
-    }
-    
-    private void saveSettings() {
-        Context context = requireContext();
         
-        try {
-            // 获取用户输入
-            int chunkSize = (seekBarChunkSize.getProgress() * 100) + 100;
-            int overlapSize = (seekBarOverlapSize.getProgress() * 20) + 20;
-            int minChunkSize = (seekBarMinChunkSize.getProgress() * 10) + 10;
-            String dataRootPath = editTextDataRootPath.getText().toString().trim();
-            
-            // 数值已经从SeekBar获取，无需验证输入格式
-            
-            // 验证值范围
-            if (chunkSize < 100 || chunkSize > 4000) {
-                Toast.makeText(context, getString(R.string.toast_chunk_size_range_old), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            if (overlapSize < 20 || overlapSize > 800 || overlapSize >= chunkSize) {
-                Toast.makeText(context, getString(R.string.toast_overlap_size_range_old), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            if (minChunkSize < 10 || minChunkSize > 200 || minChunkSize >= chunkSize) {
-                Toast.makeText(context, getString(R.string.toast_min_chunk_limit_range_old), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            // 验证根目录
-            if (dataRootPath.isEmpty()) {
-                Toast.makeText(context, getString(R.string.toast_please_set_data_root_path), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            // 获取调试模式设置
-            boolean debugMode = switchDebugMode.isChecked();
-            
-            // 获取后端偏好设置
-            int selectedIndex = spinnerUseGpu.getSelectedItemPosition();
-            String backendPreference = (selectedIndex >= 0 && selectedIndex < BACKEND_VALUES.length) ? 
-                BACKEND_VALUES[selectedIndex] : "CPU";
-            // Log backend selection for debugging
-            switch (backendPreference) {
-                case "VULKAN":
-                    LogManager.logI(TAG, "Backend selected: VULKAN (GPU via Vulkan API)");
-                    break;
-                case "OPENCL":
-                    LogManager.logI(TAG, "Backend selected: OPENCL (GPU via OpenCL API)");
-                    break;
-                case "NNAPI":
-                    LogManager.logI(TAG, "Backend selected: NNAPI (Android Neural Networks API, arm64 only)");
-                    break;
-                case "CPU":
-                default:
-                    LogManager.logI(TAG, "Backend selected: CPU (KleidiAI microkernels auto-enabled on arm64)");
-                    break;
-            }
-            
-            // ONNX引擎设置获取已移除
-            
-            // 获取JSON训练集分块优化开关
-            boolean jsonDatasetSplitting = switchJsonDatasetSplitting.isChecked();
-            
-            // 获取字体大小
-            int progress = seekBarFontSize.getProgress();
-            float fontSize = progress + 10;
-            
-            // 获取 LLM 推理设置
-            int maxSequenceLength = (seekBarMaxSequenceLength.getProgress() * 512) + 512;
-            int threads = seekBarThreads.getProgress() + 1;
-            int maxNewTokens = (seekBarKvCacheSize.getProgress() * 512) + 512;
-            // noThinking已移动到RAG问答界面
-            
-            // 获取手动推理参数
-            float manualTemperature = seekBarManualTemperature.getProgress() / 10.0f;
-            float manualTopP = seekBarManualTopP.getProgress() * 0.05f;
-            int manualTopK = (seekBarManualTopK.getProgress() * 10) + 10;
-            float manualRepeatPenalty = seekBarManualRepeatPenalty.getProgress() / 10.0f;
-            boolean priorityManualParams = switchPriorityManualParams.isChecked();
-            
-            // 数值已经从SeekBar获取，无需验证输入格式和转换
-            
-            // 验证值范围
-            if (maxSequenceLength < 100 || maxSequenceLength > 8192) {
-                Toast.makeText(context, getString(R.string.toast_max_seq_length_range), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            if (threads < 1 || threads > 16) {
-                Toast.makeText(context, getString(R.string.toast_inference_threads_range), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            if (maxNewTokens < 512 || maxNewTokens > 16384) {
-                Toast.makeText(context, getString(R.string.toast_max_output_tokens_range), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            // 验证手动推理参数范围
-            if (manualTemperature < 0.0f || manualTemperature > 2.0f) {
-                Toast.makeText(context, getString(R.string.toast_manual_temperature_range), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            if (manualTopP < 0.0f || manualTopP > 1.0f) {
-                Toast.makeText(context, getString(R.string.toast_manual_top_p_range), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            if (manualTopK < 1 || manualTopK > 100) {
-                Toast.makeText(context, getString(R.string.toast_manual_top_k_range), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            if (manualRepeatPenalty < 0.0f || manualRepeatPenalty > 2.0f) {
-                Toast.makeText(context, getString(R.string.toast_manual_repeat_penalty_range), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            // 取消“最大序列长度必须大于最大输出token数+缓冲区”的强耦合校验，改为解耦使用
-            
-            // 保存设置到ConfigManager
-            ConfigManager.setChunkSize(context, chunkSize);
-            ConfigManager.setInt(context, ConfigManager.KEY_OVERLAP_SIZE, overlapSize);
-            ConfigManager.setMinChunkSize(context, minChunkSize); // 保存最小分块限制
-            ConfigManager.setDataRootPath(context, dataRootPath);
-            
-            ConfigManager.setBoolean(context, ConfigManager.KEY_DEBUG_MODE, debugMode);
-            ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
-            // ONNX引擎配置保存已移除
-            ConfigManager.setJsonDatasetSplittingEnabled(context, jsonDatasetSplitting);
-            ConfigManager.setGlobalTextSize(context, fontSize);
-            
-            // 保存 LLM 推理设置
-            ConfigManager.setMaxSequenceLength(context, maxSequenceLength);
-            ConfigManager.setThreads(context, threads);
-            ConfigManager.setMaxNewTokens(context, maxNewTokens);
-            // noThinking已移动到RAG问答界面
-            
-            // 保存手动推理参数
-            ConfigManager.setManualTemperature(context, manualTemperature);
-            ConfigManager.setManualTopP(context, manualTopP);
-            ConfigManager.setManualTopK(context, manualTopK);
-            ConfigManager.setManualRepeatPenalty(context, manualRepeatPenalty);
-            ConfigManager.setBoolean(context, ConfigManager.KEY_PRIORITY_MANUAL_PARAMS, priorityManualParams);
-            
-            // Save image preprocess size
-            int imagePreprocessProgress = seekBarImagePreprocessSize.getProgress();
-            int imagePreprocessSize = progressToSize(imagePreprocessProgress);
-            ConfigManager.setImagePreprocessSize(context, imagePreprocessSize);
-            
-            // 图像编码线程数配置已移除（MNN不支持独立配置）
-            
-            // 保存Diffusion扩散设置
-            int diffusionMemoryMode = spinnerDiffusionMemoryMode.getSelectedItemPosition();
-            ConfigManager.setDiffusionMemoryMode(context, diffusionMemoryMode);
-            
-            int diffusionSteps = seekBarDiffusionSteps.getProgress() + 1; // 转换回1-50范围
-            ConfigManager.setDiffusionSteps(context, diffusionSteps);
-            
-            boolean useDiffusionSeedRandom = switchDiffusionSeedRandom.isChecked();
-            ConfigManager.setDiffusionSeedRandom(context, useDiffusionSeedRandom);
-            
-            if (!useDiffusionSeedRandom && !editTextDiffusionSeed.getText().toString().trim().isEmpty()) {
-                try {
-                    int diffusionSeed = Integer.parseInt(editTextDiffusionSeed.getText().toString().trim());
-                    ConfigManager.setDiffusionSeed(context, diffusionSeed);
-                } catch (NumberFormatException ex) {
-                    // 输入无效，使用默认值
-                    ConfigManager.setDiffusionSeed(context, -1);
-                }
-            } else {
-                ConfigManager.setDiffusionSeed(context, -1);
-            }
-            
-            // 创建JSON格式的设置摘要
-            JSONObject settingsSummary = new JSONObject();
-            settingsSummary.put("chunkSize", chunkSize);
-            settingsSummary.put("overlapSize", overlapSize);
-            settingsSummary.put("minChunkSize", minChunkSize); // 添加最小分块限制
-            settingsSummary.put("dataRootPath", dataRootPath);
-            settingsSummary.put("debugMode", debugMode);
-            settingsSummary.put("backendPreference", backendPreference);
-            // ONNX引擎设置摘要已移除
-            settingsSummary.put("jsonDatasetSplitting", jsonDatasetSplitting);
-            
-            // 添加 LLM 推理设置信息
-            settingsSummary.put("maxSequenceLength", maxSequenceLength);
-            settingsSummary.put("threads", threads);
-            // noThinking已移动到RAG问答界面
-            
-            LogManager.logD(TAG, "Settings saved: " + settingsSummary.toString());
-            
-            // 显示成功消息
-            Toast.makeText(context, getString(R.string.toast_settings_saved), Toast.LENGTH_SHORT).show();
-            
-            // 更新LocalLlmHandler的推理引擎配置
-            try {
-                LocalLlmHandler localLlmHandler = LocalLlmHandler.getInstance(context);
-                localLlmHandler.updateEngineFromConfig();
-                LogManager.logI(TAG, "Inference engine configuration updated");
-            } catch (Exception e) {
-                LogManager.logE(TAG, "Failed to update inference engine configuration: " + e.getMessage(), e);
-            }
-            
-            // 通知监听器
-            if (settingsChangeListener != null) {
-                settingsChangeListener.onSettingsChanged();
-            }
-        } catch (NumberFormatException e) {
-            LogManager.logE(TAG, "Failed to parse number: " + e.getMessage(), e);
-            Toast.makeText(context, getString(R.string.toast_please_enter_valid_number), Toast.LENGTH_SHORT).show();
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to save settings: " + e.getMessage(), e);
-            Toast.makeText(context, getString(R.string.toast_save_settings_failed, e.getMessage()), Toast.LENGTH_SHORT).show();
-        }
-    }
-    
-    private void handleDirectorySelection(Uri uri, EditText targetEditText) {
-        if (uri != null) {
-            try {
-                // 将 URI 转换为实际可用的文件路径
-                String realPath = getPathFromUri(uri);
-                LogManager.logD(TAG, "Selected path URI: " + uri);
-                LogManager.logD(TAG, "Converted actual path: " + realPath);
-                
-                targetEditText.setText(realPath);
-            } catch (Exception e) {
-                LogManager.logE(TAG, "Failed to convert path: " + e.getMessage(), e);
-                Toast.makeText(requireContext(), getString(R.string.toast_cannot_get_selected_path), Toast.LENGTH_SHORT).show();
-            }
-        }
-    }
-    
-    /**
-     * 将 URI 转换为实际可用的文件路径
-     * @param uri 文件 URI
-     * @return 实际文件路径
-     */
-    private String getPathFromUri(Uri uri) {
-        String path = uri.getPath();
-        
-        // 检查是否是 content:// 类型的 URI
-        if (uri.getScheme() != null && uri.getScheme().equals("content")) {
-            // 处理 /tree/primary: 格式的路径
-            if (path != null && path.contains("primary:")) {
-                // 提取 primary: 后面的部分
-                String[] segments = path.split("primary:");
-                if (segments.length > 1) {
-                    // 转换为实际的存储路径
-                    String relativePath = segments[1];
-                    // 替换可能存在的重复路径
-                    if (relativePath.contains("/document/primary:")) {
-                        relativePath = relativePath.split("/document/primary:")[0];
-                    }
-                    
-                    // 构建实际路径
-                    File externalStorage = Environment.getExternalStorageDirectory();
-                    path = new File(externalStorage, relativePath).getAbsolutePath();
-                    LogManager.logD(TAG, "Converting primary: path: " + path);
-                }
-            }
-        }
-        
-        return path;
-    }
-    
-
-    
-    // 静态方法，用于获取设置值
-    public static int getChunkSize(Context context) {
-        return ConfigManager.getChunkSize(context);
-    }
-    
-    public static int getOverlapSize(Context context) {
-        return ConfigManager.getInt(context, ConfigManager.KEY_OVERLAP_SIZE, ConfigManager.DEFAULT_OVERLAP_SIZE);
-    }
-    
-    /**
-     * 获取最小分块限制
-     * @param context 上下文
-     * @return 最小分块限制
-     */
-    public static int getMinChunkSize(Context context) {
-        return ConfigManager.getMinChunkSize(context);
-    }
-    
-    
-    /**
-     * 获取是否启用调试模式
-     * @param context 上下文
-     * @return 是否启用调试模式
-     */
-    public static boolean isDebugModeEnabled(Context context) {
-        return ConfigManager.getBoolean(context, ConfigManager.KEY_DEBUG_MODE, false);
-    }
-    
-    /**
-     * 获取后端偏好设置
-     * @param context 上下文
-     * @return 后端偏好字符串
-     */
-    public static String getBackendPreference(Context context) {
-        String backendPreference = ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
-        // Compatibility: map deprecated values to CPU and write back
-        if ("CANN".equals(backendPreference)
-                || "GPU".equals(backendPreference)
-                || "KLEIDIAI-SME".equals(backendPreference)) {
-            LogManager.logW(TAG, "Deprecated backend '" + backendPreference + "' detected. Falling back to 'CPU' and updating config.");
-            backendPreference = "CPU";
-            ConfigManager.setString(context, ConfigManager.KEY_USE_GPU, backendPreference);
-        }
-        // Validate value
-        for (String validValue : BACKEND_VALUES) {
-            if (validValue.equals(backendPreference)) {
-                return backendPreference;
-            }
-        }
-        // Default to CPU if invalid value
-        LogManager.logW(TAG, "Invalid backend preference '" + backendPreference + "', defaulting to 'CPU'");
-        return "CPU";
-    }
-    
-    /**
-     * 获取是否使用GPU加速（兼容性方法）
-     * @param context 上下文
-     * @return 是否使用GPU加速
-     */
-
-    
-    /**
-     * 获取是否启用JSON训练集分块优化
-     * @param context 上下文
-     * @return 是否启用JSON训练集分块优化
-     */
-    public static boolean isJsonDatasetSplittingEnabled(Context context) {
-        return ConfigManager.isJsonDatasetSplittingEnabled(context);
-    }
-    
-    private void setupOverlapSizeSeekBar() {
         seekBarOverlapSize.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -844,16 +449,12 @@ public class SettingsFragment extends Fragment {
             public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int size = (seekBar.getProgress() * 20) + 20;
+                ConfigManager.setOverlapSize(requireContext(), size);
+            }
         });
-    }
-    
-    private void updateOverlapSizeText(int progress) {
-        int overlapSize = (progress * 20) + 20;
-        textViewOverlapSizeValue.setText(String.valueOf(overlapSize));
-    }
-    
-    private void setupMinChunkSizeSeekBar() {
+        
         seekBarMinChunkSize.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -864,16 +465,12 @@ public class SettingsFragment extends Fragment {
             public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int size = (seekBar.getProgress() * 10) + 10;
+                ConfigManager.setMinChunkSize(requireContext(), size);
+            }
         });
-    }
-    
-    private void updateMinChunkSizeText(int progress) {
-        int minChunkSize = (progress * 10) + 10;
-        textViewMinChunkSizeValue.setText(String.valueOf(minChunkSize));
-    }
-    
-    private void setupMaxSequenceLengthSeekBar() {
+        
         seekBarMaxSequenceLength.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -884,16 +481,12 @@ public class SettingsFragment extends Fragment {
             public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int length = (seekBar.getProgress() * 512) + 512;
+                ConfigManager.setMaxSequenceLength(requireContext(), length);
+            }
         });
-    }
-    
-    private void updateMaxSequenceLengthText(int progress) {
-        int maxSequenceLength = (progress * 512) + 512;
-        textViewMaxSequenceLengthValue.setText(String.valueOf(maxSequenceLength));
-    }
-    
-    private void setupThreadsSeekBar() {
+        
         seekBarThreads.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -904,16 +497,12 @@ public class SettingsFragment extends Fragment {
             public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int threads = seekBar.getProgress() + 1;
+                ConfigManager.setThreads(requireContext(), threads);
+            }
         });
-    }
-    
-    private void updateThreadsText(int progress) {
-        int threads = progress + 1;
-        textViewThreadsValue.setText(String.valueOf(threads));
-    }
-    
-    private void setupKvCacheSizeSeekBar() {
+        
         seekBarKvCacheSize.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -924,16 +513,28 @@ public class SettingsFragment extends Fragment {
             public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int size = (seekBar.getProgress() * 512) + 512;
+                ConfigManager.setMaxNewTokens(requireContext(), size);
+            }
         });
-    }
-    
-    private void updateKvCacheSizeText(int progress) {
-        int kvCacheSize = (progress * 512) + 512;
-        textViewKvCacheSizeValue.setText(String.valueOf(kvCacheSize));
-    }
-    
-    private void setupManualTemperatureSeekBar() {
+        
+        seekBarHistoryRounds.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateHistoryRoundsText(progress);
+            }
+            
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int rounds = seekBar.getProgress();
+                ConfigManager.setHistoryRounds(requireContext(), rounds);
+            }
+        });
+        
         seekBarManualTemperature.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -944,7 +545,10 @@ public class SettingsFragment extends Fragment {
             public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                float temperature = seekBar.getProgress() / 10.0f;
+                ConfigManager.setFloat(requireContext(), ConfigManager.KEY_MANUAL_TEMPERATURE, temperature);
+            }
         });
     }
     
@@ -964,7 +568,10 @@ public class SettingsFragment extends Fragment {
             public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                float topP = seekBar.getProgress() * 0.05f;
+                ConfigManager.setFloat(requireContext(), ConfigManager.KEY_MANUAL_TOP_P, topP);
+            }
         });
     }
     
@@ -984,7 +591,10 @@ public class SettingsFragment extends Fragment {
             public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int topK = (seekBar.getProgress() * 10) + 10;
+                ConfigManager.setManualTopK(requireContext(), topK);
+            }
         });
     }
     
@@ -1004,7 +614,10 @@ public class SettingsFragment extends Fragment {
             public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                float repeatPenalty = seekBar.getProgress() / 10.0f;
+                ConfigManager.setFloat(requireContext(), ConfigManager.KEY_MANUAL_REPEAT_PENALTY, repeatPenalty);
+            }
         });
     }
     
@@ -1024,7 +637,10 @@ public class SettingsFragment extends Fragment {
             public void onStartTrackingTouch(SeekBar seekBar) {}
             
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {}
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int size = progressToSize(seekBar.getProgress());
+                ConfigManager.setImagePreprocessSize(requireContext(), size);
+            }
         });
     }
     
@@ -1075,5 +691,283 @@ public class SettingsFragment extends Fragment {
     }
     
     // setupImageEncodingThreadsSeekBar和updateImageEncodingThreadsText方法已移除（MNN不支持独立配置）
+    
+    private void setupAsrTtsSpinners() {
+        Context context = requireContext();
+        
+        // Setup ASR model spinner
+        String asrPath = ConfigManager.getAsrModelPath(context);
+        File asrDir = new File(asrPath);
+        java.util.List<String> asrModels = new java.util.ArrayList<>();
+        asrModels.add(getString(R.string.settings_asr_model_none)); // "无" or "None"
+        
+        if (asrDir.exists() && asrDir.isDirectory()) {
+            File[] asrDirs = asrDir.listFiles(File::isDirectory);
+            if (asrDirs != null) {
+                for (File dir : asrDirs) {
+                    asrModels.add(dir.getName());
+                }
+            }
+        }
+        
+        ArrayAdapter<String> asrAdapter = new ArrayAdapter<>(context,
+            android.R.layout.simple_spinner_item, asrModels);
+        asrAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerAsrModel.setAdapter(asrAdapter);
+        
+        // Setup TTS model spinner
+        String ttsPath = ConfigManager.getTtsModelPath(context);
+        File ttsDir = new File(ttsPath);
+        java.util.List<String> ttsModels = new java.util.ArrayList<>();
+        ttsModels.add(getString(R.string.settings_tts_model_none)); // "无" or "None"
+        
+        if (ttsDir.exists() && ttsDir.isDirectory()) {
+            File[] ttsDirs = ttsDir.listFiles(File::isDirectory);
+            if (ttsDirs != null) {
+                for (File dir : ttsDirs) {
+                    ttsModels.add(dir.getName());
+                }
+            }
+        }
+        
+        ArrayAdapter<String> ttsAdapter = new ArrayAdapter<>(context,
+            android.R.layout.simple_spinner_item, ttsModels);
+        ttsAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerTtsModel.setAdapter(ttsAdapter);
+    }
+    
+    private void setupTtsDitStepsSeekBar() {
+        seekBarTtsDitSteps.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateTtsDitStepsText(progress);
+            }
+            
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int steps = seekBar.getProgress() + 1;
+                ConfigManager.setTtsDitSteps(requireContext(), steps);
+            }
+        });
+    }
+    
+    private void updateTtsDitStepsText(int progress) {
+        int steps = progress + 1; // Convert to 1-10 range
+        textViewTtsDitStepsValue.setText(getString(R.string.settings_tts_dit_steps_value, steps));
+    }
+    
+    private void updateChunkSizeText(int progress) {
+        int size = (progress * 100) + 100;
+        textViewChunkSizeValue.setText(String.format("%d", size));
+    }
+    
+    private void updateOverlapSizeText(int progress) {
+        int size = (progress * 20) + 20;
+        textViewOverlapSizeValue.setText(String.format("%d", size));
+    }
+    
+    private void updateMinChunkSizeText(int progress) {
+        int size = (progress * 10) + 10;    
+        textViewMinChunkSizeValue.setText(String.format("%d", size));
+    }
+    
+    private void updateMaxSequenceLengthText(int progress) {
+        int length = (progress * 512) + 512;
+        textViewMaxSequenceLengthValue.setText(String.format("%d", length));
+    }
+    
+    private void updateThreadsText(int progress) {
+        int threads = progress + 1;
+        textViewThreadsValue.setText(String.format("%d", threads));
+    }
+    
+    private void updateKvCacheSizeText(int progress) {
+        int size = (progress * 512) + 512;
+        textViewKvCacheSizeValue.setText(String.format("%d", size));
+    }
+    
+    private void updateHistoryRoundsText(int progress) {
+        textViewHistoryRoundsValue.setText(String.format("%d", progress));
+    }
+    
+    // Empty setup methods (all SeekBars configured in setupChunkSizeSeekBar)
+    private void setupOverlapSizeSeekBar() {}
+    private void setupMinChunkSizeSeekBar() {}
+    private void setupMaxSequenceLengthSeekBar() {}
+    private void setupThreadsSeekBar() {}
+    private void setupKvCacheSizeSeekBar() {}
+    private void setupHistoryRoundsSeekBar() {}
+    private void setupManualTemperatureSeekBar() {}
+    
+    public static String getBackendPreference(Context context) {
+        return ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
+    }
+    
+    private void loadSettings() {
+        // Load all settings from ConfigManager and set UI controls
+        Context ctx = requireContext();
+        
+        // Data root path
+        String dataRootPath = ConfigManager.getDataRootPath(ctx);
+        editTextDataRootPath.setText(dataRootPath);
+        
+        // Backend preference
+        String backend = ConfigManager.getString(ctx, ConfigManager.KEY_USE_GPU, "CPU");
+        int backendPos = java.util.Arrays.asList(BACKEND_VALUES).indexOf(backend);
+        if (backendPos >= 0) spinnerUseGpu.setSelection(backendPos);
+        
+        // Diffusion settings
+        int memMode = ConfigManager.getDiffusionMemoryMode(ctx); // 0=low, 1=enough, 2=balance
+        spinnerDiffusionMemoryMode.setSelection(memMode == 0 ? 0 : 1); // Spinner: 0=low, 1=normal
+        
+        int diffSteps = ConfigManager.getDiffusionSteps(ctx);
+        int diffStepsProgress = diffSteps - 1;
+        seekBarDiffusionSteps.setProgress(diffStepsProgress);
+        textViewDiffusionStepsValue.setText(String.valueOf(diffSteps));
+        
+        int diffSeed = ConfigManager.getDiffusionSeed(ctx);
+        boolean isRandom = (diffSeed == -1);
+        switchDiffusionSeedRandom.setChecked(isRandom);
+        editTextDiffusionSeed.setText(isRandom ? "" : String.valueOf(diffSeed));
+        editTextDiffusionSeed.setEnabled(!isRandom);
+        editTextDiffusionSeed.setAlpha(isRandom ? 0.5f : 1.0f);
+        
+        // RAG settings
+        int chunkSize = ConfigManager.getChunkSize(ctx);
+        int chunkProgress = Math.round((chunkSize - 100) / 100f);
+        chunkProgress = Math.max(0, Math.min(chunkProgress, seekBarChunkSize.getMax()));
+        seekBarChunkSize.setProgress(chunkProgress);
+        updateChunkSizeText(chunkProgress);
+        
+        int overlapSize = ConfigManager.getOverlapSize(ctx);
+        int overlapProgress = Math.round((overlapSize - 20) / 20f);
+        overlapProgress = Math.max(0, Math.min(overlapProgress, seekBarOverlapSize.getMax()));
+        seekBarOverlapSize.setProgress(overlapProgress);
+        updateOverlapSizeText(overlapProgress);
+        
+        int minChunkSize = ConfigManager.getMinChunkSize(ctx);
+        int minChunkProgress = Math.round((minChunkSize - 10) / 10f);
+        minChunkProgress = Math.max(0, Math.min(minChunkProgress, seekBarMinChunkSize.getMax()));
+        seekBarMinChunkSize.setProgress(minChunkProgress);
+        updateMinChunkSizeText(minChunkProgress);
+        
+        // LLM settings
+        int maxSeqLen = ConfigManager.getMaxSequenceLength(ctx);
+        int maxSeqProgress = Math.round((maxSeqLen - 512) / 512f);
+        maxSeqProgress = Math.max(0, Math.min(maxSeqProgress, seekBarMaxSequenceLength.getMax()));
+        seekBarMaxSequenceLength.setProgress(maxSeqProgress);
+        updateMaxSequenceLengthText(maxSeqProgress);
+        
+        int threads = ConfigManager.getThreads(ctx);
+        int threadsProgress = threads - 1;
+        threadsProgress = Math.max(0, Math.min(threadsProgress, seekBarThreads.getMax()));
+        seekBarThreads.setProgress(threadsProgress);
+        updateThreadsText(threadsProgress);
+        
+        int kvCacheSize = ConfigManager.getMaxNewTokens(ctx);
+        int kvCacheProgress = Math.round((kvCacheSize - 512) / 512f);
+        kvCacheProgress = Math.max(0, Math.min(kvCacheProgress, seekBarKvCacheSize.getMax()));
+        seekBarKvCacheSize.setProgress(kvCacheProgress);
+        updateKvCacheSizeText(kvCacheProgress);
+        
+        int historyRounds = ConfigManager.getHistoryRounds(ctx);
+        historyRounds = Math.max(0, Math.min(historyRounds, seekBarHistoryRounds.getMax()));
+        seekBarHistoryRounds.setProgress(historyRounds);
+        updateHistoryRoundsText(historyRounds);
+        
+        // Manual params
+        float manualTemp = ConfigManager.getFloat(ctx, ConfigManager.KEY_MANUAL_TEMPERATURE, 0.7f);
+        int manualTempProgress = Math.round(manualTemp * 10f);
+        manualTempProgress = Math.max(0, Math.min(manualTempProgress, seekBarManualTemperature.getMax()));
+        seekBarManualTemperature.setProgress(manualTempProgress);
+        updateManualTemperatureText(manualTempProgress);
+        
+        float manualTopP = ConfigManager.getFloat(ctx, ConfigManager.KEY_MANUAL_TOP_P, 0.9f);
+        int manualTopPProgress = Math.round(manualTopP / 0.05f);
+        manualTopPProgress = Math.max(0, Math.min(manualTopPProgress, seekBarManualTopP.getMax()));
+        seekBarManualTopP.setProgress(manualTopPProgress);
+        updateManualTopPText(manualTopPProgress);
+        
+        int manualTopK = ConfigManager.getManualTopK(ctx);
+        int manualTopKProgress = Math.round((manualTopK - 10) / 10f);
+        manualTopKProgress = Math.max(0, Math.min(manualTopKProgress, seekBarManualTopK.getMax()));
+        seekBarManualTopK.setProgress(manualTopKProgress);
+        updateManualTopKText(manualTopKProgress);
+        
+        float manualRepeatPenalty = ConfigManager.getFloat(ctx, ConfigManager.KEY_MANUAL_REPEAT_PENALTY, 1.1f);
+        int manualRepeatProgress = Math.round(manualRepeatPenalty * 10f);
+        manualRepeatProgress = Math.max(0, Math.min(manualRepeatProgress, seekBarManualRepeatPenalty.getMax()));
+        seekBarManualRepeatPenalty.setProgress(manualRepeatProgress);
+        updateManualRepeatPenaltyText(manualRepeatProgress);
+        
+        boolean priorityManualParams = ConfigManager.getPriorityManualParams(ctx);
+        switchPriorityManualParams.setChecked(priorityManualParams);
+        
+        // Image preprocess size
+        int imgSize = ConfigManager.getImagePreprocessSize(ctx);
+        int imgProgress = sizeToProgress(imgSize);
+        seekBarImagePreprocessSize.setProgress(imgProgress);
+        updateImagePreprocessSizeText(imgProgress);
+        
+        // ASR/TTS model selection
+        String asrModel = ConfigManager.getString(ctx, ConfigManager.KEY_ASR_MODEL, "");
+        if (!asrModel.isEmpty() && spinnerAsrModel.getAdapter() != null) {
+            for (int i = 0; i < spinnerAsrModel.getAdapter().getCount(); i++) {
+                if (asrModel.equals(spinnerAsrModel.getAdapter().getItem(i))) {
+                    spinnerAsrModel.setSelection(i);
+                    break;
+                }
+            }
+        }
+        
+        String ttsModel = ConfigManager.getString(ctx, ConfigManager.KEY_TTS_MODEL, "");
+        if (!ttsModel.isEmpty() && spinnerTtsModel.getAdapter() != null) {
+            for (int i = 0; i < spinnerTtsModel.getAdapter().getCount(); i++) {
+                if (ttsModel.equals(spinnerTtsModel.getAdapter().getItem(i))) {
+                    spinnerTtsModel.setSelection(i);
+                    break;
+                }
+            }
+        }
+        
+        // TTS settings
+        int ttsDitSteps = ConfigManager.getTtsDitSteps(ctx);
+        int ttsDitProgress = ttsDitSteps - 1;
+        seekBarTtsDitSteps.setProgress(ttsDitProgress);
+        updateTtsDitStepsText(ttsDitProgress);
+        
+        // Switches
+        boolean debugMode = ConfigManager.getDebugMode(ctx);
+        switchDebugMode.setChecked(debugMode);
+        
+        boolean jsonSplitting = ConfigManager.getJsonDatasetSplittingEnabled(ctx);
+        switchJsonDatasetSplitting.setChecked(jsonSplitting);
+    }
+    
+    private void saveSettings() {}
+    
+    private void handleDirectorySelection(Uri uri, EditText targetEditText) {
+        if (uri != null && getContext() != null) {
+            try {
+                requireContext().getContentResolver().takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                );
+                
+                DocumentFile docFile = DocumentFile.fromTreeUri(requireContext(), uri);
+                if (docFile != null && docFile.isDirectory()) {
+                    String path = uri.toString();
+                    targetEditText.setText(path);
+                    ConfigManager.setString(requireContext(), ConfigManager.KEY_DATA_ROOT_PATH, path);
+                    Toast.makeText(requireContext(), "Data root path saved", Toast.LENGTH_SHORT).show();
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to handle directory selection", e);
+                Toast.makeText(requireContext(), "Failed to set directory", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
 }
-

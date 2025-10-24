@@ -1211,24 +1211,40 @@ public class LocalLlmHandler {
         // Log file existence for debugging
         LogManager.logD(TAG, "Checking MNN files in: " + modelDir.getAbsolutePath());
         LogManager.logD(TAG, "  llm.mnn: " + (llmMnn.exists() ? "✓" : "✗"));
-        LogManager.logD(TAG, "  llm.mnn.weight: " + (llmWeight.exists() ? "✓" : "✗"));
+        LogManager.logD(TAG, "  llm.mnn.weight: " + (llmWeight.exists() ? "✓" : "✗ (optional for embedded weights)"));
         LogManager.logD(TAG, "  tokenizer.txt: " + (tokenizer.exists() ? "✓" : "✗"));
         LogManager.logD(TAG, "  config.json: " + (config.exists() ? "✓" : "✗"));
         LogManager.logD(TAG, "  embeddings_bf16.bin: " + (embeddingFile.exists() ? "✓ (" + formatFileSize(embeddingFile.length()) + ")" : "✗ (optional)"));
         LogManager.logD(TAG, "  visual.mnn: " + (visualMnn.exists() ? "✓ (multimodal)" : "✗ (text-only)"));
-        LogManager.logD(TAG, "  visual.mnn.weight: " + (visualWeight.exists() ? "✓ (multimodal)" : "✗ (text-only)"));
+        LogManager.logD(TAG, "  visual.mnn.weight: " + (visualWeight.exists() ? "✓ (multimodal)" : "✗ (optional for embedded weights)"));
         
-        boolean isMnn = llmMnn.exists() && llmWeight.exists() && tokenizer.exists() && config.exists();
+        // Core MNN files: llm.mnn, tokenizer.txt, config.json are required
+        // Weight files are optional (can be embedded in .mnn files)
+        boolean isMnn = llmMnn.exists() && tokenizer.exists() && config.exists();
         
         if (isMnn) {
-            boolean isMultimodal = visualMnn.exists() && visualWeight.exists();
-            if (isMultimodal) {
-                LogManager.logI(TAG, "MNN MULTIMODAL model files found (with vision support)");
+            // Determine model type based on available files
+            boolean hasExternalWeights = llmWeight.exists();
+            boolean hasVisualModel = visualMnn.exists();
+            boolean hasExternalVisualWeights = visualWeight.exists();
+            
+            if (hasVisualModel) {
+                if (hasExternalWeights && hasExternalVisualWeights) {
+                    LogManager.logI(TAG, "MNN MULTIMODAL model with external weights (traditional format)");
+                } else if (hasExternalWeights || hasExternalVisualWeights) {
+                    LogManager.logI(TAG, "MNN MULTIMODAL model with mixed weight format (some embedded, some external)");
+                } else {
+                    LogManager.logI(TAG, "MNN MULTIMODAL model with embedded weights (compact format)");
+                }
             } else {
-                LogManager.logI(TAG, "MNN TEXT-ONLY model files found");
+                if (hasExternalWeights) {
+                    LogManager.logI(TAG, "MNN TEXT-ONLY model with external weights (traditional format)");
+                } else {
+                    LogManager.logI(TAG, "MNN TEXT-ONLY model with embedded weights (compact format)");
+                }
             }
         } else {
-            LogManager.logW(TAG, "MNN model files incomplete or missing");
+            LogManager.logW(TAG, "MNN model files incomplete or missing (requires: llm.mnn, tokenizer.txt, config.json)");
         }
         
         return isMnn;
@@ -1406,6 +1422,10 @@ public class LocalLlmHandler {
         private boolean thinkingMode = false;
         private float repetitionPenalty = 1.1f;
         private int seed = -1; // -1表示随机种子
+        
+        // History and TTS support
+        public String systemPrompt = null;      // System prompt for history inference
+        public String ttsOutputPath = null;     // TTS output file path
         
         // Getter和Setter方法
         public int getMaxTokens() { return maxTokens; }

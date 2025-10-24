@@ -78,6 +78,17 @@
       "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/MiniCPM-V-4-MNN/resolve/master/visual.mnn.weight",
 	    "comments": "MiniCPM-V-4-MNN-int4 Text-Image2Text, Tested to be good."
     },
+    "PaddleOCR-VL-0.9B-int4": {
+      "config.json": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/config.json",
+      "configuration.json": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/configuration.json",
+      "embeddings_bf16.bin": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/embeddings_bf16.bin",
+      "llm_config.json": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/llm_config.json" ,
+      "llm.mnn.json": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/llm_config.json",
+      "llm.mnn": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/llm.mnn",
+      "tokenizer.txt": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/tokenizer.txt",
+      "visual.mnn": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/visual.mnn",
+	    "comments": "PaddleOCR-VL-0.9B的MNN格式4bit量化版本，专为移动端和边缘设备部署优化"
+    },
     "Qwen2.5-Omni-3B-MNN-int4": {
       "config.json": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-3B-MNN/resolve/master/config.json",
       "configuration.json": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-3B-MNN/resolve/master/configuration.json",
@@ -101,6 +112,31 @@
       "talker_embeddings_bf16.bin": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-3B-MNN/resolve/master/talker_embeddings_bf16.bin",
       "visual.mnn": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-3B-MNN/resolve/master/visual.mnn",
       "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-3B-MNN/resolve/master/visual.mnn.weight",
+      "comments": "Qwen2.5 Omni Multimodal: Text+Image+Audio2Text (Full multimodal support with audio input/output, Audio tokens not stable，TTS Crashing!!!)"
+    },
+    "Qwen2.5-Omni-7B-MNN-int4": {
+      "config.json": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/config.json",
+      "configuration.json": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/configuration.json",
+      "llm_config.json": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/llm_config.json",
+      "llm.mnn.json": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/llm.mnn.json",
+      "embeddings_bf16.bin": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/embeddings_bf16.bin",
+      "llm.mnn": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/llm.mnn",
+      "llm.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/llm.mnn.weight",
+      "tokenizer.txt": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/tokenizer.txt",
+      "audio.mnn": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/audio.mnn",
+      "audio.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/audio.mnn.weight",
+      "bigvgan.mnn": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/bigvgan.mnn",
+      "bigvgan.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/bigvgan.mnn.weight",
+      "dit.mnn": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/dit.mnn",
+      "dit.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/dit.mnn.weight",
+      "predit.mnn": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/predit.mnn",
+      "predit.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/predit.mnn.weight",
+      "spk_dict.mnn": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/spk_dict.mnn",
+      "talker.mnn": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/talker.mnn",
+      "talker.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/talker.mnn.weight",
+      "talker_embeddings_bf16.bin": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/talker_embeddings_bf16.bin",
+      "visual.mnn": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/visual.mnn",
+      "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/visual.mnn.weight",
       "comments": "Qwen2.5 Omni Multimodal: Text+Image+Audio2Text (Full multimodal support with audio input/output)"
     },
     "stable-diffusion-v1-5-mnn-opencl-int8": {
@@ -115,6 +151,45 @@
       "vocab.json": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/vocab.json",
       "alphas.txt": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/alphas.txt",
       "comments": "Stable Diffusion v1.5 Text2Image (OpenCL optimized, int8 quantized; 只能选OPENCL后端！！！/OpenCL is a mandatory, to be crashing on other backends!)"
+    }
+  },
+  "asr": {
+    "sherpa-mnn-streaming-zipformer-bilingual-zh-en-2023-02-20": {
+      "configuration.json": "https://www.modelscope.cn/models/MNN/sherpa-mnn-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/master/configuration.json",
+      "decoder-epoch-99-avg-1.int8.mnn": "https://www.modelscope.cn/models/MNN/sherpa-mnn-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/master/decoder-epoch-99-avg-1.int8.mnn",
+      "encoder-epoch-99-avg-1.int8.mnn": "https://www.modelscope.cn/models/MNN/sherpa-mnn-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/master/encoder-epoch-99-avg-1.int8.mnn",
+      "joiner-epoch-99-avg-1.int8.mnn": "https://www.modelscope.cn/models/MNN/sherpa-mnn-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/master/joiner-epoch-99-avg-1.int8.mnn",
+      "tokens.txt": "https://www.modelscope.cn/models/MNN/sherpa-mnn-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/master/tokens.txt",
+      "comments": "Sherpa-MNN流式ASR模型，支持中英文双语识别。/Sherpa-MNN Streaming ASR model with bilingual Chinese-English support."
+    }
+  },
+  "tts": {
+    "bert-vits2-MNN": {
+      "config.json": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/config.json",
+      "configuration.json": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/configuration.json",
+      "tokenizer.txt": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/tokenizer.txt",
+      "tts_generator_w_bert_chenxi_0310_int8.mnn": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/tts_generator_w_bert_chenxi_0310_int8.mnn",
+      "common/mnn_models/chinese_bert.mnn": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/mnn_models/chinese_bert.mnn",
+      "common/mnn_models/chinese_bert.mnn.weight": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/mnn_models/chinese_bert.mnn.weight",
+      "common/mnn_models/english_bert.mnn": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/mnn_models/english_bert.mnn",
+      "common/mnn_models/english_bert.mnn.weight": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/mnn_models/english_bert.mnn.weight",
+      "common/text_processing_jsons/char_state.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/char_state.bin",
+      "common/text_processing_jsons/cn_bert_token.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/cn_bert_token.bin",
+      "common/text_processing_jsons/default_tone_words.json": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/default_tone_words.json",
+      "common/text_processing_jsons/en_bert_token.json": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/en_bert_token.json",
+      "common/text_processing_jsons/eng_dict.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/eng_dict.bin",
+      "common/text_processing_jsons/hotwords_cn.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/hotwords_cn.bin",
+      "common/text_processing_jsons/hotwords_cn.json": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/hotwords_cn.json",
+      "common/text_processing_jsons/phrases_dict.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/phrases_dict.bin",
+      "common/text_processing_jsons/pinyin_dict.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/pinyin_dict.bin",
+      "common/text_processing_jsons/pinyin_to_symbol_map.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/pinyin_to_symbol_map.bin",
+      "common/text_processing_jsons/prob_emit.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/prob_emit.bin",
+      "common/text_processing_jsons/prob_start.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/prob_start.bin",
+      "common/text_processing_jsons/prob_trans.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/prob_trans.bin",
+      "common/text_processing_jsons/tokenizer.txt": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/tokenizer.txt",      
+      "common/text_processing_jsons/word_freq.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/word_freq.bin",
+      "common/text_processing_jsons/word_tag.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/word_tag.bin",
+      "comments": "BERT-VITS2 TTS模型，高质量中文语音合成。/BERT-VITS2 TTS model for high-quality Chinese speech synthesis."
     }
   }
 }

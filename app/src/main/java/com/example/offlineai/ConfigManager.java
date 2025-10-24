@@ -101,6 +101,7 @@ public class ConfigManager {
     public static final String KEY_THREADS = "threads"; // ONNX推理线程数
     // KEY_IMAGE_ENCODING_THREADS已移除（MNN不支持独立配置）
     public static final String KEY_MAX_NEW_TOKENS = "max_new_tokens"; // 最大输出token数
+    public static final String KEY_HISTORY_ROUNDS = "history_rounds"; // 对话历史轮数（滑窗机制，0-20）
     public static final String KEY_KV_CACHE_SIZE = "kv_cache_size"; // 兼容性保留，已废弃，使用max_new_tokens
     // ONNX相关配置项已移除
     
@@ -136,6 +137,13 @@ public class ConfigManager {
     public static final String KEY_DIFFUSION_SEED = "diffusion_seed"; // 随机种子 (-1=随机)
     public static final String KEY_DIFFUSION_SEED_RANDOM = "diffusion_seed_random"; // 是否使用随机种子
     
+    // ASR语音识别配置键
+    public static final String KEY_ASR_MODEL = "asr_model"; // ASR模型选择
+    
+    // TTS语音合成配置键
+    public static final String KEY_TTS_MODEL = "tts_model"; // TTS模型选择
+    public static final String KEY_TTS_DIT_STEPS = "tts_dit_steps"; // DiT步数 (1-10)
+    
     // 语言设置配置键
     public static final String KEY_LANGUAGE = "language"; // 语言设置
     
@@ -160,6 +168,8 @@ public class ConfigManager {
     private static final String SUBDIR_MODELS = "models";
     private static final String SUBDIR_EMBEDDINGS = "embeddings";
     private static final String SUBDIR_RERANKERS = "rerankers";
+    private static final String SUBDIR_ASR = "asr";
+    private static final String SUBDIR_TTS = "tts";
     private static final String SUBDIR_KNOWLEDGE_BASES = "knowledge_bases";
     private static final String SUBDIR_CHAT_HISTORY = "chathistory";
 
@@ -177,6 +187,13 @@ public class ConfigManager {
     public static final int DEFAULT_DIFFUSION_STEPS = 20; // 默认20步（平衡质量和速度）
     public static final int DEFAULT_DIFFUSION_SEED = -1; // -1表示随机
     public static final boolean DEFAULT_DIFFUSION_SEED_RANDOM = true; // 默认使用随机种子
+    
+    // ASR语音识别默认值
+    public static final String DEFAULT_ASR_MODEL = "无"; // 默认无（不使用ASR）
+    
+    // TTS语音合成默认值
+    public static final String DEFAULT_TTS_MODEL = "无"; // 默认无（不使用外挂TTS）
+    public static final int DEFAULT_TTS_DIT_STEPS = 3; // 默认3步（平衡质量和速度）
     
     // LlamaCpp 相关默认值
     public static final String DEFAULT_LLAMACPP_MODEL_PATH = "files/models/llamacpp";
@@ -212,6 +229,9 @@ public class ConfigManager {
     public static final int DEFAULT_MANUAL_TOP_K = 40;
     public static final float DEFAULT_MANUAL_REPEAT_PENALTY = 1.1f;
     public static final int DEFAULT_IMAGE_PREPROCESS_SIZE = IMAGE_SIZE_ORIGINAL; // 图片预处理尺寸默认值（0=MAX模式，让MNN自己处理）
+    public static final int DEFAULT_HISTORY_ROUNDS = 5; // 默认保留5轮对话历史
+    public static final boolean DEFAULT_DEBUG_MODE = false; // 默认关闭调试模式
+    public static final boolean DEFAULT_PRIORITY_MANUAL_PARAMS = false; // 默认不优先使用手动参数
     
     // 语言设置默认值
     public static final String DEFAULT_LANGUAGE = "CHN"; // 默认中文
@@ -1011,6 +1031,24 @@ public class ConfigManager {
     }
 
     /**
+     * 获取ASR模型路径（根目录 + asr）
+     * @param context 上下文
+     * @return ASR模型路径
+     */
+    public static String getAsrModelPath(Context context) {
+        return new File(getDataRootPath(context), SUBDIR_ASR).getAbsolutePath();
+    }
+
+    /**
+     * 获取TTS模型路径（根目录 + tts）
+     * @param context 上下文
+     * @return TTS模型路径
+     */
+    public static String getTtsModelPath(Context context) {
+        return new File(getDataRootPath(context), SUBDIR_TTS).getAbsolutePath();
+    }
+
+    /**
      * 获取最后选择的词嵌入模型
      * @param context 上下文
      * @return 最后选择的词嵌入模型名称
@@ -1294,6 +1332,186 @@ public class ConfigManager {
      */
     public static void setDiffusionSeedRandom(Context context, boolean random) {
         setBoolean(context, KEY_DIFFUSION_SEED_RANDOM, random);
+    }
+    
+    /**
+     * 获取检索数量
+     * @param context 上下文
+     * @return 检索数量
+     */
+    public static int getRetrievalCount(Context context) {
+        return getInt(context, KEY_RETRIEVAL_COUNT, DEFAULT_SEARCH_DEPTH);
+    }
+    
+    /**
+     * 设置检索数量
+     * @param context 上下文
+     * @param count 检索数量
+     */
+    public static void setRetrievalCount(Context context, int count) {
+        setInt(context, KEY_RETRIEVAL_COUNT, count);
+    }
+    
+    /**
+     * 获取当前对话文件夹路径
+     * @param context 上下文
+     * @return 当前对话文件夹路径
+     */
+    public static String getCurrentChatFolder(Context context) {
+        return getString(context, KEY_CURRENT_CHAT_FOLDER, "");
+    }
+    
+    /**
+     * 设置当前对话文件夹路径
+     * @param context 上下文
+     * @param folderPath 对话文件夹路径
+     */
+    public static void setCurrentChatFolder(Context context, String folderPath) {
+        setString(context, KEY_CURRENT_CHAT_FOLDER, folderPath);
+    }
+    
+    /**
+     * 获取语言设置
+     * @param context 上下文
+     * @return 语言设置 (CHN/ENG)
+     */
+    public static String getLanguage(Context context) {
+        return getString(context, KEY_LANGUAGE, DEFAULT_LANGUAGE);
+    }
+    
+    /**
+     * 设置语言设置
+     * @param context 上下文
+     * @param language 语言设置 (CHN/ENG)
+     */
+    public static void setLanguage(Context context, String language) {
+        setString(context, KEY_LANGUAGE, language);
+    }
+    
+    /**
+     * 获取最小分块大小
+     * @param context 上下文
+     * @return 最小分块大小
+     */
+    public static int getMinChunkSize(Context context) {
+        return getInt(context, KEY_MIN_CHUNK_SIZE, DEFAULT_MIN_CHUNK_SIZE);
+    }
+    
+    /**
+     * 设置最小分块大小
+     * @param context 上下文
+     * @param minChunkSize 最小分块大小
+     */
+    public static void setMinChunkSize(Context context, int minChunkSize) {
+        setInt(context, KEY_MIN_CHUNK_SIZE, minChunkSize);
+    }
+    
+    /**
+     * 获取历史对话轮数
+     * @param context 上下文
+     * @return 历史对话轮数
+     */
+    public static int getHistoryRounds(Context context) {
+        return getInt(context, KEY_HISTORY_ROUNDS, DEFAULT_HISTORY_ROUNDS);
+    }
+    
+    /**
+     * 设置历史对话轮数
+     * @param context 上下文
+     * @param rounds 历史对话轮数
+     */
+    public static void setHistoryRounds(Context context, int rounds) {
+        setInt(context, KEY_HISTORY_ROUNDS, rounds);
+    }
+    
+    /**
+     * 获取图片预处理尺寸
+     * @param context 上下文
+     * @return 图片预处理尺寸
+     */
+    public static int getImagePreprocessSize(Context context) {
+        return getInt(context, KEY_IMAGE_PREPROCESS_SIZE, DEFAULT_IMAGE_PREPROCESS_SIZE);
+    }
+    
+    /**
+     * 设置图片预处理尺寸
+     * @param context 上下文
+     * @param size 图片预处理尺寸
+     */
+    public static void setImagePreprocessSize(Context context, int size) {
+        setInt(context, KEY_IMAGE_PREPROCESS_SIZE, size);
+    }
+    
+    /**
+     * 获取TTS Diffusion步数
+     * @param context 上下文
+     * @return TTS Diffusion步数
+     */
+    public static int getTtsDitSteps(Context context) {
+        return getInt(context, KEY_TTS_DIT_STEPS, DEFAULT_TTS_DIT_STEPS);
+    }
+    
+    /**
+     * 设置TTS Diffusion步数
+     * @param context 上下文
+     * @param steps TTS Diffusion步数
+     */
+    public static void setTtsDitSteps(Context context, int steps) {
+        setInt(context, KEY_TTS_DIT_STEPS, steps);
+    }
+    
+    /**
+     * 获取调试模式
+     * @param context 上下文
+     * @return 是否启用调试模式
+     */
+    public static boolean getDebugMode(Context context) {
+        return getBoolean(context, KEY_DEBUG_MODE, DEFAULT_DEBUG_MODE);
+    }
+    
+    /**
+     * 设置调试模式
+     * @param context 上下文
+     * @param enabled 是否启用调试模式
+     */
+    public static void setDebugMode(Context context, boolean enabled) {
+        setBoolean(context, KEY_DEBUG_MODE, enabled);
+    }
+    
+    /**
+     * 获取是否优先使用手动参数
+     * @param context 上下文
+     * @return 是否优先使用手动参数
+     */
+    public static boolean getPriorityManualParams(Context context) {
+        return getBoolean(context, KEY_PRIORITY_MANUAL_PARAMS, DEFAULT_PRIORITY_MANUAL_PARAMS);
+    }
+    
+    /**
+     * 设置是否优先使用手动参数
+     * @param context 上下文
+     * @param priority 是否优先使用手动参数
+     */
+    public static void setPriorityManualParams(Context context, boolean priority) {
+        setBoolean(context, KEY_PRIORITY_MANUAL_PARAMS, priority);
+    }
+    
+    /**
+     * 获取手动Top-K值
+     * @param context 上下文
+     * @return 手动Top-K值
+     */
+    public static int getManualTopK(Context context) {
+        return getInt(context, KEY_MANUAL_TOP_K, DEFAULT_MANUAL_TOP_K);
+    }
+    
+    /**
+     * 设置手动Top-K值
+     * @param context 上下文
+     * @param topK 手动Top-K值
+     */
+    public static void setManualTopK(Context context, int topK) {
+        setInt(context, KEY_MANUAL_TOP_K, topK);
     }
     
     /**
@@ -1753,6 +1971,15 @@ public class ConfigManager {
     }
 
     /**
+     * 获取是否启用JSON训练集分块优化（别名方法，保持API一致性）
+     * @param context 上下文
+     * @return 是否启用
+     */
+    public static boolean getJsonDatasetSplittingEnabled(Context context) {
+        return isJsonDatasetSplittingEnabled(context);
+    }
+    
+    /**
      * 设置是否启用JSON训练集分块优化
      * @param context 上下文
      * @param enabled 是否启用
@@ -1777,24 +2004,6 @@ public class ConfigManager {
      */
     public static void setGlobalTextSize(Context context, float size) {
         setFloat(context, KEY_GLOBAL_TEXT_SIZE, size);
-    }
-
-    /**
-     * 获取最小分块限制
-     * @param context 上下文
-     * @return 最小分块限制
-     */
-    public static int getMinChunkSize(Context context) {
-        return getInt(context, KEY_MIN_CHUNK_SIZE, DEFAULT_MIN_CHUNK_SIZE);
-    }
-
-    /**
-     * 设置最小分块限制
-     * @param context 上下文
-     * @param minChunkSize 最小分块限制
-     */
-    public static void setMinChunkSize(Context context, int minChunkSize) {
-        setInt(context, KEY_MIN_CHUNK_SIZE, minChunkSize);
     }
 
     /**
@@ -1852,24 +2061,6 @@ public class ConfigManager {
     }
 
     /**
-     * 获取手动Top-K参数
-     * @param context 上下文
-     * @return 手动Top-K参数
-     */
-    public static int getManualTopK(Context context) {
-        return getInt(context, KEY_MANUAL_TOP_K, DEFAULT_MANUAL_TOP_K);
-    }
-
-    /**
-     * 设置手动Top-K参数
-     * @param context 上下文
-     * @param topK Top-K参数
-     */
-    public static void setManualTopK(Context context, int topK) {
-        setInt(context, KEY_MANUAL_TOP_K, topK);
-    }
-
-    /**
      * 获取手动重复惩罚参数
      * @param context 上下文
      * @return 手动重复惩罚参数
@@ -1885,42 +2076,6 @@ public class ConfigManager {
      */
     public static void setManualRepeatPenalty(Context context, float repeatPenalty) {
         setFloat(context, KEY_MANUAL_REPEAT_PENALTY, repeatPenalty);
-    }
-
-    /**
-     * 获取优先手动参数开关状态
-     * @param context Context
-     * @return 优先手动参数开关状态
-     */
-    public static boolean getPriorityManualParams(Context context) {
-        return getBoolean(context, KEY_PRIORITY_MANUAL_PARAMS, false);
-    }
-
-    /**
-     * 设置优先手动参数开关状态
-     * @param context Context
-     * @param priorityManualParams 优先手动参数开关状态
-     */
-    public static void setPriorityManualParams(Context context, boolean priorityManualParams) {
-        setBoolean(context, KEY_PRIORITY_MANUAL_PARAMS, priorityManualParams);
-    }
-
-    /**
-     * 获取图片预处理尺寸
-     * @param context Context
-     * @return 图片预处理尺寸
-     */
-    public static int getImagePreprocessSize(Context context) {
-        return getInt(context, KEY_IMAGE_PREPROCESS_SIZE, DEFAULT_IMAGE_PREPROCESS_SIZE);
-    }
-
-    /**
-     * 设置图片预处理尺寸
-     * @param context Context
-     * @param size 图片预处理尺寸
-     */
-    public static void setImagePreprocessSize(Context context, int size) {
-        setInt(context, KEY_IMAGE_PREPROCESS_SIZE, size);
     }
 
     /**

@@ -3,12 +3,16 @@ package com.example.offlineai.api;
 import android.content.Context;
 import android.util.Log;
 
+import com.example.offlineai.ChatHistoryFilter;
+import com.example.offlineai.ChatHistoryManager;
 import com.example.offlineai.ConfigManager;
 import com.example.offlineai.LogManager;
 import com.example.offlineai.SettingsFragment;
+import com.example.offlineai.chat.model.ChatDataItem;
 import com.offlineai.mnn.MnnInference;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -87,6 +91,11 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private LocalLlmHandler.InferenceParams currentParams;
     private LocalLlmHandler.InferenceParams modelFileParams; // Parameters from model config.json
     private String currentModelPath;
+    
+    // TTS (Text-to-Speech) support
+    private boolean hasTtsSupport = false;
+    private String currentAudioOutputPath = null;
+    private java.io.ByteArrayOutputStream ttsAudioBuffer = null;
     
     /**
      * Constructor
@@ -170,20 +179,25 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         LogManager.logI(TAG, "Checking LLM required files:");
         LogManager.logI(TAG, "  config.json: " + (configFile.exists() ? "✓ " + configFile.length() + " bytes" : "✗ NOT FOUND"));
         LogManager.logI(TAG, "  llm.mnn: " + (llmFile.exists() ? "✓ " + llmFile.length() + " bytes" : "✗ NOT FOUND"));
-        LogManager.logI(TAG, "  llm.mnn.weight: " + (weightFile.exists() ? "✓ " + weightFile.length() + " bytes" : "✗ NOT FOUND"));
+        LogManager.logI(TAG, "  llm.mnn.weight: " + (weightFile.exists() ? "✓ " + weightFile.length() + " bytes" : "✗ NOT FOUND (may be embedded)"));
         LogManager.logI(TAG, "  tokenizer.txt: " + (tokenizerFile.exists() ? "✓ " + tokenizerFile.length() + " bytes" : "✗ NOT FOUND"));
         
+        // Check for required core files
         if (!configFile.exists()) {
             throw new Exception("config.json not found in model directory");
         }
         if (!llmFile.exists()) {
             throw new Exception("llm.mnn not found in model directory");
         }
-        if (!weightFile.exists()) {
-            throw new Exception("llm.mnn.weight not found in model directory");
-        }
         if (!tokenizerFile.exists()) {
             throw new Exception("tokenizer.txt not found in model directory");
+        }
+        
+        // Weight file is optional - can be embedded in llm.mnn
+        if (!weightFile.exists()) {
+            LogManager.logI(TAG, "llm.mnn.weight not found - assuming weights are embedded in llm.mnn (compact format)");
+        } else {
+            LogManager.logI(TAG, "llm.mnn.weight found - using traditional external weight format");
         }
         
         // Read model config.json to get default parameters
@@ -193,14 +207,23 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         String mnnConfig = buildMnnConfig(null);
         LogManager.logI(TAG, "MNN Config: " + mnnConfig);
         
-        // Create MNN session
+        // Create MNN session - MNN backend will handle both embedded and external weights
         llmSessionHandle = MnnInference.createSession(modelPath, mnnConfig);
         
         if (llmSessionHandle == 0) {
-            throw new Exception("Failed to create MNN LLM session");
+            throw new Exception("Failed to create MNN LLM session - check if model format is compatible");
         }
         
         LogManager.logI(TAG, "MNN LLM session created successfully: " + llmSessionHandle);
+        
+        // Detect TTS support and setup callback
+        hasTtsSupport = MnnInference.hasTTS(llmSessionHandle);
+        if (hasTtsSupport) {
+            LogManager.logI(TAG, "✅ Model supports TTS (Text-to-Speech)");
+            // Note: TTS output path is set per-inference in inferenceLLM()
+        } else {
+            LogManager.logI(TAG, "ℹ️ Model does not support TTS");
+        }
     }
     
     /**
@@ -390,10 +413,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     /**
-     * Full multimodal inference with image and audio support
-     * @param prompt Text prompt
-     * @param imagePaths Image file paths
-     * @param audioPaths Audio file paths
+     * Inference with conversation history (sliding window)
+     * Automatically loads and filters markdown history
+     * @param userPrompt Current user prompt
      * @param params Inference parameters
      * @param callback Streaming callback
      */
@@ -424,11 +446,253 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     /**
+     * Inference with conversation history (sliding window)
+     * Automatically loads and filters markdown history
+     * @param userPrompt Current user prompt (text only)
+     * @param imagePaths Current round image paths (will be added as <img> tags)
+     * @param audioPaths Current round audio paths (will be added as <audio> tags)
+     * @param params Inference parameters
+     * @param callback Streaming callback
+     */
+    public void inferenceWithConversationHistory(String userPrompt,
+                                                  List<String> imagePaths,
+                                                  List<String> audioPaths,
+                                                  LocalLlmHandler.InferenceParams params,
+                                                  LocalLlmHandler.StreamingCallback callback) {
+        if (!isInitialized.get()) {
+            LogManager.logE(TAG, "Handler not initialized");
+            if (callback != null) {
+                callback.onError("Handler not initialized");
+            }
+            return;
+        }
+        
+        if (isGenerating.get()) {
+            LogManager.logW(TAG, "Inference already in progress");
+            if (callback != null) {
+                callback.onError("Inference already in progress");
+            }
+            return;
+        }
+        
+        if (currentModelType != ModelType.LLM) {
+            // Diffusion/other models don't use history, fallback to normal inference
+            LogManager.logI(TAG, "[HISTORY] Model type " + currentModelType + " doesn't support history, using normal inference");
+            inference(userPrompt, imagePaths, params, callback);
+            return;
+        }
+        
+        try {
+            // Get history rounds from config
+            int historyRounds = ConfigManager.getInt(context, ConfigManager.KEY_HISTORY_ROUNDS, 5);
+            LogManager.logI(TAG, "[HISTORY] Starting inference with " + historyRounds + " rounds of history");
+            
+            // Load current chat history from markdown
+            String chatFolder = ConfigManager.getString(context, ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            List<ChatDataItem> allMessages = new ArrayList<>();
+            if (!chatFolder.isEmpty()) {
+                allMessages = ChatHistoryManager.loadConversation(context, chatFolder);
+                if (allMessages == null) {
+                    allMessages = new ArrayList<>();
+                }
+            }
+            LogManager.logI(TAG, "[HISTORY] Loaded " + allMessages.size() + " messages from markdown");
+            
+            // Get system prompt from config or params
+            String systemPrompt = "";
+            if (params != null && params.systemPrompt != null && !params.systemPrompt.isEmpty()) {
+                systemPrompt = params.systemPrompt;
+            } else {
+                systemPrompt = ConfigManager.getString(context, ConfigManager.KEY_SYSTEM_PROMPT, "");
+            }
+            
+            // Build filtered history using ChatHistoryFilter (removes <img>/<audio> from history)
+            List<ChatHistoryFilter.PromptItem> history = ChatHistoryFilter.buildHistoryForInference(
+                context, allMessages, systemPrompt, historyRounds);
+            
+            LogManager.logI(TAG, "[HISTORY] Built history with " + history.size() + " items (excluding current)");
+            
+            // Build full prompt with history in ChatML format
+            StringBuilder fullPrompt = new StringBuilder();
+            
+            // Add history messages
+            for (ChatHistoryFilter.PromptItem item : history) {
+                if ("system".equals(item.role)) {
+                    fullPrompt.append("<|im_start|>system\\n").append(item.content).append("<|im_end|>\\n");
+                } else if ("user".equals(item.role)) {
+                    fullPrompt.append("<|im_start|>user\\n").append(item.content).append("<|im_end|>\\n");
+                } else if ("assistant".equals(item.role)) {
+                    fullPrompt.append("<|im_start|>assistant\\n").append(item.content).append("<|im_end|>\\n");
+                }
+            }
+            
+            // Add current user message with <img>/<audio> tags
+            fullPrompt.append("<|im_start|>user\\n");
+            
+            // Add image tags for current round
+            if (imagePaths != null && !imagePaths.isEmpty()) {
+                for (String imagePath : imagePaths) {
+                    fullPrompt.append("<img>").append(imagePath).append("</img>");
+                }
+            }
+            
+            // Add audio tags for current round
+            if (audioPaths != null && !audioPaths.isEmpty()) {
+                for (String audioPath : audioPaths) {
+                    fullPrompt.append("<audio>").append(audioPath).append("</audio>");
+                }
+            }
+            
+            // Add user text
+            fullPrompt.append(userPrompt).append("<|im_end|>\\n");
+            fullPrompt.append("<|im_start|>assistant\\n");
+            
+            String finalPrompt = fullPrompt.toString();
+            LogManager.logI(TAG, "[HISTORY] Built full prompt with history, length=" + finalPrompt.length());
+            
+            // DEBUG: Print full prompt to see what's actually sent to MNN
+            LogManager.logI(TAG, "[HISTORY][DEBUG] ========== FULL PROMPT START ==========");
+            LogManager.logI(TAG, "[HISTORY][DEBUG] " + finalPrompt);
+            LogManager.logI(TAG, "[HISTORY][DEBUG] ========== FULL PROMPT END ==========");
+            
+            // Use MNN.inference with full prompt (MNN will parse <img>/<audio> tags)
+            performSimpleInference(finalPrompt, params, callback);
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[HISTORY] Error building history: " + e.getMessage(), e);
+            if (callback != null) {
+                callback.onError("Failed to build history: " + e.getMessage());
+            }
+        }
+    }
+    
+    /**
+     * Internal method to perform simple text inference (prompt already contains <img>/<audio> tags)
+     */
+    private void performSimpleInference(String prompt,
+                                        LocalLlmHandler.InferenceParams params,
+                                        LocalLlmHandler.StreamingCallback callback) {
+        isGenerating.set(true);
+        shouldStop.set(false);
+        fullResponseBuilder.setLength(0);
+        generationStartTime = System.currentTimeMillis();
+        inferenceStartTime = System.currentTimeMillis();
+        
+        currentTask = executorService.submit(() -> {
+            try {
+                // Set TTS output path if supported
+                if (hasTtsSupport && params != null && params.ttsOutputPath != null) {
+                    MnnInference.setTtsOutputPath(llmSessionHandle, params.ttsOutputPath);
+                    LogManager.logI(TAG, "[TTS] Output path set for inference: " + params.ttsOutputPath);
+                }
+                
+                // Use original inference API with full prompt (includes <img>/<audio> tags)
+                // MNN will parse tags from prompt automatically
+                Map<String, Long> stats = MnnInference.inference(
+                    llmSessionHandle,
+                    prompt,
+                    new MnnInference.InferenceCallback() {
+                        @Override
+                        public boolean onToken(String token) {
+                            if (shouldStop.get()) {
+                                return true;
+                            }
+                            
+                            fullResponseBuilder.append(token);
+                            currentSessionTokens.incrementAndGet();
+                            totalTokensGenerated.incrementAndGet();
+                            
+                            if (callback != null) {
+                                callback.onToken(token);
+                            }
+                            
+                            return false;
+                        }
+                        
+                        @Override
+                        public void onComplete(Map<String, Long> statistics) {
+                            long endTime = System.currentTimeMillis();
+                            long totalTime = endTime - generationStartTime;
+                            
+                            if (statistics != null) {
+                                promptTokens = statistics.getOrDefault("prompt_len", 0L);
+                                generatedTokens = statistics.getOrDefault("decode_len", 0L);
+                                prefillTimeUs = statistics.getOrDefault("prefill_time", 0L);
+                                decodeTimeUs = statistics.getOrDefault("decode_time", 0L);
+                            }
+                            
+                            LogManager.logI(TAG, "[HISTORY] Inference complete: " + generatedTokens + " tokens in " + totalTime + "ms");
+                            
+                            isGenerating.set(false);
+                            
+                            if (callback != null) {
+                                String perfStats = getPerformanceStats();
+                                callback.onToken(perfStats);
+                                callback.onComplete(fullResponseBuilder.toString() + perfStats);
+                            }
+                        }
+                        
+                        @Override
+                        public void onError(String error) {
+                            LogManager.logE(TAG, "[HISTORY] Inference error: " + error);
+                            isGenerating.set(false);
+                            
+                            if (callback != null) {
+                                callback.onError(error);
+                            }
+                        }
+                    }
+                );
+                
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[HISTORY] Exception during inference: " + e.getMessage(), e);
+                isGenerating.set(false);
+                
+                if (callback != null) {
+                    callback.onError("Inference failed: " + e.getMessage());
+                }
+            }
+        });
+    }
+    
+    /**
      * LLM text generation inference with full multimodal support
      */
     private void inferenceLLM(String prompt, List<String> imagePaths, List<String> audioPaths,
                              LocalLlmHandler.InferenceParams params,
                              LocalLlmHandler.StreamingCallback callback) {
+        // Set TTS output path if supported (same as Diffusion: save to chat folder)
+        if (hasTtsSupport) {
+            try {
+                // Get current chat folder (same as Diffusion)
+                String chatFolderPath = ConfigManager.getString(context, 
+                    ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                
+                if (chatFolderPath != null && !chatFolderPath.isEmpty()) {
+                    File chatFolder = new File(chatFolderPath);
+                    if (chatFolder.exists() && chatFolder.isDirectory() && chatFolder.canWrite()) {
+                        // Save to chat history folder, like Diffusion images
+                        long timestamp = System.currentTimeMillis();
+                        currentAudioOutputPath = new File(chatFolder, "audio_" + timestamp + "_ai.wav").getAbsolutePath();
+                        MnnInference.setTtsOutputPath(llmSessionHandle, currentAudioOutputPath);
+                        LogManager.logI(TAG, "[TTS] Output path set (chat folder): " + currentAudioOutputPath);
+                    } else {
+                        LogManager.logW(TAG, "[TTS] Chat folder not writable: " + chatFolderPath);
+                        MnnInference.setTtsOutputPath(llmSessionHandle, null);
+                        currentAudioOutputPath = null;
+                    }
+                } else {
+                    LogManager.logW(TAG, "[TTS] No chat folder set, TTS disabled for this inference");
+                    MnnInference.setTtsOutputPath(llmSessionHandle, null);
+                    currentAudioOutputPath = null;
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TTS] Failed to set output path", e);
+                MnnInference.setTtsOutputPath(llmSessionHandle, null);
+                currentAudioOutputPath = null;
+            }
+        }
+        
         // Reset stop flag and response builder
         shouldStop.set(false);
         isGenerating.set(true);
@@ -507,6 +771,21 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                             decodeTimeUs / 1000.0, decodeSpeed,
                             elapsedMs
                         ));
+                        
+                        // Check TTS audio generation (like Diffusion image)
+                        if (hasTtsSupport && currentAudioOutputPath != null) {
+                            File audioFile = new File(currentAudioOutputPath);
+                            if (audioFile.exists() && audioFile.length() > 0) {
+                                LogManager.logI(TAG, "[TTS] Audio file generated: " + currentAudioOutputPath + 
+                                              " (" + audioFile.length() + " bytes)");
+                                // Send audio path marker (like [IMAGE:] for Diffusion)
+                                if (callback != null) {
+                                    callback.onToken("\n\n[AUDIO:" + currentAudioOutputPath + "]");
+                                }
+                            } else {
+                                LogManager.logW(TAG, "[TTS] Audio file not generated or empty");
+                            }
+                        }
                         
                         // Generate and append performance stats
                         String perfStats = getPerformanceStats();
@@ -691,8 +970,13 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         LogManager.logI(TAG, String.format("🔍 Backend resolution: requested=%s, resolved=%s", 
             backendPreference, mnnBackend));
         
-        // Fixed chunk size for balanced memory and performance
-        final int CHUNK_SIZE = 256;
+        // CRITICAL: Do NOT set chunk size (keep default 0 = no chunking)
+        // Reason: Setting chunk > 0 causes vision_pad tokens to be split across chunks,
+        // which triggers multiple embedding() calls. After first embedding(), MNN clears
+        // mVisionEmbeddings, causing SIGBUS crash on second embedding() call.
+        // ChatMNN also uses default (no chunk) to avoid this issue.
+        // Reference: libs/mnn/transformers/llm/engine/src/llm.cpp Line 708
+        final int CHUNK_SIZE = 0;  // 0 = no chunking (MNN default behavior)
         
         // KV Cache size limit calculation
         // -1 = unlimited (recommended for best performance)
@@ -718,9 +1002,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             .power("high")     // Hardcoded: use big cores for performance
             .maxAllTokens(maxSeqLength)  // CRITICAL: Total context window (input + output)
             .maxNewTokens(maxNewTokens)  // Single response generation limit
-            .chunk(CHUNK_SIZE)         // Fixed chunk size for prefill stage
+            // .chunk() NOT called - use MNN default (0 = no chunking) to avoid vision_pad split
             .kvcacheLimit(kvcacheLimitBytes)   // CRITICAL: -1 = unlimited, or bytes limit per layer
-            .reuseKv(true)     // Enable KV cache reuse for multi-turn
+            .reuseKv(false)    // CRITICAL: Disable KV cache reuse (like ChatMNN)
             //.useMmap(true)     // Use mmap for model weights, bug here, android do not open
             .kvcacheMmap(false); // CRITICAL: Disable KV cache mmap to avoid /tmp crash on Android
         
@@ -732,46 +1016,65 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             LogManager.logI(TAG, "🎤 Audio support enabled: audio_model=audio.mnn, audio_pad=151666");
         }
         
+        // Check if TTS (Talker) is supported
+        File talkerModel = new File(currentModelPath, "talker.mnn");
+        boolean hasTtsSupport = talkerModel.exists();
+        if (hasTtsSupport) {
+            // TTS configuration (via set_config, like temperature/topK)
+            // Reference: libs/mnn/docs/transformers/llm.md Line 433-437
+            // Note: talker_max_new_tokens NOT set - use model default (2048 for Qwen2.5-Omni)
+            // Note: talker_speaker NOT set - model-specific (Qwen2.5-Omni: "Chelsie"/"Ethan"), use model default
+            builder.ditSteps(3);     // Diffusion steps: 3 (balance quality/speed, 2=noisy, 5=slow)
+            builder.ditSolver(1);    // 1=Euler (fast), 4=RK4 (4x slower but better)
+            LogManager.logI(TAG, "🔊 TTS config: dit_steps=3, dit_solver=1 (max_tokens/speaker: model default)");
+        }
+        
         // Add temp path for weight mmap (not for kvcache)
         // Reference: libs/mnn/apps/Android/MnnLlmChat/app/src/main/cpp/llm_session.cpp
         File cacheDir = context.getCacheDir();
         builder.tmpPath(cacheDir.getAbsolutePath());
         
-        // Parameter priority: runtime params > ConfigManager > model config.json
-        float temperature;
-        float topP;
-        int topK;
+        // Parameter priority logic:
+        // 1. If priorityManual=true (手动参数优先): use manual params from ConfigManager
+        // 2. If priorityManual=false (非手动参数优先): do NOT set params, let MNN read model config.json
+        // Note: params!=null means buildParamsFromConfig() was called, but we must check priorityManual flag
         
-        if (params != null) {
-            // Use runtime parameters (highest priority)
-            temperature = params.getTemperature();
-            topP = params.getTopP();
-            topK = params.getTopK();
-            LogManager.logI(TAG, "Using runtime inference parameters");
-        } else if (modelFileParams != null) {
-            // Use model config.json parameters
-            temperature = modelFileParams.getTemperature();
-            topP = modelFileParams.getTopP();
-            topK = modelFileParams.getTopK();
-            LogManager.logI(TAG, "Using model config.json parameters");
+        boolean priorityManual = ConfigManager.getPriorityManualParams(context);
+        
+        if (priorityManual && params != null) {
+            // 手动参数优先模式：设置runtime parameters（覆盖模型config.json）
+            float temperature = params.getTemperature();
+            float topP = params.getTopP();
+            int topK = params.getTopK();
+            float repeatPenalty = params.getRepetitionPenalty();
+            
+            builder.temperature(temperature)
+                   .topP(topP)
+                   .topK(topK);
+            
+            LogManager.logI(TAG, String.format(
+                "Using manual params (priority) - temp=%.2f, top_p=%.2f, top_k=%d, repeat_penalty=%.2f",
+                temperature, topP, topK, repeatPenalty));
+            
+            // Note: MNN does not support repeat_penalty in ConfigBuilder, ignored for now
         } else {
-            // Use defaults
-            temperature = 0.7f;
-            topP = 0.9f;
-            topK = 40;
-            LogManager.logI(TAG, "Using default parameters");
+            // 非手动参数优先模式：不设置采样参数，让MNN读取模型config.json
+            LogManager.logI(TAG, "Using model config.json parameters (not setting runtime params)");
         }
-        
-        builder.temperature(temperature)
-               .topP(topP)
-               .topK(topK);
         
         String config = builder.build();
         
         String kvLimitStr = (KV_CACHE_LIMIT_MB == -1) ? "unlimited" : KV_CACHE_LIMIT_MB + "MB/layer";
-        LogManager.logI(TAG, String.format(
-            "Built MNN config - Backend: %s, Threads: %d, MaxAllTokens: %d, MaxNewTokens: %d, Chunk: %d, KVLimit: %s, temp=%.2f, top_p=%.2f, top_k=%d",
-            mnnBackend, threads, maxSeqLength, maxNewTokens, CHUNK_SIZE, kvLimitStr, temperature, topP, topK));
+        
+        if (priorityManual && params != null) {
+            LogManager.logI(TAG, String.format(
+                "Built MNN config - Backend: %s, Threads: %d, MaxAllTokens: %d, MaxNewTokens: %d, Chunk: %d, KVLimit: %s, SamplingParams: manual_priority",
+                mnnBackend, threads, maxSeqLength, maxNewTokens, CHUNK_SIZE, kvLimitStr));
+        } else {
+            LogManager.logI(TAG, String.format(
+                "Built MNN config - Backend: %s, Threads: %d, MaxAllTokens: %d, MaxNewTokens: %d, Chunk: %d, KVLimit: %s, SamplingParams: model_default",
+                mnnBackend, threads, maxSeqLength, maxNewTokens, CHUNK_SIZE, kvLimitStr));
+        }
         
         return config;
     }
@@ -1208,6 +1511,42 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         LogManager.logI(TAG, String.format("🎯 Backend mapping: '%s' -> MNN ForwardType %d (NO FALLBACK)", 
             backendPreference, forwardType));
         return forwardType;
+    }
+    
+    // ========== TTS (Text-to-Speech) Implementation ==========
+    
+    // ========== Deprecated TTS Callback Code (replaced by C++ synchronous file writing) ==========
+    // All TTS file writing is now done in C++ layer (mnn_jni.cpp::writeWavFile)
+    // like Diffusion does for images - synchronous and reliable
+    
+    /**
+     * Get TTS audio output path from last inference (if available)
+     * File is written synchronously by C++ layer, like Diffusion images
+     * @return Audio file path or null
+     */
+    public String getTtsAudioOutputPath() {
+        // Get path from C++ layer (returns path only if file was successfully written)
+        String cppPath = MnnInference.getTtsOutputPath(llmSessionHandle);
+        if (cppPath != null) {
+            // Verify file exists
+            File audioFile = new File(cppPath);
+            if (audioFile.exists() && audioFile.length() > 0) {
+                LogManager.logI(TAG, "[TTS] Verified audio file: " + cppPath + " (" + audioFile.length() + " bytes)");
+                return cppPath;
+            } else {
+                LogManager.logW(TAG, "[TTS] File not found or empty: " + cppPath);
+                return null;
+            }
+        }
+        return null;
+    }
+    
+    /**
+     * Check if handler supports TTS
+     * @return true if TTS is supported
+     */
+    public boolean hasTtsSupport() {
+        return hasTtsSupport;
     }
     
     @Override

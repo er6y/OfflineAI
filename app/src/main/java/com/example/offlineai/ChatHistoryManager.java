@@ -256,6 +256,21 @@ public class ChatHistoryManager {
                 }
             }
             
+            // 添加TTS音频（如果有）- 使用和用户音频相同的格式
+            if (item.audioUri != null) {
+                String audioPath = item.audioUri.getPath();
+                if (!TextUtils.isEmpty(audioPath)) {
+                    File audioFile = new File(audioPath);
+                    // 使用和用户音频相同的markdown格式（便于UI识别）
+                    markdown.append("🎙️ [音频: ").append(audioFile.getName());
+                    if (item.getAudioDuration() > 0) {
+                        markdown.append(String.format(" (%.1fs)", item.getAudioDuration()));
+                    }
+                    markdown.append("](").append(audioFile.getName()).append(")\n\n");
+                    LogManager.logD(TAG, "AI audio reference added: " + audioFile.getName());
+                }
+            }
+            
             // 添加性能信息（如果有）
             if (!TextUtils.isEmpty(item.getPerformanceText())) {
                 markdown.append("<performance>\n");
@@ -502,6 +517,33 @@ public class ChatHistoryManager {
                         String beforeImg = bodyContent.substring(0, imgStart).trim();
                         String afterImg = bodyContent.substring(imgEnd + 1).trim();
                         bodyContent = (beforeImg + "\n" + afterImg).trim();
+                    }
+                }
+                
+                // 提取TTS音频（如果有）- 使用统一格式：🎙️ [音频: filename](filename)
+                if (bodyContent.contains("🎙️ [音频:")) {
+                    int audioStart = bodyContent.indexOf("🎙️ [音频:");
+                    int linkStart = bodyContent.indexOf("](", audioStart);
+                    int linkEnd = bodyContent.indexOf(")", linkStart);
+                    if (linkEnd > linkStart && linkStart > audioStart) {
+                        String audioFileName = bodyContent.substring(linkStart + 2, linkEnd);
+                        File audioFile = new File(folderPath, audioFileName);
+                        
+                        LogManager.logD(TAG, "[AI_AUDIO_LOAD] Parsing AI audio: fileName=" + audioFileName + 
+                                          ", folderPath=" + folderPath + ", exists=" + audioFile.exists());
+                        
+                        if (audioFile.exists()) {
+                            item.audioUri = Uri.fromFile(audioFile);
+                            item.setHasOmniAudio(true);  // CRITICAL: Must set flag to show AI audio player
+                            LogManager.logI(TAG, "[AI_AUDIO_LOAD] ✅ AI audio loaded: hasOmniAudio=true, uri=" + audioFile.getAbsolutePath());
+                        } else {
+                            LogManager.logW(TAG, "[AI_AUDIO_LOAD] ❌ AI audio file not found: " + audioFile.getAbsolutePath());
+                        }
+                        
+                        // 移除音频markdown语法，获取纯文本
+                        String beforeAudio = bodyContent.substring(0, audioStart).trim();
+                        String afterAudio = bodyContent.substring(linkEnd + 1).trim();
+                        bodyContent = (beforeAudio + "\n" + afterAudio).trim();
                     }
                 }
                 

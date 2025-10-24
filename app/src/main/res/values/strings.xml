@@ -410,6 +410,8 @@
     <string name="title_embedding_model_list">嵌入模型列表</string>
     <string name="title_reranker_model_list">重排模型列表</string>
     <string name="title_llm_list">LLM列表</string>
+    <string name="title_asr_list">ASR模型列表</string>
+    <string name="title_tts_list">TTS模型列表</string>
     <string name="title_download_progress">下载进度</string>
     <string name="text_waiting_download">等待下载...</string>
     <string name="button_download_selected_models">下载选中的模型</string>
@@ -481,6 +483,7 @@
     <string name="log_download_failed">下载失败</string>
     <string name="log_download_completed">下载完成</string>
     <string name="log_file_already_complete">文件已存在且完整</string>
+    <string name="log_failed_to_create_dir">创建目录失败</string>
     <string name="log_download_failed_http_code">下载失败，HTTP响应码</string>
     <string name="log_start_download_file_size">开始下载，文件大小</string>
     <string name="log_download_was_interrupted">下载已被中断</string>
@@ -1082,4 +1085,25 @@
     <string name="audio_playback">播放音频</string>
     <string name="audio_pause">暂停</string>
     <string name="audio_playing">播放中</string>
+
+    <!-- 历史控制相关 -->
+    <string name="settings_history_control">历史控制</string>
+    <string name="settings_history_rounds">历史轮数\n(0~20)</string>
+    <string name="settings_history_rounds_value">%d 轮</string>
+    <string name="settings_history_rounds_summary">控制上下文历史的轮数（0-20），0表示无历史</string>
+    
+    <!-- ASR语音识别设置 -->
+    <string name="settings_asr_title">ASR (语音识别)</string>
+    <string name="settings_asr_model">ASR 模型</string>
+    <string name="settings_asr_model_none">无</string>
+    <string name="settings_asr_model_summary">选择语音识别模型，无表示不使用ASR</string>
+    
+    <!-- TTS语音合成设置 -->
+    <string name="settings_tts_title">TTS (语音合成)</string>
+    <string name="settings_tts_model">TTS 模型</string>
+    <string name="settings_tts_model_none">无</string>
+    <string name="settings_tts_model_summary">选择语音合成模型，无表示不使用外挂TTS</string>
+    <string name="settings_tts_dit_steps">DiT 步数\n(1~10)</string>
+    <string name="settings_tts_dit_steps_value">%d 步</string>
+    <string name="settings_tts_dit_steps_summary">DiT扩散步数，值越大质量越好但速度越慢</string>
 </resources>

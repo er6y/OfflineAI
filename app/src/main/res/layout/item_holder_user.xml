@@ -42,7 +42,7 @@
         android:layout_marginTop="@dimen/space5"
         android:visibility="gone"
         tools:visibility="visible"
-        android:background="@drawable/bg_chat_user"
+        android:background="@drawable/bg_audio_user"
         >
         <ImageView
             android:id="@+id/iv_audio_play_pause"

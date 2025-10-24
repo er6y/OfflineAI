@@ -2318,8 +2318,41 @@ public class RagQaFragment extends Fragment {
                         return;
                     }
                     
-                    // Perform final Markdown rendering in UI thread
+                    // Perform final Markdown rendering and TTS audio setup in UI thread
                     mainHandler.post(() -> {
+                        // Check for TTS audio output (local model only)
+                        String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
+                        String currentApiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrlDisplay);
+                        if (AppConstants.ApiUrl.LOCAL.equals(currentApiUrl)) {
+                            try {
+                                com.example.offlineai.api.LocalLlmAdapter localAdapter = 
+                                    com.example.offlineai.api.LocalLlmAdapter.getInstance(requireContext());
+                                String ttsAudioPath = localAdapter.getLastTtsAudioPath();
+                                if (ttsAudioPath != null && !chatMessages.isEmpty()) {
+                                    // Verify file exists before setting
+                                    java.io.File audioFile = new java.io.File(ttsAudioPath);
+                                    if (audioFile.exists()) {
+                                        ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
+                                        if (lastMsg.getType() == ChatViewHolders.ASSISTANT) {
+                                            lastMsg.audioUri = android.net.Uri.fromFile(audioFile);
+                                            lastMsg.setHasOmniAudio(true);
+                                            LogManager.logI(TAG, "[TTS] Set audio URI to assistant message: " + ttsAudioPath);
+                                            // Notify adapter to update the item (safe in UI thread)
+                                            if (chatAdapter != null) {
+                                                chatAdapter.notifyItemChanged(chatMessages.size() - 1);
+                                            }
+                                        }
+                                    } else {
+                                        LogManager.logW(TAG, "[TTS] Audio file not found: " + ttsAudioPath);
+                                    }
+                                    // Clear it for next inference
+                                    localAdapter.clearLastTtsAudioPath();
+                                }
+                            } catch (Exception e) {
+                                LogManager.logE(TAG, "[TTS] Error setting TTS audio to message", e);
+                            }
+                        }
+                        
                         try {
                             // Check Fragment state again
                             if (getActivity() == null || !isAdded() || isDetached() || getView() == null) {
@@ -2677,9 +2710,11 @@ public class RagQaFragment extends Fragment {
             
             // Create LlmApiAdapter instance and call API
             // imagePaths is passed from method parameter (prepared by caller)
+            // audioPaths: Currently audio is embedded in prompt as <audio>path</audio> tags, not passed separately
+            // TODO: Extract audio paths from prompt and pass as separate parameter for better history support
             // JNI will: 1) Load model 2) Check multimodal support 3) Compress to correct size 4) Use or ignore images
             com.example.offlineai.api.LlmApiAdapter apiAdapter = new com.example.offlineai.api.LlmApiAdapter(context);
-            apiAdapter.callLlmApi(apiUrl, apiKey, model, prompt, imagePaths, callback);
+            apiAdapter.callLlmApi(apiUrl, apiKey, model, prompt, imagePaths, null, callback);
             
         } catch (Exception e) {
             LogManager.logE(TAG, "Failed to call LLM API", e);
@@ -4913,6 +4948,20 @@ public class RagQaFragment extends Fragment {
                     // Remove marker from text
                     newText = newText.substring(0, startIdx) + newText.substring(endIdx + 1);
                     LogManager.logI(TAG, "Image marker detected, path: " + imagePath);
+                }
+            }
+            
+            // Check for audio marker [AUDIO:path]
+            if (newText.contains("[AUDIO:")) {
+                int startIdx = newText.indexOf("[AUDIO:");
+                int endIdx = newText.indexOf("]", startIdx);
+                if (endIdx > startIdx) {
+                    String audioPath = newText.substring(startIdx + 7, endIdx);
+                    // Set audio URI (for TTS playback)
+                    lastMsg.audioUri = Uri.fromFile(new File(audioPath));
+                    // Remove marker from text
+                    newText = newText.substring(0, startIdx) + newText.substring(endIdx + 1);
+                    LogManager.logI(TAG, "[TTS] Audio marker detected, path: " + audioPath);
                 }
             }
             

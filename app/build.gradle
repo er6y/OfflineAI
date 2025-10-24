@@ -255,6 +255,15 @@ dependencies {
     }
 }
 
+// Ensure app's release assemble depends on JNI release assemble for performance
+afterEvaluate {
+    def jniReleaseTaskPath = ":libs:mnn-jni:assembleRelease"
+    // Only add dependency if the JNI module exists
+    if (project.rootProject.findProject(":libs:mnn-jni") != null) {
+        tasks.findByName("assembleRelease")?.dependsOn(jniReleaseTaskPath)
+    }
+}
+
 // 不再从子模块复制 .so 到 app/src/main/jniLibs，模块自行打包其 .so
 
 // 集成APK复制到构建流程中

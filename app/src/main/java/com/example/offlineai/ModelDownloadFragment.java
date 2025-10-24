@@ -31,6 +31,7 @@ import androidx.lifecycle.Lifecycle;
 import com.example.offlineai.ConfigManager;
 import com.example.offlineai.LogManager;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -55,6 +56,8 @@ public class ModelDownloadFragment extends Fragment {
     private LinearLayout containerEmbeddingModels;
     private LinearLayout containerRerankerModels;
     private LinearLayout containerLlmModels;
+    private LinearLayout containerAsrModels;
+    private LinearLayout containerTtsModels;
     private TextView textViewProgress;
     private ScrollView scrollViewProgress;
     private Button buttonDownload;
@@ -79,6 +82,8 @@ public class ModelDownloadFragment extends Fragment {
     private final Map<CheckBox, String> embeddingCheckBoxMap = new HashMap<>();
     private final Map<CheckBox, String> rerankerCheckBoxMap = new HashMap<>();
     private final Map<CheckBox, String> llmCheckBoxMap = new HashMap<>();
+    private final Map<CheckBox, String> asrCheckBoxMap = new HashMap<>();
+    private final Map<CheckBox, String> ttsCheckBoxMap = new HashMap<>();
     // 旧的内置配置（用于首次生成默认JSON）
     private static final Map<String, ModelConfig> MODEL_CONFIGS = new HashMap<>();
     
@@ -206,6 +211,8 @@ public class ModelDownloadFragment extends Fragment {
         containerEmbeddingModels = view.findViewById(R.id.containerEmbeddingModels);
         containerRerankerModels = view.findViewById(R.id.containerRerankerModels);
         containerLlmModels = view.findViewById(R.id.containerLlmModels);
+        containerAsrModels = view.findViewById(R.id.containerAsrModels);
+        containerTtsModels = view.findViewById(R.id.containerTtsModels);
         textViewProgress = view.findViewById(R.id.textViewProgress);
         // Find the ScrollView ancestor that contains the progress TextView
         scrollViewProgress = view.findViewById(R.id.scrollViewMain);
@@ -281,6 +288,12 @@ public class ModelDownloadFragment extends Fragment {
         for (Map.Entry<CheckBox, String> entry : llmCheckBoxMap.entrySet()) {
             if (entry.getKey().isChecked()) selected.add(entry.getValue());
         }
+        for (Map.Entry<CheckBox, String> entry : asrCheckBoxMap.entrySet()) {
+            if (entry.getKey().isChecked()) selected.add(entry.getValue());
+        }
+        for (Map.Entry<CheckBox, String> entry : ttsCheckBoxMap.entrySet()) {
+            if (entry.getKey().isChecked()) selected.add(entry.getValue());
+        }
         return selected;
     }
     
@@ -322,6 +335,10 @@ public class ModelDownloadFragment extends Fragment {
             return ConfigManager.getRerankerModelPath(getContext());
         } else if (modelList.containsKey("llm") && modelList.get("llm").containsKey(modelName)) {
             return ConfigManager.getModelPath(getContext());
+        } else if (modelList.containsKey("asr") && modelList.get("asr").containsKey(modelName)) {
+            return ConfigManager.getAsrModelPath(getContext());
+        } else if (modelList.containsKey("tts") && modelList.get("tts").containsKey(modelName)) {
+            return ConfigManager.getTtsModelPath(getContext());
         }
         // Default to LLM model path if category not found
         return ConfigManager.getModelPath(getContext());
@@ -431,6 +448,12 @@ public class ModelDownloadFragment extends Fragment {
         } else if (modelList.containsKey("llm") && modelList.get("llm").containsKey(modelName)) {
             filesMap = modelList.get("llm").get(modelName);
             modelCategory = "llm";
+        } else if (modelList.containsKey("asr") && modelList.get("asr").containsKey(modelName)) {
+            filesMap = modelList.get("asr").get(modelName);
+            modelCategory = "asr";
+        } else if (modelList.containsKey("tts") && modelList.get("tts").containsKey(modelName)) {
+            filesMap = modelList.get("tts").get(modelName);
+            modelCategory = "tts";
         } else {
             modelCategory = null;
         }
@@ -454,6 +477,12 @@ public class ModelDownloadFragment extends Fragment {
             case "llm":
                 basePath = ConfigManager.getModelPath(getContext());
                 break;
+            case "asr":
+                basePath = ConfigManager.getAsrModelPath(getContext());
+                break;
+            case "tts":
+                basePath = ConfigManager.getTtsModelPath(getContext());
+                break;
             default:
                 mainHandler.post(() -> appendProgress("Unknown model category: " + modelCategory + "\n"));
                 return false;
@@ -475,13 +504,40 @@ public class ModelDownloadFragment extends Fragment {
             String url = entry.getValue();
             File targetFile = new File(targetDir, filename);
             
+            // Create parent directories if filename contains subdirectories
+            File parentDir = targetFile.getParentFile();
+            if (parentDir != null && !parentDir.exists()) {
+                if (!parentDir.mkdirs()) {
+                    LogManager.logE(TAG, "Failed to create parent directory: " + parentDir.getAbsolutePath());
+                    mainHandler.post(() -> appendProgress(getString(R.string.log_failed_to_create_dir) + ": " + parentDir.getName() + "\n"));
+                    return false;
+                }
+            }
+            
             // 先检查文件是否已完整下载，如果是则跳过
             if (isFileCompletelyDownloaded(url, targetFile)) {
                 mainHandler.post(() -> appendProgress(getString(R.string.log_downloading_file) + ": " + filename + " - " + getString(R.string.log_file_already_complete) + "\n"));
                 continue;
             }
             
-            mainHandler.post(() -> appendProgress(getString(R.string.log_downloading_file) + ": " + filename + "\n"));
+            // Calculate and display file size (in background thread)
+            String sizeInfo = "";
+            try {
+                URL sizeUrl = new URL(url);
+                HttpURLConnection sizeConn = (HttpURLConnection) sizeUrl.openConnection();
+                sizeConn.setRequestMethod("HEAD");
+                sizeConn.setConnectTimeout(5000);
+                sizeConn.setReadTimeout(5000);
+                long fileSize = sizeConn.getContentLengthLong();
+                sizeConn.disconnect();
+                if (fileSize > 0) {
+                    sizeInfo = " (" + formatFileSize(fileSize) + ")";
+                }
+            } catch (Exception e) {
+                // Ignore size fetch errors
+            }
+            final String finalSizeInfo = sizeInfo;
+            mainHandler.post(() -> appendProgress(getString(R.string.log_downloading_file) + ": " + filename + finalSizeInfo + "\n"));
             
             // 仅使用来自 JSON 的主地址进行下载（移除备份地址逻辑）
             boolean success = downloadFileWithRetry(url, targetFile);
@@ -508,6 +564,12 @@ public class ModelDownloadFragment extends Fragment {
             case LLM:
                 basePath = ConfigManager.getModelPath(getContext());
                 break;
+            case ASR:
+                basePath = ConfigManager.getAsrModelPath(getContext());
+                break;
+            case TTS:
+                basePath = ConfigManager.getTtsModelPath(getContext());
+                break;
             default:
                 throw new IllegalArgumentException("未知模型" + "类型: " + config.type);
         }
@@ -521,18 +583,10 @@ public class ModelDownloadFragment extends Fragment {
             File baseDir = new File(ConfigManager.getDataRootPath(requireContext()));
             if (!baseDir.exists()) baseDir.mkdirs();
             File listFile = new File(baseDir, "ModelDownloadList.txt");
-            if (!listFile.exists()) {
-                // 首选：从 assets 复制默认文件 ModelDownloadList.txt
-                boolean copied = copyAssetToFile("ModelDownloadList.txt", listFile);
-                if (!copied) {
-                    // 兜底：若复制失败，则使用内置配置生成默认 JSON
-                    String json = buildDefaultModelListJsonFromBuiltins();
-                    json = json.replace("\\/", "/");
-                    try (FileOutputStream fos = new FileOutputStream(listFile)) {
-                        fos.write(json.getBytes(StandardCharsets.UTF_8));
-                    }
-                }
-            }
+            
+            // Smart merge: Always merge assets file with user file
+            mergeModelListFromAssets(listFile);
+            
             String content = readFileContent(listFile);
             // 统一处理已存在文件：将 "\/" 规范化为 "/" 并回写
             boolean needRewrite = content.contains("\\/");
@@ -545,8 +599,8 @@ public class ModelDownloadFragment extends Fragment {
                 }
             }
             // 优先读取英文分类键，兼容老的中文键；统一存储为英文键
-            String[] categoriesPreferred = new String[]{"embedding", "reranker", "llm"};
-            String[] categoriesLegacy = new String[]{"嵌入式模型", "重排模型", "LLM模型"};
+            String[] categoriesPreferred = new String[]{"embedding", "reranker", "llm", "asr", "tts"};
+            String[] categoriesLegacy = new String[]{"嵌入式模型", "重排模型", "LLM模型", "asr", "tts"};
             for (int i = 0; i < categoriesPreferred.length; i++) {
                 String storeKey = categoriesPreferred[i];
                 String key = root.has(storeKey) ? storeKey : (root.has(categoriesLegacy[i]) ? categoriesLegacy[i] : null);
@@ -593,6 +647,8 @@ public class ModelDownloadFragment extends Fragment {
             org.json.JSONObject emb = new org.json.JSONObject();
             org.json.JSONObject rer = new org.json.JSONObject();
             org.json.JSONObject llm = new org.json.JSONObject();
+            org.json.JSONObject asr = new org.json.JSONObject();
+            org.json.JSONObject tts = new org.json.JSONObject();
             for (Map.Entry<String, ModelConfig> entry : MODEL_CONFIGS.entrySet()) {
                 ModelConfig cfg = entry.getValue();
                 org.json.JSONObject files = new org.json.JSONObject();
@@ -609,12 +665,20 @@ public class ModelDownloadFragment extends Fragment {
                     case LLM:
                         llm.put(cfg.directoryName, files);
                         break;
+                    case ASR:
+                        asr.put(cfg.directoryName, files);
+                        break;
+                    case TTS:
+                        tts.put(cfg.directoryName, files);
+                        break;
                 }
             }
             // 使用英文分类键，避免中文与空格
             root.put("embedding", emb);
             root.put("reranker", rer);
             root.put("llm", llm);
+            root.put("asr", asr);
+            root.put("tts", tts);
             return root.toString(2);
         } catch (Exception e) {
             LogManager.logE(TAG, "构建默认模型列表失败", e);
@@ -627,9 +691,13 @@ public class ModelDownloadFragment extends Fragment {
         containerEmbeddingModels.removeAllViews();
         containerRerankerModels.removeAllViews();
         containerLlmModels.removeAllViews();
+        containerAsrModels.removeAllViews();
+        containerTtsModels.removeAllViews();
         embeddingCheckBoxMap.clear();
         rerankerCheckBoxMap.clear();
         llmCheckBoxMap.clear();
+        asrCheckBoxMap.clear();
+        ttsCheckBoxMap.clear();
 
         // Embedding models
         Map<String, Map<String, String>> emb = modelList.get("embedding");
@@ -692,6 +760,48 @@ public class ModelDownloadFragment extends Fragment {
                 }
                 containerLlmModels.addView(item);
                 llmCheckBoxMap.put(cb, modelName);
+            }
+        }
+        // ASR models
+        Map<String, Map<String, String>> asr = modelList.get("asr");
+        if (asr != null) {
+            for (String modelName : asr.keySet()) {
+                LinearLayout item = new LinearLayout(requireContext());
+                item.setOrientation(LinearLayout.VERTICAL);
+                CheckBox cb = new CheckBox(requireContext());
+                cb.setText(modelName);
+                item.addView(cb);
+                String comment = modelComments.get(modelName);
+                if (comment != null && !comment.isEmpty()) {
+                    TextView tv = new TextView(requireContext());
+                    tv.setText(comment);
+                    tv.setTextSize(12);
+                    tv.setTextColor(0xFF7A7A7A);
+                    item.addView(tv);
+                }
+                containerAsrModels.addView(item);
+                asrCheckBoxMap.put(cb, modelName);
+            }
+        }
+        // TTS models
+        Map<String, Map<String, String>> tts = modelList.get("tts");
+        if (tts != null) {
+            for (String modelName : tts.keySet()) {
+                LinearLayout item = new LinearLayout(requireContext());
+                item.setOrientation(LinearLayout.VERTICAL);
+                CheckBox cb = new CheckBox(requireContext());
+                cb.setText(modelName);
+                item.addView(cb);
+                String comment = modelComments.get(modelName);
+                if (comment != null && !comment.isEmpty()) {
+                    TextView tv = new TextView(requireContext());
+                    tv.setText(comment);
+                    tv.setTextSize(12);
+                    tv.setTextColor(0xFF7A7A7A);
+                    item.addView(tv);
+                }
+                containerTtsModels.addView(item);
+                ttsCheckBoxMap.put(cb, modelName);
             }
         }
     }
@@ -950,9 +1060,9 @@ public class ModelDownloadFragment extends Fragment {
                 if (attempt == 1) {
                     final long finalExistingFileSize = existingFileSize;
                     if (existingFileSize == 0) {
-                        mainHandler.post(() -> appendProgress(getString(R.string.log_progress) + ":"));
+                        mainHandler.post(() -> appendProgress(getString(R.string.log_progress) + "(%):0"));
                     } else {
-                        mainHandler.post(() -> appendProgress("Resuming from " + (finalExistingFileSize / 1024 / 1024) + "MB..."));
+                        mainHandler.post(() -> appendProgress("Resuming from " + formatFileSize(finalExistingFileSize) + "..."));
                     }
                 }
                 
@@ -962,7 +1072,9 @@ public class ModelDownloadFragment extends Fragment {
                     byte[] buffer = new byte[32768]; // 32KB缓冲区
                     long totalBytesRead = existingFileSize; // 包含已下载的字节数
                     int bytesRead;
-                    int lastReportedProgress = totalFileSize > 0 ? (int) ((totalBytesRead * 100) / totalFileSize) : 0;
+                    // FIXED: Track last reported 10% milestone, not actual progress
+                    // This ensures every 10% increment is displayed correctly
+                    int lastReportedTenPercent = totalFileSize > 0 ? ((int) ((totalBytesRead * 100) / totalFileSize) / 10) * 10 : 0;
                     
                     LogManager.logI(TAG, "Starting download, total file size: " + totalFileSize + " bytes, resume from: " + existingFileSize);
                     
@@ -979,25 +1091,20 @@ public class ModelDownloadFragment extends Fragment {
                         if (totalFileSize > 0) {
                             final int progress = (int) ((totalBytesRead * 100) / totalFileSize);
                             
-                            // 确保每个百分点都显示一个点，防止跳跃
-                            if (progress > lastReportedProgress) {
-                                // 构建所有需要添加的点号和百分比
-                                StringBuilder progressText = new StringBuilder();
-                                while (progress > lastReportedProgress && lastReportedProgress < 100) {
-                                    lastReportedProgress++;
-                                    progressText.append(".");
-                                    
-                                    // 每10个点插入百分比数字，不换行
-                                    if (lastReportedProgress % 10 == 0) {
-                                        progressText.append(lastReportedProgress).append("%");
-                                    }
+                            // 每10%显示一次进度: 0..10..20..30..40..50..60..70..80..90..100
+                            // FIXED: Calculate current 10% milestone
+                            int currentTenPercent = (progress / 10) * 10;
+                            
+                            // Display all missing milestones from last to current
+                            // This fixes small files that jump from 0 to 100 quickly
+                            if (currentTenPercent > lastReportedTenPercent && currentTenPercent <= 100) {
+                                // Display all intermediate milestones
+                                for (int milestone = lastReportedTenPercent + 10; milestone <= currentTenPercent; milestone += 10) {
+                                    final String progressText = ".." + milestone;
+                                    LogManager.logI(TAG, "Progress update: " + milestone + "%");
+                                    mainHandler.post(() -> appendProgress(progressText));
                                 }
-                                
-                                final String textToAdd = progressText.toString();
-                                LogManager.logI(TAG, "Progress update: " + lastReportedProgress + "%, content: " + textToAdd);
-                                
-                                // 一次性添加所有内容，减少UI更新次数
-                                mainHandler.post(() -> appendProgress(textToAdd));
+                                lastReportedTenPercent = currentTenPercent;
                             }
                         }
                     }
@@ -1005,7 +1112,7 @@ public class ModelDownloadFragment extends Fragment {
                 
                 // 完成后显示结果
                 if (totalFileSize > 0) {
-                    mainHandler.post(() -> appendProgress(" " + getString(R.string.log_100_percent) + "\n"));
+                    mainHandler.post(() -> appendProgress("..100 " + getString(R.string.log_100_percent) + "\n"));
                 }
                 
                 LogManager.logI(TAG, "Download completed successfully");
@@ -1141,6 +1248,138 @@ public class ModelDownloadFragment extends Fragment {
         releaseWakeLocks();
     }
     
+    /**
+     * Smart merge: Add missing models from assets to user's file
+     * - Keep user's original order and custom models
+     * - Only add models that don't exist in user's file
+     * - Only write file if there are new models to add
+     */
+    private void mergeModelListFromAssets(File userListFile) {
+        try {
+            // Read assets file (APP built-in models)
+            org.json.JSONObject assetsJson = null;
+            try (InputStream is = requireContext().getAssets().open("ModelDownloadList.txt")) {
+                String assetsContent = readStreamContent(is);
+                assetsContent = assetsContent.replace("\\/", "/");
+                assetsJson = new org.json.JSONObject(assetsContent);
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to read assets ModelDownloadList.txt", e);
+                // Fallback: If assets file not found, create from built-in configs
+                String json = buildDefaultModelListJsonFromBuiltins();
+                json = json.replace("\\/", "/");
+                assetsJson = new org.json.JSONObject(json);
+            }
+            
+            // Read user file (preserve user's order and custom models)
+            org.json.JSONObject userJson = null;
+            if (userListFile.exists()) {
+                try {
+                    String userContent = readFileContent(userListFile);
+                    userContent = userContent.replace("\\/", "/");
+                    userJson = new org.json.JSONObject(userContent);
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "Failed to read user ModelDownloadList.txt, will use assets only", e);
+                }
+            }
+            
+            // If user file doesn't exist, just copy from assets
+            if (userJson == null) {
+                try (FileOutputStream fos = new FileOutputStream(userListFile)) {
+                    String pretty = assetsJson.toString(2).replace("\\/", "/");
+                    fos.write(pretty.getBytes(StandardCharsets.UTF_8));
+                    LogManager.logI(TAG, "Created ModelDownloadList.txt from assets");
+                }
+                return;
+            }
+            
+            // Check each category and add missing models from assets
+            String[] categories = new String[]{"embedding", "reranker", "llm", "asr", "tts"};
+            boolean hasNewModels = false;
+            
+            for (String category : categories) {
+                // Ensure category exists in user file
+                if (!userJson.has(category)) {
+                    userJson.put(category, new org.json.JSONObject());
+                }
+                org.json.JSONObject userCategory = userJson.getJSONObject(category);
+                
+                // Check each model in assets
+                if (assetsJson.has(category)) {
+                    org.json.JSONObject assetsCategory = assetsJson.getJSONObject(category);
+                    Iterator<String> assetsModels = assetsCategory.keys();
+                    
+                    while (assetsModels.hasNext()) {
+                        String modelName = assetsModels.next();
+                        
+                        // If user doesn't have this model, add it
+                        if (!userCategory.has(modelName)) {
+                            userCategory.put(modelName, assetsCategory.getJSONObject(modelName));
+                            hasNewModels = true;
+                            LogManager.logI(TAG, "Added new model from assets: " + category + "/" + modelName);
+                        }
+                        // If user already has this model, skip (keep user's version)
+                    }
+                }
+            }
+            
+            // Only write file if there are new models added
+            if (hasNewModels) {
+                try (FileOutputStream fos = new FileOutputStream(userListFile)) {
+                    String pretty = userJson.toString(2).replace("\\/", "/");
+                    fos.write(pretty.getBytes(StandardCharsets.UTF_8));
+                    LogManager.logI(TAG, "Updated ModelDownloadList.txt with new models");
+                }
+            } else {
+                LogManager.logI(TAG, "No new models to add, user file is up-to-date");
+            }
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to merge ModelDownloadList.txt", e);
+            // Fallback: If merge fails and user file doesn't exist, copy from assets
+            if (!userListFile.exists()) {
+                copyAssetToFile("ModelDownloadList.txt", userListFile);
+            }
+        }
+    }
+    
+    /**
+     * Read content from InputStream
+     */
+    private String readStreamContent(InputStream is) throws IOException {
+        ByteArrayOutputStream result = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int length;
+        while ((length = is.read(buffer)) != -1) {
+            result.write(buffer, 0, length);
+        }
+        return result.toString(StandardCharsets.UTF_8.name());
+    }
+    
+    /**
+     * Format file size to human-readable format (GB/MB/KB)
+     * @param bytes File size in bytes
+     * @return Formatted string like "1.5GB", "256MB", "512KB"
+     */
+    private String formatFileSize(long bytes) {
+        if (bytes < 0) {
+            return "Unknown";
+        }
+        
+        final double KB = 1024;
+        final double MB = KB * 1024;
+        final double GB = MB * 1024;
+        
+        if (bytes >= GB) {
+            return String.format("%.1fGB", bytes / GB);
+        } else if (bytes >= MB) {
+            return String.format("%.0fMB", bytes / MB);
+        } else if (bytes >= KB) {
+            return String.format("%.0fKB", bytes / KB);
+        } else {
+            return bytes + "B";
+        }
+    }
+    
     // 模型配置类
     private static class ModelConfig {
         final String directoryName;
@@ -1158,6 +1397,6 @@ public class ModelDownloadFragment extends Fragment {
     
     // 模型类型枚举
     private enum ModelType {
-        EMBEDDING, RERANKER, LLM
+        EMBEDDING, RERANKER, LLM, ASR, TTS
     }
 }

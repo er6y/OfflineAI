@@ -321,6 +321,40 @@
                 android:layout_marginStart="0dp" />
         </LinearLayout>
 
+        <!-- 历史轮数设置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/settings_history_rounds"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarHistoryRounds"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="20"
+                android:progress="5" />
+
+            <TextView
+                android:id="@+id/textViewHistoryRoundsValue"
+                android:layout_width="60dp"
+                android:layout_height="wrap_content"
+                android:text="5 轮"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+
         <!-- 备份推理参数（归属于LLM推理设置） -->
 
         <LinearLayout
@@ -624,6 +658,104 @@
                 android:checked="true" />
         </LinearLayout>
 
+        <!-- ASR语音识别设置 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_asr_title"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp" />
+
+        <!-- ASR模型选择 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/settings_asr_model"
+                android:textSize="16sp" />
+
+            <Spinner
+                android:id="@+id/spinnerAsrModel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="150dp" />
+        </LinearLayout>
+
+        <!-- TTS语音合成设置 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_tts_title"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp" />
+
+        <!-- TTS模型选择 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/settings_tts_model"
+                android:textSize="16sp" />
+
+            <Spinner
+                android:id="@+id/spinnerTtsModel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="150dp" />
+        </LinearLayout>
+
+        <!-- TTS DiT步数 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/settings_tts_dit_steps"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarTtsDitSteps"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:max="9"
+                android:progress="2"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp" />
+
+            <TextView
+                android:id="@+id/textViewTtsDitStepsValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="3 步"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+
         <!-- 全局设置 -->
         <TextView
             android:layout_width="match_parent"
@@ -731,12 +863,14 @@
                 android:layout_marginTop="4dp" />
         </LinearLayout>
 
-        <!-- 保存按钮 -->
-        <Button
-            android:id="@+id/buttonSaveSettings"
+        <!-- 说明：设置自动保存，无需保存按钮 -->
+        <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/button_save_settings"
+            android:text="* 设置修改后自动保存"
+            android:textSize="12sp"
+            android:textColor="@android:color/darker_gray"
+            android:gravity="center"
             android:layout_marginTop="16dp"
             android:layout_marginBottom="16dp" />
 

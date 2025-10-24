@@ -404,6 +404,8 @@
     <string name="title_embedding_model_list">Embedding Model List</string>
     <string name="title_reranker_model_list">Reranker Model List</string>
     <string name="title_llm_list">LLM List</string>
+    <string name="title_asr_list">ASR Model List</string>
+    <string name="title_tts_list">TTS Model List</string>
     <string name="title_download_progress">Download Progress</string>
     <string name="text_waiting_download">Waiting for download…</string>
     <string name="button_download_selected_models">Download Selected Models</string>
@@ -477,6 +479,7 @@
     <string name="log_download_failed">Download failed</string>
     <string name="log_download_completed">Download completed</string>
     <string name="log_file_already_complete">File already exists and complete</string>
+    <string name="log_failed_to_create_dir">Failed to create directory</string>
     <string name="log_download_failed_http_code">Download failed, HTTP response code</string>
     <string name="log_start_download_file_size">Start download, file size</string>
     <string name="log_download_was_interrupted">Download was interrupted</string>
@@ -1066,4 +1069,25 @@
     <string name="toast_chat_history_load_failed">Failed to load conversation</string>
     <string name="toast_chat_history_saved">Conversation saved</string>
     <string name="toast_chat_history_save_failed">Failed to save conversation</string>
+
+    <!-- History control related -->
+    <string name="settings_history_control">History Control</string>
+    <string name="settings_history_rounds">History Rounds\n(0~20)</string>
+    <string name="settings_history_rounds_value">%d rounds</string>
+    <string name="settings_history_rounds_summary">Control the number of conversation rounds in context (0-20), 0 means no history</string>
+    
+    <!-- ASR speech recognition settings -->
+    <string name="settings_asr_title">ASR (Speech Recognition)</string>
+    <string name="settings_asr_model">ASR Model</string>
+    <string name="settings_asr_model_none">None</string>
+    <string name="settings_asr_model_summary">Select speech recognition model, None means ASR is disabled</string>
+    
+    <!-- TTS speech synthesis settings -->
+    <string name="settings_tts_title">TTS (Speech Synthesis)</string>
+    <string name="settings_tts_model">TTS Model</string>
+    <string name="settings_tts_model_none">None</string>
+    <string name="settings_tts_model_summary">Select speech synthesis model, None means external TTS is disabled</string>
+    <string name="settings_tts_dit_steps">DiT Steps\n(1~10)</string>
+    <string name="settings_tts_dit_steps_value">%d steps</string>
+    <string name="settings_tts_dit_steps_summary">DiT diffusion steps, higher values improve quality but reduce speed</string>
 </resources>

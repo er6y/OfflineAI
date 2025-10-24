@@ -143,6 +143,14 @@ object ChatViewHolders {
         private val imageGenerated: ImageView = view.findViewById(R.id.image_generated)
         var viewAssistantLoading: View = view.findViewById(R.id.view_assistant_loading)
         
+        // TTS Audio Player
+        private val audioPlayerContainer: View = view.findViewById(R.id.audio_player_container)
+        private val btnPlayPauseTts: ImageView = view.findViewById(R.id.btnPlayPauseTts)
+        private val seekBarTtsProgress: android.widget.SeekBar = view.findViewById(R.id.seekBarTtsProgress)
+        private val textViewTtsDuration: TextView = view.findViewById(R.id.textViewTtsDuration)
+        private var ttsMediaPlayer: android.media.MediaPlayer? = null
+        private var ttsAudioPath: String? = null
+        
         // Callback for transferring selected text to knowledge note
         private var transferToNoteCallback: ((String) -> Unit)? = null
         
@@ -320,6 +328,9 @@ object ChatViewHolders {
                 imageGenerated.setImageURI(data.imageUri)
             }
             
+            // TTS Audio Player
+            setupTtsAudioPlayer(data)
+            
             // Set tags for click listeners
             imageGenerated.tag = data
             viewText.tag = data
@@ -329,6 +340,100 @@ object ChatViewHolders {
             thinkingToggle.tag = data
             debugToggle.tag = data
             performanceToggle.tag = data
+        }
+        
+        private fun setupTtsAudioPlayer(data: ChatDataItem) {
+            // Check if TTS audio exists (hasOmniAudio flag or audioUri with assistant type)
+            val audioUri = data.audioUri
+            val hasTtsAudio = data.hasOmniAudio && audioUri != null && audioUri.scheme == "file"
+            
+            if (!hasTtsAudio) {
+                audioPlayerContainer.visibility = View.GONE
+                releaseTtsMediaPlayer()
+                return
+            }
+            
+            audioPlayerContainer.visibility = View.VISIBLE
+            ttsAudioPath = audioUri?.path
+            
+            if (ttsAudioPath == null) {
+                audioPlayerContainer.visibility = View.GONE
+                return
+            }
+            
+            // Setup MediaPlayer
+            try {
+                releaseTtsMediaPlayer()
+                ttsMediaPlayer = android.media.MediaPlayer().apply {
+                    setDataSource(ttsAudioPath!!)
+                    prepare()
+                    
+                    val duration = this.duration
+                    textViewTtsDuration.text = formatDuration(duration)
+                    seekBarTtsProgress.max = duration
+                    seekBarTtsProgress.progress = 0
+                }
+                
+                // Play/Pause button
+                btnPlayPauseTts.setOnClickListener {
+                    ttsMediaPlayer?.let { player ->
+                        if (player.isPlaying) {
+                            player.pause()
+                            btnPlayPauseTts.setImageResource(R.drawable.ic_audio_play)
+                        } else {
+                            player.start()
+                            btnPlayPauseTts.setImageResource(R.drawable.ic_audio_pause)
+                            updateTtsProgress()
+                        }
+                    }
+                }
+                
+                // SeekBar change listener
+                seekBarTtsProgress.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
+                        if (fromUser) {
+                            ttsMediaPlayer?.seekTo(progress)
+                        }
+                    }
+                    override fun onStartTrackingTouch(seekBar: android.widget.SeekBar?) {}
+                    override fun onStopTrackingTouch(seekBar: android.widget.SeekBar?) {}
+                })
+                
+                // Reset button on completion
+                ttsMediaPlayer?.setOnCompletionListener {
+                    btnPlayPauseTts.setImageResource(R.drawable.ic_audio_play)
+                    seekBarTtsProgress.progress = 0
+                }
+                
+            } catch (e: Exception) {
+                com.example.offlineai.LogManager.logE("AssistantViewHolder", "Failed to setup TTS audio player", e)
+                audioPlayerContainer.visibility = View.GONE
+            }
+        }
+        
+        private fun updateTtsProgress() {
+            ttsMediaPlayer?.let { player ->
+                if (player.isPlaying) {
+                    seekBarTtsProgress.progress = player.currentPosition
+                    seekBarTtsProgress.postDelayed({ updateTtsProgress() }, 100)
+                }
+            }
+        }
+        
+        private fun releaseTtsMediaPlayer() {
+            try {
+                ttsMediaPlayer?.release()
+            } catch (e: Exception) {
+                // Ignore
+            }
+            ttsMediaPlayer = null
+        }
+        
+        private fun formatDuration(durationMs: Int): String {
+            val seconds = (durationMs / 1000) % 60
+            val minutes = (durationMs / 1000) / 60
+            // Always use minutes:seconds format for consistency
+            return String.format("%d:%02d", minutes, seconds)
         }
         
         private fun applyGlobalTextSize() {

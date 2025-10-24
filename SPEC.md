@@ -1,3 +1,345 @@
+# OfflineAI 技术规格说明书（SPEC）
+
+> 本文聚焦于 OfflineAI Android 应用的系统设计、模块拆分与运行机制，提供面向开发与维护的整体视图。历史缺陷修复记录已保留于附录部分，供排障回溯使用。
+
+## 1. 项目总览
+
+- **产品定位**：离线优先的 Android AI 助手，支持本地/在线混合推理、RAG 检索增强问答、多模态理解、知识库构建与知识笔记管理。
+- **核心目标**：在完全离线或弱网环境下，提供可控、安全的数据闭环，覆盖“知识构建 → 知识问答 → 结果沉淀”的闭环体验。
+- **关键特性概览**：
+  - 本地推理解法：统一依赖 MNN 推理栈覆盖 LLM、VLM、Diffusion、TTS，所有模型通过 config.json + runtime config 完成加载和运行参数注入。
+  - 在线推理：兼容 OpenAI/Claude 风格 API，与本地模型共用 RagQa 工作台界面，支持热切换与统一日志管道。
+  - RAG 工作台：提供思考模式、流控、附件输入（图像/音频）、历史会话回放/迁移、笔记沉淀等能力。
+  - 知识库构建：从多格式文档解析、分块、向量化、重排到落库的全流程自动化，标配进度跟踪与日志记录。
+  - 知识笔记：支持手工创建、从对话转换、标签分类、同步回写向量库，形成知识闭环。
+  - 系统弹性：统一前台服务、唤醒锁、加速器检测与自动回退、资源释放策略确保长任务稳定运行。
+  - 国际化：动态语言切换、统一文案管控、内置帮助文档与版本信息展示。
+
+## 2. 系统架构分层
+
+```mermaid
+flowchart TB
+    UI["表层 UI<br/>(MainActivity + 五大 Fragment)<br/>- RagQaFragment / BuildKnowledgeBaseFragment<br/>- KnowledgeNoteFragment / ModelDownloadFragment<br/>- SettingsFragment / HelpFragment / LogViewFragment"]
+    Logic["业务逻辑层<br/>- RagQueryManager / RerankerHandler / EmbeddingHandler<br/>- KnowledgeBaseService / TextChunkProcessor<br/>- ChatHistoryManager / ProgressManager / LogManager"]
+    Bridge["推理桥接层<br/>- LocalLLMMNNHandler（MNN 一站式）<br/>- StreamingApiClient / MnnInference JNI（在线/本地桥接）"]
+    Data["数据与资源层<br/>- SQLiteVectorDatabaseHandler（知识向量库）<br/>- ConfigManager（KV 配置）<br/>- 文件系统（模型/知识库/日志/会话/资产）<br/>- UnifiedForegroundService & AcceleratorDiagnostics"]
+
+    UI --> Logic --> Bridge --> Data
+```
+
+### 2.1 表层 UI（多 Fragment 构成的三分屏）
+- **MainActivity**：负责应用级生命周期管理、语言切换（基于 attachBaseContext 重建 Locale）、权限弹窗（存储/录音/电池优化）、统一的 ViewPager2 容器与底部导航。需求关注：启动时需恢复上次打开的页签，保证后台返回后状态与滚动位置保持一致。设计要点：所有耗时初始化（日志配置、加速器检测）放在 onCreate 早期完成，保证 Fragment 创建前依赖就绪。**主要 API**：`requestRequiredPermissions()`、`initializeConfig()`、`performAcceleratorConfigCheck()`、`bindToKnowledgeBaseBuilderService()`、`onProgressUpdate()`。**关键数据结构**：`UnifiedForegroundService.LocalBinder`、`StateDisplayManager`。**布局示意**：
+  ```mermaid
+  flowchart TB
+      subgraph MainActivity
+          Toolbar[
+              "Toolbar"
+          ]
+          ViewPager["ViewPager2\n├ RagQaFragment\n├ BuildKnowledgeBase\n├ KnowledgeNote\n└ Settings/Help/Log"]
+          BottomNav["BottomNavigationView (3 Tabs)"]
+          Toolbar --> ViewPager
+          ViewPager --> BottomNav
+      end
+  ```
+- **RagQaFragment**：主问答工作台，需求包括模型选择（本地/在线统一下拉）、知识库绑定、系统提示词/历史管理、附件输入（支持最多 3 张图片、语音录制）、流式输出（带 Markdown 渲染与折叠块）。设计思路：发送流程拆为输入校验→准备数据（知识检索、上下文组装）→推理，期间通过状态机控制发送按钮、停止按钮互斥显示并与进度日志联动。**主要 API**：`prepareAndSendMessage()`、`stopOngoingTask()`、`updateProgressPlainText()`、`loadSelectedKnowledgeBase()`、`handleStreamingChunk()`。**关键数据结构**：`ChatDataItem`、`ChatRecyclerViewAdapter`、`ImageThumbnailAdapter`、`VoiceRecordingDialog`。**布局示意**：
+  ```mermaid
+  flowchart TB
+      subgraph RagQaFragment
+          Header["Header\nAPI/Model/Backend Spinners\nKnowledgeBase Spinner\nHistory Button"]
+          ChatView["ChatRecyclerView\n文本/图片/音频/图像多类型视图"]
+          DebugConsole["Debug Console\nMarkdown Progress"]
+          InputRow["Input Row\nPrompt + Attachments + Send/Stop"]
+          Header --> ChatView --> DebugConsole --> InputRow
+      end
+  ```
+- **BuildKnowledgeBaseFragment**：知识库构建界面，需求涵盖知识库选择/创建、文件批量浏览、嵌入/重排模型选择、两阶段进度展示（文本提取与向量化），应对长时间任务。设计思路：通过 UnifiedForegroundService + ProgressManager 同步通知栏、界面、日志，避免 Activity 被杀后任务失联。**主要 API**：`startBuildTask()`、`updateProgress(int stage)`、`bindServiceCallbacks()`、`displaySelectedFiles()`、`cancelBuildTask()`。**关键数据结构**：`TextChunkProcessor.ProgressCallback`、`ProgressManager.ProgressData`、`KnowledgeBaseService.Metadata`。**布局示意**：
+  ```mermaid
+  flowchart TB
+      subgraph BuildKnowledgeBase
+          Controls["KB Spinner / New KB\nEmbedding Spinner\nReranker Spinner"]
+          FilePanel["Selected Files Panel\n滚动列表 + 清空"]
+          Actions["Start / Cancel Buttons"]
+          StageProgress["Stage Progress\nText Extraction → Vectorization"]
+          LogView["Progress Log\n滚动 TextView"]
+          Controls --> FilePanel --> Actions --> StageProgress --> LogView
+      end
+  ```
+- **KnowledgeNoteFragment**：需求围绕笔记创建、编辑、批量回写知识库；需支持从 RAG 对话跳转带入内容。设计要点：保存后触发 EmbeddingHandler 的低内存模式向量化，并在 UI 中实时更新向量统计、提供失败重试。**主要 API**：`saveNote()`、`loadNotesForKnowledgeBase()`、`convertChatToNote()`、`onVectorizationComplete()`。**关键数据结构**：`KnowledgeNote`（本地笔记实体）、`NoteAdapter`、`EmbeddingHandler.MemoryMode`。**布局示意**：
+  ```mermaid
+  flowchart TB
+      subgraph KnowledgeNote
+          Filters["KB Spinner\nFilter Tabs"]
+          Editor["Title / Tags / Markdown Editor"]
+          Actions["Save Note\nConvert from Chat"]
+          ListView["Notes RecyclerView\n卡片展示标题/标签/更新时间"]
+          Filters --> Editor --> Actions --> ListView
+      end
+  ```
+- **ModelDownloadFragment**：模型中心，需求是从 JSON 描述文件动态生成分类 CheckBox 列表，支持断点续传、失败重试、滚动日志展示。设计思路：WakeLock 保持长任务，下载器位于后台线程，进度通过 Handler 刷新 UI，并与 UnifiedForegroundService 保持同步。**主要 API**：`ensureAndLoadModelList()`、`buildCheckboxesFromModelList()`、`startDownloadSelectedModels()`、`updateDownloadLog()`、`releaseWakeLock()`。**关键数据结构**：`ModelConfig`（内部静态类，描述模型包）、`DownloadTask`、`Handler` 消息体。**布局示意**：
+  ```mermaid
+  flowchart TB
+      subgraph ModelDownload
+          Categories["分类区域\nLLM / Embedding / Reranker / ASR / TTS / Diffusion"]
+          Options["CheckBox + 描述 + 注释"]
+          Actions["Download / Select All / Clear"]
+          Progress["Progress Log\n滚动 TextView"]
+          Categories --> Options --> Actions --> Progress
+      end
+  ```
+- **Settings/Help/LogViewFragment**：设置页强调配置项互斥与即时生效（如手动参数优先），帮助页加载 assets 内文档并支持跳转锚点；日志页需读写本地 .log 文件并支持过滤/导出。**主要 API**：`SettingsFragment.saveSettings()`、`SettingsFragment.loadSettings()`、`HelpFragment.loadMarkdown()`、`LogViewFragment.refreshLogs()`、`LogViewFragment.filterByLevel()`。**关键数据结构**：`StateDisplayManager.DisplayEntry`、`LogManager.LogBuffer`、`MarkdownRenderer`。**布局示意**：
+  ```mermaid
+  flowchart TB
+      subgraph SettingsFragment
+          Prefs["PreferenceScreen\nData Dir / LLM / RAG / UI\nSwitches & SeekBars"]
+      end
+      subgraph HelpFragment
+          HelpView["Toolbar + Markdown WebView"]
+      end
+      subgraph LogViewFragment
+          LogPane["Toolbar + Log TextView\n筛选/导出"]
+      end
+      SettingsFragment --> HelpFragment --> LogViewFragment
+  ```
+
+### 2.2 业务逻辑层（跨界面共享的核心服务）
+- **RagQueryManager**：封装完整的 RAG 调度流程。需求：响应问答请求时，根据当前设置决定是否执行知识库检索/重排，注入系统提示词与历史上下文，并与推理引擎双向通信（流式回调、停止信号）。设计：内部将流程拆为检索（SQLiteVectorDatabaseHandler）、可选重排（RerankerHandler）、上下文模板填充与调用 LocalLLMMNNHandler。提供详细日志（得分、拼接上下文 token 统计）便于调试。**主要 API**：`executeRagQuery()`（对外入口，驱动检索+推理）、`buildDirectPrompt()`/`buildFullPrompt()`（prompt 组装）、`queryKnowledgeBase()`（内部调用向量库）；回调接口 `RagQueryCallback`。**关键数据结构**：`RagQueryCallback`（进度/流式数据回传）、`LlmModelFactory.Provider`（在线模型适配）。
+- **EmbeddingHandler / RerankerHandler**：MNN 一站式嵌入与重排管理器。需求：以单例形式常驻模型，适配构建任务（高负载）与问答（低延迟）两种场景，支持中断与模式切换。设计：统一调用 MnnInference JNI，维护 native handle 生命周期，确保线程安全（synchronized + AtomicBoolean）与内存模式管理。**主要 API**：`EmbeddingHandler.loadModel()`、`computeEmbedding()`、`stopInference()`；`RerankerHandler.loadModel()`、`setInstruction()`、`rerank()`、`setScoreCallback()`。**关键数据结构**：`EmbeddingHandler.MemoryMode`、`RerankerHandler.RerankResult`、`RerankerHandler.ScoreCallback`。
+- **KnowledgeBaseService**：管理知识库目录结构与元信息。需求：提供新建/删除/重命名/校验接口，维护 SQLite 数据文件、文档快照、临时中间文件。设计：封装路径拼接与权限校验，所有写操作记录日志便于排查权限问题。**主要 API**：`createKnowledgeBase()`、`deleteKnowledgeBase()`、`loadMetadata()`、`validatePath()`。**关键数据结构**：`KnowledgeBaseService.Metadata`（记录 embedding 模型、创建时间、统计信息）。
+- **TextChunkProcessor + DocumentParser**：文档解析与分块管线。需求：支持主流办公格式（PDF/Office/TXT/Markdown/JSON），按配置执行分块与重叠策略，并在失败时可恢复。设计：解析阶段使用 DocumentParser 抽取文本，分块阶段依据 chunkSize/overlap/minChunkSize 生成 TextChunk 集合，写入中间文件供断点续跑，随后驱动 EmbeddingHandler 写入向量库。**主要 API**：`processFiles()`、`extractTextFromFiles()`、`processChunksToVectors()`、`DocumentParser.extractText()`。**关键数据结构**：`TextChunkProcessor.TextChunk`、`ProgressCallback`、`NotificationProgressCallback`。
+- **ChatHistoryManager**：会话与附件管理。需求：记录聊天 Markdown、图像缩略图、AI 语音音频、Diffusion 输出，一并落地到 chathistory/<session> 中。设计：以 Markdown + 元数据形式存储，加载时解析音频/图像链接恢复 UI 状态，提供历史迁移与分享能力。**主要 API**：`saveChat()`、`loadChat()`、`appendAudioRecord()`、`convertChatToMarkdown()`。**关键数据结构**：`ChatHistoryManager.ChatRecord`、`ChatDataItem`、音频/图像文件命名规范。
+- **ProgressManager / StateDisplayManager**：状态广播与多语言文案中心。ProgressManager 负责知识库构建等长任务的阶段进度与耗时统计；StateDisplayManager 统一管理中英文文案，将业务状态映射为 UI 可读提示，减少界面硬编码。**主要 API**：`ProgressManager.initFileProcessing()`、`updateFileProgress()`、`initVectorization()`、`markCompleted()`；`StateDisplayManager.getDialogDisplay()`、`getButtonDisplay()`。**关键数据结构**：`ProgressManager.ProgressData`、`StateDisplayManager.DisplayEntry`。
+- **LogManager**：统一日志输出、文件滚动、logcat 捕获。需求：Release 默认强制写盘，支持多线程安全写入与大小限制（1MB 自动裁剪）。设计：所有模块通过 LogManager 记录关键事件，并在日志页面按级别过滤显示。**主要 API**：`LogManager.getInstance()`、`d/i/w/e()`、`setForceLogToFile()`、`loadLogConfig()`、`saveLogConfig()`。**关键数据结构**：日志文件 `.log`、内部线程池、格式化模板。
+
+### 2.3 推理与原生层
+- **LocalLLMMNNHandler**：MNN 推理枢纽，需求是对不同模型类型（纯文本 LLM、视觉-语言、Diffusion、TTS）进行统一探测、配置构建、推理调度，并处理流式回调与停止控制。设计：通过检测模型目录内文件（llm.mnn、visual.mnn、text_encoder.mnn、audio.mnn、talker.mnn）判定功能，使用 MnnInference.ConfigBuilder 构建 runtime config，注册回调处理文本 token、图像/音频输出，支持 dit_steps/dit_solver、KV Cache 等高级参数。**主要 API**：`findModelFile()`、`initialize()`、`generate()`、`stopGeneration()`、`buildMnnConfig()`、`handleStreamingToken()`。**关键数据结构**：`LocalLlmHandler.InferenceParams`、`MnnInference.ConfigBuilder`、`StreamingCallback`。
+- **MnnInference JNI（libs/mnn-jni）**：Java 层调用 MNN C++ 引擎的唯一桥梁。需求：对外提供 createSession、generate、embedding、reranker 等接口，维持线程安全、日志输出与错误返回。设计：在 mnn_jni.cpp 中统一管理 Session 生命周期（含 ExecutorScope 创建）、音频数据缓冲、Wavform 回调、错误码打印，使 Java 层只需关注高层业务。**主要 API**：`createSession()`、`generate()`、`createEmbeddingWithConfig()`、`createRerankerWithConfig()`、`setWavformCallback()`、`releaseSession()`。**关键数据结构**：`MnnLlmSession`（JNI 持有的会话对象）、音频缓冲 `tts_audio_buffer_`。
+  - 优化与注意事项：
+    - Android 构建强制 native 使用 `-DCMAKE_BUILD_TYPE=Release`（O3），避免 JNI/MNN 被 Debug 构建拖慢。
+    - app 的 `assembleRelease` 任务显式依赖 `:libs:mnn-jni:assembleRelease`，保证先构建 JNI 的 Release 版本。
+    - `libs/mnn-jni` 的 `debug` 构建禁用 `ndk.debugSymbolLevel` 并传递 Release 参数，统一使用 O3 优化；Java 层仍可保留 Debug 便于问题定位。
+    - 如需对 native 进行调试，建议在本地分支临时开启符号和断言，不要影响主线发布构建。
+    - 最佳实践：仅在必要时打开 native 调试符号；发布通道一律保持 Release 优化以确保 TTS/LLM 性能。
+- **StreamingApiClient / LlmApiAdapter**：在线推理客户端。需求：兼容多家 OpenAI/Claude 风格 API，实现统一的流式回调、错误处理、重试机制，与本地流程共享同一回调接口。设计：使用 Volley/OkHttp 发起 HTTP 请求，按流式事件将增量内容回传给 RagQaFragment，支持停止信号中断网络请求。**主要 API**：`StreamingApiClient.startStreaming()`、`stopStreaming()`、`LlmApiAdapter.ApiCallback`（成功/失败/流式回调）。**关键数据结构**：`LlmApiAdapter.ProviderConfig`、`StreamingChunk`。
+- **AcceleratorDiagnostics**：加速器检测与策略管理。需求：启动时检测设备是否支持 Vulkan/OpenCL/NNAPI/KleidiAI，并结合 Settings 中的偏好决定实际后端，同时提供日志可观测性。设计：通过 JNI 获取硬件能力、编译宏信息，按优先级回退到 CPU，并在日志中标记可用性和降级原因。**主要 API**：`initializeGPUHandling()`、`performAcceleratorConfigCheck()`、`logHardwareCaps()`。**关键数据结构**：后端能力快照（Vulkan/NNAPI flags）、`AcceleratorDiagnostics.Result`。
+
+### 2.4 数据与资源层
+- **ConfigManager**：配置中心。需求：统一存储路径配置、推理参数、UI 习惯、API Key 等，保证热更新能力。设计：结合 SharedPreferences（快速存取）与内部 .config JSON 文件（备份/同步），提供强类型访问器与默认值，兼容历史字段并记录迁移日志。**主要 API**：`getKnowledgeBasePath()`、`getEmbeddingModelPath()`、`getMaxNewTokens()`、`getPriorityManualParams()`、`setInt/Float/Boolean()` 等强类型访问器。**关键数据结构**：配置键常量（`KEY_*` 系列）、`.config` JSON。
+- **SQLiteVectorDatabaseHandler**：向量数据库封装。需求：管理向量表、元数据表、构建进度表，支持批量写入、删除、查询、统计。设计：使用事务保障批量插入一致性，提供相似度查询接口与分页能力，并在构建流程结束后返回写入统计供 UI 展示。**主要 API**：`loadDatabase()`、`searchSimilar()`、`insertChunk()`、`closeDatabase()`。**关键数据结构**：`SearchResult`（包含 text/similarity/source）、SQLite 表结构。
+- **文件系统布局**：统一根目录 `/storage/emulated/0/Download/OfflineAIData` 下的 models、embeddings、rerankers、knowledge_bases、chathistory 等子目录。需求：自动创建、校验剩余空间、提供错误提示。设计：ConfigManager 负责路径生成，FileUtil 校验读写权限，并在日志中记录异常文件路径。**主要 API**：`FileUtil.ensureDirectory()`、`ConfigManager.ensureDataDirs()`。**关键数据结构**：目录常量、`File` 对象。
+- **UnifiedForegroundService**：前台服务框架。需求：对知识库构建、模型下载、长时间推理等任务保持前台通知和 WakeLock，防止系统回收。设计：通过 Binder 向各 Fragment 提供回调注册，通知栏显示任务状态与进度，任务完成后自动降级通知并释放资源。**主要 API**：`startTask()`、`setProgressCallback()`、`stopTask()`、`releaseWakeLock()`。**关键数据结构**：`TaskType` 枚举、`ProgressCallback`。
+
+## 3. 核心功能设计
+
+### 3.1 RAG 问答体系
+- **模型来源**：支持本地 MNN 模型（文本/多模态/TTS/Diffusion）与在线 API。需求：在同一界面可无缝切换模型来源，在停机/弱网环境下优先走本地路径。设计：模型选择下拉列表合并本地与在线条目，发送前依据模型类型设置后端参数（如音频/图像开关）。
+- **知识库选择**：提供知识库多选与深度、重排数配置。需求：用户可按场景快速切换知识库，并设定检索深度与重排策略。设计：ConfigManager 持久化最近使用的知识库和检索参数，RagQueryManager 在执行检索前加载对应向量库。
+- **检索流程**：问题向量化 → 向量召回 → 条件重排 → 上下文拼装 → 调用模型。需求：过程需可中断、可观测、可调试。设计：在日志窗口输出向量分数/重排分数，统计拼装上下文 token 数，遇到异常（如向量全为零）立即告警并回退。**主要 API**：RagQueryManager 的 `executeRagQuery()`、EmbeddingHandler 的 `computeEmbedding()`、RerankerHandler 的 `rerank()`、LocalLLMMNNHandler 的 `generate()`。**关键数据结构**：`ChatDataItem`、`SQLiteVectorDatabaseHandler.SearchResult`、`RerankerResult`。
+- **会话特性**：Markdown 渲染、折叠菜单、复制、转笔记；支持最多 3 张图像输入并保留历史缩略图；语音输入需提供长按录音/上滑取消提示；TTS 输出落地文件并在聊天列表显示播放器；全局停止按钮即时中断流式输出。设计：通过 ChatRecyclerViewAdapter 管理多类型消息（文本、图片、音频、Diffusion 图片），结合 ChatHistoryManager 进行持久化。
+- **调试与可观测性**：需求是问题排查时能快速定位检索和推理异常。设计：RagQaFragment 提供 debug 面板输出 Embedding/Rerank 详细分数、Prompt token 长度、API 请求/响应日志，LogManager 统一收集。**主要 API**：`updateProgressPlainText()`、`LogManager.d()`、`RagQueryManager.callback.onProgressUpdate()`。**关键数据结构**：调试字符串缓存、日志文件。
+
+### 3.2 知识库构建
+- **入口与交互**：知识库选择器支持新建与切换，文件列表支持多选、清空、查看累计大小。需求：长任务中界面需保持可操作（查看日志、暂停），构建完成后要附带统计（向量条数、耗时）。设计：通过 ProgressManager 在 UI/前台通知/日志三处同步进度，构建完成后刷新知识库摘要。
+- **文档处理**：支持 PDF/Office/TXT/Markdown/JSON 等格式。需求：解析时保留文档结构（标题、表格、列表），对 JSON 特殊格式（instruction、对话等）需按语义拆分。设计：DocumentParser 针对不同格式采用专用解析器，输出结构化段落，后续由 TextChunkProcessor 处理。
+- **分块策略**：chunkSize/overlap/minChunkSize 可配置。需求：既要保证上下文连贯又要限制单块长度。设计：采用“自然段优先 + 长段二次切分”策略，重叠区用于保留衔接，Chunk 元数据记录来源段落与页码。
+- **向量化与重排**：现统一走 MNN Embedding/Reranker。需求：支持低内存模式与高性能模式切换，自动过滤异常向量。设计：EmbeddingHandler loadModel 时指定 memory mode，并在 computeEmbedding 后调用 VectorAnomalyHandler 校验；重排结果低于阈值时记录日志提醒。**主要 API**：`EmbeddingHandler.getModel()`、`computeEmbedding()`、`VectorAnomalyHandler.detectAndFix()`、`RerankerHandler.rerank()`。**关键数据结构**：`TextChunkProcessor.TextChunk`、`SQLiteVectorDatabaseHandler.SearchResult`。
+- **数据落盘**：向量与原文存入 SQLite，配套保存 intermediate_chunks.json 做断点续建，成功后清理临时文件。设计：TextChunkProcessor 在每阶段结束写入 checkpoint，失败时可回滚后续阶段。**主要 API**：`SQLiteVectorDatabaseHandler.insertChunk()`、`TextChunkProcessor.saveIntermediateChunks()`、`deleteIntermediateFile()`。**关键数据结构**：`intermediate_chunks.json`、SQLite 表。
+- **日志/诊断**：构建过程强制写入日志文件，包含解析、分块、向量化统计；UI 调试窗口实时输出当前文件、耗时、错误信息，便于查找格式或权限问题。
+
+### 3.3 知识库笔记
+- **功能点**：手动创建、标题/正文编辑、转换聊天回复为笔记、标签/分类扩展位。
+- **数据流**：新笔记在保存后立即向量化并写入当前知识库，提供进度提示与统计（条目数增长）。
+- **互操作**：笔记内容可回流至 RAG 问答作为知识源。
+
+### 3.4 模型下载管理
+- **数据来源**：ModelDownloadList.json 按类别列出模型包与 URL。需求：用户可按需下载或自定义来源。设计：首次进入时校验 JSON 并自动创建目录，支持用户替换文件指向自定义镜像。
+- **功能特性**：分类展示（LLM/Embedding/Reranker/ASR/TTS/Diffusion），可批量选择下载；支持断点续传、失败重试、下载完成校验（对比文件大小/Hash）。设计：下载过程在单独线程池执行，通过 Handler 刷新 UI 日志，遇到异常时自动重试并在前台服务通知中提示。
+- **资源管理**：下载前检测剩余空间，不足时提示用户；下载过程中持有 WakeLock 防止熄屏；完成后释放资源并写入下载日志，供用户排查网络问题。
+
+### 3.5 设置与配置管理
+- **目录设置**：用户可指定数据根目录、缓存目录、临时目录。需求：改变目录后应自动迁移或重新创建子目录，避免残留旧数据。设计：ConfigManager 保存目录并触发 FileUtil 重新校验/创建子目录，日志记录旧目录以便手动清理。
+- **推理参数**：包含最大上下文长度、最大新 Token、线程数、采样参数、后端偏好等。需求：修改后需即时生效，本地推理与在线推理共享一致的接口。设计：ConfigManager + LocalLLMMNNHandler 在每次推理前读取最新值，若开启手动参数优先则覆盖模型默认。
+- **RAG 参数**：检索深度、重排数量、相似度阈值等。需求：调整后立即影响下一次问答，提供默认建议与极值保护（例如深度上限）。设计：SettingsFragment 保留最后一次选择并提示建议范围。
+- **多模态与 Diffusion**：图像预处理尺寸、Diffusion 步数/CFG/种子等。需求：Diffusion 设置需平衡性能与质量，支持省内存模式。设计：ConfigManager 提供预设值（low/balance/enough），LocalLLMMNNHandler 在加载模型时传入配置。
+- **UI 与日志**：字号、主题、日志字体大小等个性化设置。需求：改动后界面即时刷新，日志视图需适配长文本。设计：StateDisplayManager 协调文案刷新，LogViewFragment 根据配置调整字体。
+- **API 管理**：在线接口地址、Key 存储、代理设置。需求：安全保存、可快速切换，且对网络异常提供提示。设计：ConfigManager 对 Key 加密存储（如使用 SharedPreferences MODE_PRIVATE），StreamingApiClient 读取失败时在 UI 提示。
+- **持久化策略**：所有关键配置写入 SharedPreferences，同时保留 .config JSON 备份以便导出分享，应用启动时优先使用 SharedPreferences 并校验与 JSON 一致性。
+
+### 3.6 日志与调试
+- **LogManager**：负责统一日志写入、滚动、强制落盘。需求：Release 模式默认写文件，支持多线程安全写入与容量控制。设计：使用单线程写入队列，超过容量自动裁剪头部，并支持手动导出。
+- **LogViewFragment**：UI 级日志查看器。需求：按等级/关键词过滤，支持复制/导出，显示最新日志并保持滚动位置。设计：定时刷新最新日志文件并在前台展示。
+- **调试辅助**：RagQaFragment 输出检索/重排分数、上下文统计；MNN JNI 打印后端/音频/TTS 状态；知识库构建记录每阶段耗时和失败原因。需求：调试信息需英文输出以便查阅，对关键异常提供醒目提示。
+
+### 3.7 帮助文档与版本信息
+- **帮助体系**：HelpFragment 渲染 assets/USER_GUIDE.md，提供章节目录、锚点跳转。需求：保证离线可用，更新版本时同步文档。设计：在应用内构建 Markdown 渲染器，同时提供外部打开链接功能。
+- **版本信息**：MainActivity 在日志与设置页展示 BuildConfig.BUILD_VERSION，帮助定位构建时间与渠道。需求：在问题反馈时便于追踪，结合日志导出提供完整环境信息。
+
+### 3.8 国际化支持
+- **语言切换**：通过 ConfigManager.KEY_LANGUAGE 控制，MainActivity 通过 attachBaseContext 注入新 Locale 并重建 Activity。需求：切换后界面即时刷新，后台返回时保持语言一致。设计：所有文案从 StateDisplayManager 获取，避免硬编码。
+- **资源适配**：界面文案、通知、日志提示均支持中英文，帮助文档双语并在 UI 中可以切换版本。设计：StateDisplayManager 按语言返回对应字符串，同时提供默认回退策略。
+
+## 4. 推理引擎与原生集成
+
+### 4.1 MNN 推理核心
+- **统一入口**：LocalLLMMNNHandler 负责检测模型目录，判断是否具备 LLM、视觉、Diffusion、TTS 功能。需求：自动化检测避免用户手动配置，加载失败时给出可读日志。
+- **配置构建**：通过 MnnInference.ConfigBuilder 设置后端、线程、精度、内存模式、功耗策略、max_all_tokens、max_new_tokens 等关键参数；根据模型内文件自动启用视觉/音频模块，TTS 默认设置 dit_steps=5、dit_solver=1。需求：确保配置优先级为运行时参数 > ConfigManager > 模型 config.json。
+- **特性实现**：LLM 流式输出、KV Cache 管控、手动/默认采样切换；视觉模型支持多轮图像追问，需避免 chunk>0 导致的 mVisionEmbeddings 崩溃；Diffusion 在本地执行文本转图并输出进度；TTS 通过 Talker Diffusion 输出音频文件并将路径传回 UI。
+- **JNI 实现**：mnn_jni.cpp 中封装 Session 生命周期、创建 ExecutorScope、绑定流式回调与音频回调，处理停止标志。需求：日志需英文输出，关键路径（加载、推理、回调）均保留调试信息，错误需抛回 Java 层处理。
+
+### 4.2 在线推理适配
+- **StreamingApiClient / LlmApiAdapter**：面向在线 API 的统一接入层。需求：兼容 OpenAI/Claude 风格接口，支持 SSE/流式输出、错误重试、请求超时、API Key 管理。设计：内部对不同厂商适配各自参数（model、temperature 等），并与 RagQueryManager 共用回调接口，以统一 UI 展示逻辑。
+
+### 4.3 加速器与资源检测
+- **AcceleratorDiagnostics**：需求是评估设备可用的硬件后端（CPU、Vulkan、NNAPI、KleidiAI 等），并在后端不可用时自动回退，输出详细日志。设计：启动时通过 JNI 调用获取硬件能力、编译宏与运行时检测结果，结合 Settings 中的偏好确定实际后端，失败时记录原因。
+
+## 5. 数据与持久化
+
+### 5.1 目录结构
+
+| 目录 | 描述 | 主要内容 |
+|------|------|----------|
+| `models/` | 本地 LLM/VLM/TTS/Diffusion 模型 | `llm.mnn`、`visual.mnn`、`text_encoder.mnn`、`audio.mnn`、`talker.mnn` 等 |
+| `embeddings/` | 嵌入模型 | MNN Embedding 模型及配置 |
+| `rerankers/` | 重排模型 | Qwen3、GTE 等 MNN Reranker |
+| `knowledge_bases/<name>/` | 知识库 | SQLite 向量库、文档快照、中间文件 |
+| `chathistory/<session>/` | 会话历史 | Markdown、图像、TTS 音频、Diffusion 图片 |
+| `logs/` | 日志输出 | `.log`、构建日志、调试快照 |
+| `downloads/` | 模型下载缓存 | 临时文件、断点续传记录 |
+
+### 5.2 知识库存储
+- **SQLiteVectorDatabaseHandler**：负责向量存储、元数据维护、构建统计。需求：批量写入时需事务保证，提供查询/删除接口。设计：表结构包括向量表、文档元信息表、构建进度表，支持相似度查询与统计接口。
+- **RAG 查询**：调用时按相似度排序返回 Top-N，并在必要时进行重排。需求：多线程安全、支持停止检查。设计：检索阶段可并行，返回结果附带分数与元数据，供 RagQueryManager 拼接上下文。
+
+### 5.3 会话历史
+- **ChatHistoryManager**：负责对话序列化、附件管理。需求：保存聊天 Markdown、图像、AI 音频、Diffusion 图片，并能加载恢复 UI 状态。设计：Markdown 中以特定标记记录附件，加载时解析并生成相应 ViewHolder。
+- **文件命名**：音频 `audio_{timestamp}_ai.wav`、Diffusion 图片 `image_{timestamp}_ai.png` 保持统一命名，便于回溯与外部导出。
+
+### 5.4 配置与日志
+- **配置文件**：SharedPreferences + `.config` JSON 双轨并存，前者用于即时读取，后者用于备份/导出。需求：启动时校验两者一致性，避免错乱。
+- **日志**：`.log` 文件滚动写入，超过 1MB 自动裁剪；Release 模式强制写盘。需求：支持用户导出调试信息，LogManager 提供接口。
+
+## 6. 后台任务与资源管理
+
+- **UnifiedForegroundService**：任务调度与保活服务，承担通知展示、WakeLock、任务回调。需求：长时间任务过程中保持前台，任务结束自动降级并释放资源。
+- **ProgressManager**：统一维护构建等任务的阶段进度、已耗时、当前文件，供 UI/通知/日志使用。
+- **AcceleratorDiagnostics**：检测设备可用后端并提供自动降级策略，启动时输出日志以便排查兼容性。
+- **Global Stop 控制**：通过全局原子标志与线程池管理，确保停止指令可在检索、推理、下载等流程中迅速生效。
+
+## 7. 配置、可观测性与调试
+
+- **构建命令**：统一使用 Release 构建进行测试：
+  ```bash
+  ./gradlew assembleRelease -PKEYPSWD=abc-1234
+  ```
+- **日志观测**：
+  - `LogManager` 文件 + `LogViewFragment` UI。
+  - ADB 过滤：`adb logcat -s OfflineAI_* MNN_JNI MNNJNI`。
+- **性能指标**：
+  - 向量检索耗时、内存占用、模型加载时长在 README 提供参考值，可结合实际设备记录。
+- **异常排查**：
+  - 知识库存储权限、模型文件完整性、后端不可用（自动 fallback）均在日志中打印。
+
+## 8. 本地化、帮助与文档
+
+- **语言切换**：
+  - 设置项实时生效，重启 Activity 后 UI 语言刷新。
+  - `StateDisplayManager` 将文案按键位分类，结合资源文件输出对应语言文本。
+- **帮助体系**：
+  - 内置 `USER_GUIDE.md`，覆盖 RAG 原理、操作步骤、Diffusion/TTS 使用建议。
+  - README 提供项目背景、贡献指南、性能指标。
+- **版本与配置导出**：用户可通过日志和配置文件导出排障信息。
+
+## 9. 最佳实践与注意事项
+
+1. **模型配置**：
+   - 保持 MNN Chunk Size = 0，避免 Vision Embedding 被截断。
+   - 配置 `max_all_tokens` 对齐上下文窗口，避免历史截断。
+   - TTS 默认 `dit_steps=5`，`dit_solver=1`，不手动设置 `talker_max_new_tokens`/`talker_speaker`。
+2. **知识库构建**：
+   - 大文件构建前确保前台运行与充足存储。
+   - JSON 数据保持结构化字段，便于自动解析。
+   - 向量异常日志应及时关注，避免检索质量下降。
+3. **RAG 调优**：
+   - `searchDepth` 与 `rerankCount` 建议保持 1:2~1:3，平衡召回与性能。
+   - 合理设置采样参数，确保回答连贯性；在“手动优先”模式下谨慎调整温度与 Top-P。
+4. **资源控制**：
+   - GPU/NNAPI 后端选择结合设备兼容性；失败自动降级至 CPU。
+   - 长时间任务必须依赖 UnifiedForegroundService 维持 WakeLock，防止系统杀死。
+5. **隐私与合规**：
+   - 用户数据（文档、向量、日志）均存储本地；提供手动备份/导出方案。
+   - 提示用户遵守模型许可与内容生成规范。
+
+---
+
+## 附录A：历史缺陷修复记录（保留原始内容待迁移）
+
+**MNN Vision多模态chunk分块崩溃修复（CRITICAL BUG FIX #5）**
+- 问题现象：Vision模型推理时SIGBUS崩溃，Fatal signal 7 (SIGBUS), Cause: invalid address alignment
+- 崩溃位置：`omni.cpp` Line 950-951，访问`mVisionEmbeddings`时
+- 根本原因：**设置chunk=256导致vision_pad tokens被分块处理，触发多次embedding()调用**
+  ```
+  崩溃流程：
+  1. Prompt总长度 > 256 tokens（历史对话 + 当前图片）
+  2. 第一块[0-255]：调用embedding() → 处理完后clear()清空mVisionEmbeddings
+  3. 第二块[256-511]：再次调用embedding()，包含vision_pad → 访问已清空的embeddings → SIGBUS崩溃
+  ```
+
+- **关键代码分析：**
+  ```cpp
+  // llm.cpp Line 708-724：chunk分块逻辑
+  if (0 == mBlockSize || input_ids.size() <= mBlockSize) {
+      auto hidden_states = embedding(input_ids);  // 一次性处理，不分块
+      return generate(hidden_states, max_tokens);
+  }
+  // chunk > 0时，分块处理
+  int loop_size = UP_DIV(total_size, mBlockSize);
+  for (int i = 0; i < loop_size; i++) {
+      auto input_embeds = embedding(chunk_ids);  // ❌ 多次调用embedding()
+      generate(input_embeds, 0);
+  }
+  ```
+  
+  ```cpp
+  // omni.cpp Line 993：第一次embedding()后清空
+  mVisionEmbeddings.clear();  // ❌ 清空后第二次调用会崩溃
+  mAudioEmbeddings.clear();
+  ```
+
+- **ChatMNN不崩溃的原因：**
+  - ChatMNN没有设置chunk参数
+  - MNN默认`mBlockSize = 0` → 不分块 → 只调用一次embedding() → 不崩溃
+
+- **修复方案：**
+  ```java
+  // LocalLLMMNNHandler.java Line 974
+  final int CHUNK_SIZE = 0;  // 0 = no chunking (MNN default behavior)
+  
+  // Line 1000
+  // .chunk() NOT called - use MNN default to avoid vision_pad split
+  ```
+
+- **对比：**
+  | 配置 | chunk值 | 行为 | 结果 |
+  |------|---------|------|------|
+  | 我们（修复前） | 256 | 分块处理 | SIGBUS崩溃 ❌ |
+  | ChatMNN | 0（默认） | 不分块 | 正常运行 ✅ |
+  | 我们（修复后） | 0（默认） | 不分块 | 正常运行 ✅ |
+
+- **为什么不能用大chunk（如2048）？**
+  - 虽然能减少崩溃概率，但如果prompt真的超过2048 tokens还是会崩溃
+  - 正确做法是使用默认（不分块），和官方ChatMNN保持一致
+
+- 影响范围：
+  - `app/src/main/java/com/example/offlineai/api/LocalLLMMNNHandler.java` Line 974, 1000
+
+- 验证方法：
+  ```bash
+  # 测试多轮对话后发送图片，不应崩溃
+  # 日志中应只看到一次embedding()调用
+  adb logcat | grep "EMBEDDING DEBUG"
+  ```
+
+---
+
 **MNN 上下文窗口配置缺失（CRITICAL BUG FIX #4）**
 - 问题现象：长对话被截断，无法记住完整历史，实际上下文窗口只有2048 tokens
 - 根本原因：**只设置了`max_new_tokens`，缺少`max_all_tokens`配置！**
@@ -5836,7 +6178,7 @@ implementation project(':libs:mnn-jni')  // 统一的MNN JNI库
 
 ### MNN模型文件结构
 
-**所需文件**：
+**标准文件结构（外部权重）**：
 ```
 model_dir/
 ├── llm.mnn              # MNN模型文件
@@ -5846,6 +6188,55 @@ model_dir/
 ├── llm_config.json      # 模型配置
 └── config.json          # 运行时配置
 ```
+
+**内嵌权重文件结构（新增支持）**：
+```
+model_dir/
+├── llm.mnn              # MNN模型文件（权重内嵌）
+├── tokenizer.txt        # Tokenizer文件（MNN内置使用）
+├── embeddings_bf16.bin  # (可选)独立embedding权重
+├── llm_config.json      # 模型配置
+└── config.json          # 运行时配置
+```
+
+**混合权重文件结构（兼容性）**：
+```
+model_dir/
+├── llm.mnn              # MNN模型文件
+├── visual.mnn           # 视觉模型文件（权重内嵌）
+├── llm.mnn.weight       # 文本模型权重文件
+├── tokenizer.txt        # Tokenizer文件
+├── embeddings_bf16.bin  # (可选)独立embedding权重
+├── llm_config.json      # 模型配置
+└── config.json          # 运行时配置
+```
+
+**权重模式检测逻辑**：
+- **外部权重模式**：存在 `llm.mnn.weight` 和 `visual.mnn.weight` 文件
+- **内嵌权重模式**：仅存在 `.mnn` 文件，无对应 `.weight` 文件
+- **混合权重模式**：部分模型使用外部权重，部分使用内嵌权重
+
+**代码实现**：
+```java
+// LocalLlmHandler.java - isMnnModel() 方法
+// 检测权重模式并记录日志
+boolean hasLlmWeight = new File(modelDir, "llm.mnn.weight").exists();
+boolean hasVisualWeight = new File(modelDir, "visual.mnn.weight").exists();
+
+if (hasLlmWeight && hasVisualWeight) {
+    Log.i(TAG, "MNN model with external weights detected");
+} else if (!hasLlmWeight && !hasVisualWeight) {
+    Log.i(TAG, "MNN model with embedded weights detected");
+} else {
+    Log.i(TAG, "MNN model with mixed weights detected");
+}
+```
+
+**兼容性说明**：
+- 支持传统的外部权重文件格式（向后兼容）
+- 支持新的内嵌权重文件格式（如 PaddleOCR-VL-0.9B-int4）
+- 自动检测权重模式，无需用户手动配置
+- 混合权重模式支持不同组件使用不同权重存储方式
 
 **config.json示例**：
 ```json
@@ -6792,6 +7183,174 @@ Chatbox UI/UX优化与Debug信息增强（2025-10-17）
   3. **格式一致性**：同类信息使用统一格式，便于用户理解和对比
   4. **TextView状态管理**：setText后必须重新设置selectable和movement method
   5. **性能考虑**：进度更新使用plain text避免Markdown渲染开销
+
+---
+
+### MNN TTS音质改进和UI修复 (2025-10-23)
+
+#### 问题1：TTS音质差（"鬼叫"问题）
+
+**症状**：
+- TTS生成的音频长度正常（45秒），但除了开头"你好"能听清，后续声音质量很差
+
+**根本原因**：
+- `dit_steps=3` **太低**！MNN官方文档建议5-10
+- dit_steps控制扩散模型迭代次数，直接影响音频质量
+
+**MNN文档说明**（libs/mnn/docs/transformers/llm.md Line 436-437）：
+```
+- dit_steps: 生成语音时扩散模型迭代次数，默认为5, 建议设置为5~10,
+  越大语音质量越高计算耗时越高；
+- dit_solver: 生成语音时扩散模型求解算法阶数，支持1, 4，默认为1使用一阶欧拉法；
+  4表示四阶龙格库塔法，效果略好但耗时增加4倍；
+```
+
+**修复**：
+```java
+// LocalLLMMNNHandler.java Line 804-805
+// ❌ 原配置：dit_steps=3（音质差）
+builder.ditSteps(3);
+
+// ✅ 修复后：dit_steps=5（MNN推荐最小值）
+builder.ditSteps(5);     // Diffusion steps: 5 (MNN doc recommends 5-10 for quality)
+builder.ditSolver(1);    // 1=Euler (fast), 4=RK4 (4x slower but better)
+```
+
+#### 问题2：AI音频块UI样式不一致 (已完全修复✅ 2025-10-24)
+
+**症状**：
+- AI音频块圆角过大（40dp，变成完整胶囊形）
+- 播放/暂停按钮圆圈时有时无（播放带圈，暂停不带圈）
+- 用户音频块使用了错误的背景资源（`bg_chat_user`用于文本气泡）
+- 存在冗余资源（`ic_play.xml`与`ic_audio_play.xml`完全重复）
+
+**修复内容**：
+
+1. **统一播放图标风格（Drawable资源）** ✅
+   - `ic_audio_play.xml`：带圆圈的播放图标
+   - `ic_audio_pause.xml`：改为带圆圈的暂停图标（之前不带圈）
+   - 删除`ic_play.xml`（冗余资源）
+
+2. **修复AI音频块代码图标混用（关键bug）** ✅
+   - **问题**：`ChatViewHolders.kt`使用Android系统图标，导致AI播放按钮是实心三角（无圆圈）
+   - **修复**：
+     ```kotlin
+     // ❌ 修复前（Line 382, 385, 404）
+     btnPlayPauseTts.setImageResource(android.R.drawable.ic_media_play)    // 系统图标：实心三角
+     btnPlayPauseTts.setImageResource(android.R.drawable.ic_media_pause)   // 系统图标：实心暂停
+     
+     // ✅ 修复后
+     btnPlayPauseTts.setImageResource(R.drawable.ic_audio_play)   // 自定义图标：带圆圈
+     btnPlayPauseTts.setImageResource(R.drawable.ic_audio_pause)  // 自定义图标：带圆圈
+     ```
+   - **影响**：播放/暂停切换时，圆圈始终存在，与用户音频块一致
+
+3. **修复背景资源混用** ✅
+   - `item_holder_user.xml` Line 45：用户音频块从`bg_chat_user`改为`bg_audio_user`
+   - 确保文本气泡和音频播放器使用专属的背景资源
+
+4. **优化音频块圆角** ✅
+   - `bg_audio_assistant.xml`：圆角从40dp改为20dp
+   - `bg_audio_user.xml`：圆角从40dp改为20dp
+   - 原因：容器高度40dp，圆角40dp会变成完整半圆两端，视觉不自然；20dp更柔和
+
+**资源设计规范**：
+
+| 资源 | 用途 | 圆角 | 颜色 | 说明 |
+|------|------|------|------|------|
+| `bg_chat_user` | 用户文本气泡 | 14dp全圆角 | 蓝色 | 用于文本消息 |
+| `bg_chat_assistant` | AI文本气泡 | 14dp（左下1dp） | 灰色 | 用于文本消息 |
+| `bg_audio_user` | 用户音频块 | **20dp**全圆角 | 蓝色 | 用于音频播放器 |
+| `bg_audio_assistant` | AI音频块 | **20dp**全圆角 | 绿色#81C784 | 用于音频播放器 |
+| `ic_audio_play` | 播放图标 | **带圆圈** | #e3e3e3 | 统一风格 |
+| `ic_audio_pause` | 暂停图标 | **带圆圈** | #e3e3e3 | 统一风格 |
+
+#### 问题3：AI音频块不显示
+
+**症状**：
+- Log显示AI音频文件加载成功
+- 但界面上AI音频播放器不显示
+
+**根本原因**：
+- `ChatHistoryManager.java` 加载AI音频时只设置了`audioUri`
+- **忘记设置`hasOmniAudio=true`标志**
+- `ChatViewHolders.kt` Line 348判断需要这个标志：
+  ```kotlin
+  val hasTtsAudio = data.hasOmniAudio && audioUri != null && audioUri.scheme == "file"
+  ```
+
+**修复**（ChatHistoryManager.java Line 536-538）：
+```java
+// ❌ 修复前
+if (audioFile.exists()) {
+    item.audioUri = Uri.fromFile(audioFile);
+    LogManager.logI(TAG, "[AI_AUDIO_LOAD] AI audio URI set: " + audioFile.getAbsolutePath());
+}
+
+// ✅ 修复后
+if (audioFile.exists()) {
+    item.audioUri = Uri.fromFile(audioFile);
+    item.hasOmniAudio = true;  // CRITICAL: Must set flag to show AI audio player
+    LogManager.logI(TAG, "[AI_AUDIO_LOAD] ✅ AI audio loaded: hasOmniAudio=true, uri=" + audioFile.getAbsolutePath());
+}
+```
+
+#### 测试验证
+
+1. **编译测试**：
+   ```bash
+   .\gradlew.bat assembleRelease -PKEYPSWD=abc-1234
+   ```
+
+2. **音质测试**：
+   - 生成任意长度文本（如"请介绍一下人工智能的发展历史"）
+   - 检查音频质量是否清晰，无杂音
+
+3. **UI测试**：
+   - 检查AI音频块是否显示
+   - 对比蓝色用户音频块和绿色AI音频块的弧度、按钮样式是否一致
+   - 测试播放/暂停图标切换，确认圆圈始终存在
+
+#### 影响范围
+
+- **代码修改**：
+  - `app/src/main/java/com/example/offlineai/api/LocalLLMMNNHandler.java` (2行) - dit_steps配置
+  - `app/src/main/res/layout/item_holder_assistant.xml` (14行) - AI音频块布局
+  - `app/src/main/java/com/example/offlineai/ChatHistoryManager.java` (2行) - hasOmniAudio标志
+  - `app/src/main/res/layout/item_holder_user.xml` (1行) - 用户音频块背景
+  - `app/src/main/java/com/example/offlineai/chat/chatlist/ChatViewHolders.kt` (3行) - AI音频图标
+  - `app/src/main/res/drawable/ic_audio_pause.xml` (重写) - 带圆圈暂停图标
+  - `app/src/main/res/drawable/bg_audio_assistant.xml` (1行) - 圆角20dp
+  - `app/src/main/res/drawable/bg_audio_user.xml` (1行) - 圆角20dp
+  - 删除 `app/src/main/res/drawable/ic_play.xml` (冗余资源)
+
+- **配置变更**：
+  - TTS dit_steps: 3 → 5
+  - 音频块圆角：40dp → 20dp
+  - AI音频播放图标：Android系统图标 → 自定义带圈图标
+
+#### 最佳实践
+
+1. **TTS参数配置**：
+   - dit_steps不低于5（MNN推荐）
+   - dit_solver=1（欧拉法）适合移动端，平衡速度和质量
+   - talker_max_new_tokens和talker_speaker使用模型默认值
+
+2. **UI设计一致性**：
+   - 相同功能的控件（用户/AI音频块）保持视觉一致
+   - 只用颜色区分角色（蓝色=用户，绿色=AI）
+   - 圆角大小应适配容器尺寸（40dp高的容器用20dp圆角，不要用40dp）
+   - 图标风格统一（播放/暂停按钮都带圆圈或都不带）
+   - **代码层图标引用一致性**：
+     * XML布局和Kotlin代码都必须使用相同的自定义图标
+     * 避免XML用`R.drawable.ic_audio_play`，代码却用`android.R.drawable.ic_media_play`
+     * 检查所有setImageResource调用，确保使用项目自定义资源
+   - 避免资源冗余（删除重复的drawable）
+   - 正确复用背景资源（`bg_chat_*`用于文本，`bg_audio_*`用于音频）
+
+3. **数据模型完整性**：
+   - 设置audioUri时必须同时设置hasOmniAudio标志
+   - 避免"数据存在但不显示"的bug
 
 ---
 

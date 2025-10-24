@@ -1,6 +1,8 @@
 package com.offlineai.mnn;
 
 import android.util.Log;
+import android.util.Pair;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -112,6 +114,36 @@ public class MnnInference {
         InferenceCallback callback
     );
     
+    /**
+     * Perform multi-modal inference with images and/or audio (unified interface)
+     * @param sessionHandle Session handle
+     * @param prompt User prompt text
+     * @param imagePaths Array of image file paths (can be null)
+     * @param audioPaths Array of audio file paths (can be null)
+     * @param callback Streaming callback for token output
+     * @return Inference statistics
+     */
+    public static native Map<String, Long> inferenceMultimodal(
+        long sessionHandle,
+        String prompt,
+        String[] imagePaths,
+        String[] audioPaths,
+        InferenceCallback callback
+    );
+    
+    /**
+     * Perform streaming inference with conversation history
+     * @param sessionHandle Session handle from createSession
+     * @param history Conversation history (List of Pair<role, content>)
+     * @param callback Streaming callback for token output
+     * @return Inference statistics
+     */
+    public static native Map<String, Long> inferenceWithHistory(
+        long sessionHandle,
+        List<Pair<String, String>> history,
+        InferenceCallback callback
+    );
+    
     // ========== Configuration Methods ==========
     
     /**
@@ -184,6 +216,55 @@ public class MnnInference {
      */
     public static native String diagnoseOpenCL();
     
+    // ========== TTS (Text-to-Speech) Support ==========
+    
+    /**
+     * Check if model supports TTS (has talker.mnn)
+     * @param sessionHandle Session handle
+     * @return true if TTS is supported
+     */
+    public static native boolean hasTTS(long sessionHandle);
+    
+    /**
+     * Set TTS waveform callback to receive generated audio
+     * @deprecated Use setTtsOutputPath() for synchronous file writing (Diffusion-style)
+     * @param sessionHandle Session handle
+     * @param callback TTS callback for receiving audio data
+     * @return true if callback was set successfully
+     */
+    @Deprecated
+    public static native boolean setWavformCallback(long sessionHandle, TtsCallback callback);
+    
+    /**
+     * Set TTS output file path for synchronous WAV file writing
+     * C++ layer will write WAV file directly, like Diffusion does for images
+     * @param sessionHandle Session handle
+     * @param outputPath Output WAV file path (or null to disable)
+     */
+    public static native void setTtsOutputPath(long sessionHandle, String outputPath);
+    
+    /**
+     * Get TTS output file path (returns path after successful generation)
+     * @param sessionHandle Session handle
+     * @return Output path if file was written, null otherwise
+     */
+    public static native String getTtsOutputPath(long sessionHandle);
+    
+    /**
+     * Callback interface for TTS audio output
+     * @deprecated Use setTtsOutputPath() instead
+     */
+    @Deprecated
+    public interface TtsCallback {
+        /**
+         * Called when audio data is generated (24kHz mono float32 PCM)
+         * @param data Audio samples in range [-1.0, 1.0]
+         * @param isEnd true if this is the last chunk
+         * @return false to continue, true to stop
+         */
+        boolean onAudioData(float[] data, boolean isEnd);
+    }
+    
     public interface InferenceCallback {
         /**
          * Called when a new token is generated
@@ -204,6 +285,12 @@ public class MnnInference {
          */
         void onError(String error);
     }
+    
+    // Note: inferenceWithHistory() now uses List<Pair<String, String>> instead of PromptItem[]
+    // This matches ChatMNN implementation and avoids JNI field access issues
+    // Use: List<Pair<String, String>> history = new ArrayList<>();
+    //      history.add(new Pair<>("user", "Hello"));
+    //      history.add(new Pair<>("assistant", "Hi there!"));
     
     // ========== Helper Classes ==========
     
@@ -311,6 +398,24 @@ public class MnnInference {
         
         public ConfigBuilder audioPad(int padToken) {
             addField("audio_pad", padToken);
+            return this;
+        }
+        
+        public ConfigBuilder talkerMaxNewTokens(int tokens) {
+            addField("talker_max_new_tokens", tokens);
+            return this;
+        }
+        
+        // Note: talker_speaker NOT provided - model-specific parameter (e.g., Qwen2.5-Omni: "Chelsie"/"Ethan")
+        // Different models have different speaker options, should use model's default config
+        
+        public ConfigBuilder ditSteps(int steps) {
+            addField("dit_steps", steps);
+            return this;
+        }
+        
+        public ConfigBuilder ditSolver(int solver) {
+            addField("dit_solver", solver);
             return this;
         }
         

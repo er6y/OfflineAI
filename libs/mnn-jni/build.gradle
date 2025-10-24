@@ -33,7 +33,9 @@ android {
                           "-DMNN_BUILD_DIFFUSION=ON",
                           "-DMNN_SEP_BUILD=OFF",
                           "-DMNN_KLEIDIAI=ON",
-                          "-DMNN_BUILD_TOOLS=OFF"
+                          "-DMNN_BUILD_TOOLS=OFF",
+                          // Force native build to use Release for performance
+                          "-DCMAKE_BUILD_TYPE=Release"
 
                 cppFlags "-std=c++17", "-fexceptions", "-frtti"
                 // Build for both ARM64 (real device) and x86_64 (emulator)
@@ -52,9 +54,25 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Ensure native build stays on Release even in release variant
+            externalNativeBuild {
+                cmake {
+                    arguments "-DCMAKE_BUILD_TYPE=Release"
+                }
+            }
         }
         debug {
             minifyEnabled false
+            // Disable extra debug symbols for JNI to avoid slowdowns
+            ndk {
+                debugSymbolLevel 'none'
+            }
+            // Force JNI/MNN to compile with Release flags even in debug variant
+            externalNativeBuild {
+                cmake {
+                    arguments "-DCMAKE_BUILD_TYPE=Release"
+                }
+            }
         }
     }
 

@@ -95,6 +95,40 @@
             android:orientation="vertical"
             android:layout_marginBottom="8dp" />
 
+        <!-- ASR列表 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_asr_list"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="2dp"
+            android:layout_marginBottom="0dp" />
+
+        <LinearLayout
+            android:id="@+id/containerAsrModels"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp" />
+
+        <!-- TTS列表 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/title_tts_list"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="2dp"
+            android:layout_marginBottom="0dp" />
+
+        <LinearLayout
+            android:id="@+id/containerTtsModels"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="8dp" />
+
         <!-- 进度显示区域 -->
         <TextView
             android:layout_width="match_parent"
