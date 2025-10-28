@@ -11,13 +11,21 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent">
 
-        <!-- Thumbnail image -->
+        <!-- Thumbnail image/icon -->
         <ImageView
             android:id="@+id/imageViewThumbnail"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
             android:scaleType="centerCrop"
             android:contentDescription="@string/desc_image_thumbnail" />
+
+        <!-- Converting progress indicator (for audio) -->
+        <ProgressBar
+            android:id="@+id/progressBarConverting"
+            android:layout_width="24dp"
+            android:layout_height="24dp"
+            android:layout_gravity="center"
+            android:visibility="gone" />
 
         <!-- Delete button overlay -->
         <ImageButton

@@ -691,6 +691,10 @@ public class LocalLlmAdapter {
         lastTtsAudioPath = null;
     }
     
+    // ========== ASR (Automatic Speech Recognition) ==========
+    // ASR functionality has been moved to AsrAdapter.java for better separation of concerns
+    // Use AsrAdapter.getInstance(context) directly for ASR operations
+    
     /**
      * 释放资源（在APP退出时调用以保存kernel cache）
      */

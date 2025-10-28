@@ -3263,3 +3263,8 @@ Java_com_offlineai_mnn_MnnInference_releaseDiffusion(
         LOGW("[DIFFUSION] Diffusion handle not found: %lld", (long long)handle);
     }
 }
+
+// ========== ASR (Automatic Speech Recognition) ==========
+// NOTE: ASR functionality has been moved to sherpa-mnn-jni module
+// MnnInference.java still declares these methods for compatibility,
+// but they will be implemented by sherpa-mnn-jni module

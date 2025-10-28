@@ -30,6 +30,19 @@ public class ChatHistoryFilter {
     private static final Pattern IMG_TAG = Pattern.compile("<img>.*?</img>");
     private static final Pattern AUDIO_TAG = Pattern.compile("<audio>.*?</audio>");
     
+    // Debug tags and markers (CRITICAL: must filter from history to prevent model from learning them)
+    private static final Pattern DEBUG_TAG = Pattern.compile("<debug>.*?</debug>", Pattern.DOTALL);
+    private static final Pattern DEBUG_OPEN_TAG = Pattern.compile("<debug>");
+    private static final Pattern DEBUG_CLOSE_TAG = Pattern.compile("</debug>");
+    private static final Pattern TEXT_HEAD = Pattern.compile("\\[TEXT:\\]");
+    private static final Pattern IMAGE_HEAD = Pattern.compile("\\[IMAGE:\\]");
+    private static final Pattern AUDIO_HEAD = Pattern.compile("\\[AUDIO:\\]");
+    private static final Pattern RAG_TAG = Pattern.compile("\\[RAG\\][^\\n]*");
+    private static final Pattern LLM_TAG = Pattern.compile("\\[LLM\\][^\\n]*");
+    private static final Pattern ASR_TAG = Pattern.compile("\\[ASR\\][^\\n]*");
+    private static final Pattern DIFFUSION_TAG = Pattern.compile("\\[Diffusion\\][^\\n]*");
+    private static final Pattern PERFORMANCE_TAG = Pattern.compile("<performance>.*?</performance>", Pattern.DOTALL);
+    
     /**
      * Filter text content for MNN inference
      * @param text Raw markdown text
@@ -39,6 +52,19 @@ public class ChatHistoryFilter {
         if (TextUtils.isEmpty(text)) {
             return "";
         }
+        
+        // CRITICAL: Remove debug tags and markers FIRST (prevent model from learning them)
+        text = DEBUG_TAG.matcher(text).replaceAll("");  // Remove complete <debug>...</debug> blocks
+        text = DEBUG_OPEN_TAG.matcher(text).replaceAll("");  // Remove orphan <debug>
+        text = DEBUG_CLOSE_TAG.matcher(text).replaceAll("");  // Remove orphan </debug>
+        text = PERFORMANCE_TAG.matcher(text).replaceAll("");  // Remove <performance>...</performance>
+        text = TEXT_HEAD.matcher(text).replaceAll("");  // Remove [TEXT:]
+        text = IMAGE_HEAD.matcher(text).replaceAll("");  // Remove [IMAGE:]
+        text = AUDIO_HEAD.matcher(text).replaceAll("");  // Remove [AUDIO:]
+        text = RAG_TAG.matcher(text).replaceAll("");  // Remove [RAG] xxx
+        text = LLM_TAG.matcher(text).replaceAll("");  // Remove [LLM] xxx
+        text = ASR_TAG.matcher(text).replaceAll("");  // Remove [ASR] xxx
+        text = DIFFUSION_TAG.matcher(text).replaceAll("");  // Remove [Diffusion] xxx
         
         // Remove emoji
         text = EMOJI_PATTERN.matcher(text).replaceAll("");

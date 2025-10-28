@@ -11,6 +11,7 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
+import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -70,7 +71,7 @@ import com.example.offlineai.RerankerHandler;
 import com.example.offlineai.AppConstants;
 import com.example.offlineai.StateDisplayManager;
 import com.example.offlineai.adapter.StateAwareSpinnerAdapter;
-import com.example.offlineai.ImageThumbnailAdapter;
+import com.example.offlineai.MediaThumbnailAdapter;
 import com.example.offlineai.EmbeddingHandler;
 import com.example.offlineai.SQLiteVectorDatabaseHandler;
 import com.example.offlineai.ConfigManager;
@@ -99,9 +100,11 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -154,8 +157,8 @@ public class RagQaFragment extends Fragment {
     private Handler longPressHandler;  // Handler for long press detection
     private TextView textViewResponse; // Response text view
     private CheckBox checkBoxThinkingMode; // Thinking mode checkbox
-    private RecyclerView recyclerViewImageThumbnails; // Image thumbnail container
-    private ImageThumbnailAdapter imageThumbnailAdapter; // Image thumbnail adapter
+    private RecyclerView recyclerViewImageThumbnails; // Media thumbnail container (images and audio)
+    private MediaThumbnailAdapter mediaThumbnailAdapter; // Media thumbnail adapter
     // 避免程序化设置复选框状态时触发监听器造成误保存
     private boolean isUpdatingUiFromConfig = false;
     
@@ -171,6 +174,8 @@ public class RagQaFragment extends Fragment {
     private ActivityResultLauncher<PickVisualMediaRequest> pickMedia;
     // Document picker launcher for Android 11/12
     private ActivityResultLauncher<String[]> pickDocument;
+    // Media picker launcher (images, audio, video)
+    private ActivityResultLauncher<String[]> pickMediaFile;
     // Camera launcher for taking photos
     private ActivityResultLauncher<Uri> takePictureLauncher;
     private Uri cameraCaptureUri; // Temporary URI for camera capture
@@ -272,30 +277,39 @@ public class RagQaFragment extends Fragment {
         recyclerViewChat.setAdapter(chatAdapter);
         LogManager.logD(TAG, "Chat RecyclerView initialized with callbacks");
         
-        // Initialize image thumbnail adapter and RecyclerView
-        imageThumbnailAdapter = new ImageThumbnailAdapter();
-        imageThumbnailAdapter.setContext(requireContext()); // Set context for thumbnail loading
+        // Initialize media thumbnail adapter and RecyclerView
+        mediaThumbnailAdapter = new MediaThumbnailAdapter();
+        mediaThumbnailAdapter.setContext(requireContext()); // Set context for thumbnail loading
         recyclerViewImageThumbnails.setLayoutManager(
                 new LinearLayoutManager(requireContext(), LinearLayoutManager.HORIZONTAL, false));
-        recyclerViewImageThumbnails.setAdapter(imageThumbnailAdapter);
+        recyclerViewImageThumbnails.setAdapter(mediaThumbnailAdapter);
         
-        // Set image action listener
-        imageThumbnailAdapter.setOnImageActionListener(new ImageThumbnailAdapter.OnImageActionListener() {
+        // Set media action listener
+        mediaThumbnailAdapter.setOnMediaActionListener(new MediaThumbnailAdapter.OnMediaActionListener() {
             @Override
-            public void onImageClick(String imagePath, int position) {
-                // Show full screen image preview
-                showImagePreview(imagePath);
+            public void onMediaClick(MediaThumbnailAdapter.MediaItem item, int position) {
+                if (item instanceof MediaThumbnailAdapter.AudioItem) {
+                    // Play audio
+                    MediaThumbnailAdapter.AudioItem audioItem = (MediaThumbnailAdapter.AudioItem) item;
+                    if (audioItem.isProcessed()) {
+                        mediaThumbnailAdapter.playAudio(audioItem.getProcessedPath());
+                        LogManager.logI(TAG, "Playing audio: " + audioItem.getProcessedPath());
+                    }
+                } else {
+                    // Show full screen image preview
+                    LogManager.logI(TAG, "Image clicked: " + item.getProcessedPath());
+                }
             }
-            
+
             @Override
-            public void onImageDelete(String imagePath, int position) {
-                // Delete image from list
-                imageThumbnailAdapter.removeImage(position);
-                // Hide RecyclerView if no images
-                if (imageThumbnailAdapter.getImageCount() == 0) {
+            public void onMediaDelete(MediaThumbnailAdapter.MediaItem item, int position) {
+                // Delete media from list
+                mediaThumbnailAdapter.removeMedia(position);
+                // Hide RecyclerView if no media
+                if (mediaThumbnailAdapter.getMediaCount() == 0) {
                     recyclerViewImageThumbnails.setVisibility(View.GONE);
                 }
-                LogManager.logI(TAG, "Deleted image at position: " + position);
+                LogManager.logI(TAG, "Deleted media at position: " + position);
             }
         });
         
@@ -1214,197 +1228,198 @@ public class RagQaFragment extends Fragment {
                 LogManager.logE(TAG, "Error while cleaning previous state before new send", th);
             }
 
-            // Check if need to create new chat folder (before any validation)
-            String currentChatFolder = ConfigManager.getString(getContext(), 
-                ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
-            if (chatMessages.isEmpty() || currentChatFolder.isEmpty()) {
-                // Create new chat folder
-                String newFolder = ChatHistoryManager.createNewChatFolder(getContext());
-                if (newFolder != null) {
-                    ConfigManager.setString(getContext(), 
-                        ConfigManager.KEY_CURRENT_CHAT_FOLDER, newFolder);
-                    currentChatFolderPath = newFolder; // Update instance variable
-                    LogManager.logD(TAG, "[CHAT_HISTORY] Created new chat folder: " + newFolder);
-                } else {
-                    // Failed to create chat folder - abort sending
-                    LogManager.logE(TAG, "[CHAT_HISTORY] Failed to create new chat folder, aborting");
-                    restoreSendStateAfterValidationFailure("failed to create chat folder");
-                    Toast.makeText(requireContext(), "无法创建对话文件夹，请检查存储权限", Toast.LENGTH_SHORT).show();
-                    return;
-                }
-            } else {
-                // Use existing folder, verify it exists
-                File existingFolder = new File(currentChatFolder);
-                if (!existingFolder.exists()) {
-                    LogManager.logW(TAG, "[CHAT_HISTORY] Current chat folder doesn't exist, creating new one");
-                    String newFolder = ChatHistoryManager.createNewChatFolder(getContext());
-                    if (newFolder != null) {
-                        ConfigManager.setString(getContext(), 
-                            ConfigManager.KEY_CURRENT_CHAT_FOLDER, newFolder);
-                        currentChatFolderPath = newFolder;
-                        LogManager.logD(TAG, "[CHAT_HISTORY] Created new chat folder: " + newFolder);
-                    } else {
-                        LogManager.logE(TAG, "[CHAT_HISTORY] Failed to create new chat folder, aborting");
-                        restoreSendStateAfterValidationFailure("failed to create chat folder");
-                        Toast.makeText(requireContext(), "无法创建对话文件夹，请检查存储权限", Toast.LENGTH_SHORT).show();
-                        return;
-                    }
-                } else {
-                    currentChatFolderPath = currentChatFolder;
-                }
+            // NOTE: Chat folder creation and media file saving moved to prepareAndSaveUserInput()
+            // This ensures all files are saved at the moment user clicks send
+            // NOTE: Audio conversion also moved to prepareAndSaveUserInput() (no background conversion)
+        
+        // Basic validation: Allow empty prompt if media files are present
+        boolean hasMedia = mediaThumbnailAdapter != null && mediaThumbnailAdapter.getMediaCount() > 0;
+        if (userPrompt.trim().isEmpty() && !hasMedia) {
+            LogManager.logW(TAG, "[SEND][VALIDATION] Failed: empty user prompt and no media");
+            restoreSendStateAfterValidationFailure("empty user prompt and no media");
+            Toast.makeText(requireContext(), getString(R.string.toast_enter_user_question), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        
+        if (apiUrl.trim().isEmpty() || 
+            StateDisplayManager.isModelStatusDisplayText(requireContext(), model)) {
+            LogManager.logW(TAG, "[SEND][VALIDATION] Failed: invalid api url or model status placeholder");
+            restoreSendStateAfterValidationFailure("invalid api url or model status placeholder");
+            Toast.makeText(requireContext(), getString(R.string.toast_ensure_api_model_set), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        
+        // If not local model, need to check API Key
+        if (!AppConstants.ApiUrl.LOCAL.equals(apiUrl) && apiKey.trim().isEmpty()) {
+            LogManager.logW(TAG, "[SEND][VALIDATION] Failed: empty api key for non-local model");
+            restoreSendStateAfterValidationFailure("empty api key for non-local model");
+            Toast.makeText(requireContext(), getString(R.string.toast_enter_api_key), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        
+        // Multimodal pre-check: just log media count if present, defer actual validation to model loading time
+        if (AppConstants.ApiUrl.LOCAL.equals(apiUrl)) {
+            int mediaCount = mediaThumbnailAdapter != null ? mediaThumbnailAdapter.getMediaCount() : 0;
+            if (mediaCount > 0) {
+                LogManager.logI(TAG, String.format(
+                    "[MULTIMODAL] User selected %d media item(s), will check model capability after loading",
+                    mediaCount));
             }
-            
-            // Set chat folder path for image adapter (images will be saved to history folder)
-            if (imageThumbnailAdapter != null && currentChatFolderPath != null) {
-                imageThumbnailAdapter.setChatFolderPath(currentChatFolderPath);
-                LogManager.logD(TAG, "[CHAT_HISTORY] Set image adapter chat folder: " + currentChatFolderPath);
-            }
-            
-            // Basic validation
-            if (userPrompt.trim().isEmpty()) {
-                LogManager.logW(TAG, "[SEND][VALIDATION] Failed: empty user prompt");
-                restoreSendStateAfterValidationFailure("empty user prompt");
-                Toast.makeText(requireContext(), getString(R.string.toast_enter_user_question), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            if (apiUrl.trim().isEmpty() || 
-                StateDisplayManager.isModelStatusDisplayText(requireContext(), model)) {
-                LogManager.logW(TAG, "[SEND][VALIDATION] Failed: invalid api url or model status placeholder");
-                restoreSendStateAfterValidationFailure("invalid api url or model status placeholder");
-                Toast.makeText(requireContext(), getString(R.string.toast_ensure_api_model_set), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            // If not local model, need to check API Key
-            if (!AppConstants.ApiUrl.LOCAL.equals(apiUrl) && apiKey.trim().isEmpty()) {
-                LogManager.logW(TAG, "[SEND][VALIDATION] Failed: empty api key for non-local model");
-                restoreSendStateAfterValidationFailure("empty api key for non-local model");
-                Toast.makeText(requireContext(), getString(R.string.toast_enter_api_key), Toast.LENGTH_SHORT).show();
-                return;
-            }
+        }
 
-            // Multimodal pre-check: just log image count if present, defer actual validation to model loading time
-            if (AppConstants.ApiUrl.LOCAL.equals(apiUrl)) {
-                int imageCount = imageThumbnailAdapter != null ? imageThumbnailAdapter.getImageCount() : 0;
-                if (imageCount > 0) {
-                    LogManager.logI(TAG, String.format(
-                        "[MULTIMODAL] User selected %d image(s), will check model capability after loading",
-                        imageCount));
-                }
-            }
-
-            // Save current configuration
-            LogManager.logD(TAG, "[SEND] Persisting configuration selection to storage");
-            saveConfig();
-            
-            // Update button state (isSending has already been set to true in compareAndSet)
-            buttonSendStop.setText(getString(R.string.button_stop_with_icon));
-            
-            // Create user message ChatDataItem
-            android.net.Uri imageUri = null;
-            if (imageThumbnailAdapter != null && imageThumbnailAdapter.getImageCount() > 0) {
-                List<String> imagePaths = imageThumbnailAdapter.getOriginalImageFiles();
-                if (imagePaths != null && !imagePaths.isEmpty()) {
-                    imageUri = Uri.parse(imagePaths.get(0));
-                }
-            }
-            
-            ChatDataItem userMsg;
-            if (imageUri != null) {
-                userMsg = ChatDataItem.Companion.createImageInputData(getCurrentTime(), userPrompt, imageUri);
-                LogManager.logD(TAG, "Created user message with image: " + imageUri);
+        // Save current configuration
+        LogManager.logD(TAG, "[SEND] Persisting configuration selection to storage");
+        saveConfig();
+        
+        // Update button state (isSending has already been set to true in compareAndSet)
+        buttonSendStop.setText(getString(R.string.button_stop_with_icon));
+        
+        // CRITICAL: Prepare and save user input (files, message, markdown) at send moment
+        UserInput userInput = prepareAndSaveUserInput(userPrompt, null);
+        if (userInput == null) {
+            // Failed to prepare input (e.g., folder creation failed)
+            restoreSendStateAfterValidationFailure("failed to prepare user input");
+            return;
+        }
+        
+        LogManager.logI(TAG, String.format("[SEND] User input prepared: text=%s, images=%d, audio=%d",
+            userInput.hasText() ? "yes" : "no", 
+            userInput.imagePaths.size(), 
+            userInput.audioPaths.size()));
+        
+        // Create AI message placeholder
+        ChatDataItem aiMsg = new ChatDataItem(ChatViewHolders.ASSISTANT);
+        aiMsg.setLoading(true);
+        chatMessages.add(aiMsg);
+        chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+        recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+        
+        LogManager.logD(TAG, "Chat messages created: user + AI placeholder, total=" + chatMessages.size());
+        
+        // Clear response area and display processing message (keep for old TextView compatibility)
+        if (textViewResponse != null) {
+            textViewResponse.setText("");
+        }
+        
+        // CRITICAL: Check if audio needs ASR processing before submitting RAG task
+        // If user selected ASR model (not "无") and there are audio files, use ASR flow
+        boolean needsAsrProcessing = false;
+        if (userInput.hasAudio()) {
+            String asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
+            if (!"无".equals(asrModel)) {
+                needsAsrProcessing = true;
+                LogManager.logI(TAG, "[SEND] Audio detected with ASR enabled, will use ASR processing flow");
             } else {
-                userMsg = new ChatDataItem(getCurrentTime(), ChatViewHolders.USER, userPrompt);
-                LogManager.logD(TAG, "Created user message without image");
+                LogManager.logI(TAG, "[SEND] Audio detected but ASR disabled, will use <audio> tag flow");
             }
-            
-            chatMessages.add(userMsg);
-            chatAdapter.notifyItemInserted(chatMessages.size() - 1);
-            recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
-            
-            // Create AI message placeholder
-            ChatDataItem aiMsg = new ChatDataItem(ChatViewHolders.ASSISTANT);
-            aiMsg.setLoading(true);
-            chatMessages.add(aiMsg);
-            chatAdapter.notifyItemInserted(chatMessages.size() - 1);
-            recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
-            
-            LogManager.logD(TAG, "Chat messages created: user + AI placeholder, total=" + chatMessages.size());
-            
-            // Clear response area and display processing message (keep for old TextView compatibility)
-            if (textViewResponse != null) {
-                textViewResponse.setText("");
+        }
+        
+        // [Important Fix] Use dedicated RAG query thread pool to execute query tasks
+        // Avoid executing model operations in stop check thread, eliminate concurrency conflicts
+        LogManager.logI(TAG, "[SEND] Submitting RAG task to executor - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
+        
+        // CRITICAL: Check if previous task is stuck (cancelled but not done)
+        // This happens when native call (e.g. Reranker loading) is blocking the thread
+        if (ragTaskFuture != null && ragTaskFuture.isCancelled() && !ragTaskFuture.isDone()) {
+            LogManager.logW(TAG, "[EXECUTOR] Previous task is STUCK (cancelled but not done), recreating executor");
+            try {
+                ragQueryExecutor.shutdownNow();
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[EXECUTOR] Error shutting down stuck executor: " + e.getMessage());
             }
-            
-            // [Important Fix] Use dedicated RAG query thread pool to execute query tasks
-            // Avoid executing model operations in stop check thread, eliminate concurrency conflicts
-            LogManager.logI(TAG, "[SEND] Submitting RAG task to executor - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
-            
-            // CRITICAL: Check if previous task is stuck (cancelled but not done)
-            // This happens when native call (e.g. Reranker loading) is blocking the thread
-            if (ragTaskFuture != null && ragTaskFuture.isCancelled() && !ragTaskFuture.isDone()) {
-                LogManager.logW(TAG, "[EXECUTOR] Previous task is STUCK (cancelled but not done), recreating executor");
-                try {
-                    ragQueryExecutor.shutdownNow();
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "[EXECUTOR] Error shutting down stuck executor: " + e.getMessage());
-                }
-                ragQueryExecutor = Executors.newSingleThreadExecutor(r -> {
-                    Thread t = new Thread(r, "RagQa-Query-Thread");
-                    t.setDaemon(true);
-                    return t;
-                });
-                LogManager.logI(TAG, "[EXECUTOR] Executor recreated successfully");
-            }
+            ragQueryExecutor = Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "RagQa-Query-Thread");
+                t.setDaemon(true);
+                return t;
+            });
+            LogManager.logI(TAG, "[EXECUTOR] Executor recreated successfully");
+        }
             
             LogManager.logI(TAG, "[EXECUTOR] Before submit - isShutdown=" + ragQueryExecutor.isShutdown() + ", isTerminated=" + ragQueryExecutor.isTerminated());
-            ragTaskFuture = ragQueryExecutor.submit(() -> {
-                LogManager.logI(TAG, "[EXECUTOR] Task lambda ENTERED - thread=" + Thread.currentThread().getName());
-                // Background thread snapshot at RAG task start (English log)
-                try {
-                    Thread worker = Thread.currentThread();
-                    boolean globalStopRequested = userRequestedStop;
-
-                    LocalLlmAdapter adapter = LocalLlmAdapter.getInstance(requireContext());
-                    String modelState = String.valueOf(adapter.getModelState());
-                    boolean llmBusy = adapter.isModelBusy();
-                    boolean llmRunning = adapter.isInferenceRunning();
-                    boolean llmShouldStop = adapter.getShouldStop();
-
-                    LogManager.logI(
-                        TAG,
-                        "[SNAPSHOT][BG_START] RAG-task start - thread=" + worker.getName()
-                            + ", interrupted=" + worker.isInterrupted()
-                            + ", userRequestedStop=" + globalStopRequested
-                            + ", modelState=" + modelState
-                            + ", llmBusy=" + llmBusy
-                            + ", llmRunning=" + llmRunning
-                            + ", llmShouldStop=" + llmShouldStop
-                    );
-                } catch (Throwable th) {
-                    LogManager.logE(TAG, "Error collecting RAG-task start snapshot", th);
-                }
-
-                // [Fix] Only reset local LLM stop flag, do not reset global stop flag
-                // Global stop flag can only be reset after confirming stop process completion
-                String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
-                String currentApiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrlDisplay);
-                if (AppConstants.ApiUrl.LOCAL.equals(currentApiUrl)) {
-                    try {
-                        LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(requireContext());
-                        // Only reset local LLM stop flag, do not affect global stop flag
-                        localAdapter.resetStopFlag();
-                        LogManager.logD(TAG, "Reset local LLM stop flag in RAG query thread (global stop flag unchanged)");
-                    } catch (Exception e) {
-                        LogManager.logE(TAG, "Error resetting local LLM stop flag", e);
-                    }
-                }
+            
+            // Choose execution path based on ASR requirement
+            if (needsAsrProcessing) {
+                // ASR flow: convert audio to text first, then execute RAG query
+                String asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
+                String audioPath = userInput.audioPaths.get(0); // Use first audio file
+                LogManager.logI(TAG, "[SEND] Routing to ASR flow: model=" + asrModel + ", audio=" + audioPath);
                 
-                // Display processing message in background thread, avoid UI thread nested calls
-                //updateProgressOnUiThread("Starting knowledge base query...");
-                executeRagQuery(apiUrl, apiKey, model, knowledgeBase, systemPrompt, userPrompt);
-            });
+                ragTaskFuture = ragQueryExecutor.submit(() -> {
+                    LogManager.logI(TAG, "[EXECUTOR] ASR task lambda ENTERED - thread=" + Thread.currentThread().getName());
+                    try {
+                        // Reset local LLM stop flag
+                        String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
+                        String currentApiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrlDisplay);
+                        if (AppConstants.ApiUrl.LOCAL.equals(currentApiUrl)) {
+                            try {
+                                LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(requireContext());
+                                localAdapter.resetStopFlag();
+                                LogManager.logD(TAG, "Reset local LLM stop flag in ASR task thread");
+                            } catch (Exception e) {
+                                LogManager.logE(TAG, "Error resetting local LLM stop flag", e);
+                            }
+                        }
+                        
+                        // Execute ASR conversion and RAG query
+                        convertAndSendAsTextInternal(audioPath, userPrompt, asrModel, apiUrl, apiKey, model, knowledgeBase, systemPrompt, userInput);
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[ASR] Error in ASR task", e);
+                        mainHandler.post(() -> {
+                            Toast.makeText(requireContext(), "ASR processing failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                            resetSendingState();
+                        });
+                    }
+                });
+            } else {
+                // Normal flow: execute RAG query directly (audio will be embedded as <audio> tag if present)
+                ragTaskFuture = ragQueryExecutor.submit(() -> {
+                    LogManager.logI(TAG, "[EXECUTOR] Task lambda ENTERED - thread=" + Thread.currentThread().getName());
+                    // Background thread snapshot at RAG task start (English log)
+                    try {
+                        Thread worker = Thread.currentThread();
+                        boolean globalStopRequested = userRequestedStop;
+
+                        LocalLlmAdapter adapter = LocalLlmAdapter.getInstance(requireContext());
+                        String modelState = String.valueOf(adapter.getModelState());
+                        boolean llmBusy = adapter.isModelBusy();
+                        boolean llmRunning = adapter.isInferenceRunning();
+                        boolean llmShouldStop = adapter.getShouldStop();
+
+                        LogManager.logI(
+                            TAG,
+                            "[SNAPSHOT][BG_START] RAG-task start - thread=" + worker.getName()
+                                + ", interrupted=" + worker.isInterrupted()
+                                + ", userRequestedStop=" + globalStopRequested
+                                + ", modelState=" + modelState
+                                + ", llmBusy=" + llmBusy
+                                + ", llmRunning=" + llmRunning
+                                + ", llmShouldStop=" + llmShouldStop
+                        );
+                    } catch (Throwable th) {
+                        LogManager.logE(TAG, "Error collecting RAG-task start snapshot", th);
+                    }
+
+                    // [Fix] Only reset local LLM stop flag, do not reset global stop flag
+                    // Global stop flag can only be reset after confirming stop process completion
+                    String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
+                    String currentApiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrlDisplay);
+                    if (AppConstants.ApiUrl.LOCAL.equals(currentApiUrl)) {
+                        try {
+                            LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(requireContext());
+                            // Only reset local LLM stop flag, do not affect global stop flag
+                            localAdapter.resetStopFlag();
+                            LogManager.logD(TAG, "Reset local LLM stop flag in RAG query thread (global stop flag unchanged)");
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "Error resetting local LLM stop flag", e);
+                        }
+                    }
+                    
+                    // Display processing message in background thread, avoid UI thread nested calls
+                    //updateProgressOnUiThread("Starting knowledge base query...");
+                    // Pass UserInput to RAG query for file paths
+                    executeRagQuery(apiUrl, apiKey, model, knowledgeBase, systemPrompt, userPrompt, userInput);
+                });
+            }
             LogManager.logI(TAG, "[EXECUTOR] After submit - ragTaskFuture=" + (ragTaskFuture == null ? "null" : "not_null") + ", isDone=" + (ragTaskFuture != null && ragTaskFuture.isDone()) + ", isCancelled=" + (ragTaskFuture != null && ragTaskFuture.isCancelled()));
 
         } else if (isSending.compareAndSet(true, false)) {
@@ -1584,6 +1599,15 @@ public class RagQaFragment extends Fragment {
         
         isSending.set(false); // Use atomic operation to reset sending state
         
+        // Clear media thumbnails after successful send
+        if (mediaThumbnailAdapter != null && mediaThumbnailAdapter.getMediaCount() > 0) {
+            mainHandler.post(() -> {
+                mediaThumbnailAdapter.clearMedia();
+                recyclerViewImageThumbnails.setVisibility(View.GONE);
+                LogManager.logD(TAG, "Cleared media thumbnails after send");
+            });
+        }
+        
         // Save conversation to markdown after AI response completes
         saveChatHistory();
         
@@ -1654,23 +1678,47 @@ public class RagQaFragment extends Fragment {
             LogManager.logE(TAG, "Error restoring state after validation failure", th);
         }
     }
-    private void executeRagQuery(String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt, String userPrompt) {
+    // Overload: without ASR info and UserInput
+    private void executeRagQuery(String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt, String userPrompt, UserInput userInput) {
+        executeRagQueryWithAsr(apiUrl, apiKey, model, knowledgeBase, systemPrompt, userPrompt, null, false, userInput);
+    }
+    
+    // Main implementation: with optional ASR info, audio embedding control, and UserInput
+    private void executeRagQueryWithAsr(String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt, String userPrompt, String asrInfo, boolean skipAudioEmbedding, UserInput userInput) {
         // [Fix] Use dedicated initialization method, do not reset global stop flag
         initializeSendingState();
         
         LogManager.logD(TAG, "Starting RAG query execution with preserved global stop flag state");
         
-        // Prepare images if user selected any (convert content:// URI to file paths)
-        // Java layer only does URI→file conversion, JNI handles all compression
+        // ============================================
+        // START: Unified Debug Section Management
+        // ============================================
+        // Open debug section at the beginning of the entire flow
+        updateChatMessage("<debug>\n");
+        
+        // Output ASR info if provided (from ASR flow)
+        if (asrInfo != null && !asrInfo.isEmpty()) {
+            updateChatMessage(asrInfo);
+        }
+        
+        // Use image paths from UserInput (already saved to chat folder)
         java.util.List<String> imagePaths = null;
-        if (imageThumbnailAdapter != null && imageThumbnailAdapter.getItemCount() > 0) {
-            imagePaths = imageThumbnailAdapter.getOriginalImageFiles();
-            if (imagePaths != null && !imagePaths.isEmpty()) {
-                LogManager.logI(TAG, "[MULTIMODAL] Prepared " + imagePaths.size() + " image(s), JNI will handle compression");
-            } else {
-                LogManager.logW(TAG, "[MULTIMODAL] User selected images but conversion failed, proceeding with text-only");
-                imagePaths = null; // Ensure null for text-only mode
-            }
+        if (userInput != null && userInput.hasImages()) {
+            imagePaths = userInput.imagePaths;
+            LogManager.logI(TAG, "[MULTIMODAL] Using " + imagePaths.size() + " image(s) from UserInput");
+        }
+        
+        // Use audio paths from UserInput (will be handled by JNI layer, similar to images)
+        // CRITICAL: Skip audio if ASR already converted audio to text
+        java.util.List<String> audioPaths = null;
+        final String originalUserPrompt = userPrompt; // Save original prompt for lambda
+        if (!skipAudioEmbedding && userInput != null && userInput.hasAudio()) {
+            audioPaths = userInput.audioPaths;
+            LogManager.logI(TAG, "[MULTIMODAL] Using " + audioPaths.size() + " audio file(s) from UserInput, will pass to JNI");
+            // NOTE: Audio tags will be added by JNI layer (similar to image handling)
+            // No need to modify userPrompt here
+        } else if (skipAudioEmbedding) {
+            LogManager.logI(TAG, "[MULTIMODAL] Skipped audio (ASR already converted to text)");
         }
         
         // Save query parameters for recovery
@@ -1706,6 +1754,23 @@ public class RagQaFragment extends Fragment {
         
         // Execute query synchronously (avoid concurrent conflicts)
         try {
+            // Build media info for logging
+            StringBuilder mediaInfo = new StringBuilder();
+            if (imagePaths != null && !imagePaths.isEmpty()) {
+                mediaInfo.append("; image: ");
+                for (int i = 0; i < imagePaths.size(); i++) {
+                    if (i > 0) mediaInfo.append(", ");
+                    mediaInfo.append(new File(imagePaths.get(i)).getName());
+                }
+            }
+            if (audioPaths != null && !audioPaths.isEmpty()) {
+                mediaInfo.append("; audio: ");
+                for (int i = 0; i < audioPaths.size(); i++) {
+                    if (i > 0) mediaInfo.append(", ");
+                    mediaInfo.append(new File(audioPaths.get(i)).getName());
+                }
+            }
+            
             // Log query information
                 String logMessage = "Executing RAG query:\n" +
                         "API URL: " + apiUrl + "\n" +
@@ -1713,7 +1778,7 @@ public class RagQaFragment extends Fragment {
                         "Knowledge Base: " + knowledgeBase + "\n" +
                         "Retrieval Count: " + searchDepth + "\n" +
                         "System Prompt: " + systemPrompt + "\n" +
-                        "User Question: " + userPrompt;
+                        "User Question: " + userPrompt + mediaInfo.toString();
                 LogManager.logD(TAG, logMessage);
                 
                 // Update UI to show query log
@@ -1721,7 +1786,7 @@ public class RagQaFragment extends Fragment {
                     //updateProgressOnUiThread("Starting knowledge base query...");
                     //updateProgressOnUiThread("Knowledge base: " + knowledgeBase);
                     //updateProgressOnUiThread("Retrieval count: " + searchDepth);
-                    updateProgressOnUiThread("\n " + getString(R.string.debug_info_header) + "\n\n" + getString(R.string.user_question, userPrompt));
+                    updateProgressOnUiThread("\n " + getString(R.string.debug_info_header) + "\n\n" + getString(R.string.user_question, originalUserPrompt));
                 });
                 
                 // Check if knowledge base query is needed
@@ -1730,7 +1795,9 @@ public class RagQaFragment extends Fragment {
                 if (!valueNone.equals(knowledgeBase) && !valueNoAvailableKb.equals(knowledgeBase) && searchDepth > 0) {
                     String kbInfo = getString(R.string.log_using_kb_for_query, knowledgeBase);
                     LogManager.logD(TAG, kbInfo);
-                    //updateProgressOnUiThread(kbInfo);
+                    // Output RAG info to debug section
+                    updateChatMessage("[RAG] Knowledge Base: " + knowledgeBase + "\n");
+                    updateChatMessage("[RAG] Retrieval count: " + searchDepth + "\n");
                     
                     // Query knowledge base for relevant content - only call queryKnowledgeBase, don't use return value
                     queryKnowledgeBase(knowledgeBase, userPrompt);
@@ -1794,7 +1861,7 @@ public class RagQaFragment extends Fragment {
                         
                         // Call large model API to get response
                         updateProgressOnUiThread("Calling LLM API...");
-                        callLLMApi(apiUrl, apiKey, model, fullPrompt, imagePaths);
+                        callLLMApi(apiUrl, apiKey, model, fullPrompt, imagePaths, audioPaths);
                     } else {
                         // Get similarity information
                         String simInfo = "";
@@ -1834,14 +1901,18 @@ public class RagQaFragment extends Fragment {
                         
                         // Call large model API to get response
                         updateProgressOnUiThread("Calling LLM API...");
-                        callLLMApi(apiUrl, apiKey, model, fullPrompt, imagePaths);
+                        callLLMApi(apiUrl, apiKey, model, fullPrompt, imagePaths, audioPaths);
                     }
                 } else {
                     // Not using knowledge base or retrieval count is 0, call large model API directly
                     String directMsg = searchDepth == 0 ? "Search depth is 0, skipping knowledge base query, calling LLM directly" : "No knowledge base configured, calling LLM directly";
                     LogManager.logD(TAG, directMsg);
-                    updateProgressOnUiThread(directMsg);
-                    updateProgressOnUiThread("Generating response...");
+                    // Output bypass info to debug section
+                    if (searchDepth == 0) {
+                        updateChatMessage("[RAG] Bypassed (search depth = 0)\n");
+                    } else {
+                        updateChatMessage("[RAG] Bypassed (no knowledge base)\n");
+                    }
                     
                     // Build prompt without knowledge base content
                     String fullPrompt = buildPromptWithoutKnowledgeBase(systemPrompt, userPrompt);
@@ -1861,7 +1932,7 @@ public class RagQaFragment extends Fragment {
                     
                     // Call large model API to get response
                     updateProgressOnUiThread("Calling LLM API...");
-                    callLLMApi(apiUrl, apiKey, model, fullPrompt, imagePaths);
+                    callLLMApi(apiUrl, apiKey, model, fullPrompt, imagePaths, audioPaths);
                 }
         } catch (Exception e) {
             String errorMsg = "RAG query task execution failed: " + e.getMessage();
@@ -2262,12 +2333,12 @@ public class RagQaFragment extends Fragment {
     
     // Call LLM API to get answer
     private void callLLMApi(String apiUrl, String apiKey, String model, String prompt) {
-        // Delegate to the version with image support (no images)
-        callLLMApi(apiUrl, apiKey, model, prompt, null);
+        // Delegate to the version with multimodal support (no images/audio)
+        callLLMApi(apiUrl, apiKey, model, prompt, null, null);
     }
     
-    // Call LLM API to get answer (with image support)
-    private void callLLMApi(String apiUrl, String apiKey, String model, String prompt, java.util.List<String> imagePaths) {
+    // Call LLM API to get answer (with multimodal support: images and audio)
+    private void callLLMApi(String apiUrl, String apiKey, String model, String prompt, java.util.List<String> imagePaths, java.util.List<String> audioPaths) {
         try {
             // Check global stop flag and task cancelled flag
             if (globalStopFlag || isTaskCancelled) {
@@ -2276,12 +2347,39 @@ public class RagQaFragment extends Fragment {
                 return;
             }
             
-            LogManager.logD(TAG, "Starting to call LLM API: " + apiUrl);
-        LogManager.logD(TAG, "Using model: " + model);
-        LogManager.logD(TAG, "Prompt length: " + prompt.length() + " characters");
+            // ============================================
+            // LLM Section: Check if model needs loading
+            // ============================================
+            // Check if this is a local model
+            boolean isLocalModel = AppConstants.ApiUrl.LOCAL.equals(apiUrl);
             
-            // Add connection info without clearing previous debug info
-            //appendToResponse("Connecting to API server...");
+            if (isLocalModel) {
+                // Check if model is already loaded
+                com.example.offlineai.api.LocalLlmHandler localHandler = 
+                    com.example.offlineai.api.LocalLlmHandler.getInstance(requireContext());
+                boolean isModelLoaded = localHandler.isModelReady() && 
+                                       model.equals(localHandler.getCurrentModelName());
+                
+                if (isModelLoaded) {
+                    updateChatMessage("[LLM] ReUsing loaded model: " + model + "\n");
+                } else {
+                    updateChatMessage("[LLM] Loading model: " + model + "\n");
+                }
+            } else {
+                // Online API
+                updateChatMessage("[LLM] Using online API: " + model + "\n");
+            }
+            
+            // ============================================
+            // NOTE: Debug section will be closed when [TEXT:]/[IMAGE:]/[AUDIO:] head is detected
+            // in onStreamingData callback below
+            // ============================================
+            
+            LogManager.logD(TAG, "Starting to call LLM API: " + apiUrl);
+            LogManager.logD(TAG, "Using model: " + model);
+            LogManager.logD(TAG, "Prompt length: " + prompt.length() + " characters");
+            
+            // Debug section will be closed when head marker is detected
             
             // Safety check: ensure Fragment is attached to Context
             if (!isAdded()) {
@@ -2399,6 +2497,8 @@ public class RagQaFragment extends Fragment {
                 private final boolean[] modelTitleAdded = {false};
                 // Last displayed response content
                 private final String[] lastDisplayedResponse = {""};
+                // Track if debug section has been closed
+                private boolean debugClosed = false;
                 // Detect if it's a Huawei device
                 private static boolean isHuaweiDevice() {
                     return Build.MANUFACTURER.toLowerCase().contains("huawei") || 
@@ -2432,8 +2532,29 @@ public class RagQaFragment extends Fragment {
                     // Log received data chunk
                     //LogManager.logD(TAG, "Received data chunk: [" + chunk + "]");
                     
-                    // Update chat message with streaming chunk
-                    updateChatMessage(chunk);
+                    // ============================================
+                    // CRITICAL: Detect head markers to close debug section
+                    // ============================================
+                    String filteredChunk = chunk;
+                    //LogManager.logD(TAG, "[DEBUG_TRACE] Chunk received: [" + chunk + "], debugClosed=" + debugClosed);
+                    
+                    // Close debug when detecting head markers
+                    if (!debugClosed && (chunk.contains("[TEXT:]") || 
+                                        chunk.contains("[IMAGE:]") || 
+                                        chunk.contains("[AUDIO:]"))) {
+                        LogManager.logD(TAG, "[DEBUG_TRACE] Detected head marker, closing debug section");
+                        updateChatMessage("</debug>\n");
+                        debugClosed = true;
+                        LogManager.logD(TAG, "[DEBUG_TRACE] Debug section closed, debugClosed=" + debugClosed);
+                        
+                        // Filter out the head marker from display
+                        filteredChunk = chunk.replace("[TEXT:]", "")
+                                            .replace("[IMAGE:]", "")
+                                            .replace("[AUDIO:]", "");
+                    }
+                    
+                    // Update chat message with filtered chunk
+                    updateChatMessage(filteredChunk);
                     
                     // Accumulate response content (for old TextView compatibility)
                     responseBuilder.append(chunk);
@@ -2696,6 +2817,13 @@ public class RagQaFragment extends Fragment {
                     }
                     
                     try {
+                        // CRITICAL: Close debug section if still open (error occurred before head was sent)
+                        if (!debugClosed) {
+                            updateChatMessage("</debug>\n");
+                            debugClosed = true;
+                            LogManager.logD(TAG, "Debug section closed due to error");
+                        }
+                        
                         // Display error message
                         updateResultOnUiThread("API call failed: " + errorMessage);
                         
@@ -2709,12 +2837,10 @@ public class RagQaFragment extends Fragment {
             };
             
             // Create LlmApiAdapter instance and call API
-            // imagePaths is passed from method parameter (prepared by caller)
-            // audioPaths: Currently audio is embedded in prompt as <audio>path</audio> tags, not passed separately
-            // TODO: Extract audio paths from prompt and pass as separate parameter for better history support
-            // JNI will: 1) Load model 2) Check multimodal support 3) Compress to correct size 4) Use or ignore images
+            // imagePaths and audioPaths are passed from method parameter (prepared by caller)
+            // JNI will: 1) Load model 2) Check multimodal support 3) Add tags and merge to prompt 4) Use or ignore media
             com.example.offlineai.api.LlmApiAdapter apiAdapter = new com.example.offlineai.api.LlmApiAdapter(context);
-            apiAdapter.callLlmApi(apiUrl, apiKey, model, prompt, imagePaths, null, callback);
+            apiAdapter.callLlmApi(apiUrl, apiKey, model, prompt, imagePaths, audioPaths, callback);
             
         } catch (Exception e) {
             LogManager.logE(TAG, "Failed to call LLM API", e);
@@ -3154,17 +3280,10 @@ public class RagQaFragment extends Fragment {
     // Load model and process query
     private void loadModelAndProcessQuery(String foundModelPath, String query, SQLiteVectorDatabaseHandler vectorDb) throws InterruptedException {
         try {
-            // Start debug section for progress info
-            updateChatMessage("<debug>\n");
-            
-            // Show knowledge base name
-            String kbName = spinnerKnowledgeBase != null && spinnerKnowledgeBase.getSelectedItem() != null 
-                ? spinnerKnowledgeBase.getSelectedItem().toString() 
-                : "Unknown";
-            updateChatMessage("Knowledge Base: " + kbName + "\n");
+            // Debug section already opened in executeRagQuery, just continue outputting
             
             // Update progress
-            updateChatMessage("Loading embedding model...");
+            updateChatMessage("[RAG] Loading embedding model...");
             
             // Get embedding handler instance
             EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(requireContext());
@@ -3180,7 +3299,7 @@ public class RagQaFragment extends Fragment {
             // Show embedding model name
             String embeddingModelName = embeddingHandler.getEmbeddingModel();
             if (embeddingModelName != null) {
-                updateChatMessage("\nEmbedding Model: " + embeddingModelName);
+                updateChatMessage("\n[RAG] Embedding Model: " + embeddingModelName);
             }
             
             // CRITICAL: Check stop flags after loading
@@ -3195,12 +3314,12 @@ public class RagQaFragment extends Fragment {
             // Get model vector dimension
             int embeddingDimension = embeddingHandler.getEmbeddingDimension();
             LogManager.logD(TAG, "Model vector dimension: " + embeddingDimension);
-            updateChatMessage("\nModel vector dimension: " + embeddingDimension);
+            updateChatMessage("\n[RAG] Model vector dimension: " + embeddingDimension);
 
             // Check if vector dimension matches knowledge base
             int dbDimension = vectorDb.getMetadata().getEmbeddingDimension();
             LogManager.logD(TAG, "Knowledge base vector dimension: " + dbDimension + ", model vector dimension: " + embeddingDimension);
-            updateChatMessage("\nKnowledge base vector dimension: " + dbDimension);
+            updateChatMessage("\n[RAG] Knowledge base vector dimension: " + dbDimension);
 
             if (dbDimension > 0 && dbDimension != embeddingDimension) {
                 String warningMsg = "Warning: Vector dimensions do not match! Knowledge base dimension: " + dbDimension + ", model dimension: " + embeddingDimension;
@@ -3223,7 +3342,7 @@ public class RagQaFragment extends Fragment {
                 }
                 
                 // Generate query vector
-                updateChatMessage("\nGenerating query vector...");
+                updateChatMessage("\n[RAG] Generating query vector...");
                 
                 // Get user query
                 String userQuery = editTextUserPrompt.getText().toString().trim();
@@ -3257,7 +3376,7 @@ public class RagQaFragment extends Fragment {
                 }
                 
                 // Record vector debug information
-                String vectorDebugInfo = "Query vector generated, dimension: " + queryVector.length;
+                String vectorDebugInfo = "[RAG] Query vector generated, dimension: " + queryVector.length;
                 
                 // Only display basic vector information in non-debug mode
                 boolean isDebugMode = ConfigManager.getBoolean(requireContext(), ConfigManager.KEY_DEBUG_MODE, false);
@@ -3273,7 +3392,7 @@ public class RagQaFragment extends Fragment {
                 }
                 
                 // Search similar text blocks
-                updateChatMessage("\nSearching similar text blocks...");
+                updateChatMessage("\n[RAG] Searching similar text blocks...");
                 
                 // Get retrieval count setting
                 int retrievalCount = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
@@ -3290,7 +3409,7 @@ public class RagQaFragment extends Fragment {
                 
                 // Display retrieval result similarity - show immediately with all scores
                 if (!searchResults.isEmpty()) {
-                    StringBuilder similarityInfo = new StringBuilder("\nRetrieval Similarity (");
+                    StringBuilder similarityInfo = new StringBuilder("\n[RAG] Retrieval Similarity (");
                     similarityInfo.append(searchResults.size()).append(" results): ");
                     for (int i = 0; i < searchResults.size(); i++) {
                         similarityInfo.append(String.format("%.3f", searchResults.get(i).similarity));
@@ -3317,7 +3436,7 @@ public class RagQaFragment extends Fragment {
                 if (rerankCount > 0 && rerankerModelPath != null && !rerankerModelPath.isEmpty()) {
                     // Use reranker model
                     LogManager.logI(TAG, "Using reranker model with rerank count: " + rerankCount);
-                    updateChatMessage("\nUsing reranker model to optimize results...");
+                    updateChatMessage("\n[RAG] Using reranker model to optimize results...");
                     try {
                         LogManager.logI(TAG, "[DEBUG] About to call processWithReranker - query.len=" + userQuery.length() + ", results=" + searchResults.size() + ", path=" + rerankerModelPath + ", vectorDb=" + (vectorDb != null ? "not_null" : "null"));
                         processWithReranker(userQuery, searchResults, rerankerModelPath, vectorDb);
@@ -3331,14 +3450,14 @@ public class RagQaFragment extends Fragment {
                     // Do not use reranking, directly process vector search results
                     if (rerankCount == 0) {
                         LogManager.logI(TAG, "Rerank count is 0, skipping reranking and using vector search results directly");
-                        updateChatMessage("\nRerank count is 0, skipping reranking");
+                        updateChatMessage("\n[RAG] Bypassed reranker (rerank count = 0)");
                     } else {
                         LogManager.logD(TAG, "No reranker model configured, using vector search results");
+                        updateChatMessage("\n[RAG] Bypassed reranker (no model configured)");
                     }
                     processVectorSearchResults(searchResults);
                     
-                    // Close debug section
-                    updateChatMessage("\n</debug>\n");
+                    // Debug section will be closed in callLLMApi, not here
                     
                     // [Fix] No longer call continueRagQueryAfterReranking to avoid duplicate LLM API calls
                     // executeRagQuery method will wait for relevantDocuments to be set and then call callLLMApi itself
@@ -3664,7 +3783,7 @@ public class RagQaFragment extends Fragment {
             }
 
             // Display reranker results immediately
-            String rerankerScores = "\nReranker Similarity (" + actualResultCount + " results): " + similarityInfoBuilder.toString();
+            String rerankerScores = "\n[RAG] Reranker Similarity (" + actualResultCount + " results): " + similarityInfoBuilder.toString();
             updateChatMessage(rerankerScores);
             LogManager.logI(TAG, "Reranker scores: " + rerankerScores);
 
@@ -3676,10 +3795,9 @@ public class RagQaFragment extends Fragment {
             
             LogManager.logD(TAG, "Reranked results processing completed, actual document count used: " + relevantDocs.size());
             
-            updateChatMessage("\nReranking optimization completed, found " + relevantDocs.size() + " relevant contents");
+            updateChatMessage("\n[RAG] Reranking optimization completed, found " + relevantDocs.size() + " relevant contents");
             
-            // Close debug section
-            updateChatMessage("\n</debug>\n");
+            // Debug section will be closed in callLLMApi, not here
             
             // [Fix] No longer call continueRagQueryAfterReranking to avoid duplicate LLM API calls
             // executeRagQuery method will wait for relevantDocuments to be set and then call callLLMApi itself
@@ -4193,9 +4311,9 @@ public class RagQaFragment extends Fragment {
             // Reload conversation
             loadChatHistory();
             
-            // Update image adapter folder path
-            if (imageThumbnailAdapter != null && currentChatFolderPath != null) {
-                imageThumbnailAdapter.setChatFolderPath(currentChatFolderPath);
+            // Update media adapter folder path
+            if (mediaThumbnailAdapter != null && currentChatFolderPath != null) {
+                mediaThumbnailAdapter.setChatFolderPath(currentChatFolderPath);
             }
         }
         
@@ -4444,6 +4562,17 @@ public class RagQaFragment extends Fragment {
                     }
                 });
         
+        // Media file picker (images, audio, video)
+        pickMediaFile = registerForActivityResult(
+                new ActivityResultContracts.OpenDocument(),
+                uri -> {
+                    if (uri != null) {
+                        handleMediaFileSelected(uri);
+                    } else {
+                        LogManager.logI(TAG, "Pick media file - no file selected");
+                    }
+                });
+        
         // Initialize camera launcher
         takePictureLauncher = registerForActivityResult(
                 new ActivityResultContracts.TakePicture(),
@@ -4495,8 +4624,8 @@ public class RagQaFragment extends Fragment {
         ActionMode.Callback selectionCallback = new ActionMode.Callback() {
             @Override
             public boolean onCreateActionMode(ActionMode mode, android.view.Menu menu) {
-                // Add "Image" and "Camera" menu items
-                menu.add(0, android.R.id.button1, 0, R.string.menu_pick_image);
+                // Add "Media" and "Camera" menu items
+                menu.add(0, android.R.id.button1, 0, R.string.menu_pick_media);
                 menu.add(0, android.R.id.button2, 1, R.string.menu_take_photo);
                 return true;
             }
@@ -4508,9 +4637,9 @@ public class RagQaFragment extends Fragment {
             
             @Override
             public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
-                if (item.getTitle().equals(getString(R.string.menu_pick_image))) {
-                    // Launch image picker
-                    launchImagePicker();
+                if (item.getTitle().equals(getString(R.string.menu_pick_media))) {
+                    // Launch media picker (images, audio, video)
+                    launchMediaPicker();
                     mode.finish();
                     return true;
                 } else if (item.getTitle().equals(getString(R.string.menu_take_photo))) {
@@ -4540,7 +4669,7 @@ public class RagQaFragment extends Fragment {
      */
     private void launchImagePicker() {
         // Check if max images reached
-        if (imageThumbnailAdapter.getImageCount() >= MAX_IMAGES) {
+        if (mediaThumbnailAdapter.getMediaCount() >= MAX_IMAGES) {
             Toast.makeText(requireContext(), R.string.toast_image_too_many, Toast.LENGTH_SHORT).show();
             return;
         }
@@ -4565,7 +4694,7 @@ public class RagQaFragment extends Fragment {
     private void handleImageSelected(Uri imageUri) {
         try {
             // Add image URI to adapter (compression will happen later)
-            imageThumbnailAdapter.addImage(imageUri);
+            mediaThumbnailAdapter.addImage(imageUri);
             // Show RecyclerView
             recyclerViewImageThumbnails.setVisibility(View.VISIBLE);
             LogManager.logI(TAG, "Image added (delayed compression): " + imageUri.toString());
@@ -4577,12 +4706,71 @@ public class RagQaFragment extends Fragment {
     }
     
     /**
+     * Launch media picker for images, audio, and video files
+     */
+    private void launchMediaPicker() {
+        LogManager.logI(TAG, "Launch media picker from selection menu");
+        
+        // Support images, audio (wav, mp3, m4a), and video (mp4)
+        String[] mimeTypes = {
+            "image/*",
+            "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp4",
+            "video/mp4"
+        };
+        
+        pickMediaFile.launch(mimeTypes);
+    }
+    
+    /**
+     * Handle selected media file (image, audio, or video)
+     */
+    private void handleMediaFileSelected(Uri fileUri) {
+        try {
+            String mimeType = requireContext().getContentResolver().getType(fileUri);
+            LogManager.logI(TAG, "Media file selected: " + fileUri + ", type: " + mimeType);
+            
+            if (mimeType == null) {
+                Toast.makeText(requireContext(), R.string.toast_unsupported_file_type, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            
+            if (mimeType.startsWith("image/")) {
+                // Handle image
+                handleImageSelected(fileUri);
+            } else if (mimeType.startsWith("audio/")) {
+                // Handle audio file
+                handleAudioFileSelected(fileUri);
+            } else if (mimeType.startsWith("video/")) {
+                // Handle video file (reserved for future)
+                Toast.makeText(requireContext(), "Video support coming soon", Toast.LENGTH_SHORT).show();
+                LogManager.logI(TAG, "Video file selected (not yet supported): " + fileUri);
+            } else {
+                Toast.makeText(requireContext(), R.string.toast_unsupported_file_type, Toast.LENGTH_SHORT).show();
+            }
+        } catch (Exception e) {
+            Toast.makeText(requireContext(), R.string.toast_media_pick_failed, Toast.LENGTH_SHORT).show();
+            LogManager.logE(TAG, "Error handling selected media file", e);
+        }
+    }
+    
+    /**
+     * Handle selected audio file: add to media thumbnail adapter for conversion
+     */
+    private void handleAudioFileSelected(Uri audioUri) {
+        // Add audio to media adapter (will convert in background)
+        mediaThumbnailAdapter.addAudio(audioUri);
+        // Show RecyclerView
+        recyclerViewImageThumbnails.setVisibility(View.VISIBLE);
+        LogManager.logI(TAG, "Audio added to media adapter (will convert in background): " + audioUri.toString());
+    }
+    
+    /**
      * Launch camera for taking photo
      * Checks permission first, then starts camera capture
      */
     private void launchCamera() {
         // Check if max images reached
-        if (imageThumbnailAdapter.getImageCount() >= MAX_IMAGES) {
+        if (mediaThumbnailAdapter.getMediaCount() >= MAX_IMAGES) {
             Toast.makeText(requireContext(), R.string.toast_image_too_many, Toast.LENGTH_SHORT).show();
             return;
         }
@@ -5070,8 +5258,8 @@ public class RagQaFragment extends Fragment {
     public void onDestroy() {
         super.onDestroy();
         
-        // Cleanup image cache
-        ImageThumbnailAdapter.cleanupCache(requireContext());
+        // Cleanup media cache (images and audio)
+        // Note: Media files are saved to chat history folder, no separate cache cleanup needed
         
         // Close thread pool
         if (ragQueryExecutor != null && !ragQueryExecutor.isShutdown()) {
@@ -5092,6 +5280,12 @@ public class RagQaFragment extends Fragment {
         }
         
         LogManager.logD(TAG, "Thread pools shutdown completed");
+        
+        // Clean up media adapter resources
+        if (mediaThumbnailAdapter != null) {
+            mediaThumbnailAdapter.stopAudio();
+            LogManager.logD(TAG, "Media adapter audio playback stopped");
+        }
         
         // Clean up recording resources
         if (audioRecorderHelper != null && audioRecorderHelper.isRecording()) {
@@ -5312,41 +5506,52 @@ private void sendVoiceMessage() {
     LogManager.logI(TAG, "Voice message recorded: " + audioFile.getName() + 
         ", duration: " + duration + "ms, size: " + audioFile.length() + " bytes");
     
-    // Create user message with audio (不显示"[语音消息]"文本，纯语音UI)
-    String userPrompt = editTextUserPrompt.getText().toString().trim();
-    ChatDataItem userMsg = ChatDataItem.Companion.createAudioInputData(
-        getCurrentTime(), 
-        userPrompt,  // 直接使用用户输入，为空则不显示文本
-        audioFile.getAbsolutePath(), 
-        duration / 1000.0f
-    );
-    
-    // Add to chat
-    chatMessages.add(userMsg);
-    chatAdapter.notifyItemInserted(chatMessages.size() - 1);
-    recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
-    
-    // Clear input
-    editTextUserPrompt.setText("");
-    
-    // Send to model for inference (check if already sending)
-    if (isSending.get()) {
+    // Check if already sending (use compareAndSet to avoid race condition)
+    if (!isSending.compareAndSet(false, true)) {
         Toast.makeText(requireContext(), "正在生成中，请稍候", Toast.LENGTH_SHORT).show();
-        // Remove the just-added message
-        chatMessages.remove(chatMessages.size() - 1);
-        chatAdapter.notifyItemRemoved(chatMessages.size());
+        audioFile.delete();  // Clean up recorded file
         return;
     }
     
-    // Trigger audio inference
-    sendAudioToModel(audioFile.getAbsolutePath(), userPrompt);
+    // Now we own the sending lock, update button state
+    buttonSendStop.setText(getString(R.string.button_stop_with_icon));
+    LogManager.logI(TAG, "[VOICE] Acquired sending lock and updated button to STOP");
+    
+    // CRITICAL: Prepare and save user input (move audio file, create message, save markdown)
+    String userPrompt = editTextUserPrompt.getText().toString().trim();
+    UserInput userInput = prepareAndSaveUserInput(userPrompt, audioFile);
+    if (userInput == null) {
+        // Failed to prepare input - restore state
+        Toast.makeText(requireContext(), "无法保存录音，请检查存储权限", Toast.LENGTH_SHORT).show();
+        audioFile.delete();  // Clean up recorded file
+        isSending.set(false);
+        buttonSendStop.setText(getString(R.string.button_send));
+        LogManager.logE(TAG, "[VOICE] Restored state after prepare input failed");
+        return;
+    }
+    
+    LogManager.logI(TAG, String.format("[VOICE] User input prepared: text=%s, audio=%d",
+        userInput.hasText() ? "yes" : "no", userInput.audioPaths.size()));
+    
+    // Trigger audio inference (use saved audio path from userInput)
+    // NOTE: isSending already set to true above with compareAndSet
+    if (!userInput.audioPaths.isEmpty()) {
+        sendAudioToModel(userInput.audioPaths.get(0), userPrompt, userInput);
+    } else {
+        LogManager.logE(TAG, "[VOICE] No audio path in userInput after preparation");
+        Toast.makeText(requireContext(), "录音保存失败", Toast.LENGTH_SHORT).show();
+        // Restore state on failure
+        isSending.set(false);
+        buttonSendStop.setText(getString(R.string.button_send));
+    }
 }
 
 /**
  * Send audio to model for inference
  * Note: User message with audioUri has already been created and added to chat
+ * @param userInput User input structure containing image/audio paths (for ASR flow to preserve images)
  */
-private void sendAudioToModel(String audioPath, String textPrompt) {
+private void sendAudioToModel(String audioPath, String textPrompt, UserInput userInput) {
     String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
     String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
     String apiKey = editTextApiKey.getText().toString();
@@ -5363,15 +5568,227 @@ private void sendAudioToModel(String audioPath, String textPrompt) {
         return;
     }
     
-    LogManager.logI(TAG, "[AUDIO] Sending audio to model: " + audioPath + ", selected model: " + model);
+    // Create AI placeholder message (CRITICAL: needed for updateChatMessage to work)
+    ChatDataItem aiMessage = new ChatDataItem(ChatViewHolders.ASSISTANT);
+    aiMessage.setLoading(true);
+    chatMessages.add(aiMessage);
+    chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+    recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+    LogManager.logD(TAG, "[AUDIO] Created AI placeholder message");
     
-    // No need to check model state - let executeRagQuery handle model loading automatically
-    // (same as text-only send flow)
-    sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
+    // Get ASR model selection
+    String asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
+    
+    LogManager.logI(TAG, "[AUDIO] Sending audio to model: " + audioPath + ", selected model: " + model + ", ASR: " + asrModel);
+    
+    if (!"无".equals(asrModel)) {
+        // ASR enabled, convert audio to text
+        // CRITICAL: Pass userInput to preserve image information
+        convertAndSendAsText(audioPath, textPrompt, asrModel, apiUrl, apiKey, model, knowledgeBase, systemPrompt, userInput);
+    } else {
+        // ASR disabled, use <audio> tag (original flow)
+        updateChatMessage("[ASR] Disabled, sending audio tag to model\n");
+        sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
+    }
 }
 
 /**
- * Internal method to send audio after model is confirmed ready
+ * Convert audio to text using ASR and send as text
+ * @param userInput User input structure to preserve image information during ASR conversion
+ */
+private void convertAndSendAsText(String audioPath, String textPrompt, String asrModel,
+                                   String apiUrl, String apiKey, String model, 
+                                   String knowledgeBase, String systemPrompt, UserInput userInput) {
+    // Submit ASR task
+    ragTaskFuture = ragQueryExecutor.submit(() -> {
+        try {
+            // ============================================
+            // ASR Section: Will be included in debug section opened by executeRagQuery
+            // ============================================
+            LogManager.logI(TAG, "[ASR] Starting ASR conversion task");
+            
+            // Prepare ASR info to be output in executeRagQuery
+            // Get image info from UserInput (adapter is already cleared)
+            String imageInfo = (userInput != null && userInput.hasImages()) 
+                ? userInput.imagePaths.size() + " image(s)" : "none";
+            String audioFileName = new File(audioPath).getName();
+            final String asrInfo = String.format("[ASR] Model: %s; Audio: %s; Image: %s\n", 
+                asrModel, audioFileName, imageInfo);
+            
+            // Load ASR model (lazy loading) - use AsrAdapter (independent of LLM)
+            com.example.offlineai.api.AsrAdapter asrAdapter = 
+                com.example.offlineai.api.AsrAdapter.getInstance(requireContext());
+            
+            if (!asrAdapter.isAsrLoaded() || !asrModel.equals(asrAdapter.getCurrentAsrModel())) {
+                LogManager.logI(TAG, "[ASR] Loading model: " + asrModel);
+                asrAdapter.loadAsrModel(asrModel);
+                LogManager.logI(TAG, "[ASR] Model loaded successfully: " + asrModel);
+            } else {
+                LogManager.logI(TAG, "[ASR] Using loaded model: " + asrModel);
+            }
+            
+            // Transcribe
+            LogManager.logI(TAG, "[ASR] Transcribing audio: " + audioPath);
+            String convertedText = asrAdapter.transcribeAudio(audioPath);
+            
+            // Normalize textPrompt (handle null/empty/whitespace)
+            String normalizedTextPrompt = (textPrompt == null) ? "" : textPrompt.trim();
+            
+            // Check if ASR result is empty - fallback to audio tag instead of error
+            if (convertedText.isEmpty() && normalizedTextPrompt.isEmpty()) {
+                LogManager.logW(TAG, "[ASR] ⚠️ ASR returned empty text, fallback to audio tag mode");
+                mainHandler.post(() -> {
+                    updateChatMessage("<debug>\n");
+                    updateChatMessage("[ASR] Model: " + asrModel + "\n");
+                    updateChatMessage("[ASR] ⚠️ No speech recognized, using audio tag mode\n");
+                    updateChatMessage("</debug>\n");
+                    sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
+                });
+                return; // Exit ASR task, let audio tag flow handle it
+            }
+            
+            // Wrap ASR converted text with [Audio] marker to help model understand it's from speech
+            // Format: [Audio]"converted text" or [Audio0]"text0" [Audio1]"text1" for multiple audios
+            String wrappedAsrText = String.format("[Audio]\"%s\"", convertedText);
+            
+            // Merge with user text
+            String finalText = wrappedAsrText;
+            if (!normalizedTextPrompt.isEmpty()) {
+                finalText = wrappedAsrText + "\n" + normalizedTextPrompt;
+            }
+            
+            LogManager.logI(TAG, "[ASR] Conversion successful, wrapped text length: " + finalText.length());
+            
+            // Prepare ASR result info
+            final String asrResult = String.format("[ASR] Converted text: \"%s\"%s\n", 
+                convertedText, 
+                textPrompt.isEmpty() ? "" : (" + user text: \"" + textPrompt + "\""));
+            
+            // NOTE: Media adapter already cleared by prepareAndSaveUserInput()
+            // Audio file already saved to chat folder, no need to remove from adapter
+            
+            // Continue with RAG flow (text-only)
+            // Pass ASR info to be output in debug section
+            // CRITICAL: Set skipAudioEmbedding=true to prevent re-embedding <audio> tag
+            // CRITICAL: Pass userInput to preserve image information
+            executeRagQueryWithAsr(apiUrl, apiKey, model, knowledgeBase, systemPrompt, finalText, 
+                                  asrInfo + asrResult, true, userInput);
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[ASR] Conversion failed", e);
+            
+            // Fallback to <audio> tag
+            mainHandler.post(() -> {
+                // Open debug section for error info
+                updateChatMessage("<debug>\n");
+                updateChatMessage("[ASR] Model: " + asrModel + "\n");
+                updateChatMessage("[ASR] ❌ Conversion failed: " + e.getMessage() + "\n");
+                updateChatMessage("[ASR] Fallback to audio tag mode\n");
+                updateChatMessage("</debug>\n");
+                sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
+            });
+        }
+    });
+}
+
+/**
+ * Internal method for ASR conversion (called from executor, no need to submit again)
+ * @param userInput User input structure to preserve image information during ASR conversion
+ */
+private void convertAndSendAsTextInternal(String audioPath, String textPrompt, String asrModel,
+                                          String apiUrl, String apiKey, String model, 
+                                          String knowledgeBase, String systemPrompt, UserInput userInput) {
+    try {
+        // ============================================
+        // ASR Section: Will be included in debug section opened by executeRagQuery
+        // ============================================
+        LogManager.logI(TAG, "[ASR] Starting ASR conversion task");
+        
+        // Prepare ASR info to be output in executeRagQuery
+        // Get image info from UserInput (adapter is already cleared)
+        String imageInfo = (userInput != null && userInput.hasImages()) 
+            ? userInput.imagePaths.size() + " image(s)" : "none";
+        String audioFileName = new File(audioPath).getName();
+        final String asrInfo = String.format("[ASR] Model: %s; Audio: %s; Image: %s\n", 
+            asrModel, audioFileName, imageInfo);
+        
+        // Load ASR model (lazy loading) - use AsrAdapter (independent of LLM)
+        com.example.offlineai.api.AsrAdapter asrAdapter = 
+            com.example.offlineai.api.AsrAdapter.getInstance(requireContext());
+        
+        if (!asrAdapter.isAsrLoaded() || !asrModel.equals(asrAdapter.getCurrentAsrModel())) {
+            LogManager.logI(TAG, "[ASR] Loading model: " + asrModel);
+            asrAdapter.loadAsrModel(asrModel);
+            LogManager.logI(TAG, "[ASR] Model loaded successfully: " + asrModel);
+        } else {
+            LogManager.logI(TAG, "[ASR] Using loaded model: " + asrModel);
+        }
+        
+        // Transcribe
+        LogManager.logI(TAG, "[ASR] Transcribing audio: " + audioPath);
+        String convertedText = asrAdapter.transcribeAudio(audioPath);
+        
+        // Normalize textPrompt (handle null/empty/whitespace)
+        String normalizedTextPrompt = (textPrompt == null) ? "" : textPrompt.trim();
+        
+        // Check if ASR result is empty - fallback to audio tag instead of error
+        if (convertedText.isEmpty() && normalizedTextPrompt.isEmpty()) {
+            LogManager.logW(TAG, "[ASR] ⚠️ ASR returned empty text, fallback to audio tag mode");
+            mainHandler.post(() -> {
+                updateChatMessage("<debug>\n");
+                updateChatMessage("[ASR] Model: " + asrModel + "\n");
+                updateChatMessage("[ASR] ⚠️ No speech recognized, using audio tag mode\n");
+                updateChatMessage("</debug>\n");
+                sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
+            });
+            return; // Exit ASR task, let audio tag flow handle it
+        }
+        
+        // Wrap ASR converted text with [Audio] marker to help model understand it's from speech
+        // Format: [Audio]"converted text" or [Audio0]"text0" [Audio1]"text1" for multiple audios
+        String wrappedAsrText = String.format("[Audio]\"%s\"", convertedText);
+        
+        // Merge with user text
+        String finalText = wrappedAsrText;
+        if (!normalizedTextPrompt.isEmpty()) {
+            finalText = wrappedAsrText + "\n" + normalizedTextPrompt;
+        }
+        
+        LogManager.logI(TAG, "[ASR] Conversion successful, wrapped text length: " + finalText.length());
+        
+        // Prepare ASR result info
+        final String asrResult = String.format("[ASR] Converted text: \"%s\"%s\n", 
+            convertedText, 
+            normalizedTextPrompt.isEmpty() ? "" : (" + user text: \"" + normalizedTextPrompt + "\""));
+        
+        // NOTE: Media adapter already cleared by prepareAndSaveUserInput()
+        // Audio file already saved to chat folder, no need to remove from adapter
+        
+        // Continue with RAG flow (text-only)
+        // Pass ASR info to be output in debug section
+        // CRITICAL: Set skipAudioEmbedding=true to prevent re-embedding <audio> tag
+        // CRITICAL: Pass userInput to preserve image information
+        executeRagQueryWithAsr(apiUrl, apiKey, model, knowledgeBase, systemPrompt, finalText, 
+                              asrInfo + asrResult, true, userInput);
+        
+    } catch (Exception e) {
+        LogManager.logE(TAG, "[ASR] Conversion failed", e);
+        
+        // Fallback to <audio> tag
+        mainHandler.post(() -> {
+            // Open debug section for error info
+            updateChatMessage("<debug>\n");
+            updateChatMessage("[ASR] Model: " + asrModel + "\n");
+            updateChatMessage("[ASR] ❌ Conversion failed: " + e.getMessage() + "\n");
+            updateChatMessage("[ASR] Fallback to audio tag mode\n");
+            updateChatMessage("</debug>\n");
+            sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
+        });
+    }
+}
+
+/**
+ * Internal method to send audio after model is confirmed ready (ASR fallback)
  */
 private void sendAudioToModelInternal(String audioPath, String textPrompt, String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt) {
     LogManager.logI(TAG, "[AUDIO] Starting audio inference with model: " + model);
@@ -5387,12 +5804,12 @@ private void sendAudioToModelInternal(String audioPath, String textPrompt, Strin
     chatAdapter.notifyItemInserted(chatMessages.size() - 1);
     recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
     
-    // Construct prompt with <audio> tag (for model inference)
-    // Format: <audio>path</audio>text (add newline if text exists)
-    String audioPrompt = String.format("<audio>%s</audio>%s", audioPath, 
-        textPrompt.isEmpty() ? "" : ("\n" + textPrompt));
+    // Create UserInput with audio path (unified approach)
+    java.util.List<String> audioPaths = new java.util.ArrayList<>();
+    audioPaths.add(audioPath);
+    UserInput audioUserInput = new UserInput(textPrompt, null, audioPaths, 0);
     
-    LogManager.logI(TAG, "[AUDIO] Constructed prompt: " + audioPrompt);
+    LogManager.logI(TAG, "[AUDIO] Created UserInput with audio path: " + audioPath);
     
     // Submit RAG task (similar to handleSendStopClick flow)
     LogManager.logI(TAG, "[AUDIO] Submitting audio RAG task to executor");
@@ -5411,9 +5828,237 @@ private void sendAudioToModelInternal(String audioPath, String textPrompt, Strin
             }
         }
         
-        // Execute RAG query with audio prompt
-        executeRagQuery(apiUrl, apiKey, model, knowledgeBase, systemPrompt, audioPrompt);
+        // Execute RAG query with UserInput (audio path will be handled by JNI)
+        executeRagQuery(apiUrl, apiKey, model, knowledgeBase, systemPrompt, textPrompt, audioUserInput);
     });
+}
+
+/**
+ * Prepare and save user input (CRITICAL: called at send button click/release)
+ * 1. Ensure chat folder exists
+ * 2. Save all media files to chat folder
+ * 3. Create UserInput structure
+ * 4. Save to conversation.md
+ * 5. Create and display user message in UI
+ * 6. Clear input fields and media thumbnails
+ * 
+ * @param textPrompt User text input
+ * @param recordedAudioFile Recorded audio file (from long-press), null if not recording
+ * @return UserInput structure, or null if failed
+ */
+private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioFile) {
+    // Step 1: Ensure chat folder exists
+    String chatFolderPath = ConfigManager.getString(getContext(), 
+        ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+    
+    if (chatMessages.isEmpty() || chatFolderPath.isEmpty()) {
+        // Create new chat folder
+        String newFolder = ChatHistoryManager.createNewChatFolder(getContext());
+        if (newFolder == null) {
+            LogManager.logE(TAG, "[PREPARE_INPUT] Failed to create chat folder");
+            Toast.makeText(requireContext(), "无法创建对话文件夹，请检查存储权限", Toast.LENGTH_SHORT).show();
+            return null;
+        }
+        ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, newFolder);
+        currentChatFolderPath = newFolder;
+        chatFolderPath = newFolder;
+        LogManager.logI(TAG, "[PREPARE_INPUT] Created new chat folder: " + newFolder);
+    } else {
+        // Verify existing folder
+        File existingFolder = new File(chatFolderPath);
+        if (!existingFolder.exists()) {
+            LogManager.logW(TAG, "[PREPARE_INPUT] Chat folder doesn't exist, creating new one");
+            String newFolder = ChatHistoryManager.createNewChatFolder(getContext());
+            if (newFolder == null) {
+                LogManager.logE(TAG, "[PREPARE_INPUT] Failed to create chat folder");
+                return null;
+            }
+            ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, newFolder);
+            currentChatFolderPath = newFolder;
+            chatFolderPath = newFolder;
+        }
+    }
+    
+    // Step 2: Save all media files synchronously
+    List<String> imagePaths = new ArrayList<>();
+    List<String> audioPaths = new ArrayList<>();
+    float audioDuration = 0.0f;
+    
+    // Process recorded audio (from long-press)
+    if (recordedAudioFile != null && recordedAudioFile.exists()) {
+        // Move recorded audio to chat folder
+        String fileName = "audio_" + System.currentTimeMillis() + "_user.wav";
+        File targetFile = new File(chatFolderPath, fileName);
+        try {
+            if (recordedAudioFile.renameTo(targetFile)) {
+                audioPaths.add(targetFile.getAbsolutePath());
+                // Get duration
+                try {
+                    MediaPlayer mp = new MediaPlayer();
+                    mp.setDataSource(targetFile.getAbsolutePath());
+                    mp.prepare();
+                    audioDuration = mp.getDuration() / 1000.0f;
+                    mp.release();
+                } catch (Exception e) {
+                    LogManager.logW(TAG, "[PREPARE_INPUT] Failed to get audio duration: " + e.getMessage());
+                }
+                LogManager.logI(TAG, "[PREPARE_INPUT] Moved recorded audio to: " + targetFile.getAbsolutePath());
+            } else {
+                // CRITICAL: Recorded audio move failed - this is unrecoverable
+                LogManager.logE(TAG, "[PREPARE_INPUT] Failed to move recorded audio");
+                Toast.makeText(requireContext(), "录音文件保存失败", Toast.LENGTH_SHORT).show();
+                return null;
+            }
+        } catch (Exception e) {
+            // CRITICAL: Exception during audio move - unrecoverable
+            LogManager.logE(TAG, "[PREPARE_INPUT] Error moving recorded audio", e);
+            Toast.makeText(requireContext(), "录音文件保存失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+            return null;
+        }
+    }
+    
+    // Process media from MediaThumbnailAdapter
+    int totalMediaCount = 0;
+    int failedMediaCount = 0;
+    if (mediaThumbnailAdapter != null && mediaThumbnailAdapter.getMediaCount() > 0) {
+        List<MediaThumbnailAdapter.MediaItem> items;
+        synchronized (mediaThumbnailAdapter.getMediaItems()) {
+            items = new ArrayList<>(mediaThumbnailAdapter.getMediaItems());
+        }
+        
+        totalMediaCount = items.size();
+        for (MediaThumbnailAdapter.MediaItem item : items) {
+            if (item instanceof MediaThumbnailAdapter.ImageItem) {
+                // Process image: resize and save
+                try {
+                    String imagePath = processImageToChatFolder(item.getOriginalUri(), chatFolderPath);
+                    if (imagePath != null) {
+                        imagePaths.add(imagePath);
+                        LogManager.logI(TAG, "[PREPARE_INPUT] Saved image: " + imagePath);
+                    } else {
+                        failedMediaCount++;
+                        LogManager.logE(TAG, "[PREPARE_INPUT] Failed to process image (returned null)");
+                    }
+                } catch (Exception e) {
+                    failedMediaCount++;
+                    LogManager.logE(TAG, "[PREPARE_INPUT] Error processing image", e);
+                }
+            } else if (item instanceof MediaThumbnailAdapter.AudioItem) {
+                // Process audio: convert to WAV
+                try {
+                    String audioPath = convertAudioToChatFolder(item.getOriginalUri(), chatFolderPath);
+                    if (audioPath != null) {
+                        audioPaths.add(audioPath);
+                        // Get duration
+                        try {
+                            MediaPlayer mp = new MediaPlayer();
+                            mp.setDataSource(audioPath);
+                            mp.prepare();
+                            audioDuration = mp.getDuration() / 1000.0f;
+                            mp.release();
+                        } catch (Exception e) {
+                            LogManager.logW(TAG, "[PREPARE_INPUT] Failed to get audio duration");
+                        }
+                        LogManager.logI(TAG, "[PREPARE_INPUT] Saved audio: " + audioPath);
+                    } else {
+                        failedMediaCount++;
+                        LogManager.logE(TAG, "[PREPARE_INPUT] Failed to convert audio (returned null)");
+                    }
+                } catch (Exception e) {
+                    failedMediaCount++;
+                    LogManager.logE(TAG, "[PREPARE_INPUT] Error processing audio", e);
+                }
+            }
+        }
+    }
+    
+    // Warn user if some media files failed to process
+    if (failedMediaCount > 0) {
+        final int failed = failedMediaCount;
+        final int total = totalMediaCount;
+        mainHandler.post(() -> {
+            Toast.makeText(requireContext(), 
+                String.format("%d/%d 个媒体文件保存失败", failed, total), 
+                Toast.LENGTH_LONG).show();
+        });
+        LogManager.logW(TAG, String.format("[PREPARE_INPUT] %d/%d media files failed to process", failed, total));
+    }
+    
+    // Step 3: Create UserInput structure
+    UserInput userInput = new UserInput(textPrompt, imagePaths, audioPaths, audioDuration);
+    LogManager.logI(TAG, String.format("[PREPARE_INPUT] Created UserInput: text=%d chars, images=%d, audio=%d", 
+        textPrompt.length(), imagePaths.size(), audioPaths.size()));
+    
+    // Step 4: Create user message and add to chat
+    ChatDataItem userMsg;
+    if (userInput.hasAudio()) {
+        // Audio message (with optional text and images)
+        userMsg = ChatDataItem.Companion.createAudioInputData(
+            getCurrentTime(),
+            textPrompt,
+            audioPaths.get(0),  // Use first audio
+            audioDuration
+        );
+        // TODO: Support multiple images with audio
+        if (userInput.hasImages()) {
+            userMsg.imageUri = Uri.parse(imagePaths.get(0));
+        }
+    } else if (userInput.hasImages()) {
+        // Image message (with optional text)
+        userMsg = ChatDataItem.Companion.createImageInputData(
+            getCurrentTime(),
+            textPrompt,
+            Uri.parse(imagePaths.get(0))  // Use first image
+        );
+    } else {
+        // Text-only message
+        userMsg = new ChatDataItem(getCurrentTime(), ChatViewHolders.USER, textPrompt);
+    }
+    
+    chatMessages.add(userMsg);
+    chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+    recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+    LogManager.logI(TAG, "[PREPARE_INPUT] User message added to chat");
+    
+    // Step 5: Save to conversation.md immediately
+    boolean saved = ChatHistoryManager.saveConversation(getContext(), chatMessages, chatFolderPath);
+    if (saved) {
+        LogManager.logI(TAG, "[PREPARE_INPUT] Conversation saved to markdown");
+    } else {
+        LogManager.logE(TAG, "[PREPARE_INPUT] Failed to save conversation to markdown");
+        // Warn user but don't fail the operation (message is already in UI)
+        mainHandler.post(() -> {
+            Toast.makeText(requireContext(), "对话历史保存失败，但消息已发送", Toast.LENGTH_LONG).show();
+        });
+    }
+    
+    // Step 6: Clear input fields and media thumbnails
+    mainHandler.post(() -> {
+        editTextUserPrompt.setText("");
+        if (mediaThumbnailAdapter != null) {
+            mediaThumbnailAdapter.clearMedia();
+            recyclerViewImageThumbnails.setVisibility(View.GONE);
+        }
+        LogManager.logI(TAG, "[PREPARE_INPUT] Cleared input fields and media thumbnails");
+    });
+    
+    return userInput;
+}
+
+/**
+ * Process image and save to chat folder (synchronous)
+ */
+private String processImageToChatFolder(Uri imageUri, String chatFolderPath) throws IOException {
+    // Use MediaThumbnailAdapter's processImage method
+    return MediaThumbnailAdapter.processImage(getContext(), imageUri, chatFolderPath);
+}
+
+/**
+ * Convert audio and save to chat folder (synchronous)
+ */
+private String convertAudioToChatFolder(Uri audioUri, String chatFolderPath) throws IOException {
+    // Use MediaThumbnailAdapter's convertAudioToWav method
+    return MediaThumbnailAdapter.convertAudioToWav(getContext(), audioUri, chatFolderPath);
 }
 
 /**
@@ -5434,5 +6079,35 @@ private void cancelVoiceRecording() {
 
 // Note: onRequestPermissionsResult has been removed in favor of ActivityResultContracts
 // See recordAudioPermissionLauncher and cameraPermissionLauncher initialization
+
+/**
+ * User input data structure
+ * Contains all user input: text, images, audio files
+ */
+private static class UserInput {
+    String textPrompt;
+    List<String> imagePaths;
+    List<String> audioPaths;
+    float audioDuration;  // For single audio file
+    
+    UserInput(String textPrompt, List<String> imagePaths, List<String> audioPaths, float audioDuration) {
+        this.textPrompt = textPrompt != null ? textPrompt : "";
+        this.imagePaths = imagePaths != null ? imagePaths : new ArrayList<>();
+        this.audioPaths = audioPaths != null ? audioPaths : new ArrayList<>();
+        this.audioDuration = audioDuration;
+    }
+    
+    boolean hasImages() {
+        return !imagePaths.isEmpty();
+    }
+    
+    boolean hasAudio() {
+        return !audioPaths.isEmpty();
+    }
+    
+    boolean hasText() {
+        return !textPrompt.trim().isEmpty();
+    }
+}
 
 }  // End of RagQaFragment class

@@ -173,7 +173,7 @@ public class ChatHistoryManager {
         // 处理用户消息
         if (item.getType() == ChatViewHolders.USER) {
             // 用户消息：先输出图片，然后音频，再输出文本
-            // 注意：图片已经由ImageThumbnailAdapter预处理并保存到对话文件夹了，无需复制
+            // 注意：图片和音频已经由MediaThumbnailAdapter预处理并保存到对话文件夹了，无需复制
             if (item.imageUri != null) {
                 String imagePath = item.imageUri.getPath();
                 if (!TextUtils.isEmpty(imagePath)) {

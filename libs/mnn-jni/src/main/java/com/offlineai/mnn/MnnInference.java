@@ -597,88 +597,9 @@ public class MnnInference {
          */
         boolean onToken(String message);
     }
-}
 
-class ConfigBuilder {
-    private StringBuilder json = new StringBuilder("{");
-    private boolean first = true;
+    // ========== ASR (Automatic Speech Recognition) ==========
+    // NOTE: ASR functionality has been moved to sherpa-mnn-jni module
+    // Use com.k2fsa.sherpa.mnn.OnlineRecognizer from sherpa-mnn's Kotlin API
 
-    public ConfigBuilder temperature(float temp) {
-        addField("temperature", temp);
-        return this;
-    }
-
-    public ConfigBuilder topP(float topP) {
-        addField("topP", topP);
-        return this;
-    }
-
-    public ConfigBuilder topK(int topK) {
-        addField("topK", topK);
-        return this;
-    }
-
-    public ConfigBuilder reuseKv(boolean reuse) {
-        addField("reuse_kv", reuse);
-        return this;
-    }
-
-    public ConfigBuilder useMmap(boolean mmap) {
-        addField("use_mmap", mmap);
-        return this;
-    }
-
-    public ConfigBuilder tmpPath(String path) {
-        addField("tmp_path", path);
-        return this;
-    }
-
-    public ConfigBuilder kvcacheMmap(boolean enable) {
-        addField("kvcache_mmap", enable);
-        return this;
-    }
-
-    public ConfigBuilder systemPrompt(String prompt) {
-        addField("system_prompt", prompt);
-        return this;
-    }
-
-    public ConfigBuilder chunk(int chunkSize) {
-        addField("chunk", chunkSize);
-        return this;
-    }
-
-    public ConfigBuilder kvcacheLimit(int limit) {
-        addField("kvcache_limit", limit);
-        return this;
-    }
-
-    private void addField(String key, String value) {
-        if (!first) json.append(",");
-        json.append("\"").append(key).append("\":\"").append(value).append("\"");
-        first = false;
-    }
-
-    private void addField(String key, int value) {
-        if (!first) json.append(",");
-        json.append("\"").append(key).append("\":").append(value);
-        first = false;
-    }
-
-    private void addField(String key, float value) {
-        if (!first) json.append(",");
-        json.append("\"").append(key).append("\":").append(value);
-        first = false;
-    }
-
-    private void addField(String key, boolean value) {
-        if (!first) json.append(",");
-        json.append("\"").append(key).append("\":").append(value);
-        first = false;
-    }
-
-    public String build() {
-        json.append("}");
-        return json.toString();
-    }
-}
+} // End of MnnInference class

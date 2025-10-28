@@ -1125,129 +1125,144 @@ public class LocalLlmHandler {
     private InferenceEngine selectInferenceEngine(File modelDir) {
         LogManager.logI(TAG, "Detecting model type: " + modelDir.getAbsolutePath());
         
-        // Check for MNN models (both LLM and Diffusion)
-        // LocalLLMMNNHandler now handles both LLM and Diffusion models
+        // Check for Diffusion model first (highest priority)
         if (isDiffusionModel(modelDir)) {
-            LogManager.logI(TAG, "Detected MNN DIFFUSION model (Text-to-Image), selecting MNN inference engine");
+            LogManager.logI(TAG, "✓ Selected MNN inference engine for DIFFUSION model");
             return new LocalLLMMNNHandler(context);
         }
         
+        // Check for LLM model
         if (isMnnModel(modelDir)) {
-            LogManager.logI(TAG, "Detected MNN LLM model, selecting MNN inference engine");
+            LogManager.logI(TAG, "✓ Selected MNN inference engine for LLM model");
             return new LocalLLMMNNHandler(context);
         }
         
         // No compatible model format found
-        LogManager.logW(TAG, "No compatible model format found (supported: MNN LLM, MNN Diffusion)");
+        LogManager.logW(TAG, "✗ No compatible model format found");
         return null;
     }
     
     /**
      * Check if directory contains Diffusion model (Text-to-Image)
-     * Diffusion models have specific file structure:
-     * - text_encoder.mnn (+ .weight)
-     * - unet.mnn (+ .weight)
-     * - vae_decoder.mnn (+ .weight)
-     * - vocab.json, merges.txt (tokenizer files)
-     * 
-     * @param modelDir Model directory
-     * @return true if Diffusion model files exist
+     * Strategy: 1. Check config.json  2. Check file names (regex)
      */
     private boolean isDiffusionModel(File modelDir) {
-        if (!modelDir.isDirectory()) {
-            return false;
+        if (!modelDir.isDirectory()) return false;
+        
+        boolean hasUnet = false, hasVae = false, hasDit = false;
+        
+        // Step 1: Try config.json
+        File configFile = new File(modelDir, "config.json");
+        if (configFile.exists()) {
+            try {
+                String content = readFileContent(configFile);
+                org.json.JSONObject config = new org.json.JSONObject(content);
+                String modelType = config.optString("model_type", "").toLowerCase();
+                if (modelType.contains("diffusion") || modelType.contains("stable_diffusion")) {
+                    LogManager.logI(TAG, "✓ config.json indicates Diffusion model");
+                    return true;
+                }
+            } catch (Exception e) {
+                LogManager.logD(TAG, "config.json parse failed, using file detection");
+            }
         }
         
-        // Check for Diffusion-specific model files
-        File textEncoder = new File(modelDir, "text_encoder.mnn");
-        File unet = new File(modelDir, "unet.mnn");
-        File vaeDecoder = new File(modelDir, "vae_decoder.mnn");
-        File vocabJson = new File(modelDir, "vocab.json");
-        File mergesTxt = new File(modelDir, "merges.txt");
+        // Step 2: Scan files with regex (match filename without extension)
+        File[] files = modelDir.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                String name = file.getName().toLowerCase();
+                if (name.matches(".*unet.*\\.(mnn|weight).*")) hasUnet = true;
+                if (name.matches(".*(vae|decoder).*\\.(mnn|weight).*")) hasVae = true;
+                if (name.matches(".*(dit|predit).*\\.(mnn|weight).*")) hasDit = true;
+            }
+        }
         
-        // Log file existence for debugging
-        LogManager.logD(TAG, "Checking Diffusion files in: " + modelDir.getAbsolutePath());
-        LogManager.logD(TAG, "  text_encoder.mnn: " + (textEncoder.exists() ? "✓" : "✗"));
-        LogManager.logD(TAG, "  unet.mnn: " + (unet.exists() ? "✓" : "✗"));
-        LogManager.logD(TAG, "  vae_decoder.mnn: " + (vaeDecoder.exists() ? "✓" : "✗"));
-        LogManager.logD(TAG, "  vocab.json: " + (vocabJson.exists() ? "✓" : "✗"));
-        LogManager.logD(TAG, "  merges.txt: " + (mergesTxt.exists() ? "✓" : "✗"));
-        
-        // A Diffusion model must have all three core model files
-        boolean isDiffusion = textEncoder.exists() && unet.exists() && vaeDecoder.exists();
-        
+        boolean isDiffusion = hasUnet && hasVae;
         if (isDiffusion) {
-            LogManager.logI(TAG, "✓ DIFFUSION model detected (Stable Diffusion for Text-to-Image)");
-            LogManager.logI(TAG, "  This is NOT an LLM model - use /image command to generate images");
+            LogManager.logI(TAG, "✓ DIFFUSION model (unet + vae" + (hasDit ? " + dit" : "") + ")");
         }
-        
         return isDiffusion;
     }
     
     /**
-     * Check if directory contains MNN model
-     * @param modelDir Model directory
-     * @return true if MNN model files exist
+     * Check if directory contains MNN LLM model
+     * Strategy: 1. Check config.json  2. Check file names (regex)
      */
     private boolean isMnnModel(File modelDir) {
-        if (!modelDir.isDirectory()) {
-            LogManager.logW(TAG, "Not a directory: " + modelDir.getAbsolutePath());
-            return false;
-        }
+        if (!modelDir.isDirectory()) return false;
         
-        // Check for required MNN model files
-        File llmMnn = new File(modelDir, "llm.mnn");
-        File llmWeight = new File(modelDir, "llm.mnn.weight");
-        File tokenizer = new File(modelDir, "tokenizer.txt");
-        File config = new File(modelDir, "config.json");
+        boolean hasLlm = false, hasVisual = false, hasAudio = false, hasTalker = false;
+        boolean hasTokenizer = false, hasConfig = false;
         
-        // Check for optional multimodal (vision) files
-        File visualMnn = new File(modelDir, "visual.mnn");
-        File visualWeight = new File(modelDir, "visual.mnn.weight");
-        
-        // Check for optional embedding file (required for some models like Qwen2.5-VL)
-        File embeddingFile = new File(modelDir, "embeddings_bf16.bin");
-        
-        // Log file existence for debugging
-        LogManager.logD(TAG, "Checking MNN files in: " + modelDir.getAbsolutePath());
-        LogManager.logD(TAG, "  llm.mnn: " + (llmMnn.exists() ? "✓" : "✗"));
-        LogManager.logD(TAG, "  llm.mnn.weight: " + (llmWeight.exists() ? "✓" : "✗ (optional for embedded weights)"));
-        LogManager.logD(TAG, "  tokenizer.txt: " + (tokenizer.exists() ? "✓" : "✗"));
-        LogManager.logD(TAG, "  config.json: " + (config.exists() ? "✓" : "✗"));
-        LogManager.logD(TAG, "  embeddings_bf16.bin: " + (embeddingFile.exists() ? "✓ (" + formatFileSize(embeddingFile.length()) + ")" : "✗ (optional)"));
-        LogManager.logD(TAG, "  visual.mnn: " + (visualMnn.exists() ? "✓ (multimodal)" : "✗ (text-only)"));
-        LogManager.logD(TAG, "  visual.mnn.weight: " + (visualWeight.exists() ? "✓ (multimodal)" : "✗ (optional for embedded weights)"));
-        
-        // Core MNN files: llm.mnn, tokenizer.txt, config.json are required
-        // Weight files are optional (can be embedded in .mnn files)
-        boolean isMnn = llmMnn.exists() && tokenizer.exists() && config.exists();
-        
-        if (isMnn) {
-            // Determine model type based on available files
-            boolean hasExternalWeights = llmWeight.exists();
-            boolean hasVisualModel = visualMnn.exists();
-            boolean hasExternalVisualWeights = visualWeight.exists();
-            
-            if (hasVisualModel) {
-                if (hasExternalWeights && hasExternalVisualWeights) {
-                    LogManager.logI(TAG, "MNN MULTIMODAL model with external weights (traditional format)");
-                } else if (hasExternalWeights || hasExternalVisualWeights) {
-                    LogManager.logI(TAG, "MNN MULTIMODAL model with mixed weight format (some embedded, some external)");
-                } else {
-                    LogManager.logI(TAG, "MNN MULTIMODAL model with embedded weights (compact format)");
+        // Step 1: Try config.json
+        File configFile = new File(modelDir, "config.json");
+        if (configFile.exists()) {
+            hasConfig = true;
+            try {
+                String content = readFileContent(configFile);
+                org.json.JSONObject config = new org.json.JSONObject(content);
+                
+                // Check multimodal capabilities from config
+                if (config.has("vision_model") || config.has("visual_model")) {
+                    String vm = config.optString("vision_model", config.optString("visual_model", ""));
+                    if (!vm.isEmpty() && !vm.equals("null")) hasVisual = true;
                 }
-            } else {
-                if (hasExternalWeights) {
-                    LogManager.logI(TAG, "MNN TEXT-ONLY model with external weights (traditional format)");
-                } else {
-                    LogManager.logI(TAG, "MNN TEXT-ONLY model with embedded weights (compact format)");
+                if (config.has("audio_model") || config.optBoolean("is_audio", false)) {
+                    hasAudio = true;
                 }
+                if (config.has("talker_model") || config.has("dit_model")) {
+                    hasTalker = true;
+                }
+            } catch (Exception e) {
+                LogManager.logD(TAG, "config.json parse failed: " + e.getMessage());
             }
-        } else {
-            LogManager.logW(TAG, "MNN model files incomplete or missing (requires: llm.mnn, tokenizer.txt, config.json)");
         }
         
-        return isMnn;
+        // Step 2: Scan files with regex (match filename without extension)
+        File[] files = modelDir.listFiles();
+        if (files != null) {
+            for (File file : files) {
+                String name = file.getName().toLowerCase();
+                if (name.matches("llm\\.(mnn|weight).*")) hasLlm = true;
+                else if (name.matches(".*(visual|vision).*\\.(mnn|weight).*")) hasVisual = true;
+                else if (name.matches("audio\\.(mnn|weight).*")) hasAudio = true;
+                else if (name.matches(".*(talker|dit).*\\.(mnn|weight).*")) hasTalker = true;
+                else if (name.equals("tokenizer.txt")) hasTokenizer = true;
+            }
+        }
+        
+        // LLM requires: llm.mnn + tokenizer.txt + config.json
+        boolean isLlm = hasLlm && hasTokenizer && hasConfig;
+        
+        if (isLlm) {
+            String type = "LLM";
+            if (hasVisual && hasAudio) type += "_OMNI (text+vision+audio)";
+            else if (hasVisual) type += "_VISION (text+vision)";
+            else if (hasAudio) type += "_AUDIO (text+audio)";
+            else type += "_TEXT";
+            if (hasTalker) type += " +TTS";
+            LogManager.logI(TAG, "✓ " + type);
+        }
+        
+        return isLlm;
+    }
+    
+    /**
+     * Read file content as string
+     */
+    private String readFileContent(File file) throws Exception {
+        StringBuilder content = new StringBuilder();
+        java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(file));
+        try {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                content.append(line);
+            }
+        } finally {
+            reader.close();
+        }
+        return content.toString();
     }
     
     /**

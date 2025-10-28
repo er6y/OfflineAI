@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    namespace 'com.offlineai.mnn'
+    namespace 'com.offlineai.mnn.lib'
     compileSdk 34
 
     defaultConfig {
@@ -15,7 +15,7 @@ android {
 
         externalNativeBuild {
             cmake {
-                // Enable MNN LLM with multiple backends
+                // Build standalone libMNN.so with all engines and backends
                 arguments "-DMNN_BUILD_LLM=ON",
                           "-DMNN_BUILD_FOR_ANDROID_COMMAND=ON",
                           "-DMNN_OPENCL=ON",
@@ -31,29 +31,25 @@ android {
                           "-DMNN_IMGCODECS=ON",
                           "-DLLM_SUPPORT_VISION=ON",
                           "-DLLM_SUPPORT_AUDIO=ON",
-                          "-DMNN_BUILD_AUDIO=ON",  // Enable audio support for ASR (sherpa-mnn)
+                          "-DMNN_BUILD_AUDIO=ON",
                           "-DMNN_BUILD_DIFFUSION=ON",
+                          // CRITICAL: MNN_SEP_BUILD=OFF merges all engines into libMNN.so
                           "-DMNN_SEP_BUILD=OFF",
                           "-DMNN_KLEIDIAI=ON",
                           "-DMNN_QNN=OFF",
                           "-DMNN_BUILD_TOOLS=OFF",
                           "-DMNN_WITH_PLUGIN=ON",
                           "-DBUILD_PLUGIN=ON",
-                          // Force native build to use Release for performance
                           "-DCMAKE_BUILD_TYPE=Release"
 
                 cppFlags "-std=c++17", "-fexceptions", "-frtti"
-                // Build for both ARM64 (real device) and x86_64 (emulator)
-                // NNAPI is conditionally enabled in CMakeLists.txt based on architecture
                 abiFilters 'arm64-v8a', 'x86_64'
-                // CRITICAL: Only build mnn_jni target, not all CMake targets
-                // This avoids building eigen's test programs which require SuperLU
-                targets "mnn_jni"
+                // CRITICAL: Only build MNN target (libMNN.so)
+                targets "MNN"
             }
         }
 
         ndk {
-            // Build for both ARM64 (real device) and x86_64 (emulator)
             abiFilters 'arm64-v8a', 'x86_64'
         }
     }
@@ -62,11 +58,9 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            // CRITICAL: Strip debug symbols to reduce .so size
             ndk {
                 debugSymbolLevel 'none'
             }
-            // Ensure native build stays on Release even in release variant
             externalNativeBuild {
                 cmake {
                     arguments "-DCMAKE_BUILD_TYPE=Release"
@@ -75,11 +69,9 @@ android {
         }
         debug {
             minifyEnabled false
-            // Disable extra debug symbols for JNI to avoid slowdowns
             ndk {
                 debugSymbolLevel 'none'
             }
-            // Force JNI/MNN to compile with Release flags even in debug variant
             externalNativeBuild {
                 cmake {
                     arguments "-DCMAKE_BUILD_TYPE=Release"
@@ -99,27 +91,9 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
-
-    packagingOptions {
-        pickFirst 'lib/arm64-v8a/libMNN.so'
-        pickFirst 'lib/x86_64/libMNN.so'
-    }
 }
 
-// ========== Custom MNN Operators Management ==========
-// 自定义算子文件位置：src/main/cpp/CPUGroupNorm.cpp/hpp
-// CMake会自动注入到MNN的MNNCPU目标，见 CMakeLists.txt
-// 
-// 优势：
-// - 所有JNI代码（mnn_jni.cpp + 自定义算子）集中管理
-// - 不污染上游：libs/mnn/ 保持干净，随时可以 git pull
-// - 零冗余：只有一份源文件
-// - 结构清晰：不需要额外的 custom_ops 目录
-
 dependencies {
-    // CRITICAL: Depend on mnn-lib to ensure libMNN.so is built first
-    implementation project(':libs:mnn-lib')
-    
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
     testImplementation 'junit:junit:4.13.2'

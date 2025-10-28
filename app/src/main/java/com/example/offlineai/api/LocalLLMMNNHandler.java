@@ -11,6 +11,7 @@ import com.example.offlineai.SettingsFragment;
 import com.example.offlineai.chat.model.ChatDataItem;
 import com.offlineai.mnn.MnnInference;
 
+
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
@@ -83,6 +84,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     // Store full response for onComplete callback
     private final StringBuilder fullResponseBuilder = new StringBuilder();
     
+    // Track if [TEXT:] head has been sent (for LLM models)
+    private volatile boolean textHeadSent = false;
+    
     // Runtime for memory stats
     private final Runtime runtime = Runtime.getRuntime();
     
@@ -96,6 +100,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private boolean hasTtsSupport = false;
     private String currentAudioOutputPath = null;
     private java.io.ByteArrayOutputStream ttsAudioBuffer = null;
+    
     
     /**
      * Constructor
@@ -274,11 +279,11 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         String backendPreference = SettingsFragment.getBackendPreference(context);
         int backendType = mapBackendToMnnForwardType(backendPreference);
         
-        LogManager.logI(TAG, "Creating Diffusion session with backend: " + backendPreference + " (type=" + backendType + ")");
+        LogManager.logI(TAG, "[Diffusion] Creating session with backend: " + backendPreference + " (type=" + backendType + ")");
         
         // First-time GPU load warning
         if (backendType == 3 || backendType == 7) { // OpenCL or Vulkan
-            LogManager.logW(TAG, "⚠️ FIRST-TIME GPU LOAD: May take 5-15 minutes to compile kernels!");
+            LogManager.logW(TAG, "[Diffusion] ⚠️ FIRST-TIME GPU LOAD: May take 5-15 minutes to compile kernels!");
         }
         
         // Get memory mode from config
@@ -297,13 +302,13 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         
         if (!backendCacheDir.exists()) {
             backendCacheDir.mkdirs();
-            LogManager.logI(TAG, "✅ Created app-specific cache directory: " + backendCacheDir.getAbsolutePath());
+            LogManager.logI(TAG, "[Diffusion] ✅ Created app-specific cache directory: " + backendCacheDir.getAbsolutePath());
         }
         String cachePath = backendCacheDir.getAbsolutePath();
-        LogManager.logI(TAG, "📁 Cache path: " + cachePath);
+        LogManager.logI(TAG, "[Diffusion] 📁 Cache path: " + cachePath);
         
         // All printing is now done in JNI layer
-        LogManager.logI(TAG, "Initializing diffusion model...");
+        LogManager.logI(TAG, "[Diffusion] Initializing model...");
         
         // Create DiffusionCallback adapter
         MnnInference.DiffusionCallback diffusionCallback = null;
@@ -332,12 +337,12 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         );
         
         if (diffusionHandle == 0) {
-            String errorMsg = "Failed to create Diffusion session with backend: " + backendPreference;
+            String errorMsg = "[Diffusion] Failed to create session with backend: " + backendPreference;
             LogManager.logE(TAG, errorMsg);
             throw new Exception(errorMsg);
         }
         
-        LogManager.logI(TAG, "Diffusion session created successfully, handle=" + diffusionHandle);
+        LogManager.logI(TAG, "[Diffusion] Session created successfully, handle=" + diffusionHandle);
         // JNI layer already printed "Models loaded successfully!"
     }
     
@@ -658,6 +663,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         isGenerating.set(true);
         shouldStop.set(false);
         fullResponseBuilder.setLength(0);
+        textHeadSent = false; // Reset text head flag for each inference
         generationStartTime = System.currentTimeMillis();
         inferenceStartTime = System.currentTimeMillis();
         
@@ -692,6 +698,12 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                         public boolean onToken(String token) {
                             if (shouldStop.get()) {
                                 return true;
+                            }
+                            
+                            // Send [TEXT:] head before first token (for main flow to detect and close <debug>)
+                            if (!textHeadSent && callback != null) {
+                                callback.onToken("\n[TEXT:]");
+                                textHeadSent = true;
                             }
                             
                             fullResponseBuilder.append(token);
@@ -807,6 +819,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         inferenceStartTime = generationStartTime;
         currentSessionTokens.set(0);
         fullResponseBuilder.setLength(0); // Clear previous response
+        textHeadSent = false; // Reset text head flag
         
         // Reset statistics
         promptTokens = 0;
@@ -839,6 +852,12 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                         // Skip end marker
                         if (token.contains("<eop>")) {
                             return false;
+                        }
+                        
+                        // Send [TEXT:] head before first token (for main flow to detect and close <debug>)
+                        if (!textHeadSent && callback != null) {
+                            callback.onToken("\n[TEXT:]");
+                            textHeadSent = true;
                         }
                         
                         // Update statistics
@@ -1655,6 +1674,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     public boolean hasTtsSupport() {
         return hasTtsSupport;
     }
+    
+    // ========== ASR (Automatic Speech Recognition) ==========
+    // ASR functionality has been moved to AsrAdapter.java for better separation of concerns
+    // ASR is now independent of LLM inference engines
     
     @Override
     public String getEngineType() {

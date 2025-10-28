@@ -1040,7 +1040,7 @@
     <string name="dialog_title_add_api_url_simple">添加API地址</string>
     
     <!-- Multimodal UI strings -->
-    <string name="menu_pick_image">图片</string>
+    <string name="menu_pick_media">多媒体</string>
     <string name="menu_take_photo">相机</string>
     <string name="desc_image_thumbnail">图片缩略图</string>
     <string name="desc_delete_image">删除图片</string>
@@ -1050,6 +1050,10 @@
     <string name="toast_camera_permission_denied">需要相机权限才能拍照</string>
     <string name="toast_take_photo_failed">拍照失败</string>
     <string name="dialog_title_image_preview">图片预览</string>
+    <string name="toast_media_pick_failed">选择文件失败</string>
+    <string name="toast_audio_convert_failed">音频转换失败</string>
+    <string name="toast_audio_converting">音频正在转换中，请稍候...</string>
+    <string name="toast_unsupported_file_type">不支持的文件类型</string>
 
     <!-- Chat UI collapsible section titles -->
     <string name="collapsible_debug">调试信息</string>

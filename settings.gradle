@@ -15,4 +15,6 @@ dependencyResolutionManagement {
 }
 rootProject.name = "OfflineAI"
 include ':app'
+include ':libs:mnn-lib'  // Build libMNN.so first
 include ':libs:mnn-jni'
+include ':libs:sherpa-mnn-jni'

@@ -1036,7 +1036,7 @@
     <string name="dialog_title_add_api_url_simple">Add API URL</string>
 
     <!-- Multimodal UI strings -->
-    <string name="menu_pick_image">Image</string>
+    <string name="menu_pick_media">Media</string>
     <string name="menu_take_photo">Camera</string>
     <string name="desc_image_thumbnail">Image thumbnail</string>
     <string name="desc_delete_image">Delete image</string>
@@ -1046,6 +1046,10 @@
     <string name="toast_camera_permission_denied">Camera permission is required to take photos</string>
     <string name="toast_take_photo_failed">Failed to take photo</string>
     <string name="dialog_title_image_preview">Image preview</string>
+    <string name="toast_media_pick_failed">Failed to pick file</string>
+    <string name="toast_audio_convert_failed">Failed to convert audio</string>
+    <string name="toast_audio_converting">Audio is converting, please wait...</string>
+    <string name="toast_unsupported_file_type">Unsupported file type</string>
 
     <!-- Chat UI collapsible section titles -->
     <string name="collapsible_debug">Debug</string>

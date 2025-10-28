@@ -131,11 +131,35 @@ flowchart TB
 ## 3. 核心功能设计
 
 ### 3.1 RAG 问答体系
-- **模型来源**：支持本地 MNN 模型（文本/多模态/TTS/Diffusion）与在线 API。需求：在同一界面可无缝切换模型来源，在停机/弱网环境下优先走本地路径。设计：模型选择下拉列表合并本地与在线条目，发送前依据模型类型设置后端参数（如音频/图像开关）。
+- **模型来源**：支持本地 MNN 模型（文本/多模态/TTS/Diffusion/ASR）与在线 API。需求：在同一界面可无缝切换模型来源，在停机/弱网环境下优先走本地路径。设计：模型选择下拉列表合并本地与在线条目，发送前依据模型类型设置后端参数（如音频/图像开关）。
 - **知识库选择**：提供知识库多选与深度、重排数配置。需求：用户可按场景快速切换知识库，并设定检索深度与重排策略。设计：ConfigManager 持久化最近使用的知识库和检索参数，RagQueryManager 在执行检索前加载对应向量库。
 - **检索流程**：问题向量化 → 向量召回 → 条件重排 → 上下文拼装 → 调用模型。需求：过程需可中断、可观测、可调试。设计：在日志窗口输出向量分数/重排分数，统计拼装上下文 token 数，遇到异常（如向量全为零）立即告警并回退。**主要 API**：RagQueryManager 的 `executeRagQuery()`、EmbeddingHandler 的 `computeEmbedding()`、RerankerHandler 的 `rerank()`、LocalLLMMNNHandler 的 `generate()`。**关键数据结构**：`ChatDataItem`、`SQLiteVectorDatabaseHandler.SearchResult`、`RerankerResult`。
 - **会话特性**：Markdown 渲染、折叠菜单、复制、转笔记；支持最多 3 张图像输入并保留历史缩略图；语音输入需提供长按录音/上滑取消提示；TTS 输出落地文件并在聊天列表显示播放器；全局停止按钮即时中断流式输出。设计：通过 ChatRecyclerViewAdapter 管理多类型消息（文本、图片、音频、Diffusion 图片），结合 ChatHistoryManager 进行持久化。
-- **调试与可观测性**：需求是问题排查时能快速定位检索和推理异常。设计：RagQaFragment 提供 debug 面板输出 Embedding/Rerank 详细分数、Prompt token 长度、API 请求/响应日志，LogManager 统一收集。**主要 API**：`updateProgressPlainText()`、`LogManager.d()`、`RagQueryManager.callback.onProgressUpdate()`。**关键数据结构**：调试字符串缓存、日志文件。
+- **媒体文件处理流程（2025-10-30重构）**：需求：在用户点击发送/松开录音的瞬间，立即完成所有文件操作（保存、记录、清空），确保数据一致性和UI响应速度。设计：**核心方法 `prepareAndSaveUserInput()`** 统一处理所有媒体文件，执行步骤：①检查/创建聊天文件夹 → ②同步保存所有媒体文件到聊天文件夹（录音/图片/音频转WAV格式，文件名：`{type}_{timestamp}_user.{ext}`）→ ③创建 `UserInput` 结构体（包含文本、图片路径列表、音频路径列表、时长）→ ④创建用户消息并添加到 `chatMessages` → ⑤立即保存到 `conversation.md` → ⑥清空输入框和媒体缩略图。**调用时机**：`handleSendStopClick()`（点击发送）和 `sendVoiceMessage()`（松开录音）。**关键改进**：RAG查询流程 `executeRagQueryWithAsr()` 接受 `UserInput` 参数，使用其中已保存的文件路径，而不是从已清空的 `mediaThumbnailAdapter` 获取。**已修复问题**：①ASR后图片丢失（文件已在发送瞬间保存）②并发修改异常（创建快照避免）③文件保存时机错误（不延迟到后台）④RAG获取不到文件（使用UserInput路径）。**主要 API**：`prepareAndSaveUserInput()`、`MediaThumbnailAdapter.processImage()`、`MediaThumbnailAdapter.convertAudioToWav()`、`executeRagQueryWithAsr(userInput)`。**关键数据结构**：`UserInput`（包含textPrompt/imagePaths/audioPaths/audioDuration）、`ChatDataItem`、`conversation.md`。**详细文档**：`MEDIA_PROCESSING_FLOW.md`。
+- **ASR（语音识别）集成**：支持外挂ASR模型将语音转文本后走RAG流程。需求：用户可在设置中选择ASR模型（或选择"无"跳过），语音输入时自动转换为文本并与用户文本合并，支持失败降级到原始音频标签模式。设计：**将sherpa-mnn源码完整集成到mnn-jni模块**，通过C++ JNI实现，支持arm64-v8a和x86_64架构；使用sherpa-onnx C API进行在线语音识别，支持Zipformer/Paraformer等模型；懒加载策略（首次使用时加载）；转换失败时自动降级到`<audio>`标签模式。**实现位置**：C++层（mnn_jni.cpp）实现JNI方法，Java层（LocalLLMMNNHandler）封装调用接口。**主要 API**：`MnnInference.createAsr()`、`MnnInference.transcribeAudio()`、`LocalLLMMNNHandler.loadAsrModel()`、`LocalLLMMNNHandler.transcribeAudio()`、`RagQaFragment.convertAndSendAsText()`。**关键数据结构**：C++层使用`SherpaOnnxOnlineRecognizer*`、Java层使用`long asrHandle`。**流程示意**：
+  ```
+  用户语音输入 → 检查ASR设置
+  ├─ 选择了ASR模型：
+  │  ├─ 加载ASR模型（懒加载）
+  │  ├─ 转换音频为文本
+  │  ├─ 合并ASR文本 + 用户文本
+  │  ├─ 走RAG流程（如需要）
+  │  └─ 调用LLM推理
+  └─ 未选择ASR（"无"）：
+     └─ 使用<audio>标签直接送给LLM（适用于支持音频的模型如Qwen2.5-Omni）
+  ```
+- **Debug 控制流与输出头标记**：需求：在 UI 中提供可折叠的调试信息区域，显示 ASR/RAG/LLM 各阶段的状态，并在实际输出开始时自动关闭。设计：
+  - **开启 Debug 区域**：`RagQaFragment` 在发送请求时输出 `<debug>\n`，后续各模块（ASR/RAG/LLM）输出带标签的日志（如 `[ASR]`、`[RAG]`、`[LLM]`）。
+  - **输出头标记**：推理引擎（本地/在线）在开始输出实际内容前，发送 `[TEXT:]`（文本）、`[IMAGE:]`（图像）或 `[AUDIO:]`（音频）头标记。
+  - **关闭 Debug 区域**：`RagQaFragment.onStreamingData()` 检测到输出头标记后，立即输出 `</debug>\n` 并设置 `debugClosed=true`，同时**过滤掉头标记本身**，避免显示在 UI 上。
+  - **错误处理**：如果推理过程出错且 `debugClosed=false`，在 `onError()` 中补充 `</debug>\n`，确保标签平衡。
+  - **历史记录清理**：`ChatHistoryFilter` 在加载历史对话时，**必须移除所有 debug 标记**（`<debug>`、`</debug>`、`[TEXT:]`、`[RAG]`、`[LLM]`、`[ASR]`、`[Diffusion]`、`<performance>` 等），**防止模型学习并模仿输出这些内容**。
+  - **实现位置**：
+    - `RagQaFragment.java`：Line 1673（开启 debug）、Line 2490-2502（检测头标记并关闭 debug + 过滤头标记）、Line 2583-2586（错误时关闭 debug）。
+    - `LocalLLMMNNHandler.java`：Line 817-818（重置 `textHeadSent` 标志）、Line 705-709（`performHistoryInference` 发送 `[TEXT:]`）、Line 853-857（`inferenceLLM` 发送 `[TEXT:]`）。
+    - `ChatHistoryFilter.java`：Line 34-44（定义 debug 标记过滤模式）、Line 56-67（`filterText()` 优先移除 debug 标记）。
+  **Debug日志输出**：在ChatUI的Debug Console中输出完整流程状态，包括ASR模型名称、语音文件路径、图片信息、转换结果、RAG检索日志、LLM调用状态等，便于用户了解处理流程。
+- **调试与可观测性**：需求是问题排查时能快速定位检索和推理异常。设计：RagQaFragment 提供 debug 面板输出 Embedding/Rerank 详细分数、Prompt token 长度、API 请求/响应日志、ASR转换状态，LogManager 统一收集。**主要 API**：`updateProgressPlainText()`、`updateChatMessage()`、`LogManager.d()`、`RagQueryManager.callback.onProgressUpdate()`。**关键数据结构**：调试字符串缓存、日志文件。
 
 ### 3.2 知识库构建
 - **入口与交互**：知识库选择器支持新建与切换，文件列表支持多选、清空、查看累计大小。需求：长任务中界面需保持可操作（查看日志、暂停），构建完成后要附带统计（向量条数、耗时）。设计：通过 ProgressManager 在 UI/前台通知/日志三处同步进度，构建完成后刷新知识库摘要。
@@ -191,6 +215,22 @@ flowchart TB
 ### 4.3 加速器与资源检测
 - **AcceleratorDiagnostics**：需求是评估设备可用的硬件后端（CPU、Vulkan、NNAPI、KleidiAI 等），并在后端不可用时自动回退，输出详细日志。设计：启动时通过 JNI 调用获取硬件能力、编译宏与运行时检测结果，结合 Settings 中的偏好确定实际后端，失败时记录原因。
 
+### 4.4 SO架构优化（2025-10-29重构）
+- **优化目标**：消除SO文件中的重复编译，优化APK体积。重构前libmnn_jni.so包含完整MNN引擎代码（71.16 MB），libsherpa-mnn-jni.so静态链接MNN（48.97 MB），导致MNN代码重复。
+- **重构方案**：
+  - **mnn-lib模块**：新建独立模块单独编译libMNN.so（7.59 MB），包含所有引擎（LLM/Diffusion/Vision/TTS/Audio）和backend（OpenCL/Vulkan/NNAPI/ARM82/KleidiAI）。配置`MNN_SEP_BUILD=OFF`确保所有引擎合并到libMNN.so。
+  - **mnn-jni重构**：改为薄JNI层，只包含JNI胶水代码，动态链接libMNN.so。移除`add_subdirectory(MNN)`，改为查找prebuilt libMNN.so并链接。
+  - **sherpa-mnn-jni重构**：配置动态链接libMNN.so。虽然sherpa-mnn-core仍是STATIC库（包含kaldifst等ASR依赖），但MNN部分改为动态链接，消除重复。
+  - **编译顺序**：通过Gradle依赖确保mnn-lib先编译，mnn-jni和sherpa-mnn-jni依赖mnn-lib，保证libMNN.so在其他模块编译前已存在。
+- **优化成果**：
+  - libmnn_jni.so：71.16 MB → 4.32 MB（-94%，节省66.84 MB）
+  - 总SO体积：243.37 MB → 120.54 MB（-50%，节省122.83 MB）
+  - 架构清晰：一个libMNN.so，多个模块共享，职责分离明确
+  - 易维护：更新MNN只需重新编译mnn-lib模块
+- **自定义算子处理**：CPUGroupNorm等自定义算子从mnn-jni迁移到mnn-lib，在编译libMNN.so时通过`target_sources(MNNCPU)`注入，确保算子内置在libMNN.so中。
+- **验证方法**：使用`readelf -d libmnn_jni.so | grep NEEDED`验证动态链接libMNN.so；使用`nm libmnn_jni.so | grep "MNN::"`验证不包含MNN符号。
+- **相关文档**：详见[SO架构重构文档](SO_ARCHITECTURE_REFACTOR.md)和[SO优化结果报告](SO_OPTIMIZATION_RESULT.md)。
+
 ## 5. 数据与持久化
 
 ### 5.1 目录结构
@@ -212,6 +252,13 @@ flowchart TB
 ### 5.3 会话历史
 - **ChatHistoryManager**：负责对话序列化、附件管理。需求：保存聊天 Markdown、图像、AI 音频、Diffusion 图片，并能加载恢复 UI 状态。设计：Markdown 中以特定标记记录附件，加载时解析并生成相应 ViewHolder。
 - **文件命名**：音频 `audio_{timestamp}_ai.wav`、Diffusion 图片 `image_{timestamp}_ai.png` 保持统一命名，便于回溯与外部导出。
+- **ChatHistoryFilter**：历史记录过滤器，用于将 Markdown 格式的对话历史转换为 MNN 推理可用的纯文本格式。**关键职责**：
+  - **Debug 标记过滤**（优先级最高）：移除 `<debug>`、`</debug>`、`[TEXT:]`、`[IMAGE:]`、`[AUDIO:]`、`[RAG]`、`[LLM]`、`[ASR]`、`[Diffusion]`、`<performance>` 等所有调试标记，**防止模型学习并模仿输出这些内容**。
+  - **Markdown 格式清理**：移除 emoji、粗体/斜体/代码标记、图片/音频 markdown 链接、`<img>`/`<audio>` 标签。
+  - **滑动窗口**：根据 `maxRounds` 参数截取最近 N 轮对话，避免上下文过长。
+  - **空内容跳过**：过滤后为空的消息不加入历史，避免无效 token。
+  - **AI 生成图片跳过**：包含 `🖼️ [图片:]` 的 AI 消息不加入历史（Diffusion 生成与 LLM 推理无关）。
+  - **实现位置**：`ChatHistoryFilter.java`，被 `LocalLLMMNNHandler.performHistoryInference()` 调用。
 
 ### 5.4 配置与日志
 - **配置文件**：SharedPreferences + `.config` JSON 双轨并存，前者用于即时读取，后者用于备份/导出。需求：启动时校验两者一致性，避免错乱。
@@ -7476,6 +7523,645 @@ std::string talker_weight() const {
    - 检查 `setExternalFile()` 调用的参数
    - 如果路径以 `/` 结尾，可能是空字符串导致的
    - 使用 `ls -la` 验证文件是否存在
+
+---
+
+## 附录 H：Sherpa-MNN ASR 模块分离架构（最终方案）
+
+### 架构演进
+
+**初始方案（已废弃）**：将 sherpa-mnn 编译到 mnn-jni 模块中
+- ❌ 导致 libmnn_jni.so 体积过大（152MB）
+- ❌ 模块耦合严重，难以维护
+- ❌ 违反单一职责原则
+
+**最终方案（当前实现）**：独立 sherpa-mnn-jni 模块
+- ✅ **模块解耦**：mnn-jni 只负责 LLM/TTS/Vision，sherpa-mnn-jni 只负责 ASR
+- ✅ **体积优化**：libmnn_jni.so 从 152MB 降至 92MB (-39%)
+- ✅ **官方 API**：直接使用 sherpa-mnn 的 Kotlin API，无需自己封装
+- ✅ **避免重复**：libMNN.so 只有一份，sherpa-mnn-jni 动态链接
+
+### 模块结构
+
+```
+OfflineAI/
+├── libs/
+│   ├── mnn-jni/                    # MNN LLM/TTS/Vision 模块
+│   │   ├── build.gradle
+│   │   └── src/main/cpp/
+│   │       ├── CMakeLists.txt      # 编译 libmnn_jni.so + libMNN.so
+│   │       └── mnn_jni.cpp         # LLM/TTS JNI 实现
+│   │
+│   └── sherpa-mnn-jni/             # Sherpa-MNN ASR 模块（独立）
+│       ├── build.gradle            # 依赖 mnn-jni
+│       └── src/main/cpp/
+│           └── CMakeLists.txt      # 最小化 wrapper，查找 libMNN.so
+│
+└── app/
+    └── build.gradle                # 依赖 mnn-jni + sherpa-mnn-jni
+```
+
+### 关键配置
+
+#### 1. sherpa-mnn-jni/build.gradle
+
+```gradle
+dependencies {
+    // CRITICAL: 依赖 mnn-jni 以获取 libMNN.so
+    implementation project(':libs:mnn-jni')
+}
+
+android {
+    sourceSets {
+        main {
+            // CRITICAL: 直接引用 sherpa-mnn 的 Kotlin API（不复制）
+            java.srcDirs += '../mnn/apps/frameworks/sherpa-mnn/sherpa-mnn/kotlin-api'
+        }
+    }
+    
+    externalNativeBuild {
+        cmake {
+            // 使用最小化 wrapper CMakeLists.txt
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+    
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                arguments "-DBUILD_SHARED_LIBS=OFF",  // 静态链接依赖
+                          "-DSHERPA_MNN_ENABLE_JNI=ON",
+                          "-DSHERPA_MNN_ENABLE_C_API=OFF",
+                          "-DSHERPA_MNN_ENABLE_BINARY=OFF",
+                          // 指向 MNN 源码（用于头文件）
+                          "-DMNN_LIB_DIR=${project.rootDir}/libs/mnn",
+                          // 使用本地已 clone 的依赖
+                          "-DFETCHCONTENT_SOURCE_DIR_KALDIFST=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/kaldifst",
+                          "-DFETCHCONTENT_SOURCE_DIR_OPENFST=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/kaldifst/openfst",
+                          "-DFETCHCONTENT_SOURCE_DIR_KALDI_DECODER=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/kaldi-decoder",
+                          "-DFETCHCONTENT_SOURCE_DIR_KALDI_NATIVE_FBANK=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/kaldi-native-fbank",
+                          "-DFETCHCONTENT_SOURCE_DIR_SIMPLE-SENTENCEPIECE=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/simple-sentencepiece",
+                          "-DFETCHCONTENT_SOURCE_DIR_EIGEN=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/eigen"
+                
+                targets "sherpa-mnn-jni"  // 只编译 JNI 库
+            }
+        }
+    }
+}
+```
+
+#### 2. sherpa-mnn-jni/src/main/cpp/CMakeLists.txt（最小化 wrapper）
+
+```cmake
+# CRITICAL: 最小化 wrapper，只负责查找 libMNN.so
+# 然后包含 sherpa-mnn 的官方 CMakeLists.txt
+
+cmake_minimum_required(VERSION 3.22.1)
+project(sherpa-mnn-jni-wrapper)
+
+# 动态查找 libMNN.so（支持多个 build hash 目录）
+get_filename_component(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
+set(MNN_JNI_BASE_DIR "${PROJECT_ROOT}/libs/mnn-jni/build/intermediates/cxx/Release")
+
+file(GLOB MNN_BUILD_DIRS "${MNN_JNI_BASE_DIR}/*/obj/${ANDROID_ABI}")
+foreach(BUILD_DIR ${MNN_BUILD_DIRS})
+    if(EXISTS "${BUILD_DIR}/libMNN.so")
+        link_directories(${BUILD_DIR})
+        break()
+    endif()
+endforeach()
+
+# 包含 sherpa-mnn 的官方 CMakeLists.txt
+get_filename_component(SHERPA_MNN_ROOT "${PROJECT_ROOT}/libs/mnn/apps/frameworks/sherpa-mnn" ABSOLUTE)
+
+# CRITICAL: sherpa-mnn 源码使用 #include "sherpa-mnn/csrc/xxx.h"
+include_directories(${SHERPA_MNN_ROOT})
+
+add_subdirectory(${SHERPA_MNN_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/sherpa_mnn_build)
+```
+
+**为什么需要 wrapper？**
+- sherpa-mnn 的 CMakeLists.txt 期望 `${MNN_LIB_DIR}/lib/libMNN.so`
+- 我们的 libMNN.so 在 `mnn-jni/build/intermediates/cxx/Release/[hash]/obj/${ANDROID_ABI}/`
+- Wrapper 的唯一作用：**动态查找 libMNN.so 并添加到 link_directories**
+
+### 编译产物
+
+**mnn-jni 模块**：
+- ✅ `libmnn_jni.so`: 92.45MB (arm64-v8a), 80.4MB (x86_64)
+- ✅ `libMNN.so`: 7.59MB (arm64-v8a), 8.26MB (x86_64)
+
+**sherpa-mnn-jni 模块**：
+- ✅ `libsherpa-mnn-jni.so`: 48.97MB (arm64-v8a), 47.19MB (x86_64)
+- ✅ 依赖 `libMNN.so`（动态链接，不重复打包）
+
+**总体积对比**：
+- **之前**（集成方案）：152MB (arm64-v8a)
+- **现在**（分离方案）：92.45 + 48.97 = **141.42MB** (arm64-v8a)
+- **节省**：~10MB + 更好的模块化
+
+### Java/Kotlin API 使用
+
+**不再使用自定义 JNI 封装**，直接使用 sherpa-mnn 的 Kotlin API：
+
+```kotlin
+import com.k2fsa.sherpa.mnn.OnlineRecognizer
+import com.k2fsa.sherpa.mnn.OnlineRecognizerConfig
+import com.k2fsa.sherpa.mnn.OnlineStream
+
+// 创建识别器
+val config = OnlineRecognizerConfig(
+    modelDir = "/path/to/model",
+    numThreads = 4
+)
+val recognizer = OnlineRecognizer(config)
+
+// 创建流
+val stream = recognizer.createStream()
+
+// 送入音频
+stream.acceptWaveform(samples, sampleRate)
+
+// 获取结果
+val result = recognizer.getResult(stream)
+```
+
+**参考实现**：
+- `libs/mnn/apps/frameworks/sherpa-mnn/kotlin-api-examples`
+- `libs/mnn/apps/Android/MnnLlmChat`（ChatMNN 官方示例）
+
+### Submodules 管理
+
+所有 sherpa-mnn 依赖已通过顶层 `.gitmodules` 统一管理：
+
+```bash
+# 已 clone 的依赖（无需重新下载）
+libs/mnn/apps/frameworks/sherpa-mnn/kaldifst         # 771 files
+libs/mnn/apps/frameworks/sherpa-mnn/kaldifst/openfst # (包含在 kaldifst 中)
+libs/mnn/apps/frameworks/sherpa-mnn/kaldi-decoder    # 61 files
+libs/mnn/apps/frameworks/sherpa-mnn/kaldi-native-fbank # 98 files
+libs/mnn/apps/frameworks/sherpa-mnn/eigen            # 1784 files
+libs/mnn/apps/frameworks/sherpa-mnn/simple-sentencepiece # (通过 FETCHCONTENT)
+```
+
+**build.gradle 中的 FETCHCONTENT_SOURCE_DIR 配置确保使用本地代码，不会重新下载。**
+
+### 编译命令
+
+```bash
+# 1. 编译 mnn-jni（必须先编译，sherpa-mnn-jni 依赖它）
+./gradlew :libs:mnn-jni:assembleRelease -PKEYPSWD=abc-1234
+
+# 2. 编译 sherpa-mnn-jni
+./gradlew :libs:sherpa-mnn-jni:assembleRelease
+
+# 3. 编译主 app
+./gradlew :app:assembleRelease -PKEYPSWD=abc-1234
+```
+
+### 优势总结
+
+1. **模块解耦**：mnn-jni 和 sherpa-mnn-jni 完全独立，各司其职
+2. **体积优化**：libmnn_jni.so 减少 39%，总体积减少 ~10MB
+3. **官方 API**：直接使用 sherpa-mnn 的 Kotlin API，代码更简洁
+4. **避免重复**：libMNN.so 只有一份，通过动态链接共享
+5. **易于维护**：sherpa-mnn 更新时只需重新编译 sherpa-mnn-jni 模块
+6. **清晰架构**：符合单一职责原则，每个模块职责明确
+
+---
+
+## 附录 H-旧：Sherpa-MNN ASR 从源码编译配置（已废弃）
+
+> **注意**：以下内容为初始集成方案，已被附录 H 的模块分离架构取代。保留此内容仅供历史参考。
+
+### 问题背景
+
+为了实现完整的语音识别（ASR）功能，需要将 sherpa-mnn 从源码编译并集成到 mnn-jni 模块中。sherpa-mnn 是基于 MNN 的 ASR 框架，提供 C API 接口。
+
+**挑战**：
+1. Windows 编译问题：sherpa-mnn 的依赖（kaldifst、openfst）需要 `sed` 命令
+2. 网络依赖下载：sherpa-mnn 有 6 个依赖需要从 GitHub 下载，网络超时频繁
+3. 头文件污染：sherpa-mnn 的 `features.h` 与 NDK 标准库冲突
+4. CMake 配置复杂：需要正确设置 include 路径和依赖关系
+
+### 解决方案：本地依赖 + CMake 配置（已废弃）
+
+#### 1. 手动 Clone 所有依赖
+
+```bash
+cd libs/mnn/apps/frameworks/sherpa-mnn
+
+# 依赖列表（已完成）
+git clone git@github.com:k2-fsa/kaldifst.git kaldifst && cd kaldifst && git checkout v1.7.11 && cd ..
+cd kaldifst && git clone git@github.com:csukuangfj/openfst.git openfst && cd openfst && git checkout sherpa-onnx-2024-06-13 && cd ../..
+git clone git@github.com:k2-fsa/kaldi-decoder.git kaldi-decoder && cd kaldi-decoder && git checkout v0.2.6 && cd ..
+git clone git@github.com:csukuangfj/kaldi-native-fbank.git kaldi-native-fbank && cd kaldi-native-fbank && git checkout v1.21.1 && cd ..
+git clone git@github.com:pkufool/simple-sentencepiece.git simple-sentencepiece && cd simple-sentencepiece && git checkout v0.7 && cd ..
+git clone https://gitlab.com/libeigen/eigen.git eigen && cd eigen && git checkout 3.4.0 && cd ..
+```
+
+#### 2. CMake 配置本地依赖路径
+
+**文件**：`libs/mnn-jni/src/main/cpp/CMakeLists.txt`
+
+```cmake
+if(MNN_BUILD_AUDIO)
+    # 使用本地依赖，避免网络下载
+    set(FETCHCONTENT_SOURCE_DIR_KALDIFST "${SHERPA_MNN_ROOT}/kaldifst" CACHE PATH "" FORCE)
+    set(FETCHCONTENT_SOURCE_DIR_OPENFST "${SHERPA_MNN_ROOT}/kaldifst/openfst" CACHE PATH "" FORCE)
+    set(FETCHCONTENT_SOURCE_DIR_KALDI_DECODER "${SHERPA_MNN_ROOT}/kaldi-decoder" CACHE PATH "" FORCE)
+    set(FETCHCONTENT_SOURCE_DIR_KALDI_NATIVE_FBANK "${SHERPA_MNN_ROOT}/kaldi-native-fbank" CACHE PATH "" FORCE)
+    set(FETCHCONTENT_SOURCE_DIR_SIMPLE-SENTENCEPIECE "${SHERPA_MNN_ROOT}/simple-sentencepiece" CACHE PATH "" FORCE)
+    set(FETCHCONTENT_SOURCE_DIR_EIGEN "${SHERPA_MNN_ROOT}/eigen" CACHE PATH "" FORCE)
+    
+    # sherpa-mnn 需要 MNN 头文件
+    set(MNN_LIB_DIR ${MNN_ROOT} CACHE STRING "MNN source directory" FORCE)
+    
+    # 解决 sherpa-mnn 内部 #include "sherpa-mnn/csrc/xxx.h" 查找问题
+    include_directories(${SHERPA_MNN_ROOT})
+    
+    add_subdirectory(${SHERPA_MNN_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/sherpa_mnn_build)
+    list(APPEND MNN_LIBS sherpa-mnn-c-api)
+endif()
+```
+
+#### 3. Gradle 配置：只编译 mnn_jni
+
+**文件**：`libs/mnn-jni/build.gradle`
+
+```gradle
+externalNativeBuild {
+    cmake {
+        arguments "-DMNN_BUILD_AUDIO=ON"  // 启用 ASR
+        targets "mnn_jni"  // 只编译 mnn_jni，避免编译 eigen test
+    }
+}
+```
+
+#### 4. JNI 接口（C++ 层）
+
+**文件**：`libs/mnn-jni/src/main/cpp/mnn_jni.cpp`
+
+```cpp
+#ifdef LLM_SUPPORT_AUDIO
+#include "c-api.h"  // sherpa-mnn C API
+
+static std::map<jlong, const SherpaMnnOnlineRecognizer*> g_asr_sessions;
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_offlineai_mnn_MnnInference_createAsr(JNIEnv* env, jclass, jstring jModelDir, jstring jConfigJson) {
+    SherpaMnnOnlineRecognizerConfig asrConfig;
+    memset(&asrConfig, 0, sizeof(asrConfig));
+    // 配置参数...
+    const SherpaMnnOnlineRecognizer* recognizer = SherpaMnnCreateOnlineRecognizer(&asrConfig);
+    jlong handle = reinterpret_cast<jlong>(recognizer);
+    g_asr_sessions[handle] = recognizer;
+    return handle;
+}
+#endif
+```
+
+### 编译结果
+
+**编译时间**：19 分钟（首次完整编译）
+
+**生成文件**：
+- `arm64-v8a/libmnn_jni.so`：152 MB
+- `x86_64/libmnn_jni.so`：138 MB
+
+**验证符号**：
+```bash
+llvm-nm libmnn_jni.so | grep SherpaMnn
+# SherpaMnnCreateOnlineRecognizer ✅
+# SherpaMnnDestroyOnlineRecognizer ✅
+```
+
+### 关键要点
+
+1. **依赖管理**：所有依赖本地 clone，使用 `FETCHCONTENT_SOURCE_DIR_XXX` 指定路径
+2. **CMake 配置**：只编译 mnn_jni 目标，避免 eigen test 程序
+3. **Windows 兼容**：自动查找 Git Bash 的 sed.exe
+4. **API 设计**：C++ 使用 sherpa-mnn C API，Java 提供简洁 JNI 接口
+
+---
+
+## 附录 I：Git 子模块管理优化
+
+### 问题背景
+
+原本 sherpa-mnn 相关的依赖通过嵌套的 git 子模块管理：
+- `libs/mnn/.gitmodules` 中包含 `kaldifst` 子模块
+- `libs/mnn/apps/frameworks/sherpa-mnn/kaldifst/.gitmodules` 中包含 `openfst` 子模块
+- 其他依赖（`kaldi-decoder`、`kaldi-native-fbank`、`eigen`）直接存在于目录中
+
+这种管理方式存在以下问题：
+1. **上游入侵**：需要修改 MNN 上游项目的 `.gitmodules` 文件
+2. **嵌套复杂**：多层嵌套的子模块配置难以维护
+3. **版本控制**：无法在顶层统一管理所有依赖的版本
+
+### 解决方案：顶层统一管理
+
+#### 1. 迁移策略
+
+将所有 sherpa-mnn 相关依赖迁移到顶层 `.gitmodules` 文件中统一管理：
+
+**迁移前**：
+```
+libs/mnn/.gitmodules:
+  - kaldifst
+
+libs/mnn/apps/frameworks/sherpa-mnn/kaldifst/.gitmodules:
+  - openfst
+
+其他依赖直接存在于目录中（非子模块）
+```
+
+**迁移后**：
+```
+.gitmodules (顶层):
+  - libs/mnn
+  - libs/mnn/apps/frameworks/sherpa-mnn/kaldifst
+  - libs/mnn/apps/frameworks/sherpa-mnn/kaldifst/openfst
+  - libs/mnn/apps/frameworks/sherpa-mnn/kaldi-decoder
+  - libs/mnn/apps/frameworks/sherpa-mnn/kaldi-native-fbank
+  - libs/mnn/apps/frameworks/sherpa-mnn/eigen
+```
+
+#### 2. 具体配置
+
+**文件**：`.gitmodules`
+
+```gitmodules
+[submodule "libs/mnn"]
+	path = libs/mnn
+	url = git@github.com:alibaba/MNN.git
+
+[submodule "libs/mnn/apps/frameworks/sherpa-mnn/kaldifst"]
+	path = libs/mnn/apps/frameworks/sherpa-mnn/kaldifst
+	url = git@github.com:k2-fsa/kaldifst.git
+
+[submodule "libs/mnn/apps/frameworks/sherpa-mnn/kaldifst/openfst"]
+	path = libs/mnn/apps/frameworks/sherpa-mnn/kaldifst/openfst
+	url = git@github.com:csukuangfj/openfst.git
+
+[submodule "libs/mnn/apps/frameworks/sherpa-mnn/kaldi-decoder"]
+	path = libs/mnn/apps/frameworks/sherpa-mnn/kaldi-decoder
+	url = git@github.com:k2-fsa/kaldi-decoder.git
+
+[submodule "libs/mnn/apps/frameworks/sherpa-mnn/kaldi-native-fbank"]
+	path = libs/mnn/apps/frameworks/sherpa-mnn/kaldi-native-fbank
+	url = git@github.com:csukuangfj/kaldi-native-fbank.git
+
+[submodule "libs/mnn/apps/frameworks/sherpa-mnn/eigen"]
+	path = libs/mnn/apps/frameworks/sherpa-mnn/eigen
+	url = https://gitlab.com/libeigen/eigen.git
+```
+
+#### 3. 初始化命令
+
+```bash
+# 初始化所有子模块
+git submodule update --init --recursive
+
+# 验证子模块状态
+git submodule status
+```
+
+### 优势与效果
+
+#### 1. 减少上游入侵
+- ✅ 不再需要修改 `libs/mnn/.gitmodules`
+- ✅ MNN 子模块保持原始状态，便于后续更新
+- ✅ 所有自定义依赖在顶层统一管理
+
+#### 2. 统一版本控制
+- ✅ 所有依赖版本在顶层 `.gitmodules` 中可见
+- ✅ 便于跟踪和管理依赖版本变更
+- ✅ 支持独立更新各个依赖而不影响 MNN 主模块
+
+#### 3. 简化维护
+- ✅ 避免嵌套子模块的复杂性
+- ✅ 统一的初始化和更新流程
+- ✅ 更清晰的依赖关系图
+
+#### 4. 兼容性保证
+- ✅ 不影响现有的编译配置
+- ✅ CMake 配置中的路径保持不变
+- ✅ 所有依赖仍位于原始目录位置
+
+### 最佳实践
+
+1. **子模块更新**：
+   ```bash
+   # 更新特定子模块
+   git submodule update --remote libs/mnn/apps/frameworks/sherpa-mnn/kaldifst
+   
+   # 更新所有子模块到最新版本
+   git submodule update --remote --recursive
+   ```
+
+2. **版本锁定**：
+   - 在 `.gitmodules` 中可以指定特定的分支或标签
+   - 通过 `git submodule update` 锁定到特定提交
+
+3. **清理策略**：
+   - 定期检查子模块状态：`git submodule status`
+   - 清理未使用的子模块：`git submodule deinit <path>`
+
+4. **团队协作**：
+   - 新成员只需执行 `git submodule update --init --recursive`
+   - 所有依赖自动下载到正确位置
+   - 避免手动 clone 依赖的繁琐步骤
+
+### 注意事项
+
+1. **路径一致性**：确保子模块路径与 CMake 配置中的路径一致
+2. **权限管理**：某些仓库使用 SSH URL，需要配置相应的 SSH 密钥
+3. **网络依赖**：初始化时需要网络连接下载所有子模块
+4. **存储空间**：所有依赖都会被完整下载，注意磁盘空间使用
+
+---
+
+## 附录 I：ASR 架构重构 - 解耦 LLM 与 ASR（2025-10-29）
+
+### 问题背景
+
+**原始架构问题**：
+- ASR 功能耦合在 `LocalLLMMNNHandler` 中，依赖 LLM 模型加载
+- 在线模型无法使用 ASR（只有本地 MNN 模型才能用）
+- 职责不清：LLM Handler 不应该管理 ASR
+- 导致 ASR 加载失败：`LocalLlmAdapter` 在没有加载任何 LLM 的情况下被创建，`currentEngine` 为 null，`loadAsrModel()` 直接返回 false
+
+**日志表现**：
+```
+[ASR] Loading model: sherpa-mnn-streaming-zipformer-bilingual-zh-en-2023-02-20
+LocalLlmAdapter  W  ASR not supported by current engine
+```
+
+### 重构方案
+
+**核心思想**：将 ASR 功能从 LLM 推理引擎中完全解耦，创建独立的 `AsrAdapter`，使其可以被在线/本地模型共享使用。
+
+#### 1. 创建独立的 AsrAdapter
+
+**文件**：`app/src/main/java/com/example/offlineai/api/AsrAdapter.java`
+
+**职责**：
+- 封装 Sherpa-MNN ASR 接口
+- 提供统一的 ASR 加载/转录接口
+- 独立于 LLM 引擎，单例模式管理
+- 支持模型懒加载和缓存复用
+
+**关键 API**：
+```java
+public class AsrAdapter {
+    // 单例获取
+    public static AsrAdapter getInstance(Context context);
+    
+    // 加载 ASR 模型（懒加载）
+    public synchronized void loadAsrModel(String modelName) throws Exception;
+    
+    // 转录音频文件
+    public String transcribeAudio(String audioPath) throws Exception;
+    
+    // 检查模型是否已加载
+    public boolean isAsrLoaded();
+    
+    // 获取当前模型名称
+    public String getCurrentAsrModel();
+    
+    // 释放资源
+    public synchronized void release();
+}
+```
+
+**实现细节**：
+- 使用 Sherpa-MNN 的 Kotlin API（`com.k2fsa.sherpa.mnn.*`）
+- 支持 Transducer/Paraformer/NeMo CTC 等模型类型
+- 自动配置 Feature/Endpoint/Decoder 参数
+- 线程安全的模型加载和转录
+
+#### 2. 调整 RagQaFragment 调用流程
+
+**修改位置**：`RagQaFragment.convertAndSendAsText()` (Line 5473-5487)
+
+**修改前**（耦合 LocalLlmAdapter）：
+```java
+// 依赖 LocalLlmAdapter，需要先加载 LLM
+LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(requireContext());
+if (!localAdapter.isAsrLoaded() || !asrModel.equals(localAdapter.getCurrentAsrModel())) {
+    boolean loadSuccess = localAdapter.loadAsrModel(asrModel);
+    if (!loadSuccess) {
+        throw new Exception("Failed to load ASR model: " + asrModel);
+    }
+}
+String convertedText = localAdapter.transcribeAudio(audioPath);
+```
+
+**修改后**（独立 AsrAdapter）：
+```java
+// 直接使用 AsrAdapter，无需 LLM
+AsrAdapter asrAdapter = AsrAdapter.getInstance(requireContext());
+if (!asrAdapter.isAsrLoaded() || !asrModel.equals(asrAdapter.getCurrentAsrModel())) {
+    asrAdapter.loadAsrModel(asrModel);  // 直接抛异常，无需检查返回值
+}
+String convertedText = asrAdapter.transcribeAudio(audioPath);
+```
+
+**流程优势**：
+- ✅ ASR 在 `RagQaFragment` 中统一处理，流程清晰：语音 → ASR → (RAG) → LLM
+- ✅ 在线/本地模型都能用同一个 ASR
+- ✅ ASR 独立于 LLM 引擎，解耦合
+
+#### 3. 移除旧代码
+
+**LocalLLMMNNHandler.java**：
+- 移除成员变量：`asrRecognizer`、`currentAsrModel`
+- 移除方法：`loadAsrModel()`、`transcribeAudio()`、`buildSherpaMnnConfig()`、`isAsrLoaded()`、`getCurrentAsrModel()`、`releaseAsr()`
+- 添加注释：`// ASR functionality has been moved to AsrAdapter.java`
+
+**LocalLlmAdapter.java**：
+- 移除方法：`loadAsrModel()`、`transcribeAudio()`、`isAsrLoaded()`、`getCurrentAsrModel()`
+- 添加注释：`// Use AsrAdapter.getInstance(context) directly for ASR operations`
+
+### 架构对比
+
+#### 旧架构（耦合）
+```
+RagQaFragment
+    └─> LocalLlmAdapter
+            └─> LocalLlmHandler
+                    └─> LocalLLMMNNHandler (包含 ASR)
+                            ├─ LLM 推理
+                            ├─ TTS 生成
+                            └─ ASR 转录 ❌ 耦合在这里
+```
+
+#### 新架构（解耦）
+```
+RagQaFragment
+    ├─> AsrAdapter (独立) ✅
+    │       └─ Sherpa-MNN ASR
+    │
+    └─> LocalLlmAdapter
+            └─> LocalLlmHandler
+                    └─> LocalLLMMNNHandler
+                            ├─ LLM 推理
+                            └─ TTS 生成
+```
+
+### 优势总结
+
+1. **职责清晰**：
+   - `AsrAdapter`：专注 ASR 功能
+   - `LocalLLMMNNHandler`：专注 LLM/TTS 推理
+   - `RagQaFragment`：统一协调 ASR → RAG → LLM 流程
+
+2. **兼容性好**：
+   - 在线模型可以使用 ASR（之前不行）
+   - 本地模型可以使用 ASR
+   - 支持 Qwen2.5-Omni 等原生音频模型（通过 `<audio>` 标签）
+
+3. **易于维护**：
+   - ASR 代码集中在一个文件
+   - 修改 ASR 不影响 LLM
+   - 单元测试更容易
+
+4. **资源管理**：
+   - ASR 模型独立加载/释放
+   - 不依赖 LLM 模型状态
+   - 支持懒加载和缓存复用
+
+### 编译结果
+
+- ✅ BUILD SUCCESSFUL in 3m 35s
+- ✅ APK: `OfflineAI_release_20251029195722.apk`
+- ⚠️ 2 个警告（Vibrator API 过时，不影响功能）
+
+### 测试建议
+
+1. **测试 ASR 转录**：
+   - 录制语音 → 选择 ASR 模型 → 发送
+   - 观察日志：`[ASR] Loading model`、`[ASR] Model loaded successfully`、`[ASR] Transcription result`
+
+2. **测试在线模型 + ASR**：
+   - 切换到在线 API（如 DeepSeek）
+   - 录制语音 → 选择 ASR 模型 → 发送
+   - 验证 ASR 转录后文本正确送给在线 API
+
+3. **测试 Omni 原生音频**：
+   - 加载 Qwen2.5-Omni 模型
+   - ASR 选择"无"
+   - 录制语音 → 发送
+   - 验证使用 `<audio>` 标签模式
+
+### 相关文件
+
+- `app/src/main/java/com/example/offlineai/api/AsrAdapter.java` - 新建
+- `app/src/main/java/com/example/offlineai/RagQaFragment.java` - Line 5473-5487 修改
+- `app/src/main/java/com/example/offlineai/api/LocalLLMMNNHandler.java` - Line 104-106, 1680-1876 移除
+- `app/src/main/java/com/example/offlineai/api/LocalLlmAdapter.java` - Line 694-757 移除
 
 ---
 

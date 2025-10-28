@@ -3,6 +3,9 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// Note: sherpa-mnn ASR is now compiled from source in mnn-jni module
+// No need to download prebuilt .so files
+
 android {
 namespace = 'com.example.offlineai'
     compileSdk = 34 // Use an appropriate SDK version
@@ -167,8 +170,14 @@ dependencies {
     implementation 'io.noties.markwon:syntax-highlight:4.6.2'
     implementation 'io.noties.markwon:ext-latex:4.6.2'
     
+    // MNN Library - Standalone libMNN.so (built first, shared by other modules)
+    implementation project(':libs:mnn-lib')
+    
     // MNN JNI - MNN推理引擎 (includes built-in tokenizer)
     implementation project(':libs:mnn-jni')
+    
+    // Sherpa-MNN JNI - ASR (Automatic Speech Recognition)
+    implementation project(':libs:sherpa-mnn-jni')
     
     // 文档解析库
     implementation 'org.apache.tika:tika-core:2.9.0'

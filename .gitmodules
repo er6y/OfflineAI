@@ -1,6 +1,23 @@
-[submodule "libs/tokenizers-rust"]
-	path = libs/tokenizers-rust
-	url = git@github.com:huggingface/tokenizers.git
 [submodule "libs/mnn"]
 	path = libs/mnn
 	url = git@github.com:alibaba/MNN.git
+[submodule "libs/mnn/apps/frameworks/sherpa-mnn/kaldifst"]
+	path = libs/mnn/apps/frameworks/sherpa-mnn/kaldifst
+	url = git@github.com:k2-fsa/kaldifst.git
+	branch = v1.7.17
+[submodule "libs/mnn/apps/frameworks/sherpa-mnn/kaldifst/openfst"]
+	path = libs/mnn/apps/frameworks/sherpa-mnn/kaldifst/openfst
+	url = git@github.com:csukuangfj/openfst.git
+	branch = master
+[submodule "libs/mnn/apps/frameworks/sherpa-mnn/kaldi-decoder"]
+	path = libs/mnn/apps/frameworks/sherpa-mnn/kaldi-decoder
+	url = git@github.com:k2-fsa/kaldi-decoder.git
+	branch = v1.7.17
+[submodule "libs/mnn/apps/frameworks/sherpa-mnn/kaldi-native-fbank"]
+	path = libs/mnn/apps/frameworks/sherpa-mnn/kaldi-native-fbank
+	url = git@github.com:csukuangfj/kaldi-native-fbank.git
+	branch = v1.21.1
+[submodule "libs/mnn/apps/frameworks/sherpa-mnn/eigen"]
+	path = libs/mnn/apps/frameworks/sherpa-mnn/eigen
+	url = https://gitlab.com/libeigen/eigen.git
+	branch = 3.4.0

@@ -1,0 +1,120 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.k2fsa.sherpa.mnn'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 26
+        targetSdk 34
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles "consumer-rules.pro"
+
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17", "-fexceptions", "-frtti"
+                abiFilters 'arm64-v8a', 'x86_64'
+                
+                // CRITICAL: Reference build-android-arm64-v8a.sh configuration
+                // Use RelWithDebInfo to strip debug symbols at compile time
+                arguments "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+                          "-DCMAKE_C_FLAGS_RELWITHDEBINFO=-O2 -DNDEBUG",
+                          "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O2 -DNDEBUG",
+                          "-DBUILD_SHARED_LIBS=OFF",  // Static link (48MB) - dynamic link needs separate .so files
+                          "-DSHERPA_MNN_ENABLE_JNI=ON",
+                          "-DSHERPA_MNN_ENABLE_C_API=OFF",
+                          "-DSHERPA_MNN_ENABLE_BINARY=OFF",
+                          "-DSHERPA_MNN_ENABLE_TTS=OFF",
+                          "-DSHERPA_MNN_ENABLE_SPEAKER_DIARIZATION=OFF",
+                          "-DSHERPA_MNN_ENABLE_PYTHON=OFF",
+                          "-DSHERPA_MNN_ENABLE_TESTS=OFF",
+                          "-DSHERPA_MNN_ENABLE_CHECK=OFF",
+                          "-DSHERPA_MNN_ENABLE_PORTAUDIO=OFF",
+                          "-DSHERPA_MNN_ENABLE_WEBSOCKET=OFF",
+                          "-DSHERPA_MNN_ENABLE_GPU=OFF",
+                          "-DSHERPA_MNN_ENABLE_DIRECTML=OFF",
+                          "-DSHERPA_MNN_LINK_LIBSTDCPP_STATICALLY=OFF",
+                          // CRITICAL: MNN_LIB_DIR for headers (sherpa-mnn uses ${MNN_LIB_DIR}/include)
+                          // We point to MNN source which has include/ directory
+                          "-DMNN_LIB_DIR=${project.rootDir}/libs/mnn",
+                          // CRITICAL: Add link directory for libMNN.so from mnn-jni build output
+                          // CMake will search all build hash directories automatically
+                          "-DCMAKE_LIBRARY_PATH=${project.rootDir}/libs/mnn-jni/build/intermediates/cxx/Release",
+                          // Use local dependencies (already cloned)
+                          "-DFETCHCONTENT_SOURCE_DIR_KALDIFST=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/kaldifst",
+                          "-DFETCHCONTENT_SOURCE_DIR_OPENFST=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/kaldifst/openfst",
+                          "-DFETCHCONTENT_SOURCE_DIR_KALDI_DECODER=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/kaldi-decoder",
+                          "-DFETCHCONTENT_SOURCE_DIR_KALDI_NATIVE_FBANK=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/kaldi-native-fbank",
+                          "-DFETCHCONTENT_SOURCE_DIR_SIMPLE-SENTENCEPIECE=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/simple-sentencepiece",
+                          "-DFETCHCONTENT_SOURCE_DIR_EIGEN=${project.rootDir}/libs/mnn/apps/frameworks/sherpa-mnn/eigen"
+                
+                // Only build sherpa-mnn-jni target
+                targets "sherpa-mnn-jni"
+            }
+        }
+
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Strip debug symbols to reduce size
+            ndk {
+                debugSymbolLevel 'none'
+            }
+        }
+        debug {
+            minifyEnabled false
+            ndk {
+                debugSymbolLevel 'none'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            // CRITICAL: Use minimal wrapper to find libMNN.so dynamically
+            // The wrapper then includes sherpa-mnn's official CMakeLists.txt
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+    
+    // CRITICAL: Use our own Kotlin API with @JvmField annotations for JNI compatibility
+    // DO NOT include upstream kotlin-api (it lacks @JvmField, causing NoSuchFieldError)
+    // Our custom Kotlin API is in src/main/java/com/k2fsa/sherpa/mnn/
+    sourceSets {
+        main {
+            // java.srcDirs is already src/main/java by default
+            // Our custom Kotlin files are automatically included
+        }
+    }
+}
+
+dependencies {
+    // CRITICAL: Depend on mnn-lib to ensure libMNN.so is built first
+    implementation project(':libs:mnn-lib')
+    
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+}

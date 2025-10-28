@@ -55,7 +55,6 @@
         android:largeHeap="true"
         android:hardwareAccelerated="true"
         android:vmSafeMode="false"
-
         android:resizeableActivity="true"
         tools:targetApi="31">
         

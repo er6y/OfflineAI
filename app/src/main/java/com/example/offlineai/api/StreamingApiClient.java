@@ -135,6 +135,7 @@ public class StreamingApiClient {
                     }
                     
                     StringBuilder fullResponse = new StringBuilder();
+                    boolean[] textHeadSent = {false}; // Track if [TEXT:] head has been sent
                     
                     try {
                         BufferedSource source = body.source();
@@ -158,6 +159,11 @@ public class StreamingApiClient {
                                         
                                         // 在主线程中回调
                                         new Handler(Looper.getMainLooper()).post(() -> {
+                                            // Send [TEXT:] head before first token (for main flow to detect and close <debug>)
+                                            if (!textHeadSent[0]) {
+                                                callback.onToken("\n[TEXT:]");
+                                                textHeadSent[0] = true;
+                                            }
                                             callback.onToken(content);
                                         });
                                     }

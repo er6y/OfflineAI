@@ -174,6 +174,14 @@
 -keep class com.example.offlineai.LocalLlmHandler { *; }
 -keep class com.example.offlineai.LocalLlmHandler$** { *; }
 
+# CRITICAL: Keep Sherpa-MNN Kotlin API for JNI
+# JNI code accesses these classes via GetFieldID/GetObjectField
+-keep class com.k2fsa.sherpa.mnn.** { *; }
+-keepclassmembers class com.k2fsa.sherpa.mnn.** {
+    public <fields>;
+    public <methods>;
+}
+
 # 保持所有应用的Fragment和Activity类
 -keep class com.example.offlineai.*Fragment { *; }
 -keep class com.example.offlineai.*Activity { *; }
