@@ -58,6 +58,15 @@ public class MnnInference {
     public static native long createSession(String modelDir, String configJson);
     
     /**
+     * Create MNN LLM session with separate config files
+     * @param modelDir Model directory containing llm.mnn, llm.mnn.weight, tokenizer.txt, etc.
+     * @param configJsonPath Path to config.json file (original model configuration)
+     * @param runtimeConfigJson Runtime configuration JSON string for inference parameters
+     * @return Session handle (pointer)
+     */
+    public static native long createSessionWithConfig(String modelDir, String configJsonPath, String runtimeConfigJson);
+    
+    /**
      * Destroy MNN LLM session and release resources
      * @param sessionHandle Session handle returned by createSession
      */

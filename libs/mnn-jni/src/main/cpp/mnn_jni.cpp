@@ -24,6 +24,87 @@
 
 #define LOG_TAG "MNN_JNI"
 
+// ========== Multimedia Filter Utility ==========
+/**
+ * Filter multimedia tags from history content
+ * Removes <img>...</img> and <audio>...</audio> tags
+ * This is our advantage over ChatMNN - we filter multimedia for TTS
+ * @param content Original content with potential multimedia tags
+ * @return Filtered content with only text
+ */
+std::string filterMultimediaTags(const std::string& content) {
+    std::string result = content;
+    
+    // Remove <img>...</img> tags (including <img src="..."/>)
+    size_t img_start = 0;
+    while ((img_start = result.find("<img", img_start)) != std::string::npos) {
+        size_t img_end = result.find(">", img_start);
+        if (img_end != std::string::npos) {
+            // Check if it's self-closing tag
+            if (result[img_end - 1] == '/') {
+                result.erase(img_start, img_end - img_start + 1);
+            } else {
+                // Find closing </img>
+                size_t close_tag = result.find("</img>", img_end);
+                if (close_tag != std::string::npos) {
+                    result.erase(img_start, close_tag - img_start + 6);
+                } else {
+                    result.erase(img_start, img_end - img_start + 1);
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    
+    // Remove <audio>...</audio> tags
+    size_t audio_start = 0;
+    while ((audio_start = result.find("<audio", audio_start)) != std::string::npos) {
+        size_t audio_end = result.find("</audio>", audio_start);
+        if (audio_end != std::string::npos) {
+            result.erase(audio_start, audio_end - audio_start + 8);
+        } else {
+            // Self-closing or malformed, remove opening tag only
+            size_t tag_end = result.find(">", audio_start);
+            if (tag_end != std::string::npos) {
+                result.erase(audio_start, tag_end - audio_start + 1);
+            }
+            break;
+        }
+    }
+    
+    // Trim leading/trailing whitespace
+    size_t first = result.find_first_not_of(" \t\n\r");
+    if (first == std::string::npos) return "";
+    size_t last = result.find_last_not_of(" \t\n\r");
+    return result.substr(first, last - first + 1);
+}
+
+/**
+ * Filter multimedia tags from entire history
+ * @param history Original history with multimedia tags
+ * @return Filtered history with only text content
+ */
+MNN::Transformer::ChatMessages filterMultimediaFromHistory(const MNN::Transformer::ChatMessages& history) {
+    MNN::Transformer::ChatMessages filtered;
+    filtered.reserve(history.size());
+    
+    for (const auto& item : history) {
+        std::string role = item.first;
+        std::string content = item.second;
+        
+        // Filter multimedia tags from content
+        std::string filtered_content = filterMultimediaTags(content);
+        
+        // Only add if content is not empty after filtering
+        if (!filtered_content.empty()) {
+            filtered.emplace_back(role, filtered_content);
+        }
+    }
+    
+    return filtered;
+}
+
 // ========== WAV File Writer Utility ==========
 /**
  * Write PCM audio data as WAV file
@@ -305,6 +386,8 @@ public:
         : model_dir_(model_dir), config_json_(config_json), has_tts_(false), 
           enable_audio_output_(false), stop_requested_(false) {
         LOGI("Creating MNN LLM session: %s", model_dir.c_str());
+        // Initialize history with system prompt (like ChatMNN Line 85)
+        history_.emplace_back("system", "You are a helpful assistant.");
     }
     
     ~MnnLlmSession() {
@@ -360,10 +443,16 @@ public:
             LOGI("✅ MNN Executor and ExecutorScope created with forwardType=%d", (int)forwardType);
             
             // Create LLM instance from model directory
-            std::string config_path = model_dir_ + "/config.json";
-            LOGI("Creating LLM instance from config: %s", config_path.c_str());
+            // CRITICAL: Pass directory path, NOT config.json path (like ChatMNN Line 109)
+            // LlmConfig will auto-load config.json and llm_config.json from the directory
+            // IMPORTANT: Directory path MUST end with "/" for MNN to correctly append filenames
+            std::string model_dir_with_slash = model_dir_;
+            if (!model_dir_with_slash.empty() && model_dir_with_slash.back() != '/') {
+                model_dir_with_slash += "/";
+            }
+            LOGI("Creating LLM instance from directory: %s", model_dir_with_slash.c_str());
             
-            llm_ = Llm::createLLM(config_path);
+            llm_ = Llm::createLLM(model_dir_with_slash);
             
             if (!llm_) {
                 LOGE("Failed to create LLM instance");
@@ -447,7 +536,9 @@ public:
     void reset() {
         if (llm_) {
             llm_->reset();
-            LOGD("Session reset");
+            // Keep system prompt, clear conversation history (like ChatMNN Line 76)
+            history_.resize(1);
+            LOGD("Session reset, history cleared (system prompt kept)");
         }
     }
     
@@ -460,30 +551,19 @@ public:
             return false;
         }
         
-        // CRITICAL FIX: Do NOT reset() when multimodal!
-        // 
-        // Reason:
-        // - Java layer builds prompt = history_text + <img>current_image</img>
-        // - If we reset(), KV cache is empty but prompt is very long (includes history)
-        // - MNN tries to insert vision embeddings into long sequence with empty KV cache
-        // - Dimension mismatch: seq_len=506 (history+current) vs kv_cache_len=0
-        // - SIGBUS crash!
-        // 
-        // Correct behavior:
-        // - Let KV cache accumulate naturally (history text tokens)
-        // - MNN correctly inserts vision embeddings at current position
-        // - No dimension mismatch
-        // 
-        // Note: History images are already filtered out by ChatHistoryFilter (Java layer)
-        
+        // ✅ ALIGNED WITH ChatMNN Response() API:
+        // 1. Java passes SINGLE user input with <img>/<audio> tags (NOT full prompt)
+        // 2. C++ adds to internal history_ (KEEPS multimedia tags, NO filtering)
+        // 3. C++ calls llm_->response(history_, ...) with FULL history
+        // 4. MNN applies prompt template automatically
         bool has_audio = (prompt.find("<audio>") != std::string::npos);
         bool has_image = (prompt.find("<img>") != std::string::npos);
+        const char* mode_tag = has_audio ? "[AUDIO]" : (has_image ? "[IMAGE]" : "[TEXT]");
         
-        if (has_image || has_audio) {
-            LOGI("[MULTIMODAL] Current round has media (image=%d, audio=%d), KV cache preserved", has_image, has_audio);
-        } else {
-            LOGI("[TEXT] Text-only inference, KV cache preserved");
-        }
+        // DEBUG: Print current user input (first 200 chars)
+        std::string prompt_preview = prompt.length() > 200 ? prompt.substr(0, 200) + "..." : prompt;
+        LOGI("[JAVA->C++] Received SINGLE user input (len=%zu): %s", prompt.length(), prompt_preview.c_str());
+        LOGI("[JAVA->C++] Has <img>: %d, Has <audio>: %d", has_image, has_audio);
         
         // DEBUG: Mark inference start for TTS diagnosis
         if (has_tts_) {
@@ -493,57 +573,33 @@ public:
         }
         
         try {
-            // Check if prompt contains media tags (for logging)
-            bool has_audio = (prompt.find("<audio>") != std::string::npos);
-            bool has_image = (prompt.find("<img>") != std::string::npos);
-            const char* mode_tag = has_audio ? "[AUDIO]" : (has_image ? "[IMAGE]" : "[TEXT]");
+            // ⚠️ NOTE: inference() API does NOT manage history_
+            // History is managed by Java layer and passed via inferenceWithHistory() API
+            // This API only processes single prompt (may contain <img>/<audio> tags)
+            LOGI("[INFERENCE] Processing single prompt (length=%zu)", prompt.length());
             
-            // DEBUG: Print full prompt received from Java
-            LOGI("[DEBUG] ========== C++ RECEIVED PROMPT START ==========");
-            LOGI("[DEBUG] Prompt length: %zu", prompt.length());
-            LOGI("[DEBUG] Has <img>: %d, Has <audio>: %d", has_image, has_audio);
-            LOGI("[DEBUG] Prompt content: %s", prompt.c_str());
-            LOGI("[DEBUG] ========== C++ RECEIVED PROMPT END ==========");
+            // DEBUG: Print prompt info
+            LOGI("[INFERENCE] ========== PROMPT INFO ==========");
+            std::string content_preview = prompt.length() > 100 ? 
+                prompt.substr(0, 100) + "..." : prompt;
+            bool has_img_tag = (prompt.find("<img>") != std::string::npos);
+            bool has_aud_tag = (prompt.find("<audio>") != std::string::npos);
+            LOGI("[INFERENCE] Prompt length: %zu, has_img=%d, has_audio=%d", 
+                 prompt.length(), has_img_tag, has_aud_tag);
+            LOGI("[INFERENCE] Preview: %s", content_preview.c_str());
+            LOGI("[INFERENCE] ========== END PROMPT INFO ==========");
             
-            // Parse ChatML format string into ChatMessages (like ChatMNN)
-            // Java sends: <|im_start|>role\ncontent<|im_end|>\n<|im_start|>role\ncontent<|im_end|>\n...
-            // NOTE: Last message may be incomplete (e.g., "<|im_start|>assistant\n" without <|im_end|>)
-            ChatMessages history;
+            // Count multimedia tags in prompt
+            size_t img_count = 0, audio_count = 0;
             size_t pos = 0;
-            while (pos < prompt.length()) {
-                // Find <|im_start|>
-                size_t start_pos = prompt.find("<|im_start|>", pos);
-                if (start_pos == std::string::npos) break;
-                
-                // Find role (between <|im_start|> and \n)
-                size_t role_start = start_pos + 12; // length of "<|im_start|>"
-                size_t role_end = prompt.find("\\n", role_start);
-                if (role_end == std::string::npos) break;
-                
-                std::string role = prompt.substr(role_start, role_end - role_start);
-                
-                // Find content (between \n and <|im_end|>)
-                size_t content_start = role_end + 2; // length of "\\n"
-                size_t content_end = prompt.find("<|im_end|>", content_start);
-                
-                // CRITICAL: Skip incomplete messages (no <|im_end|>)
-                // This happens for the last "<|im_start|>assistant\n" which is just a prompt prefix
-                if (content_end == std::string::npos) {
-                    LOGI("[DEBUG] Skipping incomplete message: role='%s' (no <|im_end|>)", role.c_str());
-                    break;
-                }
-                
-                std::string content = prompt.substr(content_start, content_end - content_start);
-                
-                // Add to history (like ChatMNN Line 72-87)
-                history.emplace_back(role, content);
-                LOGI("[DEBUG] Parsed message: role='%s', content_len=%zu", role.c_str(), content.length());
-                
-                // Move to next message
-                pos = content_end + 11; // length of "<|im_end|>\n"
+            while ((pos = prompt.find("<img>", pos)) != std::string::npos) {
+                img_count++; pos++;
             }
-            
-            LOGI("[DEBUG] Parsed %zu messages from prompt (incomplete messages skipped)", history.size());
+            pos = 0;
+            while ((pos = prompt.find("<audio>", pos)) != std::string::npos) {
+                audio_count++; pos++;
+            }
+            LOGI("[INFERENCE] Multimedia tags: <img>=%zu, <audio>=%zu", img_count, audio_count);
             
             // Create output stream with custom streambuf
             StreamBuffer stream_buffer(token_callback);
@@ -589,8 +645,17 @@ public:
             // Reset TTS first-chunk flag at generation start (defensive)
             tts_chunk_header_logged_ = false;
             
-            // Initial response (generates first token)
-            llm_->response(history, &output_stream, "<eop>", 1);
+            // Check for multimodal content (like ChatMNN Line 194-206)
+            // Note: For now, we don't have PromptProcessor, so just use history API
+            // TODO: Implement processMultimodalPrompt() if needed for image/video support
+            bool has_multimodal = (has_image || has_audio);
+            
+            // ⚠️ CRITICAL: Call llm_->response() with prompt string (NOT history_)
+            // History is managed by Java layer via inferenceWithHistory() API
+            // This API processes single prompt only
+            LOGI("[MNN_CALL] Calling llm_->response(prompt, ...) with single prompt");
+            LOGI("[MNN_CALL] Prompt contains multimedia tags: <img>=%zu, <audio>=%zu", img_count, audio_count);
+            llm_->response(prompt, &output_stream, "<eop>", 1);
             int current_size = 1;
             
             // Generate remaining tokens one by one
@@ -628,17 +693,22 @@ public:
                 LOGI("[TTS][DEBUG] Text generation completed: %d tokens", current_size);
             }
 
-            // Summarize the latest decoded text to trace TTS input
-            std::string preview = stream_buffer.getDebugPreview();
-            if (!preview.empty()) {
-                for (char& ch : preview) {
-                    if (ch == '\n' || ch == '\r') {
-                        ch = ' ';
-                    }
+            // Get generated response text (do NOT add to history_)
+            std::string response_text = stream_buffer.getFullText();
+            if (!response_text.empty()) {
+                LOGI("[INFERENCE] Generated response: %zu chars", response_text.length());
+                
+                // Log preview for TTS diagnosis
+                std::string preview = response_text;
+                if (preview.length() > 160) {
+                    preview = preview.substr(preview.length() - 160);
                 }
-                LOGI("[TTS][DEBUG] Response preview (tail): %.160s", preview.c_str());
+                for (char& ch : preview) {
+                    if (ch == '\n' || ch == '\r') ch = ' ';
+                }
+                LOGI("[TTS][DEBUG] Response preview (tail): %s", preview.c_str());
             } else {
-                LOGI("[TTS][DEBUG] Response preview is empty (no printable tokens captured)");
+                LOGI("[TTS][DEBUG] Response is empty (no tokens generated)");
             }
             
             // Generate TTS audio if supported and output path is set
@@ -769,20 +839,28 @@ public:
                 LOGI("[TTS] Audio output enabled BEFORE text generation");
             }
             
+            // ✅ Java layer already filtered history and kept tags in current input
+            // C++ does NOT filter - directly pass to MNN
+            // History structure: [system, user1, assistant1, ..., userN (with tags)]
             LOGI("%s Starting inference with history size=%zu, max_new_tokens=%d", 
                  mode_tag, history.size(), max_new_tokens);
             
-            // Print FULL history for debugging (user requested)
-            LOGI("%s ========== FULL HISTORY DUMP START ==========", mode_tag);
+            // Print FULL history for debugging
+            LOGI("%s ========== HISTORY DUMP START ==========", mode_tag);
             for (size_t i = 0; i < history.size(); i++) {
                 const auto& item = history[i];
-                LOGI("%s [%zu] role='%s'", mode_tag, i, item.first.c_str());
-                LOGI("%s [%zu] content='%s'", mode_tag, i, item.second.c_str());
-                LOGI("%s [%zu] ---", mode_tag, i);
+                std::string preview = item.second.length() > 100 ? 
+                    item.second.substr(0, 100) + "..." : item.second;
+                bool has_img = (item.second.find("<img>") != std::string::npos);
+                bool has_aud = (item.second.find("<audio>") != std::string::npos);
+                LOGI("%s [%zu] role='%s', len=%zu, has_img=%d, has_audio=%d", 
+                     mode_tag, i, item.first.c_str(), item.second.length(), has_img, has_aud);
+                LOGI("%s [%zu] preview: %s", mode_tag, i, preview.c_str());
             }
-            LOGI("%s ========== FULL HISTORY DUMP END (total: %zu items) ==========", mode_tag, history.size());
+            LOGI("%s ========== HISTORY DUMP END (total: %zu items) ==========", mode_tag, history.size());
             
-            // Initial response (generates first token)
+            // Call MNN history API with complete history (including current input with tags)
+            LOGI("%s Calling llm_->response(history, ...) - MNN history API", mode_tag);
             llm_->response(history, &output_stream, "<eop>", 1);
             int current_size = 1;
             
@@ -1206,6 +1284,11 @@ private:
         const std::string& getDebugPreview() const {
             return debug_preview_;
         }
+        
+        // Get full generated text (like ChatMNN response_buffer)
+        const std::string& getFullText() const {
+            return full_text_;
+        }
 
     protected:
         // Handle bulk writes for better performance and correct UTF-8 processing
@@ -1251,12 +1334,13 @@ private:
                     return 0; // signal stop
                 }
 
+                // Accumulate full text (like ChatMNN response_buffer)
+                full_text_.append(completeChars);
+                
                 // Update debug preview with the most recent characters, keep last 256 chars
-                if (!completeChars.empty()) {
-                    debug_preview_.append(completeChars);
-                    if (debug_preview_.size() > 256) {
-                        debug_preview_.erase(0, debug_preview_.size() - 256);
-                    }
+                debug_preview_.append(completeChars);
+                if (debug_preview_.size() > 256) {
+                    debug_preview_.erase(0, debug_preview_.size() - 256);
                 }
             }
 
@@ -1293,6 +1377,7 @@ private:
         bool stop_requested_;
         bool generate_end_;
         std::string debug_preview_;
+        std::string full_text_;  // Accumulate full response text (like ChatMNN response_buffer)
     }; // End of StreamBuffer class
 
 private:
@@ -1307,6 +1392,10 @@ private:
     std::function<bool(const float*, size_t, bool)> waveform_callback_;
     std::string tts_output_path_;  // TTS output WAV file path
     std::vector<float> tts_audio_buffer_;  // TTS audio accumulator
+    
+    // CRITICAL: Maintain conversation history (like ChatMNN Line 77)
+    // Format: vector<pair<role, content>>
+    ChatMessages history_;
 }; // End of MnnLlmSession class
 
 // ========== JNI Helper Functions ==========
@@ -1402,6 +1491,56 @@ Java_com_offlineai_mnn_MnnInference_createSession(
         
     } catch (const std::exception& e) {
         LOGE("Exception in createSession: %s", e.what());
+        return 0;
+    }
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_offlineai_mnn_MnnInference_createSessionWithConfig(
+    JNIEnv* env, jclass clazz,
+    jstring modelDir, jstring configJsonPath, jstring runtimeConfigJson) {
+    
+    std::string model_dir = jstring2string(env, modelDir);
+    std::string config_json_path = jstring2string(env, configJsonPath);
+    std::string runtime_config_json = jstring2string(env, runtimeConfigJson);
+    
+    LOGI("createSessionWithConfig: modelDir=%s, configPath=%s", model_dir.c_str(), config_json_path.c_str());
+    
+    try {
+        // Parse runtime config JSON
+        json runtime_config = json::parse(runtime_config_json);
+        
+        // Read config.json file
+        std::ifstream config_file(config_json_path);
+        if (!config_file.is_open()) {
+            LOGE("Failed to open config.json file: %s", config_json_path.c_str());
+            return 0;
+        }
+        
+        json config_json;
+        config_file >> config_json;
+        config_file.close();
+        
+        // Merge runtime config into config.json (runtime config takes precedence)
+        for (auto& [key, value] : runtime_config.items()) {
+            config_json[key] = value;
+        }
+        
+        std::string merged_config_str = config_json.dump();
+        LOGI("Merged config: %s", merged_config_str.c_str());
+        
+        auto* session = new MnnLlmSession(model_dir, merged_config_str);
+        if (!session->load()) {
+            delete session;
+            LOGE("Failed to load MNN session with merged config");
+            return 0;
+        }
+        
+        LOGI("Session created successfully with merged config: %p", session);
+        return reinterpret_cast<jlong>(session);
+        
+    } catch (const std::exception& e) {
+        LOGE("Exception in createSessionWithConfig: %s", e.what());
         return 0;
     }
 }

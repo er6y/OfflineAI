@@ -110,8 +110,6 @@ public class ChatHistoryFilter {
                              ", window: [" + startIndex + ", " + totalMessages + ")");
         
         // Build history from sliding window
-        boolean skipNextAssistant = false;  // Flag to skip assistant response after user image
-        
         for (int i = startIndex; i < totalMessages; i++) {
             ChatDataItem item = validMessages.get(i);
             
@@ -133,29 +131,8 @@ public class ChatHistoryFilter {
                 continue;
             }
             
-            // CRITICAL: Skip user messages with images AND their assistant responses
-            // Reason: If history has "user: 图片里面有啥 (no <img>) + AI: 图片中有小狗..."
-            //         MNN sees AI describing image but no vision embeddings → dimension mismatch!
-            if (isUser) {
-                // Check if user message has image (via imageUri or markdown)
-                boolean hasImage = (item.imageUri != null) || content.contains("🖼️ [图片:");
-                if (hasImage) {
-                    LogManager.logI(TAG, "[HISTORY] Skipping user message with image at index " + i);
-                    skipNextAssistant = true;  // Skip the assistant's response to this image
-                    continue;
-                }
-                skipNextAssistant = false;  // Reset flag for text-only user messages
-            } else {
-                // Assistant message
-                if (skipNextAssistant) {
-                    LogManager.logI(TAG, "[HISTORY] Skipping assistant response to image at index " + i);
-                    skipNextAssistant = false;
-                    continue;
-                }
-            }
-            
             // Filter content: removes markdown, emoji, and <img>/<audio> tags
-            // User requirement: Do NOT keep images in history (avoid re-encoding)
+            // KEEP TEXT CONTENT, only remove multimedia tags
             String filteredContent = filterText(content);
             
             if (TextUtils.isEmpty(filteredContent)) {
@@ -168,8 +145,18 @@ public class ChatHistoryFilter {
                                  filteredContent.substring(0, Math.min(50, filteredContent.length())) + "...");
         }
         
-        LogManager.logI(TAG, "[HISTORY] Built history with " + (history.size() - 1) + " messages (" + 
-                             ((history.size() - 1) / 2) + " rounds)");
+        // Calculate actual history messages (excluding system prompt)
+        int systemPromptCount = TextUtils.isEmpty(systemPrompt) ? 0 : 1;
+        int historyMessages = history.size() - systemPromptCount;
+        int historyRounds = historyMessages / 2;
+        
+        LogManager.logI(TAG, "[HISTORY] Built history with " + historyMessages + " messages (" + 
+                             historyRounds + " rounds)");
+        
+        if (historyMessages == 0 && maxRounds > 0) {
+            LogManager.logW(TAG, "[HISTORY] No usable history found (all messages contain images or are empty)");
+        }
+        
         return history;
     }
     

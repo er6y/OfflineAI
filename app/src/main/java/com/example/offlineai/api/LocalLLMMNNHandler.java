@@ -512,51 +512,42 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             
             LogManager.logI(TAG, "[HISTORY] Built history with " + history.size() + " items (excluding current)");
             
-            // Build full prompt with history in ChatML format
-            StringBuilder fullPrompt = new StringBuilder();
-            
-            // Add history messages
+            // Convert filtered history to List<Pair<String, String>> format for JNI
+            List<android.util.Pair<String, String>> historyPairs = new ArrayList<>();
             for (ChatHistoryFilter.PromptItem item : history) {
-                if ("system".equals(item.role)) {
-                    fullPrompt.append("<|im_start|>system\\n").append(item.content).append("<|im_end|>\\n");
-                } else if ("user".equals(item.role)) {
-                    fullPrompt.append("<|im_start|>user\\n").append(item.content).append("<|im_end|>\\n");
-                } else if ("assistant".equals(item.role)) {
-                    fullPrompt.append("<|im_start|>assistant\\n").append(item.content).append("<|im_end|>\\n");
-                }
+                historyPairs.add(new android.util.Pair<>(item.role, item.content));
             }
             
-            // Add current user message with <img>/<audio> tags
-            fullPrompt.append("<|im_start|>user\\n");
+            // Build current user message with <img>/<audio> tags
+            StringBuilder currentUserMessage = new StringBuilder();
             
             // Add image tags for current round
             if (imagePaths != null && !imagePaths.isEmpty()) {
                 for (String imagePath : imagePaths) {
-                    fullPrompt.append("<img>").append(imagePath).append("</img>");
+                    currentUserMessage.append("<img>").append(imagePath).append("</img>");
                 }
+                LogManager.logI(TAG, "[HISTORY] Added " + imagePaths.size() + " <img> tag(s) to current message");
             }
             
             // Add audio tags for current round
             if (audioPaths != null && !audioPaths.isEmpty()) {
                 for (String audioPath : audioPaths) {
-                    fullPrompt.append("<audio>").append(audioPath).append("</audio>");
+                    currentUserMessage.append("<audio>").append(audioPath).append("</audio>");
                 }
+                LogManager.logI(TAG, "[HISTORY] Added " + audioPaths.size() + " <audio> tag(s) to current message");
             }
             
             // Add user text
-            fullPrompt.append(userPrompt).append("<|im_end|>\\n");
-            fullPrompt.append("<|im_start|>assistant\\n");
+            currentUserMessage.append(userPrompt);
             
-            String finalPrompt = fullPrompt.toString();
-            LogManager.logI(TAG, "[HISTORY] Built full prompt with history, length=" + finalPrompt.length());
+            // Add current user message to history
+            historyPairs.add(new android.util.Pair<>("user", currentUserMessage.toString()));
             
-            // DEBUG: Print full prompt to see what's actually sent to MNN
-            LogManager.logI(TAG, "[HISTORY][DEBUG] ========== FULL PROMPT START ==========");
-            LogManager.logI(TAG, "[HISTORY][DEBUG] " + finalPrompt);
-            LogManager.logI(TAG, "[HISTORY][DEBUG] ========== FULL PROMPT END ==========");
+            LogManager.logI(TAG, "[HISTORY] Total history size: " + historyPairs.size() + " messages (including current)");
+            LogManager.logI(TAG, "[HISTORY] Current user message length: " + currentUserMessage.length() + " chars");
             
-            // Use MNN.inference with full prompt (MNN will parse <img>/<audio> tags)
-            performSimpleInference(finalPrompt, params, callback);
+            // Use inferenceWithHistory API (C++ will pass directly to MNN, no accumulation)
+            performHistoryInference(historyPairs, params, callback);
             
         } catch (Exception e) {
             LogManager.logE(TAG, "[HISTORY] Error building history: " + e.getMessage(), e);
@@ -622,6 +613,122 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                             }
                             
                             LogManager.logI(TAG, "[HISTORY] Inference complete: " + generatedTokens + " tokens in " + totalTime + "ms");
+                            
+                            isGenerating.set(false);
+                            
+                            if (callback != null) {
+                                String perfStats = getPerformanceStats();
+                                callback.onToken(perfStats);
+                                callback.onComplete(fullResponseBuilder.toString() + perfStats);
+                            }
+                        }
+                        
+                        @Override
+                        public void onError(String error) {
+                            LogManager.logE(TAG, "[HISTORY] Inference error: " + error);
+                            isGenerating.set(false);
+                            
+                            if (callback != null) {
+                                callback.onError(error);
+                            }
+                        }
+                    }
+                );
+                
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[HISTORY] Exception during inference: " + e.getMessage(), e);
+                isGenerating.set(false);
+                
+                if (callback != null) {
+                    callback.onError("Inference failed: " + e.getMessage());
+                }
+            }
+        });
+    }
+    
+    /**
+     * Internal method to perform inference with history (uses inferenceWithHistory API)
+     * @param history List of (role, content) pairs
+     * @param params Inference parameters
+     * @param callback Streaming callback
+     */
+    private void performHistoryInference(List<android.util.Pair<String, String>> history,
+                                         LocalLlmHandler.InferenceParams params,
+                                         LocalLlmHandler.StreamingCallback callback) {
+        isGenerating.set(true);
+        shouldStop.set(false);
+        fullResponseBuilder.setLength(0);
+        generationStartTime = System.currentTimeMillis();
+        inferenceStartTime = System.currentTimeMillis();
+        
+        // Set TTS output path if supported
+        if (hasTtsSupport) {
+            try {
+                String chatFolderPath = ConfigManager.getString(context, 
+                    ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                
+                if (chatFolderPath != null && !chatFolderPath.isEmpty()) {
+                    File chatFolder = new File(chatFolderPath);
+                    if (chatFolder.exists() && chatFolder.isDirectory() && chatFolder.canWrite()) {
+                        long timestamp = System.currentTimeMillis();
+                        currentAudioOutputPath = new File(chatFolder, "audio_" + timestamp + "_ai.wav").getAbsolutePath();
+                        MnnInference.setTtsOutputPath(llmSessionHandle, currentAudioOutputPath);
+                        LogManager.logI(TAG, "[TTS] Output path set: " + currentAudioOutputPath);
+                    }
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TTS] Failed to set output path", e);
+            }
+        }
+        
+        currentTask = executorService.submit(() -> {
+            try {
+                // Use inferenceWithHistory API (C++ will pass directly to MNN)
+                Map<String, Long> stats = MnnInference.inferenceWithHistory(
+                    llmSessionHandle,
+                    history,
+                    new MnnInference.InferenceCallback() {
+                        @Override
+                        public boolean onToken(String token) {
+                            if (shouldStop.get()) {
+                                return true;
+                            }
+                            
+                            fullResponseBuilder.append(token);
+                            currentSessionTokens.incrementAndGet();
+                            totalTokensGenerated.incrementAndGet();
+                            
+                            if (callback != null) {
+                                callback.onToken(token);
+                            }
+                            
+                            return false;
+                        }
+                        
+                        @Override
+                        public void onComplete(Map<String, Long> statistics) {
+                            long endTime = System.currentTimeMillis();
+                            long totalTime = endTime - generationStartTime;
+                            
+                            if (statistics != null) {
+                                promptTokens = statistics.getOrDefault("prompt_len", 0L);
+                                generatedTokens = statistics.getOrDefault("decode_len", 0L);
+                                prefillTimeUs = statistics.getOrDefault("prefill_time", 0L);
+                                decodeTimeUs = statistics.getOrDefault("decode_time", 0L);
+                            }
+                            
+                            LogManager.logI(TAG, "[HISTORY] Inference complete: " + generatedTokens + " tokens in " + totalTime + "ms");
+                            
+                            // Check TTS audio generation
+                            if (hasTtsSupport && currentAudioOutputPath != null) {
+                                File audioFile = new File(currentAudioOutputPath);
+                                if (audioFile.exists() && audioFile.length() > 0) {
+                                    LogManager.logI(TAG, "[TTS] Audio file generated: " + currentAudioOutputPath);
+                                    if (callback != null) {
+                                        callback.onToken("\n\n[AUDIO:" + currentAudioOutputPath + "]");
+                                    }
+                                }
+                            }
                             
                             isGenerating.set(false);
                             

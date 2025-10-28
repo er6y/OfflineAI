@@ -959,10 +959,17 @@ public class SettingsFragment extends Fragment {
                 
                 DocumentFile docFile = DocumentFile.fromTreeUri(requireContext(), uri);
                 if (docFile != null && docFile.isDirectory()) {
-                    String path = uri.toString();
+                    // CRITICAL: Convert content:// URI to traditional file path
+                    // content://com.android.externalstorage.documents/tree/primary%3ADownload%2FOfflineAIData
+                    // -> /storage/emulated/0/Download/OfflineAIData
+                    String path = UriUtils.getPathFromTreeUri(requireContext(), uri);
+                    
+                    LogManager.logD(TAG, "Directory selected - URI: " + uri.toString());
+                    LogManager.logD(TAG, "Directory selected - Converted path: " + path);
+                    
                     targetEditText.setText(path);
                     ConfigManager.setString(requireContext(), ConfigManager.KEY_DATA_ROOT_PATH, path);
-                    Toast.makeText(requireContext(), "Data root path saved", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(requireContext(), "Data root path saved: " + path, Toast.LENGTH_SHORT).show();
                 }
             } catch (Exception e) {
                 LogManager.logE(TAG, "Failed to handle directory selection", e);

@@ -7354,3 +7354,128 @@ if (audioFile.exists()) {
 
 ---
 
+### 6.9 MNN llm_weight 加载问题 (已修复✅ 2025-10-28)
+
+#### 问题描述
+
+**症状**：
+- PaddleOCR-VL-0.9B-int4 模型加载失败
+- 日志显示 `Can't open file: /storage/emulated/0/Download/OfflineAIData/models/PaddleOCR-VL-0.9B-int4/`
+- 错误信息：`Error loading model: Failed to create MNN LLM session`
+- 模型的 `config.json` 包含 `"llm_weight": ""`（空字符串）
+
+**根本原因**：
+
+MNN的 `LlmConfig::llm_weight()` 方法在处理空字符串时存在逻辑缺陷：
+
+```cpp
+// libs/mnn/transformers/llm/engine/src/llmconfig.hpp Line 282-284 (修复前)
+std::string llm_weight() const {
+    return base_dir_ + config_.value("llm_weight", "llm.mnn.weight");
+}
+```
+
+**问题分析**：
+1. `config_.value("llm_weight", "llm.mnn.weight")` 的行为：
+   - 如果 `config.json` 中**不存在** `llm_weight` 键 → 返回默认值 `"llm.mnn.weight"`
+   - 如果 `config.json` 中**存在** `llm_weight` 键且值为 `""`（空字符串）→ RapidJSON的 `IsString()` 返回 `true`，所以返回空字符串 `""`
+
+2. 当返回空字符串时：
+   - `base_dir_ + ""` 仍然是 `base_dir_`（带尾斜杠，如 `/path/to/model/`）
+   - 传给 `setExternalFile(base_dir_)` 后，MNN尝试打开这个**目录路径**作为文件
+   - 导致 `Can't open file` 错误
+
+3. 模型设计意图：
+   - `"llm_weight": ""` 表示权重已嵌入到 `llm.mnn` 文件中，不需要单独的 `.weight` 文件
+   - 但MNN的代码没有正确处理这种情况
+
+#### 修复方案
+
+修改 `LlmConfig::llm_weight()` 和 `LlmConfig::talker_weight()` 方法，当值为空字符串时使用默认值：
+
+```cpp
+// libs/mnn/transformers/llm/engine/src/llmconfig.hpp Line 282-290 (修复后)
+std::string llm_weight() const {
+    std::string weight = config_.value("llm_weight", "llm.mnn.weight");
+    // CRITICAL: If config.json has "llm_weight": "" (empty string), treat as if key doesn't exist
+    // This handles embedded weight models where weights are in llm.mnn, not separate .weight file
+    if (weight.empty()) {
+        weight = "llm.mnn.weight";  // Use default value
+    }
+    return base_dir_ + weight;
+}
+
+// libs/mnn/transformers/llm/engine/src/llmconfig.hpp Line 378-386 (修复后)
+std::string talker_weight() const {
+    std::string weight = config_.value("talker_weight", "talker.mnn.weight");
+    // CRITICAL: If config.json has "talker_weight": "" (empty string), treat as if key doesn't exist
+    // This handles embedded weight models where weights are in talker.mnn, not separate .weight file
+    if (weight.empty()) {
+        weight = "talker.mnn.weight";  // Use default value
+    }
+    return base_dir_ + weight;
+}
+```
+
+#### 修复逻辑
+
+1. **检测空字符串**：先读取配置值到临时变量
+2. **空值判断**：如果为空字符串，替换为默认值
+3. **路径拼接**：最后拼接 `base_dir_` 和权重文件名
+
+**关键点**：
+- 空字符串 `""` 和不存在的键现在都会使用默认值 `"llm.mnn.weight"`
+- MNN会尝试打开 `/path/to/model/llm.mnn.weight`
+- 如果文件不存在，MNN会忽略（因为权重已嵌入 `llm.mnn`）
+- 如果文件存在，MNN会正常加载外部权重
+
+#### 影响范围
+
+**修改文件**：
+- `libs/mnn/transformers/llm/engine/src/llmconfig.hpp` (2个方法，共14行)
+
+**影响模型**：
+- 所有在 `config.json` 中设置 `"llm_weight": ""` 的模型（如 PaddleOCR-VL-0.9B-int4）
+- 所有在 `config.json` 中设置 `"talker_weight": ""` 的TTS模型
+
+**兼容性**：
+- ✅ 不影响正常模型（`llm_weight` 设置为实际文件名）
+- ✅ 不影响不设置 `llm_weight` 的模型（使用默认值）
+- ✅ 修复了设置 `"llm_weight": ""` 的模型加载失败问题
+
+#### 测试验证
+
+1. **编译测试**：
+   ```bash
+   .\gradlew.bat assembleRelease -PKEYPSWD=abc-1234
+   ```
+   - ✅ 编译成功（4分29秒）
+
+2. **模型加载测试**：
+   - 测试 PaddleOCR-VL-0.9B-int4 模型（`"llm_weight": ""`）
+   - 检查日志是否还有 `Can't open file` 错误
+   - 验证模型能否正常加载和推理
+
+3. **兼容性测试**：
+   - 测试其他模型（如 Qwen2.5-0.5B-Instruct-int4）确保不受影响
+   - 测试TTS模型（如 Qwen2.5-Omni）确保 `talker_weight` 修复有效
+
+#### 最佳实践
+
+1. **模型配置规范**：
+   - 如果权重嵌入主模型文件：设置 `"llm_weight": ""`
+   - 如果权重是单独文件：设置 `"llm_weight": "llm.mnn.weight"` 或不设置（使用默认值）
+   - 不要设置为目录路径或其他无效值
+
+2. **MNN配置处理原则**：
+   - 空字符串应视为"未设置"，使用默认值
+   - 避免将目录路径传给文件加载函数
+   - 对所有路径类配置项应用相同的空值检查逻辑
+
+3. **调试技巧**：
+   - 检查 `setExternalFile()` 调用的参数
+   - 如果路径以 `/` 结尾，可能是空字符串导致的
+   - 使用 `ls -la` 验证文件是否存在
+
+---
+
