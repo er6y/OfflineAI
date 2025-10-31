@@ -214,6 +214,9 @@ public class RagQaFragment extends Fragment {
     // track battery optimization status
     private boolean batteryOptimizationDisabled = false;
     
+    // TTS auto-play MediaPlayer
+    private MediaPlayer autoPlayMediaPlayer;
+    
     // RAG query thread pool
     private ExecutorService ragQueryExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "RagQa-Query-Thread");
@@ -5150,6 +5153,13 @@ public class RagQaFragment extends Fragment {
                     // Remove marker from text
                     newText = newText.substring(0, startIdx) + newText.substring(endIdx + 1);
                     LogManager.logI(TAG, "[TTS] Audio marker detected, path: " + audioPath);
+                    
+                    // Auto-play if enabled
+                    if (ConfigManager.getTtsAutoPlay(requireContext())) {
+                        final ChatDataItem audioItem = lastMsg;
+                        final String finalAudioPath = audioPath;
+                        autoPlayAudio(finalAudioPath, audioItem);
+                    }
                 }
             }
             
@@ -6109,5 +6119,60 @@ private static class UserInput {
         return !textPrompt.trim().isEmpty();
     }
 }
+
+    /**
+     * Auto-play TTS generated audio
+     * Uses direct MediaPlayer playback
+     */
+    private void autoPlayAudio(String audioPath, ChatDataItem audioItem) {
+        // Delay execution to wait for RecyclerView rendering
+        recyclerViewChat.postDelayed(() -> {
+            // Direct playback (simple and reliable)
+            playAudioDirect(audioPath);
+            LogManager.logI(TAG, "[TTS] Auto-play triggered for: " + audioPath);
+        }, 300);  // 300ms delay for RecyclerView update
+    }
+    
+    /**
+     * Direct audio playback using MediaPlayer (fallback method)
+     * Only plays the latest audio, stops previous playback
+     */
+    private void playAudioDirect(String audioPath) {
+        try {
+            // Stop and release previous MediaPlayer
+            if (autoPlayMediaPlayer != null && autoPlayMediaPlayer.isPlaying()) {
+                autoPlayMediaPlayer.stop();
+                autoPlayMediaPlayer.release();
+            }
+            
+            autoPlayMediaPlayer = new MediaPlayer();
+            autoPlayMediaPlayer.setDataSource(audioPath);
+            autoPlayMediaPlayer.prepare();
+            autoPlayMediaPlayer.start();
+            
+            autoPlayMediaPlayer.setOnCompletionListener(mp -> {
+                mp.release();
+                autoPlayMediaPlayer = null;
+            });
+            
+            LogManager.logI(TAG, "[TTS] Auto-play via MediaPlayer (fallback)");
+            
+        } catch (IOException e) {
+            LogManager.logE(TAG, "[TTS] Auto-play failed", e);
+        }
+    }
+    
+    @Override
+    public void onDestroyView() {
+        super.onDestroyView();
+        // Release auto-play MediaPlayer
+        if (autoPlayMediaPlayer != null) {
+            if (autoPlayMediaPlayer.isPlaying()) {
+                autoPlayMediaPlayer.stop();
+            }
+            autoPlayMediaPlayer.release();
+            autoPlayMediaPlayer = null;
+        }
+    }
 
 }  // End of RagQaFragment class

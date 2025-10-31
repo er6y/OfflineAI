@@ -1,6 +1,9 @@
 pluginManagement {
     repositories {
         google()
+        // Use Aliyun mirror for plugins
+        maven { url 'https://maven.aliyun.com/repository/public' }
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
         mavenCentral()
         gradlePluginPortal()
     }
@@ -9,6 +12,9 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
+        // Use Aliyun mirror for better connectivity in China
+        maven { url 'https://maven.aliyun.com/repository/public' }
+        maven { url 'https://maven.aliyun.com/repository/google' }
         mavenCentral()
         maven { url 'https://jitpack.io' }  // For SpinKit
     }
@@ -18,3 +24,4 @@ include ':app'
 include ':libs:mnn-lib'  // Build libMNN.so first
 include ':libs:mnn-jni'
 include ':libs:sherpa-mnn-jni'
+include ':libs:mnn-tts-jni'  // MNN TTS JNI wrapper (links to upstream mnn_tts)

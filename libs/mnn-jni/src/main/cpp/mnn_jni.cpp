@@ -542,6 +542,12 @@ public:
         }
     }
     
+    // Enable/disable TTS audio output
+    void enableAudioOutput(bool enable) {
+        enable_audio_output_ = enable;
+        LOGI("[TTS] Audio output %s", enable ? "enabled" : "disabled");
+    }
+    
     // Inference with streaming callback
     bool inference(const std::string& prompt, 
                    std::function<bool(const std::string&)> token_callback,
@@ -3268,3 +3274,151 @@ Java_com_offlineai_mnn_MnnInference_releaseDiffusion(
 // NOTE: ASR functionality has been moved to sherpa-mnn-jni module
 // MnnInference.java still declares these methods for compatibility,
 // but they will be implemented by sherpa-mnn-jni module
+
+// ========== TTS (Text-to-Speech) - External Models ==========
+
+// Global TTS session storage
+static std::unordered_map<jlong, std::unique_ptr<MnnLlmSession>> g_tts_sessions;
+static std::mutex g_tts_sessions_mutex;
+
+/**
+ * Create external TTS session
+ * Java signature: public static native long createTtsSession(String modelDir, String configJson);
+ * 
+ * CRITICAL FIX: External TTS models should NOT use Llm::createLLM()
+ * ================================================================
+ * Problem: Llm::createLLM() expects LLM-specific files (embeddings_bf16.bin, llm.mnn)
+ *          which don't exist in external TTS models (e.g., bert-vits2-MNN)
+ * 
+ * Root Cause: MnnLlmSession::load() calls Llm::createLLM() which has hardcoded file checks
+ *             in llmconfig.hpp (Line 299: embedding_file(), Line 291: lm_model())
+ * 
+ * Solution: For now, we accept that external TTS loading will fail with these errors.
+ *           The proper fix requires either:
+ *           1. Creating a separate TTS-specific loading class (not reusing MnnLlmSession)
+ *           2. Modifying MNN's llmconfig.hpp to make file checks optional
+ *           3. Using a different MNN API for TTS models
+ * 
+ * Current Status: External TTS loading will show errors in logcat but won't crash.
+ *                 Java layer will detect failure and mark externalTtsLoadFailed=true.
+ * 
+ * TODO: Implement proper TTS-specific loading logic that doesn't rely on LLM infrastructure
+ */
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_offlineai_mnn_MnnInference_createTtsSession(
+    JNIEnv* env, jclass clazz, jstring modelDir, jstring configJson) {
+    
+    try {
+        const char* model_dir_cstr = env->GetStringUTFChars(modelDir, nullptr);
+        std::string model_dir(model_dir_cstr);
+        env->ReleaseStringUTFChars(modelDir, model_dir_cstr);
+        
+        const char* config_json_cstr = env->GetStringUTFChars(configJson, nullptr);
+        std::string config_json(config_json_cstr);
+        env->ReleaseStringUTFChars(configJson, config_json_cstr);
+        
+        LOGI("[TTS] Creating external TTS session from: %s", model_dir.c_str());
+        LOGW("[TTS] WARNING: External TTS uses LLM loading logic, may show file not found errors");
+        LOGW("[TTS] This is a known limitation - errors are expected for non-LLM TTS models");
+        
+        // Create TTS session (reuse MnnLlmSession infrastructure)
+        // NOTE: This will fail for external TTS models that don't have LLM structure
+        auto session = std::make_unique<MnnLlmSession>(model_dir, config_json);
+        if (!session->load()) {
+            LOGE("[TTS] Failed to load TTS model");
+            LOGE("[TTS] Check logcat for MNN errors about missing files");
+            return 0;
+        }
+        
+        jlong handle = reinterpret_cast<jlong>(session.get());
+        
+        std::lock_guard<std::mutex> lock(g_tts_sessions_mutex);
+        g_tts_sessions[handle] = std::move(session);
+        
+        LOGI("[TTS] External TTS session created: %lld", (long long)handle);
+        return handle;
+        
+    } catch (const std::exception& e) {
+        LOGE("[TTS] Exception creating TTS session: %s", e.what());
+        return 0;
+    }
+}
+
+/**
+ * Generate TTS audio from text
+ * Java signature: public static native boolean generateTts(long ttsHandle, String text);
+ */
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_offlineai_mnn_MnnInference_generateTts(
+    JNIEnv* env, jclass clazz, jlong handle, jstring text) {
+    
+    std::lock_guard<std::mutex> lock(g_tts_sessions_mutex);
+    auto it = g_tts_sessions.find(handle);
+    if (it == g_tts_sessions.end()) {
+        LOGE("[TTS] Invalid TTS handle: %lld", (long long)handle);
+        return JNI_FALSE;
+    }
+    
+    try {
+        const char* text_cstr = env->GetStringUTFChars(text, nullptr);
+        std::string text_str(text_cstr);
+        env->ReleaseStringUTFChars(text, text_cstr);
+        
+        LOGI("[TTS] Generating audio for text: %s", text_str.c_str());
+        
+        auto* session = it->second.get();
+        
+        // Enable audio output flag (like native TTS)
+        session->enableAudioOutput(true);
+        
+        // Perform text inference to generate TTS
+        // The TTS model will process text and generate audio via generateWavform()
+        bool success = session->inference(text_str, 
+            [](const std::string& token) -> bool {
+                // Token callback (not used for TTS)
+                return true;
+            },
+            [](const LlmContext* ctx) {
+                // Complete callback (not used for TTS)
+            }
+        );
+        
+        // Disable audio output after generation
+        session->enableAudioOutput(false);
+        
+        if (success) {
+            LOGI("[TTS] Audio generation completed successfully");
+            return JNI_TRUE;
+        } else {
+            LOGE("[TTS] Audio generation failed");
+            return JNI_FALSE;
+        }
+        
+    } catch (const std::exception& e) {
+        LOGE("[TTS] Exception generating TTS: %s", e.what());
+        return JNI_FALSE;
+    }
+}
+
+/**
+ * Destroy TTS session
+ * Java signature: public static native void destroyTtsSession(long ttsHandle);
+ */
+extern "C" JNIEXPORT void JNICALL
+Java_com_offlineai_mnn_MnnInference_destroyTtsSession(
+    JNIEnv* env, jclass clazz, jlong handle) {
+    
+    std::lock_guard<std::mutex> lock(g_tts_sessions_mutex);
+    auto it = g_tts_sessions.find(handle);
+    if (it != g_tts_sessions.end()) {
+        g_tts_sessions.erase(it);
+        LOGI("[TTS] TTS session destroyed: %lld", (long long)handle);
+    } else {
+        LOGW("[TTS] TTS handle not found: %lld", (long long)handle);
+    }
+}
+
+// ========== External TTS (bert-vits2-MNN) - REMOVED ==========
+// bert-vits2-MNN should be treated as a standard LLM text-to-audio model
+// Use the existing LLM inference framework, not a separate TTS SDK
+// Implementation will be in the LLM handler, similar to Omni TTS

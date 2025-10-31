@@ -5,6 +5,8 @@ plugins {
 android {
     namespace 'com.offlineai.mnn.lib'
     compileSdk 34
+    // Use latest available NDK for std::regex support
+    // ndkVersion "28.2.13676358"
 
     defaultConfig {
         minSdk 26
@@ -31,7 +33,7 @@ android {
                           "-DMNN_IMGCODECS=ON",
                           "-DLLM_SUPPORT_VISION=ON",
                           "-DLLM_SUPPORT_AUDIO=ON",
-                          "-DMNN_BUILD_AUDIO=ON",
+                          "-DMNN_BUILD_AUDIO=ON",  // Enable MNN Audio tools (not TTS SDK)
                           "-DMNN_BUILD_DIFFUSION=ON",
                           // CRITICAL: MNN_SEP_BUILD=OFF merges all engines into libMNN.so
                           "-DMNN_SEP_BUILD=OFF",
@@ -40,7 +42,10 @@ android {
                           "-DMNN_BUILD_TOOLS=OFF",
                           "-DMNN_WITH_PLUGIN=ON",
                           "-DBUILD_PLUGIN=ON",
-                          "-DCMAKE_BUILD_TYPE=Release"
+                          "-DCMAKE_BUILD_TYPE=Release",
+                          // CRITICAL: Use c++_shared for std::regex support (like official TTS SDK)
+                          "-DANDROID_STL=c++_shared",
+                          "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
 
                 cppFlags "-std=c++17", "-fexceptions", "-frtti"
                 abiFilters 'arm64-v8a', 'x86_64'

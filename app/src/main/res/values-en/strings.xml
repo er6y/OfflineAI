@@ -1090,8 +1090,16 @@
     <string name="settings_tts_title">TTS (Speech Synthesis)</string>
     <string name="settings_tts_model">TTS Model</string>
     <string name="settings_tts_model_none">None</string>
+    <string name="settings_tts_model_native_omni">Native (Omni)</string>
     <string name="settings_tts_model_summary">Select speech synthesis model, None means external TTS is disabled</string>
     <string name="settings_tts_dit_steps">DiT Steps\n(1~10)</string>
     <string name="settings_tts_dit_steps_value">%d steps</string>
     <string name="settings_tts_dit_steps_summary">DiT diffusion steps, higher values improve quality but reduce speed</string>
+    <string name="settings_tts_auto_play">TTS Auto Play</string>
+    <string name="settings_tts_auto_play_summary">Auto play AI generated audio</string>
+    
+    <!-- TTS Toast messages -->
+    <string name="toast_tts_generation_failed">TTS generation failed</string>
+    <string name="toast_tts_model_load_failed">TTS model load failed</string>
+    <string name="toast_tts_model_not_supported">Current model doesn\'t support native TTS. Please use Omni model or external TTS</string>
 </resources>

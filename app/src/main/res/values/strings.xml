@@ -1106,8 +1106,16 @@
     <string name="settings_tts_title">TTS (语音合成)</string>
     <string name="settings_tts_model">TTS 模型</string>
     <string name="settings_tts_model_none">无</string>
+    <string name="settings_tts_model_native_omni">原生(Omni)</string>
     <string name="settings_tts_model_summary">选择语音合成模型，无表示不使用外挂TTS</string>
     <string name="settings_tts_dit_steps">DiT 步数\n(1~10)</string>
     <string name="settings_tts_dit_steps_value">%d 步</string>
     <string name="settings_tts_dit_steps_summary">DiT扩散步数，值越大质量越好但速度越慢</string>
+    <string name="settings_tts_auto_play">TTS自动播放</string>
+    <string name="settings_tts_auto_play_summary">AI生成语音后自动播放</string>
+    
+    <!-- TTS Toast提示 -->
+    <string name="toast_tts_generation_failed">语音生成失败</string>
+    <string name="toast_tts_model_load_failed">TTS模型加载失败</string>
+    <string name="toast_tts_model_not_supported">当前模型不支持原生TTS，请选择Omni模型或使用外部TTS</string>
 </resources>

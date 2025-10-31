@@ -102,6 +102,7 @@ public class SettingsFragment extends Fragment {
     private Spinner spinnerTtsModel;
     private SeekBar seekBarTtsDitSteps;
     private TextView textViewTtsDitStepsValue;
+    private SwitchCompat switchTtsAutoPlay;
     
     // Activity Result Launchers
     private ActivityResultLauncher<Intent> dataRootPathLauncher;
@@ -201,6 +202,7 @@ public class SettingsFragment extends Fragment {
         spinnerTtsModel = view.findViewById(R.id.spinnerTtsModel);
         seekBarTtsDitSteps = view.findViewById(R.id.seekBarTtsDitSteps);
         textViewTtsDitStepsValue = view.findViewById(R.id.textViewTtsDitStepsValue);
+        switchTtsAutoPlay = view.findViewById(R.id.switchTtsAutoPlay);
         
         // 设置后端偏好Spinner适配器
         ArrayAdapter<String> backendAdapter = new ArrayAdapter<>(requireContext(), 
@@ -374,6 +376,10 @@ public class SettingsFragment extends Fragment {
         
         switchPriorityManualParams.setOnCheckedChangeListener((buttonView, isChecked) -> {
             ConfigManager.setPriorityManualParams(requireContext(), isChecked);
+        });
+        
+        switchTtsAutoPlay.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            ConfigManager.setTtsAutoPlay(requireContext(), isChecked);
         });
     }
     
@@ -720,6 +726,7 @@ public class SettingsFragment extends Fragment {
         File ttsDir = new File(ttsPath);
         java.util.List<String> ttsModels = new java.util.ArrayList<>();
         ttsModels.add(getString(R.string.settings_tts_model_none)); // "无" or "None"
+        ttsModels.add(getString(R.string.settings_tts_model_native_omni)); // "原生(Omni)" or "Native (Omni)"
         
         if (ttsDir.exists() && ttsDir.isDirectory()) {
             File[] ttsDirs = ttsDir.listFiles(File::isDirectory);
@@ -938,6 +945,9 @@ public class SettingsFragment extends Fragment {
         int ttsDitProgress = ttsDitSteps - 1;
         seekBarTtsDitSteps.setProgress(ttsDitProgress);
         updateTtsDitStepsText(ttsDitProgress);
+        
+        boolean ttsAutoPlay = ConfigManager.getTtsAutoPlay(ctx);
+        switchTtsAutoPlay.setChecked(ttsAutoPlay);
         
         // Switches
         boolean debugMode = ConfigManager.getDebugMode(ctx);

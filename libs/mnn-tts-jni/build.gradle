@@ -1,0 +1,77 @@
+plugins {
+    id 'com.android.library'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.offlineai.mnn.tts'
+    compileSdk 35
+
+    defaultConfig {
+        minSdk 26
+        targetSdk 35
+
+        ndk {
+            // Support both real device and emulator
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+        
+        externalNativeBuild {
+            cmake {
+                cppFlags "-std=c++17"
+                arguments "-DANDROID_STL=c++_shared"
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    // ========== Use our CMakeLists.txt wrapper ==========
+    externalNativeBuild {
+        cmake {
+            // Point to our wrapper CMakeLists.txt (which includes upstream source)
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    // ========== Use upstream TtsService.kt directly ==========
+    sourceSets {
+        main {
+            // Point to upstream Kotlin source
+            kotlin.srcDirs += '../mnn/apps/frameworks/mnn_tts/android/java'
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    
+    // Kotlin coroutines (required by TtsService.kt)
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+    
+    // Depend on mnn-lib to get libMNN.so
+    implementation project(':libs:mnn-lib')
+}
+
+// Make sure mnn-lib is built first
+afterEvaluate {
+    tasks.matching { it.name.startsWith('configureCMake') }.all {
+        dependsOn ':libs:mnn-lib:assembleRelease'
+    }
+}

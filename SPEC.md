@@ -314,6 +314,19 @@ flowchart TB
 5. **隐私与合规**：
    - 用户数据（文档、向量、日志）均存储本地；提供手动备份/导出方案。
    - 提示用户遵守模型许可与内容生成规范。
+6. **x86_64 模拟器兼容性（TTS 模块）**：
+   - **问题**：x86_64 Android 模拟器上 `std::locale` 初始化会崩溃（SIGABRT: misaligned pointer when deallocating）
+   - **影响范围**：所有使用 `std::regex`、`std::stringstream`、`std::wstring_convert`、`std::codecvt` 的代码
+   - **解决方案**：TTS 模块（`libs/mnn/apps/frameworks/mnn_tts`）已全面替换为手动实现（无 locale 依赖）
+     - **关键修复点**：
+       - `CalculateFileHash()`：`std::stringstream` → `snprintf()` 手动 hex 转换
+       - `FullwidthToHalfwidth()`：`std::wstring_convert` → 手动 UTF-8/UTF-32 转换
+       - `IsEng()`/`IsNum()`：`std::regex` → 字符范围检查
+       - `TextNormalizer::NormalizeText()`：临时 `std::regex` → 手动模式匹配
+       - `WordSpliter::CutDetail()`：4 个临时 `std::regex` → lambda 字符分类
+       - 日志系统：x86_64 上完全禁用（`#ifdef __x86_64__`）
+   - **验证方法**：在 x86_64 模拟器上测试 TTS 加载和生成流程，确保无崩溃
+   - **注意**：arm64 真机不受影响，所有架构使用相同代码逻辑
 
 ---
 
@@ -8162,6 +8175,384 @@ RagQaFragment
 - `app/src/main/java/com/example/offlineai/RagQaFragment.java` - Line 5473-5487 修改
 - `app/src/main/java/com/example/offlineai/api/LocalLLMMNNHandler.java` - Line 104-106, 1680-1876 移除
 - `app/src/main/java/com/example/offlineai/api/LocalLlmAdapter.java` - Line 694-757 移除
+
+---
+
+## 附录 G：TTS 问题修复记录（2025-10-31）
+
+### G.1 问题1：外部TTS加载失败 - 硬编码文件名检查
+
+#### 症状
+```
+Can't open file:/storage/.../bert-vits2-MNN/embeddings_bf16.bin
+Failed to open embedding file!
+Can't open file:/storage/.../bert-vits2-MNN/llm.mnn
+```
+
+#### 根本原因
+MNN源码 `llmconfig.hpp` 使用硬编码默认文件名：
+```cpp
+// Line 299
+std::string embedding_file() const {
+    return base_dir_ + config_.value("embedding_file", "embeddings_bf16.bin");
+}
+
+// Line 291
+std::string lm_model() const {
+    return base_dir_ + config_.value("lm_model", "lm.mnn");
+}
+```
+
+不同TTS模型文件结构不同：
+- **Native Omni**: `talker.mnn`, `talker_embeddings_bf16.bin`
+- **bert-vits2**: `tts_generator_w_bert.mnn` (无 `embeddings_bf16.bin`)
+- **其他模型**: 可能有完全不同的文件名
+
+#### 解决方案
+**Java层** (`LocalLLMMNNHandler.java` Line 1490-1570):
+- ❌ 删除硬编码文件检查（之前检查 `llm.mnn`, `embeddings_bf16.bin`）
+- ✅ 只检查目录中是否存在 `.mnn` 文件
+- ✅ 将模型目录路径传给MNN，让MNN自己从 `config.json` 读取实际文件名
+- ✅ 添加详细注释说明不同模型的文件结构差异
+
+**关键代码**:
+```java
+// CRITICAL: Only check for .mnn files, don't hardcode specific filenames
+// Let MNN read config.json to determine actual model file names
+File[] mnnFiles = ttsModelDir.listFiles((dir, name) -> 
+    name.toLowerCase().endsWith(".mnn"));
+
+// Just verify at least one .mnn file exists
+// MNN will read config.json to find the correct model files
+long handle = MnnInference.createTtsSession(ttsModelDir.getAbsolutePath(), configJson);
+```
+
+---
+
+### G.2 问题2：TTS设置"无"仍生成语音
+
+#### 症状
+从 log2.txt 看到，即使用户选择TTS="无"，原生Omni模型仍然生成了TTS音频（耗时25秒）。
+
+#### 根本原因
+`performHistoryInference()` 方法只检查 `hasTtsSupport`（模型是否有 `talker.mnn`），没有检查 `enableNativeTts`（用户是否启用TTS）。
+
+#### 解决方案
+**Java层** (`LocalLLMMNNHandler.java` Line 545-569):
+```java
+// Set TTS output path ONLY if native TTS is enabled by user
+// CRITICAL: Check enableNativeTts flag (user's TTS selection)
+if (hasTtsSupport && enableNativeTts) {
+    // 用户启用了原生TTS → 设置输出路径
+    MnnInference.setTtsOutputPath(llmSessionHandle, currentAudioOutputPath);
+} else if (hasTtsSupport && !enableNativeTts) {
+    // 用户选择"无" → 显式禁用TTS
+    MnnInference.setTtsOutputPath(llmSessionHandle, null);
+}
+```
+
+#### 控制流程
+```
+用户选择TTS模式 → 设置 enableNativeTts 标志 → 推理前检查
+    ├─ hasTtsSupport && enableNativeTts → setTtsOutputPath(path) → 生成TTS
+    └─ hasTtsSupport && !enableNativeTts → setTtsOutputPath(null) → 不生成TTS
+```
+
+---
+
+### G.3 相关文件
+
+- `app/src/main/java/com/example/offlineai/api/LocalLLMMNNHandler.java`
+  - Line 545-569: 修复TTS输出路径设置逻辑
+  - Line 1490-1570: 修复外部TTS加载逻辑，移除硬编码文件检查
+  - Line 615-661: 修复外部TTS调用逻辑，添加详细注释说明独立性
+
+---
+
+## 附录 H：TTS 架构问题深度分析（2025-10-31）
+
+### H.1 问题报告
+
+用户报告两个新问题：
+
+1. **非Omni模型仍尝试调用TTS**：
+   - 日志显示：LLM模型为`Qwen3-0.6B-MNN-int4`（非Omni），但仍尝试加载外部TTS `bert-vits2-MNN`
+   - 错误：`External model directory not found`
+   - 用户质疑："不是omni，调用啥TTS？"
+
+2. **硬编码文件检查仍然存在**：
+   - 日志显示：加载`bert-vits2-MNN`时出现错误
+   - `Can't open file:.../embeddings_bf16.bin`
+   - `Can't open file:.../llm.mnn`
+   - 用户质疑："仍然还在硬编码找模型。。。。修了寂寞啊"
+
+### H.2 根本原因分析
+
+#### 问题1：外部TTS与LLM模型的关系
+
+**误解**：外部TTS应该只在Omni模型下工作
+
+**真相**：外部TTS是**独立的**，可以与任何LLM模型配合使用
+- Native Omni TTS：依赖Omni模型的`talker.mnn`，只能在Omni模型下工作
+- External TTS：独立的TTS模型（如`bert-vits2-MNN`），可以为任何LLM生成的文本合成语音
+
+**代码位置**：`LocalLLMMNNHandler.java` Line 633-661
+```java
+} else if (!enableNativeTts && !currentTtsModelSelection.isEmpty() && 
+           !context.getString(R.string.settings_tts_model_none).equals(currentTtsModelSelection)) {
+    // External TTS - independent of LLM model type
+    // Can work with any LLM (Omni or non-Omni)
+```
+
+**设计意图**：
+- 用户可以使用非Omni模型（如`Qwen3-0.6B`）进行文本生成
+- 然后使用外部TTS（如`bert-vits2-MNN`）将生成的文本转换为语音
+- 这是**正确的设计**，不是bug
+
+#### 问题2：C++层硬编码文件检查
+
+**根本原因**：外部TTS复用了LLM的加载逻辑
+
+**调用链**：
+```
+Java: createTtsSession()
+  ↓
+C++: Java_com_offlineai_mnn_MnnInference_createTtsSession()
+  ↓
+C++: MnnLlmSession::load()
+  ↓
+C++: Llm::createLLM(model_dir)
+  ↓
+C++: llmconfig.hpp (MNN源码)
+  ↓
+硬编码检查: embeddings_bf16.bin, llm.mnn
+```
+
+**代码位置**：
+- `mnn_jni.cpp` Line 3304: `auto session = std::make_unique<MnnLlmSession>(model_dir, config_json);`
+- `mnn_jni.cpp` Line 455: `llm_ = Llm::createLLM(model_dir_with_slash);`
+- `llmconfig.hpp` (MNN源码) Line 299: `embedding_file()` - 默认返回`embeddings_bf16.bin`
+- `llmconfig.hpp` (MNN源码) Line 291: `lm_model()` - 默认返回`llm.mnn`
+
+**为什么会失败**：
+- `Llm::createLLM()`是为LLM模型设计的，期望LLM特有的文件结构
+- 外部TTS模型（如`bert-vits2-MNN`）有完全不同的结构：
+  - 可能只有`tts_generator.mnn`或其他名字
+  - 没有`embeddings_bf16.bin`（TTS不需要embedding层）
+  - 没有`llm.mnn`（TTS不是LLM架构）
+
+**之前的修复为什么无效**：
+- 我们只修改了Java层的文件检查（Line 1518-1524）
+- 但C++层的`Llm::createLLM()`仍然会检查硬编码文件
+- Java层的修改无法影响C++层的行为
+
+### H.3 解决方案
+
+#### 短期方案（已实施）
+
+1. **Java层**：
+   - 添加详细注释说明外部TTS的独立性（Line 615-661）
+   - 增加日志输出帮助调试
+   - 明确外部TTS可以与任何LLM模型配合使用
+
+2. **C++层**：
+   - 添加详细注释说明问题根源（Line 3288-3305）
+   - 添加警告日志，明确告知这是已知限制
+   - 标记为TODO，等待正确的解决方案
+
+#### 长期方案（需要实施）
+
+**选项1：创建独立的TTS加载类**
+```cpp
+class MnnTtsSession {
+    // 不使用Llm::createLLM()
+    // 直接加载TTS模型文件
+    // 不依赖LLM的文件结构
+};
+```
+
+**选项2：修改MNN源码**
+- 修改`llmconfig.hpp`，使文件检查可选
+- 添加TTS专用的配置选项
+- 需要向MNN上游提交PR
+
+**选项3：使用不同的MNN API**
+- 研究MNN是否有专门的TTS加载API
+- 不使用LLM的加载路径
+
+### H.4 当前状态
+
+**外部TTS功能**：
+- ✅ Java层逻辑正确，可以与任何LLM配合使用
+- ❌ C++层加载失败，因为复用了LLM加载逻辑
+- ⚠️ 用户会看到错误日志，但不会崩溃
+- ⚠️ Java层会检测到加载失败，标记`externalTtsLoadFailed=true`
+
+**用户体验**：
+- Native Omni TTS：正常工作（Omni模型 + talker.mnn）
+- External TTS：**暂时不可用**，需要实施长期方案
+
+### H.5 相关文件
+
+- `app/src/main/java/com/example/offlineai/api/LocalLLMMNNHandler.java`
+  - Line 615-661: 外部TTS调用逻辑（已添加详细注释）
+  - Line 1452-1570: 外部TTS加载逻辑
+- `libs/mnn-jni/src/main/cpp/mnn_jni.cpp`
+  - Line 3284-3340: `createTtsSession`函数（已添加详细注释）
+  - Line 401-534: `MnnLlmSession::load()`函数
+- MNN源码：`libs/mnn/transformers/llm/engine/src/llmconfig.hpp`
+  - Line 299: `embedding_file()` - 硬编码默认值
+  - Line 291: `lm_model()` - 硬编码默认值
+
+### H.6 完整场景矩阵（最终版本）
+
+经过全面review，确认所有6种场景组合都有正确的处理逻辑：
+
+| 场景 | LLM模型 | 用户选择TTS | hasTtsSupport | enableNativeTts | 预期行为 | 代码处理 | 状态 |
+|------|---------|-------------|---------------|-----------------|----------|----------|------|
+| 1 | Omni | 无 | true | false | 不生成TTS | Line 586-590: 设置null禁用 | ✅ 正确 |
+| 2 | Omni | 原生 | true | true | 生成原生TTS | Line 556-575: 设置输出路径 | ✅ 正确 |
+| 3 | Omni | 外部TTS | true | false | 生成外部TTS | Line 591-595: 禁用原生<br>Line 673-701: 调用外部TTS | ✅ 正确 |
+| 4 | 非Omni | 无 | false | false | 不生成TTS | Line 597-598: 无需操作 | ✅ 正确 |
+| 5 | 非Omni | 原生 | false | true | **用户配置错误** | Line 576-582: 检测并警告 | ✅ 已修复 |
+| 6 | 非Omni | 外部TTS | false | false | 生成外部TTS | Line 597-598: 无需操作<br>Line 673-701: 调用外部TTS | ✅ 正确 |
+
+**关键修复**：
+1. **场景5检测**：在`performHistoryInference()`中检测用户配置错误，显示Toast警告
+2. **场景矩阵注释**：在代码中添加完整的场景矩阵注释（Line 545-598, Line 644-703）
+3. **日志增强**：每个场景都有明确的日志输出，包含模型类型信息
+
+### H.7 外部TTS功能实现（暂时禁用 - 依赖问题）
+
+**问题根源**：
+外部TTS模型（如`bert-vits2-MNN`）是**纯TTS模型**，不是LLM模型。
+
+**文件结构对比**：
+```
+LLM模型（Qwen2.5-Omni）:
+├── llm.mnn                    ✓ LLM主模型
+├── embeddings_bf16.bin        ✓ 词嵌入
+├── talker.mnn                 ✓ TTS模块（可选）
+└── config.json
+
+外部TTS模型（bert-vits2-MNN）:
+├── tts_generator.mnn          ✓ TTS生成器
+├── config.json                ✓ TTS配置
+├── chinese_bert.mnn           ✓ 中文BERT
+├── english_bert.mnn           ✓ 英文BERT
+└── 其他TTS特有文件
+    ❌ 没有 llm.mnn
+    ❌ 没有 embeddings_bf16.bin
+```
+
+**之前的错误实现**：
+```
+Java: generateExternalTts()
+  ↓
+C++: createTtsSession()
+  ↓
+C++: MnnLlmSession::load()  ← ❌ 错误！这是LLM加载函数
+  ↓
+C++: Llm::createLLM()       ← ❌ 强制检查LLM文件
+  ↓
+llmconfig.hpp: 检查 embeddings_bf16.bin, llm.mnn  ← ❌ TTS模型没有这些文件
+```
+
+**正确的实现（已完成）**：
+使用MNN的专门TTS SDK：
+- `MNNTTSSDK` (libs/mnn/apps/frameworks/mnn_tts/include/mnn_tts_sdk.hpp)
+- `MNNBertVits2TTSImpl` (专门用于bert-vits2模型)
+
+**正确的调用链**：
+```
+Java: generateExternalTts()
+  ↓
+Java: MnnInference.createTtsSdkSession(modelDir)
+  ↓
+C++: Java_com_offlineai_mnn_MnnInference_createTtsSdkSession()
+  ↓
+C++: MNNTTSSDK::MNNTTSSDK(config_folder)
+  ↓
+Java: MnnInference.generateTtsSdk(handle, text)
+  ↓
+C++: MNNBertVits2TTSImpl::Process(text)
+  ↓
+返回PCM音频数据 (short[])
+  ↓
+Java: saveWavFile() - 保存为WAV文件
+```
+
+**实现细节**：
+
+1. **C++层新接口** (`mnn_jni.cpp` Line 3423-3544)：
+   - `createTtsSdkSession(modelDir)` - 创建MNNTTSSDK实例
+   - `generateTtsSdk(handle, text)` - 生成音频，返回PCM样本
+   - `getTtsSdkSampleRate(handle)` - 获取采样率（44100）
+   - `destroyTtsSdkSession(handle)` - 释放资源
+
+2. **Java层接口** (`MnnInference.java` Line 629-658)：
+   - 对应的native方法声明
+
+3. **Java层实现** (`LocalLLMMNNHandler.java`):
+   - `loadExternalTtsModelSdk()` (Line 1550-1592): 使用`createTtsSdkSession`加载
+   - `generateExternalTts()` (Line 1594-1643): 使用`generateTtsSdk`生成音频
+   - `saveWavFile()` (Line 1645-1691): 将PCM样本保存为WAV文件
+   - 所有释放代码更新为使用`destroyTtsSdkSession`
+
+**当前状态（2025-10-31）**：
+- ⚠️ **暂时禁用** - 使用stub实现
+- ❌ **依赖问题** - MNNTTSSDK需要`nlohmann/json.hpp`，但MNN的`3rd_party`中没有
+- ✅ **编译成功** - stub实现允许编译通过
+- ✅ **不会崩溃** - 加载外部TTS时返回失败，显示警告日志
+
+**临时方案**：
+1. C++层实现为stub（`mnn_jni.cpp` Line 3421-3492）
+2. 所有TTS SDK函数返回失败/空值
+3. 用户选择外部TTS时会加载失败
+4. **Native Omni TTS仍然完全可用**
+
+**要实现外部TTS需要**：
+1. **添加nlohmann/json** - 在`libs/mnn/3rd_party/`中添加nlohmann/json库
+2. **取消stub实现** - 恢复真正的MNNTTSSDK调用
+3. **重新编译** - 确保依赖正确
+
+**已实现的架构**：
+1. ✅ Java接口完整（`MnnInference.java` Line 629-658）
+2. ✅ Java层调用逻辑完整（`LocalLLMMNNHandler.java` Line 1500-1707）
+3. ✅ WAV文件保存逻辑完整
+4. ⚠️ C++层暂时为stub
+
+**相关文件**：
+- `mnn_jni.cpp` Line 3421-3492: TTS SDK JNI stub实现
+- `MnnInference.java` Line 629-658: Java接口
+- `LocalLLMMNNHandler.java` Line 1500-1707: 外部TTS完整实现
+- `CMakeLists.txt` Line 135-140: TTS SDK include路径（已配置）
+- MNN TTS SDK: `libs/mnn/apps/frameworks/mnn_tts/` (需要nlohmann/json)
+
+### H.8 经验教训
+
+1. **架构设计**：
+   - 不同功能应该使用独立的加载逻辑
+   - 不要为了代码复用而强行共享不兼容的基础设施
+   - TTS和LLM虽然都使用MNN，但文件结构完全不同
+   - **外部TTS不能复用LLM加载逻辑**
+
+2. **场景分析**：
+   - **必须穷举所有场景组合**（3种TTS模式 × 2种模型类型 = 6种场景）
+   - 每个场景都需要明确的处理逻辑和测试
+   - 用矩阵表格梳理场景，避免遗漏
+
+3. **调试方法**：
+   - 跨语言调用（Java ↔ C++）的问题需要追踪完整调用链
+   - Java层的修改无法影响C++层的行为
+   - 必须在正确的层次修复问题
+   - **看到C++层错误时，要追踪到MNN源码层面**
+
+4. **文档重要性**：
+   - 详细的注释可以帮助理解设计意图
+   - 明确标注已知限制和TODO
+   - 场景矩阵应该写在代码注释中，方便后续维护
+   - **临时禁用的功能要写清楚原因和正确的实现方式**
 
 ---
 

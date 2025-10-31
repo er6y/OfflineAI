@@ -143,6 +143,7 @@ public class ConfigManager {
     // TTS语音合成配置键
     public static final String KEY_TTS_MODEL = "tts_model"; // TTS模型选择
     public static final String KEY_TTS_DIT_STEPS = "tts_dit_steps"; // DiT步数 (1-10)
+    public static final String KEY_TTS_AUTO_PLAY = "tts_auto_play"; // TTS自动播放
     
     // 语言设置配置键
     public static final String KEY_LANGUAGE = "language"; // 语言设置
@@ -194,6 +195,7 @@ public class ConfigManager {
     // TTS语音合成默认值
     public static final String DEFAULT_TTS_MODEL = "无"; // 默认无（不使用外挂TTS）
     public static final int DEFAULT_TTS_DIT_STEPS = 3; // 默认3步（平衡质量和速度）
+    public static final boolean DEFAULT_TTS_AUTO_PLAY = false; // 默认不自动播放
     
     // LlamaCpp 相关默认值
     public static final String DEFAULT_LLAMACPP_MODEL_PATH = "files/models/llamacpp";
@@ -1458,6 +1460,24 @@ public class ConfigManager {
      */
     public static void setTtsDitSteps(Context context, int steps) {
         setInt(context, KEY_TTS_DIT_STEPS, steps);
+    }
+    
+    /**
+     * 获取TTS自动播放设置
+     * @param context 上下文
+     * @return 是否自动播放TTS生成的音频
+     */
+    public static boolean getTtsAutoPlay(Context context) {
+        return getBoolean(context, KEY_TTS_AUTO_PLAY, DEFAULT_TTS_AUTO_PLAY);
+    }
+    
+    /**
+     * 设置TTS自动播放
+     * @param context 上下文
+     * @param autoPlay 是否自动播放
+     */
+    public static void setTtsAutoPlay(Context context, boolean autoPlay) {
+        setBoolean(context, KEY_TTS_AUTO_PLAY, autoPlay);
     }
     
     /**

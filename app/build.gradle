@@ -176,6 +176,9 @@ dependencies {
     // MNN JNI - MNN推理引擎 (includes built-in tokenizer)
     implementation project(':libs:mnn-jni')
     
+    // MNN TTS JNI - bert-vits2-MNN TTS (our wrapper, links to upstream)
+    implementation project(':libs:mnn-tts-jni')
+    
     // Sherpa-MNN JNI - ASR (Automatic Speech Recognition)
     implementation project(':libs:sherpa-mnn-jni')
     

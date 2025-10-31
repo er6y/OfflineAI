@@ -756,6 +756,24 @@
                 android:layout_marginStart="0dp" />
         </LinearLayout>
 
+        <!-- TTS自动播放开关 -->
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/switchTtsAutoPlay"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_tts_auto_play"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="4dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_tts_auto_play_summary"
+            android:textSize="12sp"
+            android:textColor="@android:color/darker_gray"
+            android:layout_marginStart="16dp"
+            android:layout_marginBottom="16dp" />
+
         <!-- 全局设置 -->
         <TextView
             android:layout_width="match_parent"

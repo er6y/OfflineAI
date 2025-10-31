@@ -601,5 +601,34 @@ public class MnnInference {
     // ========== ASR (Automatic Speech Recognition) ==========
     // NOTE: ASR functionality has been moved to sherpa-mnn-jni module
     // Use com.k2fsa.sherpa.mnn.OnlineRecognizer from sherpa-mnn's Kotlin API
+    
+    // ========== TTS (Text-to-Speech) - External Models ==========
+    
+    /**
+     * Create external TTS session (for standalone TTS models, not Omni)
+     * @param modelDir TTS model directory path
+     * @param configJson JSON configuration string for TTS model
+     * @return TTS session handle (pointer), 0 if failed
+     */
+    public static native long createTtsSession(String modelDir, String configJson);
+    
+    /**
+     * Generate TTS audio from text
+     * @param ttsHandle TTS session handle
+     * @param text Input text to synthesize
+     * @return true if generation succeeded, false otherwise
+     */
+    public static native boolean generateTts(long ttsHandle, String text);
+    
+    /**
+     * Destroy TTS session and release resources
+     * @param ttsHandle TTS session handle
+     */
+    public static native void destroyTtsSession(long ttsHandle);
+    
+    // ========== External TTS (bert-vits2-MNN) - REMOVED ==========
+    // bert-vits2-MNN should be treated as a standard LLM text-to-audio model
+    // Use the existing LLM inference framework (load as LLM model)
+    // No separate TTS SDK needed
 
 } // End of MnnInference class
