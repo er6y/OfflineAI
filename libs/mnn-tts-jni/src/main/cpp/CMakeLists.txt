@@ -38,6 +38,7 @@ message(STATUS "✅ MNN target: ${MNN_SO_DIR}/libMNN.so")
 
 # Include directories from upstream mnn_tts
 include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}  # For regex_compat.hpp
     ${MNN_TTS_ROOT}/include
     ${MNN_TTS_ROOT}/include/bertvits2
     ${MNN_TTS_ROOT}/../3rd_party/include
@@ -45,6 +46,45 @@ include_directories(
     ${MNN_ROOT}/tools/audio/include
     ${MNN_ROOT}/transformers/llm/engine/include
 )
+
+# Add RE2 library for Android (replaces std::regex to avoid locale crash)
+if(ANDROID)
+    message(STATUS "")
+    message(STATUS "========================================")
+    message(STATUS "🔧 Android Build: Applying RE2 Patch")
+    message(STATUS "========================================")
+    
+    # STEP 1: Auto-patch upstream source files FIRST (before adding them to build)
+    message(STATUS "STEP 1: Patching upstream TTS source files...")
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} 
+            -DMNN_TTS_ROOT=${MNN_TTS_ROOT}
+            -DPATCH_ACTION=APPLY
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/regex_patch.cmake
+        RESULT_VARIABLE PATCH_RESULT
+    )
+    if(NOT PATCH_RESULT EQUAL 0)
+        message(FATAL_ERROR "Failed to apply RE2 patches")
+    endif()
+    message(STATUS "")
+    
+    # STEP 2: Add RE2 library
+    message(STATUS "STEP 2: Adding RE2 library...")
+    include(FetchContent)
+    FetchContent_Declare(
+        re2
+        GIT_REPOSITORY https://github.com/google/re2.git
+        GIT_TAG        2022-04-01  # Last version without mandatory Abseil dependency
+    )
+    set(RE2_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(re2)
+    
+    # CRITICAL: Disable RE2 logging to avoid std::ostream (std::locale dependency)
+    target_compile_definitions(re2 PRIVATE NDEBUG)
+    message(STATUS "✅ RE2 library ready (logging disabled)")
+    message(STATUS "========================================")
+    message(STATUS "")
+endif()
 
 # Source files from upstream (copied from upstream CMakeLists.txt Line 48-82)
 set(SHARED_SOURCE_FILES
@@ -80,16 +120,16 @@ add_library(mnn_tts SHARED
     ${ANDROID_SOURCE_FILES}
 )
 
-# Workaround for x86_64 emulator std::locale/std::regex crash
-if(ANDROID_ABI STREQUAL "x86_64")
-    target_compile_definitions(mnn_tts PRIVATE DISABLE_REGEX_FOR_X86_64)
-    message(STATUS "⚠️ x86_64: Disabled std::regex due to locale issues")
-endif()
-
 # Add 16KB page size support
 target_link_options(mnn_tts PRIVATE "-Wl,-z,max-page-size=16384")
 
-# Link to libMNN.so
-target_link_libraries(mnn_tts MNN log)
+# Link to libMNN.so and RE2 (Android only)
+if(ANDROID)
+    target_link_libraries(mnn_tts MNN log c++_shared re2)
+    message(STATUS "✅ Linked RE2 for Android regex support (no locale dependency)")
+else()
+    target_link_libraries(mnn_tts MNN log c++_shared)
+    message(STATUS "✅ Using std::regex on non-Android platforms")
+endif()
 
 message(STATUS "✅ MNN TTS JNI wrapper configured successfully")

@@ -401,6 +401,8 @@
     <string name="label_add_progress">添加进度:</string>
     <string name="content_description_delete_api_url">删除API地址</string>
     <string name="button_send">发送 ▶（长按语音）</string>
+    <string name="button_inferring">推理中…（点击停止）</string>
+    <string name="button_generating_tts">生成语音中…（点击停止）</string>
     <string name="dialog_model_not_found">找不到原始模型，请选择替代模型</string>
     <string name="dialog_select_embedding_model">请选择要使用的嵌入模型：</string>
     <string name="dialog_select_reranker_model">请选择要使用的重排模型：</string>

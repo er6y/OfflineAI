@@ -69,9 +69,12 @@ dependencies {
     implementation project(':libs:mnn-lib')
 }
 
-// Make sure mnn-lib is built first
+// CRITICAL: Force mnn-lib to build before mnn-tts-jni native compilation
 afterEvaluate {
     tasks.matching { it.name.startsWith('configureCMake') }.all {
+        dependsOn ':libs:mnn-lib:assembleRelease'
+    }
+    tasks.matching { it.name.startsWith('buildCMake') }.all {
         dependsOn ':libs:mnn-lib:assembleRelease'
     }
 }

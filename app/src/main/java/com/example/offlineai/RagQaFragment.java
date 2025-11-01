@@ -190,6 +190,7 @@ public class RagQaFragment extends Fragment {
     private final StringBuilder debugBuilder = new StringBuilder();
 
     private final AtomicBoolean isSending = new AtomicBoolean(false); // Track the state of the send/stop button with atomic operations
+    private final AtomicBoolean isTtsGenerating = new AtomicBoolean(false); // Track TTS generation state
     private static final String CONFIG_FILE = ".config"; // Configuration file name
     private List<String> systemPromptHistory = new ArrayList<>(); // System prompt history
     private Map<String, String> apiKeyMap = new HashMap<>(); // API Key mapping
@@ -1157,6 +1158,13 @@ public class RagQaFragment extends Fragment {
     }
 
     private void handleSendStopClick() {
+        // Check if TTS is generating - allow stopping TTS
+        if (isTtsGenerating.get()) {
+            LogManager.logI(TAG, "[TTS] User requested stop during TTS generation");
+            stopTtsGeneration();
+            return;
+        }
+        
         // Use atomic operation to check and set sending state, prevent concurrent clicks
         if (isSending.compareAndSet(false, true)) {
             // --- Start sending --- 
@@ -1551,6 +1559,11 @@ public class RagQaFragment extends Fragment {
         LogManager.logD(TAG, "Initializing sending state - task running: " + isTaskRunning + ", cancelled: " + isTaskCancelled + ", global stop flag unchanged: " + globalStopFlag);
         LogManager.logI(TAG, "[STATE] initializeSendingState - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
         
+        // Update button text to show "推理中..."
+        if (mainHandler != null) {
+            mainHandler.post(this::updateButtonText);
+        }
+        
         // Reset stop flags for embedding and reranker handlers
         try {
             EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(getContext());
@@ -1580,6 +1593,13 @@ public class RagQaFragment extends Fragment {
      */
     private void resetSendingState() {
         LogManager.logI(TAG, "[STATE] resetSendingState enter - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isSending=" + isSending.get() + ", isTaskRunning=" + isTaskRunning + ", isTaskCancelled=" + isTaskCancelled + ", globalStopFlag=" + globalStopFlag);
+        
+        // Check if TTS is still generating
+        if (isTtsGenerating.get()) {
+            LogManager.logW(TAG, "[STATE] TTS is still generating, cannot reset sending state yet");
+            return;
+        }
+        
         isTaskRunning = false;
         isTaskCancelled = false;
         
@@ -1649,12 +1669,46 @@ public class RagQaFragment extends Fragment {
                 }
                 
                 try {
-                    buttonSendStop.setText(getString(R.string.button_send));
+                    updateButtonText();
                 } catch (Exception e) {
                     LogManager.logE(TAG, "Failed to reset button text", e);
                 }
             });
         }
+    }
+    
+    /**
+     * Update button text based on current state
+     * Priority: TTS generating > LLM inferring > Send
+     */
+    private void updateButtonText() {
+        if (buttonSendStop == null) return;
+        
+        if (isTtsGenerating.get()) {
+            buttonSendStop.setText(getString(R.string.button_generating_tts));
+        } else if (isSending.get()) {
+            buttonSendStop.setText(getString(R.string.button_inferring));
+        } else {
+            buttonSendStop.setText(getString(R.string.button_send));
+        }
+    }
+    
+    /**
+     * Stop TTS generation
+     */
+    private void stopTtsGeneration() {
+        LogManager.logI(TAG, "[TTS] Stopping TTS generation");
+        
+        // Set global stop flag to stop TTS service
+        globalStopFlag = true;
+        
+        // Reset TTS state
+        isTtsGenerating.set(false);
+        
+        // Reset sending state
+        resetSendingState();
+        
+        Toast.makeText(requireContext(), "TTS 生成已停止", Toast.LENGTH_SHORT).show();
     }
     
     // Restore UI/flags/state when validation fails before actual send (English log)
@@ -1747,8 +1801,8 @@ public class RagQaFragment extends Fragment {
         
         // Update UI to show query start
         mainHandler.post(() -> {
-            buttonSendStop.setText(getString(R.string.button_stop_with_icon));
             isSending.set(true); // Use atomic operation to set sending state
+            updateButtonText(); // Update button text based on state machine
             // [Fix] Task state already set in initializeSendingState, no need to set again here
             
             // Clear response area
@@ -2541,6 +2595,23 @@ public class RagQaFragment extends Fragment {
                     String filteredChunk = chunk;
                     //LogManager.logD(TAG, "[DEBUG_TRACE] Chunk received: [" + chunk + "], debugClosed=" + debugClosed);
                     
+                    // Handle TTS state markers
+                    if (chunk.contains("[TTS_START]")) {
+                        LogManager.logI(TAG, "[TTS] TTS generation started");
+                        isTtsGenerating.set(true);
+                        if (mainHandler != null) {
+                            mainHandler.post(() -> updateButtonText());
+                        }
+                        filteredChunk = chunk.replace("[TTS_START]", "");
+                    } else if (chunk.contains("[TTS_END]")) {
+                        LogManager.logI(TAG, "[TTS] TTS generation ended");
+                        isTtsGenerating.set(false);
+                        if (mainHandler != null) {
+                            mainHandler.post(() -> updateButtonText());
+                        }
+                        filteredChunk = chunk.replace("[TTS_END]", "");
+                    }
+                    
                     // Close debug when detecting head markers
                     if (!debugClosed && (chunk.contains("[TEXT:]") || 
                                         chunk.contains("[IMAGE:]") || 
@@ -2551,7 +2622,7 @@ public class RagQaFragment extends Fragment {
                         LogManager.logD(TAG, "[DEBUG_TRACE] Debug section closed, debugClosed=" + debugClosed);
                         
                         // Filter out the head marker from display
-                        filteredChunk = chunk.replace("[TEXT:]", "")
+                        filteredChunk = filteredChunk.replace("[TEXT:]", "")
                                             .replace("[IMAGE:]", "")
                                             .replace("[AUDIO:]", "");
                     }
@@ -5805,7 +5876,7 @@ private void sendAudioToModelInternal(String audioPath, String textPrompt, Strin
     
     // Set sending state
     isSending.set(true);
-    buttonSendStop.setText(getString(R.string.button_stop_with_icon));
+    updateButtonText(); // Update button text based on state machine
     
     // Create AI response placeholder
     ChatDataItem aiMsg = new ChatDataItem(ChatViewHolders.ASSISTANT);

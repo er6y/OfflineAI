@@ -135,6 +135,7 @@ flowchart TB
 - **知识库选择**：提供知识库多选与深度、重排数配置。需求：用户可按场景快速切换知识库，并设定检索深度与重排策略。设计：ConfigManager 持久化最近使用的知识库和检索参数，RagQueryManager 在执行检索前加载对应向量库。
 - **检索流程**：问题向量化 → 向量召回 → 条件重排 → 上下文拼装 → 调用模型。需求：过程需可中断、可观测、可调试。设计：在日志窗口输出向量分数/重排分数，统计拼装上下文 token 数，遇到异常（如向量全为零）立即告警并回退。**主要 API**：RagQueryManager 的 `executeRagQuery()`、EmbeddingHandler 的 `computeEmbedding()`、RerankerHandler 的 `rerank()`、LocalLLMMNNHandler 的 `generate()`。**关键数据结构**：`ChatDataItem`、`SQLiteVectorDatabaseHandler.SearchResult`、`RerankerResult`。
 - **会话特性**：Markdown 渲染、折叠菜单、复制、转笔记；支持最多 3 张图像输入并保留历史缩略图；语音输入需提供长按录音/上滑取消提示；TTS 输出落地文件并在聊天列表显示播放器；全局停止按钮即时中断流式输出。设计：通过 ChatRecyclerViewAdapter 管理多类型消息（文本、图片、音频、Diffusion 图片），结合 ChatHistoryManager 进行持久化。
+- **TTS 流程优化（2025-11-01）**：需求：外挂 TTS 生成时，按钮状态应准确反映当前阶段（LLM 推理 → TTS 生成），用户可随时停止。设计：**按钮状态机**：`"发送 ▶"` → LLM 推理 → `"推理中…（点击停止）"` → LLM 完成 → `"生成语音中…（点击停止）"` → TTS 生成 → TTS 完成 → `"发送 ▶"`。**实现要点**：①添加 `isTtsGenerating` 原子标志跟踪 TTS 状态；②`resetSendingState()` 检查 TTS 状态，如果 TTS 还在生成则不重置；③`updateButtonText()` 根据状态优先级更新按钮文本（TTS > LLM > 发送），**关键修复**：在设置 `isSending.set(true)` 后必须调用 `updateButtonText()` 而不是直接设置按钮文本，确保状态机生效；④`handleSendStopClick()` 支持停止 TTS（设置 `globalStopFlag`）；⑤`LocalLLMMNNHandler` 在 TTS 开始/结束时通过 callback 发送 `[TTS_START]`/`[TTS_END]` 标记，**关键修复**：在 TTS 生成的 3 个关键点检查 `shouldStop` 标志（开始前、线程启动时、处理前），确保用户停止请求能及时响应；⑥`RagQaFragment` 在 `onToken()` 中处理 TTS 标记，更新状态和按钮。**Omni 内置 TTS**：无需额外状态管理，`generateWavform()` 同步阻塞，`isSending` 覆盖全程，用户点击"停止" → `stop_requested_` → MNN 自动停止。**资源文件**：`R.string.button_send`、`R.string.button_inferring`、`R.string.button_generating_tts`。**主要 API**：`updateButtonText()`、`stopTtsGeneration()`、`isTtsGenerating.set()`。**关键数据结构**：`AtomicBoolean isTtsGenerating`、TTS 状态标记（`[TTS_START]`/`[TTS_END]`）。**修复位置**：`RagQaFragment.java` Line 1804-1805、Line 5878-5879；`LocalLLMMNNHandler.java` Line 697-720、Line 1798-1803。
 - **媒体文件处理流程（2025-10-30重构）**：需求：在用户点击发送/松开录音的瞬间，立即完成所有文件操作（保存、记录、清空），确保数据一致性和UI响应速度。设计：**核心方法 `prepareAndSaveUserInput()`** 统一处理所有媒体文件，执行步骤：①检查/创建聊天文件夹 → ②同步保存所有媒体文件到聊天文件夹（录音/图片/音频转WAV格式，文件名：`{type}_{timestamp}_user.{ext}`）→ ③创建 `UserInput` 结构体（包含文本、图片路径列表、音频路径列表、时长）→ ④创建用户消息并添加到 `chatMessages` → ⑤立即保存到 `conversation.md` → ⑥清空输入框和媒体缩略图。**调用时机**：`handleSendStopClick()`（点击发送）和 `sendVoiceMessage()`（松开录音）。**关键改进**：RAG查询流程 `executeRagQueryWithAsr()` 接受 `UserInput` 参数，使用其中已保存的文件路径，而不是从已清空的 `mediaThumbnailAdapter` 获取。**已修复问题**：①ASR后图片丢失（文件已在发送瞬间保存）②并发修改异常（创建快照避免）③文件保存时机错误（不延迟到后台）④RAG获取不到文件（使用UserInput路径）。**主要 API**：`prepareAndSaveUserInput()`、`MediaThumbnailAdapter.processImage()`、`MediaThumbnailAdapter.convertAudioToWav()`、`executeRagQueryWithAsr(userInput)`。**关键数据结构**：`UserInput`（包含textPrompt/imagePaths/audioPaths/audioDuration）、`ChatDataItem`、`conversation.md`。**详细文档**：`MEDIA_PROCESSING_FLOW.md`。
 - **ASR（语音识别）集成**：支持外挂ASR模型将语音转文本后走RAG流程。需求：用户可在设置中选择ASR模型（或选择"无"跳过），语音输入时自动转换为文本并与用户文本合并，支持失败降级到原始音频标签模式。设计：**将sherpa-mnn源码完整集成到mnn-jni模块**，通过C++ JNI实现，支持arm64-v8a和x86_64架构；使用sherpa-onnx C API进行在线语音识别，支持Zipformer/Paraformer等模型；懒加载策略（首次使用时加载）；转换失败时自动降级到`<audio>`标签模式。**实现位置**：C++层（mnn_jni.cpp）实现JNI方法，Java层（LocalLLMMNNHandler）封装调用接口。**主要 API**：`MnnInference.createAsr()`、`MnnInference.transcribeAudio()`、`LocalLLMMNNHandler.loadAsrModel()`、`LocalLLMMNNHandler.transcribeAudio()`、`RagQaFragment.convertAndSendAsText()`。**关键数据结构**：C++层使用`SherpaOnnxOnlineRecognizer*`、Java层使用`long asrHandle`。**流程示意**：
   ```
@@ -318,13 +319,32 @@ flowchart TB
    - **问题**：x86_64 Android 模拟器上 `std::locale` 初始化会崩溃（SIGABRT: misaligned pointer when deallocating）
    - **影响范围**：所有使用 `std::regex`、`std::stringstream`、`std::wstring_convert`、`std::codecvt` 的代码
    - **解决方案**：TTS 模块（`libs/mnn/apps/frameworks/mnn_tts`）已全面替换为手动实现（无 locale 依赖）
-     - **关键修复点**：
+     - **关键修复点**（共 27 处）：
        - `CalculateFileHash()`：`std::stringstream` → `snprintf()` 手动 hex 转换
        - `FullwidthToHalfwidth()`：`std::wstring_convert` → 手动 UTF-8/UTF-32 转换
        - `IsEng()`/`IsNum()`：`std::regex` → 字符范围检查
-       - `TextNormalizer::NormalizeText()`：临时 `std::regex` → 手动模式匹配
-       - `WordSpliter::CutDetail()`：4 个临时 `std::regex` → lambda 字符分类
+       - `TextNormalizer::NormalizeText()`：2 个临时 `std::regex` → 手动模式匹配
+       - `WordSpliter::CutDetail()`：4 个未使用的 `std::regex` → 直接删除
+       - `RemoveEmptyLines()`：`std::regex` → 逐行检查空行
+       - `AddPeriodBeforeNewline()`：`std::regex` → 逐字符检查标点
+       - `ReplaceCurrency()`：`std::regex` → 手动货币符号匹配
+       - `ReplaceCompare()`：`std::regex` → 手动冒号比例匹配
+       - `ReplaceTyperead()`：`std::regex` → 手动字母-数字匹配
+       - `ReplaceTyperead2()`：`std::regex` → 手动字母-字母匹配
+       - `ReplaceSpecificCommaNumbers()`：`std::regex` → 手动逗号数字匹配
+       - **`ContainsNumber()`**：**条件编译**（x86_64 用手动检查，arm64 保持原有 regex）
+       - **`ConcatList<T>()`**：**条件编译**（x86_64 用手动字符串拼接，arm64 保持原有 `std::stringstream`）
+         - 支持类型：`SentLangPair`、`WordPosPair`、`std::string`、整数、浮点数
+         - 位置：`libs/mnn/apps/frameworks/mnn_tts/include/bertvits2/utils.hpp`
+       - **`ChineseG2P::TextAn2cn()`**：**条件编译**（x86_64 用手动数字提取，arm64 保持原有 regex）
+         - 功能：查找文本中的所有数字（整数或小数），转换为中文数字
+         - 位置：`libs/mnn/apps/frameworks/mnn_tts/src/bertvits2/chinese_g2p.cpp` Line 253-321
+         - 调用链：`ChineseG2P::Process()` → `TextNormalize()` → `TextAn2cn()` → **崩溃点**
+       - **高级规范化功能（禁用）**：14 个复杂 regex 函数（日期/时间/温度/分数/百分比/手机号/电话/范围/负数/小数/量词等）→ 直接禁用（非核心功能，避免复杂手动实现）
        - 日志系统：x86_64 上完全禁用（`#ifdef __x86_64__`）
+     - **影响**：
+       - x86_64：基础 TTS 功能完整，高级文本规范化暂时禁用
+       - arm64：**完全保持原有行为**（`ContainsNumber()` 和 `ConcatList()` 使用 regex/stringstream，性能最优）
    - **验证方法**：在 x86_64 模拟器上测试 TTS 加载和生成流程，确保无崩溃
    - **注意**：arm64 真机不受影响，所有架构使用相同代码逻辑
 
@@ -8553,6 +8573,141 @@ Java: saveWavFile() - 保存为WAV文件
    - 明确标注已知限制和TODO
    - 场景矩阵应该写在代码注释中，方便后续维护
    - **临时禁用的功能要写清楚原因和正确的实现方式**
+
+---
+
+## H.9 RE2 Regex 补丁系统（2025-11-01）
+
+### 问题背景
+
+Android ARM64 设备上 `std::locale` 初始化存在问题，导致使用 `std::regex` 的代码在构造时触发 `std::bad_cast` 崩溃。MNN TTS 模块的 `TextNormalizer` 类在构造函数中初始化 `std::regex SENTENCE_SPLITOR` 成员变量，导致外部 TTS 加载时立即崩溃。
+
+**崩溃堆栈**：
+```
+#08 pc 00000000000b363c  libmnn_tts.so (TextNormalizer::TextNormalizer()+32)
+#07 pc 0000000000112cdc  libc++_shared.so (std::locale::use_facet(...)+132)
+libc++abi: terminating due to uncaught exception of type std::bad_cast
+```
+
+### 解决方案
+
+使用 **RE2**（Google 的正则表达式库）替代 `std::regex`，RE2 不依赖 `std::locale`，完全避免崩溃。
+
+### 实现架构
+
+#### 1. 统一补丁脚本（`regex_patch.cmake`）
+
+**位置**：`libs/mnn-tts-jni/src/main/cpp/regex_patch.cmake`
+
+**功能**：
+- 单一脚本支持 `APPLY`（应用补丁）和 `RESTORE`（恢复原始）两种操作
+- 自动检测文件是否已补丁，避免重复操作
+- 支持文件特定的补丁逻辑（如删除 `SENTENCE_SPLITOR` 成员变量）
+
+**使用方法**：
+```bash
+# 应用补丁
+cmake -DMNN_TTS_ROOT=<path> -DPATCH_ACTION=APPLY -P regex_patch.cmake
+
+# 恢复原始
+cmake -DMNN_TTS_ROOT=<path> -DPATCH_ACTION=RESTORE -P regex_patch.cmake
+```
+
+**补丁内容**：
+1. 添加 `#include "regex_compat.hpp"` 到文件开头
+2. 替换所有 `std::regex*` 类型为 `mnn_regex*` 类型
+3. 特殊处理：
+   - `text_preprocessor.hpp`: 删除 `std::regex SENTENCE_SPLITOR;` 成员变量声明（**根本原因**）
+   - `text_preprocessor.cpp`: 删除 `SENTENCE_SPLITOR = ...` 赋值语句
+
+#### 2. RE2 兼容层（`regex_compat.hpp`）
+
+**位置**：`libs/mnn-tts-jni/src/main/cpp/regex_compat.hpp`
+
+**设计**：
+- 提供 `std::regex` 风格的 API，内部使用 RE2 实现
+- 支持平台条件编译：Android 使用 RE2，其他平台使用 `std::regex`
+- 完整实现：
+  - `mnn_regex` = `RE2`
+  - `mnn_smatch` - 匹配结果（支持 `[]`, `.str()`, `.prefix()`, `.suffix()`）
+  - `mnn_sregex_iterator` - 查找所有匹配
+  - `mnn_sregex_token_iterator` - 字符串分割（支持 `->str()`）
+  - `mnn_regex_match/search/replace` - 匹配/查找/替换函数
+
+**关键实现**：
+```cpp
+#ifdef __ANDROID__
+    using mnn_regex = RE2;
+    // ... RE2 实现
+#else
+    using mnn_regex = std::regex;
+    // ... std::regex 实现
+#endif
+```
+
+#### 3. 构建集成（`CMakeLists.txt`）
+
+**自动补丁流程**：
+```cmake
+if(ANDROID)
+    # Step 1: 应用补丁
+    execute_process(
+        COMMAND ${CMAKE_COMMAND} 
+            -DMNN_TTS_ROOT=${MNN_TTS_ROOT}
+            -DPATCH_ACTION=APPLY
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/regex_patch.cmake
+    )
+    
+    # Step 2: 下载 RE2
+    FetchContent_Declare(re2 GIT_TAG 2022-04-01)
+    
+    # Step 3: 链接 RE2
+    target_link_libraries(mnn_tts re2)
+endif()
+```
+
+### 补丁的文件（8 个）
+
+1. `src/bertvits2/utils.cpp` - 70+ 处 regex 替换
+2. `src/bertvits2/text_preprocessor.cpp` - 删除 `SENTENCE_SPLITOR` 赋值
+3. `src/bertvits2/english_g2p.cpp`
+4. `src/bertvits2/word_spliter.cpp`
+5. `src/bertvits2/pinyin.cpp`
+6. `src/bertvits2/chinese_g2p.cpp`
+7. `include/bertvits2/utils.hpp`
+8. `include/bertvits2/text_preprocessor.hpp` - **删除 `SENTENCE_SPLITOR` 成员变量**（关键）
+
+### 优势
+
+1. **零侵入**：上游代码不永久修改，构建时自动补丁
+2. **可逆**：随时可恢复原始 `std::regex` 实现
+3. **平台适配**：Android 用 RE2，其他平台用 `std::regex`
+4. **性能优异**：RE2 比 `std::regex` 更快且内存占用更少
+5. **统一管理**：单一脚本处理所有补丁操作，代码简洁优雅
+
+### 关键经验
+
+1. **头文件成员变量是隐藏杀手**：
+   - `std::regex` 成员变量会在构造函数初始化列表中自动调用默认构造函数
+   - 即使 `.cpp` 中没有显式赋值，头文件中的声明也会触发崩溃
+   - **必须同时处理头文件和实现文件**
+
+2. **补丁顺序很重要**：
+   - 先替换长字符串（`std::sregex_token_iterator`）
+   - 后替换短字符串（`std::regex`）
+   - 避免部分匹配导致的错误替换
+
+3. **统一脚本优于分散脚本**：
+   - 单一脚本通过参数控制行为，代码更简洁
+   - 避免逻辑重复和维护困难
+   - 更容易理解和调试
+
+### 相关文件
+
+- `libs/mnn-tts-jni/src/main/cpp/regex_patch.cmake` - 统一补丁脚本
+- `libs/mnn-tts-jni/src/main/cpp/regex_compat.hpp` - RE2 兼容层
+- `libs/mnn-tts-jni/src/main/cpp/CMakeLists.txt` - 构建集成
+- `libs/mnn-tts-jni/src/main/cpp/README_REGEX_PATCH.md` - 详细文档
 
 ---
 

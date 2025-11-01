@@ -693,17 +693,49 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                                     ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
                                 if (!chatFolderPath.isEmpty()) {
                                     String responseText = fullResponseBuilder.toString();
+                                    
+                                    // Check stop flag before starting TTS
+                                    if (shouldStop.get()) {
+                                        LogManager.logI(TAG, "[TTS] TTS generation cancelled (stop requested before start)");
+                                        return;
+                                    }
+                                    
+                                    // Notify TTS generation start
+                                    if (callback != null) {
+                                        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                                            callback.onToken("\n\n[TTS_START]");
+                                        });
+                                    }
+                                    
                                     executorService.submit(() -> {
+                                        // Check stop flag again in TTS thread
+                                        if (shouldStop.get()) {
+                                            LogManager.logI(TAG, "[TTS] TTS generation cancelled (stop requested in TTS thread)");
+                                            if (callback != null) {
+                                                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                                                    callback.onToken("\n\n[TTS_END]");
+                                                });
+                                            }
+                                            return;
+                                        }
+                                        
                                         generateExternalTts(responseText, chatFolderPath, (audioPath, error) -> {
                                             if (audioPath != null && callback != null) {
                                                 LogManager.logI(TAG, "[TTS] External TTS audio generated: " + audioPath);
                                                 // CRITICAL: callback must be called on main thread for UI safety
                                                 new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
                                                     callback.onToken("\n\n[AUDIO:" + audioPath + "]");
+                                                    callback.onToken("\n\n[TTS_END]");
                                                 });
                                             } else if (error != null) {
                                                 LogManager.logE(TAG, "[TTS] External TTS generation failed (" + currentTtsModelSelection + ")", error);
                                                 showToast(R.string.toast_tts_generation_failed);
+                                                // Notify TTS end even on error
+                                                if (callback != null) {
+                                                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                                                        callback.onToken("\n\n[TTS_END]");
+                                                    });
+                                                }
                                             }
                                         });
                                     });
@@ -1763,6 +1795,13 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // Run TTS generation in background thread
         executorService.submit(() -> {
             try {
+                // Check stop flag before TTS processing
+                if (shouldStop.get()) {
+                    LogManager.logI(TAG, "[TTS] TTS generation cancelled (stop requested before processing)");
+                    callback.accept(null, new Exception("TTS generation cancelled"));
+                    return;
+                }
+                
                 LogManager.logI(TAG, "[TTS] Calling TtsService.process() for text: " + text);
                 
                 // Call TtsService.process() to generate audio
