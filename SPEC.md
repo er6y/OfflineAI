@@ -230,6 +230,12 @@ flowchart TB
   - 易维护：更新MNN只需重新编译mnn-lib模块
 - **自定义算子处理**：CPUGroupNorm等自定义算子从mnn-jni迁移到mnn-lib，在编译libMNN.so时通过`target_sources(MNNCPU)`注入，确保算子内置在libMNN.so中。
 - **验证方法**：使用`readelf -d libmnn_jni.so | grep NEEDED`验证动态链接libMNN.so；使用`nm libmnn_jni.so | grep "MNN::"`验证不包含MNN符号。
+- **STL链接策略**（2025-11-03确定）：
+  - **mnn-lib/mnn-jni/sherpa-mnn-jni**：使用`c++_shared`（动态链接libc++），共享同一份libc++_shared.so
+  - **mnn-tts-jni**：使用`c++_static`（静态链接libc++），避免std::locale冲突导致的std::bad_cast崩溃
+  - **NDK版本**：统一使用`27.2.12479018`（与ChatMNN官方一致）
+  - **验证命令**：`llvm-readelf -d libmnn_tts.so | grep NEEDED`应不包含libc++_shared.so
+  - **设计理由**：libmnn_tts.so中的std::regex在ARM64上触发std::locale初始化问题，静态链接libc++可隔离locale环境，避免与主应用的libc++_shared.so冲突
 - **相关文档**：详见[SO架构重构文档](SO_ARCHITECTURE_REFACTOR.md)和[SO优化结果报告](SO_OPTIMIZATION_RESULT.md)。
 
 ## 5. 数据与持久化
@@ -8576,138 +8582,129 @@ Java: saveWavFile() - 保存为WAV文件
 
 ---
 
-## H.9 RE2 Regex 补丁系统（2025-11-01）
+## H.9 External TTS 流程修复（2025-11-03）
 
 ### 问题背景
 
-Android ARM64 设备上 `std::locale` 初始化存在问题，导致使用 `std::regex` 的代码在构造时触发 `std::bad_cast` 崩溃。MNN TTS 模块的 `TextNormalizer` 类在构造函数中初始化 `std::regex SENTENCE_SPLITOR` 成员变量，导致外部 TTS 加载时立即崩溃。
+External TTS（第三方 TTS 模型）生成语音后，UI 状态未正确更新：
+1. 语音块未显示在聊天列表
+2. 按钮状态卡在"推理中..."，未恢复到正常状态
+3. `isGenerating` 标志在 TTS 完成前就被设置为 `false`
 
-**崩溃堆栈**：
+### 根本原因
+
+**文件**：`LocalLLMMNNHandler.java` Line 710-748
+
+**问题代码**：
+```java
+// Line 710: 启动 TTS 后台线程
+executorService.submit(() -> {
+    generateExternalTts(responseText, chatFolderPath, (audioPath, error) -> {
+        // TTS callback
+    });
+});
+
+// Line 748: ❌ 立即标记完成，不等 TTS callback
+isGenerating.set(false);
+callback.onComplete(...);  // UI 认为推理已完成
 ```
-#08 pc 00000000000b363c  libmnn_tts.so (TextNormalizer::TextNormalizer()+32)
-#07 pc 0000000000112cdc  libc++_shared.so (std::locale::use_facet(...)+132)
-libc++abi: terminating due to uncaught exception of type std::bad_cast
+
+**时序问题**：
+```
+LLM 推理完成 → 启动 TTS 线程 → 立即执行 Line 748 (isGenerating=false)
+                    ↓
+                TTS 在后台运行（几秒）
+                    ↓
+                TTS callback 执行（但 UI 已认为完成）
 ```
 
 ### 解决方案
 
-使用 **RE2**（Google 的正则表达式库）替代 `std::regex`，RE2 不依赖 `std::locale`，完全避免崩溃。
+**移动 `isGenerating.set(false)` 到 TTS callback 中**：
 
-### 实现架构
-
-#### 1. 统一补丁脚本（`regex_patch.cmake`）
-
-**位置**：`libs/mnn-tts-jni/src/main/cpp/regex_patch.cmake`
-
-**功能**：
-- 单一脚本支持 `APPLY`（应用补丁）和 `RESTORE`（恢复原始）两种操作
-- 自动检测文件是否已补丁，避免重复操作
-- 支持文件特定的补丁逻辑（如删除 `SENTENCE_SPLITOR` 成员变量）
-
-**使用方法**：
-```bash
-# 应用补丁
-cmake -DMNN_TTS_ROOT=<path> -DPATCH_ACTION=APPLY -P regex_patch.cmake
-
-# 恢复原始
-cmake -DMNN_TTS_ROOT=<path> -DPATCH_ACTION=RESTORE -P regex_patch.cmake
+```java
+generateExternalTts(responseText, chatFolderPath, (audioPath, error) -> {
+    if (audioPath != null && callback != null) {
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            callback.onToken("\n\n[AUDIO:" + audioPath + "]");
+            callback.onToken("\n\n[TTS_END]");
+            
+            // ✅ CRITICAL: 在 TTS 完成后才标记完成
+            isGenerating.set(false);
+            String perfStats = getPerformanceStats();
+            callback.onToken(perfStats);
+            callback.onComplete(fullResponseBuilder.toString() + perfStats);
+        });
+    } else if (error != null) {
+        // ✅ 错误情况也要标记完成
+        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+            callback.onToken("\n\n[TTS_END]");
+            isGenerating.set(false);
+            callback.onComplete(...);
+        });
+    }
+});
 ```
 
-**补丁内容**：
-1. 添加 `#include "regex_compat.hpp"` 到文件开头
-2. 替换所有 `std::regex*` 类型为 `mnn_regex*` 类型
-3. 特殊处理：
-   - `text_preprocessor.hpp`: 删除 `std::regex SENTENCE_SPLITOR;` 成员变量声明（**根本原因**）
-   - `text_preprocessor.cpp`: 删除 `SENTENCE_SPLITOR = ...` 赋值语句
+### 线程模型说明
 
-#### 2. RE2 兼容层（`regex_compat.hpp`）
+**当前实现**（方案 C：后台串行流式 TTS）：
+- LLM 推理：后台线程（`executorService`）
+- TTS 生成：后台线程（`generateExternalTts()` 内部的 `executorService.submit()`）
+  - **流式处理**：分句后串行转换，每句完成立即回调
+  - **单线程**：避免并发复杂度，资源占用小
+- UI 更新：主线程（`Handler.post()`）
 
-**位置**：`libs/mnn-tts-jni/src/main/cpp/regex_compat.hpp`
-
-**设计**：
-- 提供 `std::regex` 风格的 API，内部使用 RE2 实现
-- 支持平台条件编译：Android 使用 RE2，其他平台使用 `std::regex`
-- 完整实现：
-  - `mnn_regex` = `RE2`
-  - `mnn_smatch` - 匹配结果（支持 `[]`, `.str()`, `.prefix()`, `.suffix()`）
-  - `mnn_sregex_iterator` - 查找所有匹配
-  - `mnn_sregex_token_iterator` - 字符串分割（支持 `->str()`）
-  - `mnn_regex_match/search/replace` - 匹配/查找/替换函数
-
-**关键实现**：
-```cpp
-#ifdef __ANDROID__
-    using mnn_regex = RE2;
-    // ... RE2 实现
-#else
-    using mnn_regex = std::regex;
-    // ... std::regex 实现
-#endif
+**流程**：
+```
+LLM 推理（后台） 
+  ↓
+分句（SENTENCE_PATTERN: 。！？.!?）
+  ↓
+TTS 串行处理（后台单线程）
+  ↓ 每句完成立即回调
+  [AUDIO:path1] → UI 播放
+  [AUDIO:path2] → UI 播放
+  [AUDIO:path3] → UI 播放
+  ↓
+[TTS_END] → 完成
 ```
 
-#### 3. 构建集成（`CMakeLists.txt`）
+**优点**：
+1. **低延迟**：第一句转换完立即播放（~500ms），无需等待全部完成
+2. **不阻塞 UI**：TTS 在后台线程，用户可以继续操作
+3. **简单可靠**：单线程串行，无需复杂的线程同步
+4. **支持中断**：每个句子前检查停止标志
+5. **资源友好**：只有一个 TTS 实例，内存占用小
 
-**自动补丁流程**：
-```cmake
-if(ANDROID)
-    # Step 1: 应用补丁
-    execute_process(
-        COMMAND ${CMAKE_COMMAND} 
-            -DMNN_TTS_ROOT=${MNN_TTS_ROOT}
-            -DPATCH_ACTION=APPLY
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/regex_patch.cmake
-    )
-    
-    # Step 2: 下载 RE2
-    FetchContent_Declare(re2 GIT_TAG 2022-04-01)
-    
-    # Step 3: 链接 RE2
-    target_link_libraries(mnn_tts re2)
-endif()
-```
+**文件命名**：`audio_<timestamp>_<序号>_ai.wav`（保证顺序）
 
-### 补丁的文件（8 个）
+**替代方案对比**：
+- **方案 A（并发）**：多线程并发转换，速度快但复杂度高，资源占用大
+- **方案 B（主线程）**：阻塞 UI，延迟大（不推荐）
+- **方案 C（当前）**：平衡方案，延迟小且实现简单
 
-1. `src/bertvits2/utils.cpp` - 70+ 处 regex 替换
-2. `src/bertvits2/text_preprocessor.cpp` - 删除 `SENTENCE_SPLITOR` 赋值
-3. `src/bertvits2/english_g2p.cpp`
-4. `src/bertvits2/word_spliter.cpp`
-5. `src/bertvits2/pinyin.cpp`
-6. `src/bertvits2/chinese_g2p.cpp`
-7. `include/bertvits2/utils.hpp`
-8. `include/bertvits2/text_preprocessor.hpp` - **删除 `SENTENCE_SPLITOR` 成员变量**（关键）
+### 修复的场景
 
-### 优势
+1. **External TTS 成功**：
+   - 输出 `[TTS_START]` → `[AUDIO:path]` → `[TTS_END]`
+   - `isGenerating.set(false)` 在 TTS 完成后执行
+   - UI 显示语音播放器
 
-1. **零侵入**：上游代码不永久修改，构建时自动补丁
-2. **可逆**：随时可恢复原始 `std::regex` 实现
-3. **平台适配**：Android 用 RE2，其他平台用 `std::regex`
-4. **性能优异**：RE2 比 `std::regex` 更快且内存占用更少
-5. **统一管理**：单一脚本处理所有补丁操作，代码简洁优雅
+2. **External TTS 失败**：
+   - 输出 `[TTS_START]` → `[TTS_END]`（无 AUDIO）
+   - `isGenerating.set(false)` 在错误处理后执行
+   - UI 显示错误提示
 
-### 关键经验
-
-1. **头文件成员变量是隐藏杀手**：
-   - `std::regex` 成员变量会在构造函数初始化列表中自动调用默认构造函数
-   - 即使 `.cpp` 中没有显式赋值，头文件中的声明也会触发崩溃
-   - **必须同时处理头文件和实现文件**
-
-2. **补丁顺序很重要**：
-   - 先替换长字符串（`std::sregex_token_iterator`）
-   - 后替换短字符串（`std::regex`）
-   - 避免部分匹配导致的错误替换
-
-3. **统一脚本优于分散脚本**：
-   - 单一脚本通过参数控制行为，代码更简洁
-   - 避免逻辑重复和维护困难
-   - 更容易理解和调试
+3. **无 TTS**（用户选择 "None"）：
+   - 不启动 TTS，立即标记完成
+   - `isGenerating.set(false)` 在 LLM 完成后立即执行
 
 ### 相关文件
 
-- `libs/mnn-tts-jni/src/main/cpp/regex_patch.cmake` - 统一补丁脚本
-- `libs/mnn-tts-jni/src/main/cpp/regex_compat.hpp` - RE2 兼容层
-- `libs/mnn-tts-jni/src/main/cpp/CMakeLists.txt` - 构建集成
-- `libs/mnn-tts-jni/src/main/cpp/README_REGEX_PATCH.md` - 详细文档
+- `LocalLLMMNNHandler.java` Line 710-762：TTS 流程控制
+- `LocalLLMMNNHandler.java` Line 1783-1839：`generateExternalTts()` 实现
 
 ---
+
 

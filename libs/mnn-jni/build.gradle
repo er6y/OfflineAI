@@ -5,6 +5,8 @@ plugins {
 android {
     namespace 'com.offlineai.mnn'
     compileSdk 34
+    // CRITICAL: Must match MNN upstream to avoid libc++_shared.so conflicts
+    ndkVersion "27.2.12479018"
 
     defaultConfig {
         minSdk 26

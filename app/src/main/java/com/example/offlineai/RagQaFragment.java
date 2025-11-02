@@ -2621,10 +2621,10 @@ public class RagQaFragment extends Fragment {
                         debugClosed = true;
                         LogManager.logD(TAG, "[DEBUG_TRACE] Debug section closed, debugClosed=" + debugClosed);
                         
-                        // Filter out the head marker from display
+                        // Filter out [TEXT:] and [IMAGE:] markers (but keep [AUDIO:path] intact for updateChatMessage)
                         filteredChunk = filteredChunk.replace("[TEXT:]", "")
-                                            .replace("[IMAGE:]", "")
-                                            .replace("[AUDIO:]", "");
+                                            .replace("[IMAGE:]", "");
+                        // NOTE: [AUDIO:path] is NOT filtered here - it will be handled in updateChatMessage()
                     }
                     
                     // Update chat message with filtered chunk
@@ -5221,16 +5221,16 @@ public class RagQaFragment extends Fragment {
                     String audioPath = newText.substring(startIdx + 7, endIdx);
                     // Set audio URI (for TTS playback)
                     lastMsg.audioUri = Uri.fromFile(new File(audioPath));
+                    lastMsg.setHasOmniAudio(true);  // CRITICAL: Enable audio player UI
                     // Remove marker from text
                     newText = newText.substring(0, startIdx) + newText.substring(endIdx + 1);
                     LogManager.logI(TAG, "[TTS] Audio marker detected, path: " + audioPath);
                     
-                    // Auto-play if enabled
-                    if (ConfigManager.getTtsAutoPlay(requireContext())) {
-                        final ChatDataItem audioItem = lastMsg;
-                        final String finalAudioPath = audioPath;
-                        autoPlayAudio(finalAudioPath, audioItem);
-                    }
+                    // CRITICAL: Do NOT auto-play here if backend auto-play is enabled
+                    // Backend (LocalLLMMNNHandler) already handles streaming playback
+                    // This [AUDIO:] marker is just for UI display and manual playback
+                    // Auto-play here would cause duplicate playback (segments + merged file)
+                    LogManager.logI(TAG, "[TTS] Audio UI enabled, backend handles auto-play if configured");
                 }
             }
             

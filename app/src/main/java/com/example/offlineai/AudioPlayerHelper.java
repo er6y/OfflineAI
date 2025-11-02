@@ -30,6 +30,11 @@ public class AudioPlayerHelper {
      */
     public interface PlaybackCallback {
         /**
+         * 准备完成（可以开始播放）
+         */
+        default void onPrepared() {}
+        
+        /**
          * 播放开始
          */
         void onPlaybackStarted();
@@ -96,6 +101,10 @@ public class AudioPlayerHelper {
                 isPrepared = true;
                 LogManager.logI(TAG, "Audio prepared: " + audioFile.getName() + 
                     ", duration: " + mp.getDuration() + "ms");
+                // Notify callback that preparation is complete
+                if (callback != null) {
+                    mainHandler.post(() -> callback.onPrepared());
+                }
             });
             
             mediaPlayer.setOnCompletionListener(mp -> {

@@ -5,8 +5,8 @@ plugins {
 android {
     namespace 'com.offlineai.mnn.lib'
     compileSdk 34
-    // Use latest available NDK for std::regex support
-    // ndkVersion "28.2.13676358"
+    // CRITICAL: Must match MNN upstream to avoid libc++_shared.so conflicts
+    ndkVersion "27.2.12479018"
 
     defaultConfig {
         minSdk 26

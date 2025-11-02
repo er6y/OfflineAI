@@ -3,6 +3,7 @@ package com.example.offlineai.api;
 import android.content.Context;
 import android.util.Log;
 
+import com.example.offlineai.AudioPlayerHelper;
 import com.example.offlineai.ChatHistoryFilter;
 import com.example.offlineai.ChatHistoryManager;
 import com.example.offlineai.ConfigManager;
@@ -80,6 +81,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private final AtomicInteger currentSessionTokens = new AtomicInteger(0);
     private long generationStartTime = 0;
     private long inferenceStartTime = 0;
+    private long inferenceEndTime = 0;  // Record LLM completion time (excluding TTS)
     private long promptTokens = 0;
     private long generatedTokens = 0;
     private long prefillTimeUs = 0;
@@ -90,6 +92,30 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     
     // Track if [TEXT:] head has been sent (for LLM models)
     private volatile boolean textHeadSent = false;
+    
+    // ========== Streaming TTS: sentence buffer and queue ==========
+    // Sentence buffer: accumulates tokens until sentence boundary detected
+    private final StringBuilder sentenceBuffer = new StringBuilder();
+    
+    // Sentence queue: shared between main thread (producer) and TTS thread (consumer)
+    // Main thread enqueues sentences in onToken(), TTS thread dequeues and processes
+    private final java.util.concurrent.BlockingQueue<String> sentenceQueue = 
+        new java.util.concurrent.LinkedBlockingQueue<>();
+    
+    // Sentence queue completion flag: set in onComplete() after all text generated
+    private final AtomicBoolean sentenceQueueCompleted = new AtomicBoolean(false);
+    
+    // TTS thread started flag: lazy start TTS thread on first sentence
+    private final AtomicBoolean ttsThreadStarted = new AtomicBoolean(false);
+    
+    // TTS enabled flag: true when External TTS is selected
+    private volatile boolean ttsEnabled = false;
+    
+    // TTS parameters (saved when TTS is enabled, used for lazy thread start)
+    private String ttsChatFolderPath = null;
+    private boolean ttsAutoPlay = false;
+    private LocalLlmHandler.StreamingCallback ttsCallback = null;
+    // ================================================================
     
     // Runtime for memory stats
     private final Runtime runtime = Runtime.getRuntime();
@@ -113,10 +139,15 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private final AtomicBoolean externalTtsLoading = new AtomicBoolean(false);  // Loading flag
     private String currentTtsModelSelection = "";  // Current TTS model selection
     
-    // Sentence boundary regex for streaming TTS (Chinese/English punctuation, excluding quotes)
+    // Sentence boundary regex for streaming TTS
+    // Part 1: [^。！？.!?\r\n]+[。！？.!?]+ → Match text + punctuation
+    // Part 2: [^。！？.!?\r\n]+[\r\n]+ → Match text + newline(s) (force break on newline)
+    // Note: Removed |[^。！？.!?]+$ to avoid matching every single token as "end of line"
+    //       Remaining text without punctuation will be handled in onComplete()
     private static final java.util.regex.Pattern SENTENCE_PATTERN = java.util.regex.Pattern.compile(
-        "[^。！？.!?]+[。！？.!?]+|[^。！？.!?]+$"
+        "[^。！？.!?\\r\\n]+[。！？.!?]+|[^。！？.!?\\r\\n]+[\\r\\n]+"
     );
+    private static final int MAX_SENTENCE_LENGTH = 100;  // Force break if no punctuation after 100 chars
     
     
     /**
@@ -125,7 +156,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
      */
     public LocalLLMMNNHandler(Context context) {
         this.context = context;
-        this.executorService = Executors.newSingleThreadExecutor();
+        // CRITICAL: Use cached thread pool to avoid deadlock between playback and consumer threads
+        // Single thread executor would cause playback thread to block consumer thread
+        this.executorService = Executors.newCachedThreadPool();
         
         LogManager.logI(TAG, "LocalLLMMNNHandler initialized");
     }
@@ -553,6 +586,36 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         generationStartTime = System.currentTimeMillis();
         inferenceStartTime = System.currentTimeMillis();
         
+        // ========== Reset streaming TTS state ==========
+        sentenceBuffer.setLength(0);
+        sentenceQueue.clear();
+        sentenceQueueCompleted.set(false);
+        ttsThreadStarted.set(false);  // Reset lazy start flag
+        ttsEnabled = false;
+        // ===============================================
+        
+        // ========== Clean up previous TTS temp files ==========
+        // CRITICAL: Clean at inference start, not when TTS thread starts
+        // This ensures previous playback has completed before deletion
+        final String tempDir = context.getCacheDir().getAbsolutePath() + "/tts_temp";
+        File tempDirFile = new File(tempDir);
+        if (tempDirFile.exists()) {
+            LogManager.logI(TAG, "[TTS] Cleaning up previous temp files");
+            File[] oldFiles = tempDirFile.listFiles();
+            if (oldFiles != null) {
+                for (File oldFile : oldFiles) {
+                    boolean deleted = oldFile.delete();
+                    if (!deleted) {
+                        LogManager.logW(TAG, "[TTS] Failed to delete temp file: " + oldFile.getName());
+                    }
+                }
+            }
+        } else {
+            tempDirFile.mkdirs();
+            LogManager.logI(TAG, "[TTS] Created temp directory: " + tempDir);
+        }
+        // ======================================================
+        
         // Set TTS output path based on model capability and user selection
         // CRITICAL: Must handle all 6 scenarios (3 TTS modes × 2 model types)
         // 
@@ -600,13 +663,29 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 MnnInference.setTtsOutputPath(llmSessionHandle, null);
                 LogManager.logI(TAG, "[TTS] Native TTS disabled by user (None selected)");
             } else {
-                // Scenario 3: Omni + External → Disable native TTS
+                // Scenario 3: Omni + External → Disable native TTS, enable streaming TTS
                 MnnInference.setTtsOutputPath(llmSessionHandle, null);
                 LogManager.logI(TAG, "[TTS] Native TTS disabled (External TTS selected: " + currentTtsModelSelection + ")");
+                
+                // Enable streaming TTS and save parameters (thread will start lazily on first sentence)
+                ttsEnabled = true;
+                ttsChatFolderPath = ConfigManager.getString(context, 
+                    ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                ttsAutoPlay = ConfigManager.getTtsAutoPlay(context);
+                ttsCallback = callback;
+                LogManager.logI(TAG, "[TTS] Streaming TTS enabled, thread will start on first sentence");
             }
+        } else if (!currentTtsModelSelection.isEmpty() && 
+                   !context.getString(R.string.settings_tts_model_none).equals(currentTtsModelSelection)) {
+            // Scenario 6: Non-Omni + External → Enable streaming TTS
+            ttsEnabled = true;
+            ttsChatFolderPath = ConfigManager.getString(context, 
+                ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            ttsAutoPlay = ConfigManager.getTtsAutoPlay(context);
+            ttsCallback = callback;
+            LogManager.logI(TAG, "[TTS] Streaming TTS enabled, thread will start on first sentence");
         }
-        // Scenario 4 & 6: Non-Omni + (None or External) → No action needed
-        // Model doesn't support native TTS, so no need to set/clear output path
+        // Scenario 4: Non-Omni + None → No action needed
         
         currentTask = executorService.submit(() -> {
             try {
@@ -635,13 +714,89 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                                 callback.onToken(token);
                             }
                             
+                            // ========== Streaming TTS: accumulate and detect sentence boundaries ==========
+                            // CRITICAL: Only process tokens AFTER [TEXT:] head (exclude debug info and stats)
+                            if (ttsEnabled && textHeadSent) {
+                                sentenceBuffer.append(token);
+                                String currentText = sentenceBuffer.toString();
+                                
+                                boolean shouldBreak = false;
+                                String sentenceToQueue = null;
+                                
+                                // Check 1: Regex match (punctuation or newline)
+                                // Regex handles: text+punctuation OR text+newline
+                                java.util.regex.Matcher matcher = SENTENCE_PATTERN.matcher(currentText);
+                                if (matcher.find()) {
+                                    sentenceToQueue = matcher.group().trim();
+                                    shouldBreak = true;
+                                }
+                                
+                                // Check 2: Length limit (force break if too long without punctuation)
+                                if (!shouldBreak && currentText.length() >= MAX_SENTENCE_LENGTH) {
+                                    sentenceToQueue = currentText.trim();
+                                    shouldBreak = true;
+                                    LogManager.logW(TAG, "[TTS] Force break: sentence too long (" + currentText.length() + " chars)");
+                                }
+                                
+                                // Queue sentence if break detected
+                                if (shouldBreak && sentenceToQueue != null && !sentenceToQueue.isEmpty()) {
+                                    // ========== Lazy start TTS thread on first sentence ==========
+                                    if (!ttsThreadStarted.getAndSet(true)) {
+                                        LogManager.logI(TAG, "[TTS] First sentence detected, starting TTS thread now");
+                                        if (ttsChatFolderPath != null && !ttsChatFolderPath.isEmpty()) {
+                                            startTtsProcessingThread(ttsChatFolderPath, ttsAutoPlay, ttsCallback);
+                                        } else {
+                                            LogManager.logE(TAG, "[TTS] Cannot start TTS thread: chat folder path is null");
+                                            ttsEnabled = false;  // Disable TTS if can't start
+                                        }
+                                    }
+                                    // ==============================================================
+                                    
+                                    try {
+                                        sentenceQueue.put(sentenceToQueue);
+                                        LogManager.logI(TAG, "[TTS] Sentence queued: " + 
+                                            (sentenceToQueue.length() > 30 ? sentenceToQueue.substring(0, 30) + "..." : sentenceToQueue));
+                                    } catch (InterruptedException e) {
+                                        LogManager.logE(TAG, "[TTS] Failed to queue sentence", e);
+                                    }
+                                    
+                                    // Clear buffer
+                                    sentenceBuffer.setLength(0);
+                                }
+                            }
+                            // ===============================================================================
+                            
                             return false;
                         }
                         
                         @Override
                         public void onComplete(Map<String, Long> statistics) {
-                            long endTime = System.currentTimeMillis();
-                            long totalTime = endTime - generationStartTime;
+                            // ========== Streaming TTS: process remaining text in buffer ==========
+                            if (ttsEnabled && sentenceBuffer.length() > 0) {
+                                String remaining = sentenceBuffer.toString().trim();
+                                if (!remaining.isEmpty()) {
+                                    try {
+                                        sentenceQueue.put(remaining);
+                                        LogManager.logI(TAG, "[TTS] Final sentence queued: " + 
+                                            (remaining.length() > 30 ? remaining.substring(0, 30) + "..." : remaining));
+                                    } catch (InterruptedException e) {
+                                        LogManager.logE(TAG, "[TTS] Failed to queue final sentence", e);
+                                    }
+                                }
+                                sentenceBuffer.setLength(0);
+                            }
+                            
+                            // CRITICAL: Reset textHeadSent to prevent performance stats from being processed by TTS
+                            textHeadSent = false;
+                            
+                            // Mark sentence queue as completed
+                            sentenceQueueCompleted.set(true);
+                            LogManager.logI(TAG, "[TTS] Sentence queue completed");
+                            // ======================================================================
+                            
+                            // Record inference end time (for accurate performance stats excluding TTS)
+                            inferenceEndTime = System.currentTimeMillis();
+                            long totalTime = inferenceEndTime - generationStartTime;
                             
                             if (statistics != null) {
                                 promptTokens = statistics.getOrDefault("prompt_len", 0L);
@@ -681,76 +836,21 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                                 }
                                 // Scenario 5: Non-Omni + Native → Already warned in performHistoryInference()
                                 // No audio will be generated, user already saw error toast
-                            } else if (!currentTtsModelSelection.isEmpty() && 
-                                       !context.getString(R.string.settings_tts_model_none).equals(currentTtsModelSelection)) {
-                                // User selected "External TTS"
-                                // Scenario 3 (Omni + External) or Scenario 6 (Non-Omni + External)
-                                // External TTS works with ANY LLM model type
-                                LogManager.logI(TAG, "[TTS] Generating external TTS: " + currentTtsModelSelection + 
-                                              " (model=" + (hasTtsSupport ? "Omni" : "Non-Omni") + ")");
-                                
-                                String chatFolderPath = ConfigManager.getString(context, 
-                                    ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
-                                if (!chatFolderPath.isEmpty()) {
-                                    String responseText = fullResponseBuilder.toString();
-                                    
-                                    // Check stop flag before starting TTS
-                                    if (shouldStop.get()) {
-                                        LogManager.logI(TAG, "[TTS] TTS generation cancelled (stop requested before start)");
-                                        return;
-                                    }
-                                    
-                                    // Notify TTS generation start
-                                    if (callback != null) {
-                                        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-                                            callback.onToken("\n\n[TTS_START]");
-                                        });
-                                    }
-                                    
-                                    executorService.submit(() -> {
-                                        // Check stop flag again in TTS thread
-                                        if (shouldStop.get()) {
-                                            LogManager.logI(TAG, "[TTS] TTS generation cancelled (stop requested in TTS thread)");
-                                            if (callback != null) {
-                                                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-                                                    callback.onToken("\n\n[TTS_END]");
-                                                });
-                                            }
-                                            return;
-                                        }
-                                        
-                                        generateExternalTts(responseText, chatFolderPath, (audioPath, error) -> {
-                                            if (audioPath != null && callback != null) {
-                                                LogManager.logI(TAG, "[TTS] External TTS audio generated: " + audioPath);
-                                                // CRITICAL: callback must be called on main thread for UI safety
-                                                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-                                                    callback.onToken("\n\n[AUDIO:" + audioPath + "]");
-                                                    callback.onToken("\n\n[TTS_END]");
-                                                });
-                                            } else if (error != null) {
-                                                LogManager.logE(TAG, "[TTS] External TTS generation failed (" + currentTtsModelSelection + ")", error);
-                                                showToast(R.string.toast_tts_generation_failed);
-                                                // Notify TTS end even on error
-                                                if (callback != null) {
-                                                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-                                                        callback.onToken("\n\n[TTS_END]");
-                                                    });
-                                                }
-                                            }
-                                        });
-                                    });
-                                } else {
-                                    LogManager.logW(TAG, "[TTS] External TTS skipped: no chat folder path");
-                                }
                             }
-                            // Scenario 1 & 4: (Omni or Non-Omni) + None → No audio generation (intentional)
                             
-                            isGenerating.set(false);
+                            // Scenario 3 & 6: External TTS → TTS processing thread is already running
+                            // It will consume sentence queue and notify UI when done
                             
-                            if (callback != null) {
-                                String perfStats = getPerformanceStats();
-                                callback.onToken(perfStats);
-                                callback.onComplete(fullResponseBuilder.toString() + perfStats);
+                            // For non-TTS scenarios, mark complete immediately
+                            if (!ttsEnabled) {
+                                // Scenario 1 & 4: (Omni or Non-Omni) + None → No audio generation
+                                // Scenario 2: Omni + Native → Native TTS already handled above
+                                isGenerating.set(false);
+                                if (callback != null) {
+                                    String perfStats = getPerformanceStats();
+                                    callback.onToken(perfStats);
+                                    callback.onComplete(fullResponseBuilder.toString() + perfStats);
+                                }
                             }
                         }
                         
@@ -1139,10 +1239,12 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     /**
-     * Calculate token generation rate
+     * Calculate token generation rate (LLM only, excluding TTS time)
      */
     private double calculateTokenRate() {
-        long elapsedTime = inferenceStartTime > 0 ? System.currentTimeMillis() - inferenceStartTime : 0;
+        // Use inferenceEndTime if available (LLM completed), otherwise use current time
+        long endTime = inferenceEndTime > 0 ? inferenceEndTime : System.currentTimeMillis();
+        long elapsedTime = inferenceStartTime > 0 ? endTime - inferenceStartTime : 0;
         if (elapsedTime > 0 && currentSessionTokens.get() > 0) {
             return currentSessionTokens.get() * 1000.0 / elapsedTime;
         }
@@ -1154,7 +1256,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
      */
     public String getPerformanceStats() {
         double tokenRate = calculateTokenRate();
-        long elapsedTime = inferenceStartTime > 0 ? System.currentTimeMillis() - inferenceStartTime : 0;
+        // Use inferenceEndTime for accurate LLM-only time (excluding TTS)
+        long endTime = inferenceEndTime > 0 ? inferenceEndTime : System.currentTimeMillis();
+        long elapsedTime = inferenceStartTime > 0 ? endTime - inferenceStartTime : 0;
         
         // Get JVM memory info
         long jvmMaxMemory = runtime.maxMemory();
@@ -1775,6 +1879,311 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     /**
+     * Start TTS processing thread that consumes sentence queue
+     * Called when External TTS is enabled at the start of inference
+     * 
+     * @param outputDir Output directory for final merged audio file
+     * @param autoPlay Whether to enable auto-play for streaming audio
+     * @param callback Callback for UI updates
+     */
+    private void startTtsProcessingThread(String outputDir, boolean autoPlay,
+                                          LocalLlmHandler.StreamingCallback callback) {
+        LogManager.logI(TAG, "[TTS] Starting TTS processing thread (lazy loading)");
+        
+        // NOTE: TTS will be loaded lazily in consumer thread when first sentence arrives
+        // This avoids loading TTS if inference fails or is interrupted
+        
+        // NOTE: Temp directory already cleaned in performHistoryInference() at start
+        final String tempDir = context.getCacheDir().getAbsolutePath() + "/tts_temp";
+        
+        // Create queues and state variables
+        final java.util.concurrent.BlockingQueue<String> playbackQueue = 
+            new java.util.concurrent.LinkedBlockingQueue<>();
+        final java.util.List<String> allAudioFiles = 
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+        final java.util.concurrent.atomic.AtomicBoolean ttsCompleted = 
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+        final long sessionTimestamp = System.currentTimeMillis();
+        
+        // Start playback thread (if auto-play enabled)
+        if (autoPlay) {
+            startPlaybackThread(playbackQueue, ttsCompleted);
+        }
+        
+        // Start TTS consumer thread
+        startTtsConsumerThread(outputDir, tempDir, sessionTimestamp,
+                              playbackQueue, allAudioFiles, ttsCompleted,
+                              autoPlay, callback);
+    }
+    
+    /**
+     * Start playback thread for auto-play
+     * Consumes playback queue and plays audio files sequentially
+     * 
+     * @param playbackQueue Queue of audio file paths to play
+     * @param ttsCompleted Flag indicating TTS processing is complete
+     */
+    private void startPlaybackThread(java.util.concurrent.BlockingQueue<String> playbackQueue,
+                                     java.util.concurrent.atomic.AtomicBoolean ttsCompleted) {
+        executorService.submit(() -> {
+            try {
+                AudioPlayerHelper player = new AudioPlayerHelper();
+                int playedCount = 0;
+                
+                LogManager.logI(TAG, "[TTS_PLAYBACK] Playback thread started");
+                
+                while (!ttsCompleted.get() || !playbackQueue.isEmpty()) {
+                    // Check stop flag
+                    if (shouldStop.get()) {
+                        LogManager.logI(TAG, "[TTS_PLAYBACK] Playback cancelled");
+                        player.release();
+                        break;
+                    }
+                    
+                    // Poll audio file from playback queue
+                    String audioPath = playbackQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    
+                    if (audioPath != null) {
+                        playedCount++;
+                        final int currentIndex = playedCount;
+                        LogManager.logI(TAG, "[TTS_PLAYBACK] Playing #" + currentIndex + ": " + audioPath);
+                        
+                        // Play audio synchronously
+                        java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+                        player.prepare(new File(audioPath), new AudioPlayerHelper.PlaybackCallback() {
+                            @Override
+                            public void onPlaybackStarted() {
+                                LogManager.logI(TAG, "[TTS_PLAYBACK] Started #" + currentIndex);
+                            }
+                            
+                            @Override
+                            public void onProgressUpdate(int currentMs, int totalMs) {
+                                // No UI update needed
+                            }
+                            
+                            @Override
+                            public void onPlaybackCompleted() {
+                                LogManager.logI(TAG, "[TTS_PLAYBACK] Completed #" + currentIndex);
+                                latch.countDown();
+                            }
+                            
+                            @Override
+                            public void onPlaybackError(String error) {
+                                LogManager.logE(TAG, "[TTS_PLAYBACK] Error #" + currentIndex + ": " + error);
+                                latch.countDown();
+                            }
+                        });
+                        
+                        Thread.sleep(500);  // Wait for prepare
+                        player.start();
+                        latch.await();  // Wait for completion
+                        
+                    } else if (ttsCompleted.get()) {
+                        // TTS completed and queue is empty, exit
+                        LogManager.logI(TAG, "[TTS_PLAYBACK] All " + playedCount + " files played");
+                        break;
+                    }
+                    // Otherwise, continue waiting for more audio files
+                }
+                
+                player.release();
+                LogManager.logI(TAG, "[TTS_PLAYBACK] Playback thread finished");
+                
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TTS_PLAYBACK] Playback thread error", e);
+            }
+        });
+    }
+    
+    /**
+     * Start TTS consumer thread that processes sentence queue
+     * Consumes sentences from queue, generates audio, and enqueues for playback
+     * 
+     * @param outputDir Output directory for final merged audio
+     * @param tempDir Temporary directory for audio segments
+     * @param sessionTimestamp Session timestamp for file naming
+     * @param playbackQueue Queue for playback thread
+     * @param allAudioFiles List to track all generated audio files
+     * @param ttsCompleted Flag to mark TTS processing complete
+     * @param autoPlay Whether auto-play is enabled
+     * @param callback Callback for UI updates
+     */
+    private void startTtsConsumerThread(String outputDir, String tempDir,
+                                       long sessionTimestamp,
+                                       java.util.concurrent.BlockingQueue<String> playbackQueue,
+                                       java.util.List<String> allAudioFiles,
+                                       java.util.concurrent.atomic.AtomicBoolean ttsCompleted,
+                                       boolean autoPlay,
+                                       LocalLlmHandler.StreamingCallback callback) {
+        executorService.submit(() -> {
+            try {
+                int processedCount = 0;
+                boolean ttsLoaded = false;  // Lazy loading flag
+                
+                LogManager.logI(TAG, "[TTS_CONSUMER] Consumer thread started (lazy loading mode)");
+                
+                // Consume sentence queue
+                while (true) {
+                    // Check stop flag
+                    if (shouldStop.get()) {
+                        LogManager.logI(TAG, "[TTS_CONSUMER] Cancelled at sentence " + processedCount);
+                        ttsCompleted.set(true);
+                        break;
+                    }
+                    
+                    // Poll sentence from queue
+                    String sentence = sentenceQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS);
+                    
+                    if (sentence == null) {
+                        // Check if all sentences are processed
+                        if (sentenceQueueCompleted.get() && sentenceQueue.isEmpty()) {
+                            LogManager.logI(TAG, "[TTS_CONSUMER] All " + processedCount + " sentences processed");
+                            break;
+                        }
+                        continue;  // Wait for more sentences
+                    }
+                    
+                    // ========== Lazy load TTS on first sentence ==========
+                    if (!ttsLoaded) {
+                        LogManager.logI(TAG, "[TTS_CONSUMER] First sentence arrived, loading TTS on-demand...");
+                        if (!ensureExternalTtsLoaded()) {
+                            LogManager.logE(TAG, "[TTS_CONSUMER] Failed to load TTS, aborting");
+                            ttsCompleted.set(true);
+                            
+                            // Notify UI on error
+                            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                                callback.onToken("\n\n[TTS_END]");
+                                isGenerating.set(false);
+                                String perfStats = getPerformanceStats();
+                                callback.onToken(perfStats);
+                                callback.onComplete(fullResponseBuilder.toString() + perfStats);
+                            });
+                            break;
+                        }
+                        ttsLoaded = true;
+                        LogManager.logI(TAG, "[TTS_CONSUMER] TTS loaded successfully");
+                    }
+                    // =====================================================
+                    
+                    // Process sentence
+                    processedCount++;
+                    LogManager.logI(TAG, "[TTS_CONSUMER] Processing sentence #" + processedCount + ": " +
+                        (sentence.length() > 50 ? sentence.substring(0, 50) + "..." : sentence));
+                    
+                    // ========== Error handling for TTS processing ==========
+                    try {
+                        if (externalTtsService == null) {
+                            LogManager.logE(TAG, "[TTS_CONSUMER] TTS service is null at sentence #" + processedCount);
+                            continue;  // Skip this sentence
+                        }
+                        
+                        long startTime = System.currentTimeMillis();
+                        short[] audioSamples = externalTtsService.process(sentence, 0);
+                        long duration = System.currentTimeMillis() - startTime;
+                    
+                        if (audioSamples == null || audioSamples.length == 0) {
+                            LogManager.logW(TAG, "[TTS_CONSUMER] Sentence #" + processedCount + " returned empty audio");
+                            continue;
+                        }
+                        
+                        LogManager.logI(TAG, String.format("[TTS_CONSUMER] Sentence #%d: %d samples (%.2f sec) in %d ms",
+                            processedCount, audioSamples.length, audioSamples.length / 44100.0, duration));
+                        
+                        // Save to temp file
+                        String tempPath = String.format("%s/tts_temp_%d_%03d.wav",
+                                                       tempDir, sessionTimestamp, processedCount - 1);
+                        
+                        if (saveWavFile(tempPath, audioSamples, 44100)) {
+                            File audioFile = new File(tempPath);
+                            LogManager.logI(TAG, String.format("[TTS_CONSUMER] Saved to temp: %s (%d bytes)",
+                                tempPath, audioFile.length()));
+                            
+                            allAudioFiles.add(tempPath);
+                            
+                            // Add to playback queue if auto-play enabled
+                            if (autoPlay) {
+                                playbackQueue.put(tempPath);
+                                LogManager.logI(TAG, "[TTS_CONSUMER] Added to playback queue");
+                            }
+                        } else {
+                            LogManager.logE(TAG, "[TTS_CONSUMER] Failed to save sentence #" + processedCount);
+                        }
+                        
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[TTS_CONSUMER] Exception processing sentence #" + processedCount, e);
+                        // Continue with next sentence instead of aborting
+                        continue;
+                    }
+                    // =======================================================
+                }
+                
+                // Merge audio files
+                String finalPath = String.format("%s/audio_%d_ai.wav", outputDir, sessionTimestamp);
+                
+                if (!allAudioFiles.isEmpty()) {
+                    LogManager.logI(TAG, "[TTS_FINALIZER] Merging " + allAudioFiles.size() + " file(s)");
+                    
+                    if (mergeAudioFilesToPath(allAudioFiles, finalPath)) {
+                        LogManager.logI(TAG, "[TTS_FINALIZER] Final audio saved: " + finalPath);
+                        
+                        // Notify UI
+                        final String finalAudioPath = finalPath;
+                        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                            callback.onToken("\n\n[AUDIO:" + finalAudioPath + "]");
+                            callback.onToken("\n\n[TTS_END]");
+                            
+                            isGenerating.set(false);
+                            String perfStats = getPerformanceStats();
+                            callback.onToken(perfStats);
+                            callback.onComplete(fullResponseBuilder.toString() + perfStats);
+                        });
+                    } else {
+                        LogManager.logE(TAG, "[TTS_FINALIZER] Failed to merge audio files");
+                        
+                        // Notify UI even on merge failure
+                        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                            callback.onToken("\n\n[TTS_END]");
+                            isGenerating.set(false);
+                            String perfStats = getPerformanceStats();
+                            callback.onToken(perfStats);
+                            callback.onComplete(fullResponseBuilder.toString() + perfStats);
+                        });
+                    }
+                } else {
+                    LogManager.logW(TAG, "[TTS_FINALIZER] No audio files generated");
+                    
+                    // Notify UI even if no audio generated
+                    new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                        callback.onToken("\n\n[TTS_END]");
+                        isGenerating.set(false);
+                        String perfStats = getPerformanceStats();
+                        callback.onToken(perfStats);
+                        callback.onComplete(fullResponseBuilder.toString() + perfStats);
+                    });
+                }
+                
+                // Mark TTS completed
+                ttsCompleted.set(true);
+                LogManager.logI(TAG, "[TTS_FINALIZER] TTS processing completed");
+                
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TTS_CONSUMER] Consumer thread error", e);
+                ttsCompleted.set(true);
+                
+                // Notify UI on error
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    callback.onToken("\n\n[TTS_END]");
+                    
+                    isGenerating.set(false);
+                    String perfStats = getPerformanceStats();
+                    callback.onToken(perfStats);
+                    callback.onComplete(fullResponseBuilder.toString() + perfStats);
+                });
+            }
+        });
+    }
+    
+    /**
      * Generate TTS audio using external model (uses MNN TTS Framework)
      * @param text Full text to synthesize
      * @param outputDir Output directory for audio files
@@ -1900,6 +2309,80 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             (byte)(value & 0xFF),
             (byte)((value >> 8) & 0xFF)
         };
+    }
+    
+    /**
+     * Merge multiple WAV files into a single file at specified path
+     * @param audioPaths List of WAV file paths to merge
+     * @param outputPath Output file path
+     * @return true if successful, false otherwise
+     */
+    private boolean mergeAudioFilesToPath(java.util.List<String> audioPaths, String outputPath) {
+        if (audioPaths == null || audioPaths.isEmpty()) {
+            return false;
+        }
+        
+        if (audioPaths.size() == 1) {
+            // Single file: just copy
+            try {
+                java.nio.file.Files.copy(
+                    new File(audioPaths.get(0)).toPath(),
+                    new File(outputPath).toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                );
+                return true;
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TTS_MERGER] Failed to copy single file", e);
+                return false;
+            }
+        }
+        
+        try {
+            // Read all audio samples
+            java.util.List<short[]> allSamples = new java.util.ArrayList<>();
+            int totalSamples = 0;
+            int sampleRate = 44100;  // Assume all files have same sample rate
+            
+            for (String path : audioPaths) {
+                try (java.io.FileInputStream fis = new java.io.FileInputStream(path)) {
+                    // Skip WAV header (44 bytes)
+                    fis.skip(44);
+                    
+                    // Read PCM data
+                    byte[] buffer = new byte[fis.available()];
+                    fis.read(buffer);
+                    
+                    // Convert bytes to shorts
+                    short[] samples = new short[buffer.length / 2];
+                    for (int i = 0; i < samples.length; i++) {
+                        samples[i] = (short)((buffer[i * 2] & 0xFF) | ((buffer[i * 2 + 1] & 0xFF) << 8));
+                    }
+                    
+                    allSamples.add(samples);
+                    totalSamples += samples.length;
+                }
+            }
+            
+            // Merge all samples
+            short[] mergedSamples = new short[totalSamples];
+            int offset = 0;
+            for (short[] samples : allSamples) {
+                System.arraycopy(samples, 0, mergedSamples, offset, samples.length);
+                offset += samples.length;
+            }
+            
+            // Save merged file to specified path
+            if (saveWavFile(outputPath, mergedSamples, sampleRate)) {
+                LogManager.logI(TAG, String.format("[TTS_MERGER] Merged %d files (%d samples, %.2f sec) to %s",
+                    audioPaths.size(), totalSamples, totalSamples / (float)sampleRate, outputPath));
+                return true;
+            }
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TTS_MERGER] Failed to merge audio files", e);
+        }
+        
+        return false;
     }
     
     // Remove old sentence-based generation code

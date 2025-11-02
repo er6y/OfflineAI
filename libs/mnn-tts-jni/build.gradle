@@ -6,6 +6,8 @@ plugins {
 android {
     namespace 'com.offlineai.mnn.tts'
     compileSdk 35
+    // CRITICAL: Must match MNN upstream to avoid libc++_shared.so conflicts
+    ndkVersion "27.2.12479018"
 
     defaultConfig {
         minSdk 26
@@ -19,7 +21,8 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags "-std=c++17"
-                arguments "-DANDROID_STL=c++_shared"
+                // CRITICAL: Use c++_static to avoid std::locale conflicts (like ChatMNN TTS SDK)
+                arguments "-DANDROID_STL=c++_static"
             }
         }
     }
