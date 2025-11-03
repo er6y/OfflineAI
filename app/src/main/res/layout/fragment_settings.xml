@@ -679,15 +679,18 @@
             <TextView
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
+                android:layout_weight="0.4"
                 android:text="@string/settings_asr_model"
-                android:textSize="16sp" />
+                android:textSize="16sp"
+                android:minWidth="80dp" />
 
             <Spinner
                 android:id="@+id/spinnerAsrModel"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:minWidth="150dp" />
+                android:layout_weight="0.6"
+                android:ellipsize="end"
+                android:singleLine="true" />
         </LinearLayout>
 
         <!-- TTS语音合成设置 -->
@@ -711,24 +714,29 @@
             <TextView
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
+                android:layout_weight="0.4"
                 android:text="@string/settings_tts_model"
-                android:textSize="16sp" />
+                android:textSize="16sp"
+                android:minWidth="80dp" />
 
             <Spinner
                 android:id="@+id/spinnerTtsModel"
-                android:layout_width="wrap_content"
+                android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:minWidth="150dp" />
+                android:layout_weight="0.6"
+                android:ellipsize="end"
+                android:singleLine="true" />
         </LinearLayout>
 
         <!-- TTS DiT步数 -->
         <LinearLayout
+            android:id="@+id/layoutTtsDitSteps"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:layout_marginBottom="8dp">
+            android:layout_marginBottom="8dp"
+            android:visibility="gone">
 
             <TextView
                 android:layout_width="100dp"
@@ -756,6 +764,30 @@
                 android:layout_marginStart="0dp" />
         </LinearLayout>
 
+        <!-- TTS 角色选择 -->
+        <LinearLayout
+            android:id="@+id/layoutTtsSpeaker"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/settings_tts_speaker"
+                android:textSize="16sp" />
+
+            <Spinner
+                android:id="@+id/spinnerTtsSpeaker"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="100dp" />
+        </LinearLayout>
+
         <!-- TTS自动播放开关 -->
         <androidx.appcompat.widget.SwitchCompat
             android:id="@+id/switchTtsAutoPlay"
@@ -763,7 +795,7 @@
             android:layout_height="wrap_content"
             android:text="@string/settings_tts_auto_play"
             android:layout_marginTop="16dp"
-            android:layout_marginBottom="4dp" />
+            android:layout_marginBottom="8dp" />
 
         <TextView
             android:layout_width="match_parent"
@@ -771,8 +803,82 @@
             android:text="@string/settings_tts_auto_play_summary"
             android:textSize="12sp"
             android:textColor="@android:color/darker_gray"
-            android:layout_marginStart="16dp"
-            android:layout_marginBottom="16dp" />
+            android:paddingStart="0dp"
+            android:paddingEnd="0dp"
+            android:layout_marginTop="0dp"
+            android:layout_marginBottom="0dp" />
+
+        <!-- TTS 语速 -->
+        <LinearLayout
+            android:id="@+id/layoutTtsSpeed"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/settings_tts_speed"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarTtsSpeed"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:max="150"
+                android:progress="100"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp" />
+
+            <TextView
+                android:id="@+id/textViewTtsSpeedValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="1.0"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+
+        <!-- TTS 音调 -->
+        <LinearLayout
+            android:id="@+id/layoutTtsPitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/settings_tts_pitch"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarTtsPitch"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:max="150"
+                android:progress="100"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp" />
+
+            <TextView
+                android:id="@+id/textViewTtsPitchValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="1.0"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
 
         <!-- 全局设置 -->
         <TextView

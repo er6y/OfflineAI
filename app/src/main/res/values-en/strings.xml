@@ -380,7 +380,7 @@
     <string name="hint_kb_dir_path">Knowledge base directory path</string>
 
     <!-- UI text -->
-    <string name="text_new_conversation">New Conversation</string>
+    <string name="text_new_conversation">New</string>
     <string name="text_thinking_mode">Thinking Mode</string>
     <string name="label_llm_api_url">API URL:</string>
     <string name="label_llm_api_key">API Key:</string>
@@ -1097,6 +1097,24 @@
     <string name="settings_tts_dit_steps_summary">DiT diffusion steps, higher values improve quality but reduce speed</string>
     <string name="settings_tts_auto_play">TTS Auto Play</string>
     <string name="settings_tts_auto_play_summary">Auto play AI generated audio</string>
+    <string name="settings_tts_speaker">Speaker</string>
+    <string name="settings_tts_speed">Speech Rate</string>
+    <string name="settings_tts_pitch">Pitch</string>
+    <string name="settings_tts_model_system">System</string>
+    
+    <!-- Speaker Options -->
+    <string-array name="tts_speaker_options">
+        <item>Speaker 0</item>
+        <item>Speaker 1</item>
+        <item>Speaker 2</item>
+        <item>Speaker 3</item>
+        <item>Speaker 4</item>
+        <item>Speaker 5</item>
+        <item>Speaker 6</item>
+        <item>Speaker 7</item>
+        <item>Speaker 8</item>
+        <item>Speaker 9</item>
+    </string-array>
     
     <!-- TTS Toast messages -->
     <string name="toast_tts_generation_failed">TTS generation failed</string>

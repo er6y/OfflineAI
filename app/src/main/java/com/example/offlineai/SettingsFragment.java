@@ -17,6 +17,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -100,9 +101,18 @@ public class SettingsFragment extends Fragment {
     
     // TTS语音合成设置
     private Spinner spinnerTtsModel;
+    private LinearLayout layoutTtsDitSteps;
     private SeekBar seekBarTtsDitSteps;
     private TextView textViewTtsDitStepsValue;
+    private LinearLayout layoutTtsSpeaker;
+    private Spinner spinnerTtsSpeaker;
     private SwitchCompat switchTtsAutoPlay;
+    private LinearLayout layoutTtsSpeed;
+    private SeekBar seekBarTtsSpeed;
+    private TextView textViewTtsSpeedValue;
+    private LinearLayout layoutTtsPitch;
+    private SeekBar seekBarTtsPitch;
+    private TextView textViewTtsPitchValue;
     
     // Activity Result Launchers
     private ActivityResultLauncher<Intent> dataRootPathLauncher;
@@ -200,9 +210,18 @@ public class SettingsFragment extends Fragment {
         // ASR/TTS设置控件
         spinnerAsrModel = view.findViewById(R.id.spinnerAsrModel);
         spinnerTtsModel = view.findViewById(R.id.spinnerTtsModel);
+        layoutTtsDitSteps = view.findViewById(R.id.layoutTtsDitSteps);
         seekBarTtsDitSteps = view.findViewById(R.id.seekBarTtsDitSteps);
         textViewTtsDitStepsValue = view.findViewById(R.id.textViewTtsDitStepsValue);
+        layoutTtsSpeaker = view.findViewById(R.id.layoutTtsSpeaker);
+        spinnerTtsSpeaker = view.findViewById(R.id.spinnerTtsSpeaker);
         switchTtsAutoPlay = view.findViewById(R.id.switchTtsAutoPlay);
+        layoutTtsSpeed = view.findViewById(R.id.layoutTtsSpeed);
+        seekBarTtsSpeed = view.findViewById(R.id.seekBarTtsSpeed);
+        textViewTtsSpeedValue = view.findViewById(R.id.textViewTtsSpeedValue);
+        layoutTtsPitch = view.findViewById(R.id.layoutTtsPitch);
+        seekBarTtsPitch = view.findViewById(R.id.seekBarTtsPitch);
+        textViewTtsPitchValue = view.findViewById(R.id.textViewTtsPitchValue);
         
         // 设置后端偏好Spinner适配器
         ArrayAdapter<String> backendAdapter = new ArrayAdapter<>(requireContext(), 
@@ -314,6 +333,8 @@ public class SettingsFragment extends Fragment {
         setupManualRepeatPenaltySeekBar();
         setupImagePreprocessSizeSeekBar();
         setupTtsDitStepsSeekBar();
+        setupTtsSpeedSeekBar();
+        setupTtsPitchSeekBar();
         // setupImageEncodingThreadsSeekBar已移除（MNN不支持独立配置）
         
         // 设置Spinner监听器
@@ -359,6 +380,18 @@ public class SettingsFragment extends Fragment {
                 String model = parent.getItemAtPosition(position).toString();
                 // Note: TTS model uses setString directly as it's a simple string value
                 ConfigManager.setString(requireContext(), ConfigManager.KEY_TTS_MODEL, model);
+                // Update TTS settings visibility based on selected model
+                updateTtsSettingsVisibility(model);
+            }
+            
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        
+        spinnerTtsSpeaker.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                ConfigManager.setTtsSpeakerId(requireContext(), position);
             }
             
             @Override
@@ -726,8 +759,10 @@ public class SettingsFragment extends Fragment {
         File ttsDir = new File(ttsPath);
         java.util.List<String> ttsModels = new java.util.ArrayList<>();
         ttsModels.add(getString(R.string.settings_tts_model_none)); // "无" or "None"
+        ttsModels.add(getString(R.string.settings_tts_model_system)); // "系统" or "System"
         ttsModels.add(getString(R.string.settings_tts_model_native_omni)); // "原生(Omni)" or "Native (Omni)"
         
+        // Dynamically scan TTS model directory and add discovered models
         if (ttsDir.exists() && ttsDir.isDirectory()) {
             File[] ttsDirs = ttsDir.listFiles(File::isDirectory);
             if (ttsDirs != null) {
@@ -741,6 +776,12 @@ public class SettingsFragment extends Fragment {
             android.R.layout.simple_spinner_item, ttsModels);
         ttsAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinnerTtsModel.setAdapter(ttsAdapter);
+        
+        // Setup TTS speaker spinner
+        ArrayAdapter<CharSequence> speakerAdapter = ArrayAdapter.createFromResource(context,
+            R.array.tts_speaker_options, android.R.layout.simple_spinner_item);
+        speakerAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerTtsSpeaker.setAdapter(speakerAdapter);
     }
     
     private void setupTtsDitStepsSeekBar() {
@@ -764,6 +805,52 @@ public class SettingsFragment extends Fragment {
     private void updateTtsDitStepsText(int progress) {
         int steps = progress + 1; // Convert to 1-10 range
         textViewTtsDitStepsValue.setText(getString(R.string.settings_tts_dit_steps_value, steps));
+    }
+    
+    private void setupTtsSpeedSeekBar() {
+        seekBarTtsSpeed.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateTtsSpeedText(progress);
+            }
+            
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                float speed = seekBar.getProgress() / 100.0f;
+                ConfigManager.setTtsSpeed(requireContext(), speed);
+            }
+        });
+    }
+    
+    private void updateTtsSpeedText(int progress) {
+        float speed = progress / 100.0f; // Convert to 0.5-2.0 range
+        textViewTtsSpeedValue.setText(String.format("%.1f", speed));
+    }
+    
+    private void setupTtsPitchSeekBar() {
+        seekBarTtsPitch.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateTtsPitchText(progress);
+            }
+            
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                float pitch = seekBar.getProgress() / 100.0f;
+                ConfigManager.setTtsPitch(requireContext(), pitch);
+            }
+        });
+    }
+    
+    private void updateTtsPitchText(int progress) {
+        float pitch = progress / 100.0f; // Convert to 0.5-2.0 range
+        textViewTtsPitchValue.setText(String.format("%.1f", pitch));
     }
     
     private void updateChunkSizeText(int progress) {
@@ -946,8 +1033,25 @@ public class SettingsFragment extends Fragment {
         seekBarTtsDitSteps.setProgress(ttsDitProgress);
         updateTtsDitStepsText(ttsDitProgress);
         
+        int ttsSpeakerId = ConfigManager.getTtsSpeakerId(ctx);
+        spinnerTtsSpeaker.setSelection(ttsSpeakerId);
+        
+        float ttsSpeed = ConfigManager.getTtsSpeed(ctx);
+        int ttsSpeedProgress = (int)(ttsSpeed * 100);
+        seekBarTtsSpeed.setProgress(ttsSpeedProgress);
+        updateTtsSpeedText(ttsSpeedProgress);
+        
+        float ttsPitch = ConfigManager.getTtsPitch(ctx);
+        int ttsPitchProgress = (int)(ttsPitch * 100);
+        seekBarTtsPitch.setProgress(ttsPitchProgress);
+        updateTtsPitchText(ttsPitchProgress);
+        
         boolean ttsAutoPlay = ConfigManager.getTtsAutoPlay(ctx);
         switchTtsAutoPlay.setChecked(ttsAutoPlay);
+        
+        // Update TTS settings visibility based on loaded model
+        // Reuse ttsModel variable from above (line 1020)
+        updateTtsSettingsVisibility(ttsModel);
         
         // Switches
         boolean debugMode = ConfigManager.getDebugMode(ctx);
@@ -958,6 +1062,33 @@ public class SettingsFragment extends Fragment {
     }
     
     private void saveSettings() {}
+    
+    /**
+     * Update TTS settings visibility based on selected model
+     * @param selectedModel Selected TTS model name
+     */
+    private void updateTtsSettingsVisibility(String selectedModel) {
+        // Get localized strings for comparison
+        String noneOption = getString(R.string.settings_tts_model_none);
+        String systemOption = getString(R.string.settings_tts_model_system);
+        String omniOption = getString(R.string.settings_tts_model_native_omni);
+        
+        // DiT steps: Only show for Omni (bert-vits2 uses VITS architecture, not Diffusion)
+        boolean isOmni = omniOption.equals(selectedModel);
+        layoutTtsDitSteps.setVisibility(isOmni ? View.VISIBLE : View.GONE);
+        
+        // Speaker ID: External TTS models and Omni (currently hidden, to be implemented)
+        boolean isExternalTts = !noneOption.equals(selectedModel) && 
+                               !systemOption.equals(selectedModel) && 
+                               !omniOption.equals(selectedModel);
+        // TODO: Enable when speaker ID is implemented in mnn-tts and Omni
+        layoutTtsSpeaker.setVisibility(View.GONE); // (isExternalTts || isOmni) ? View.VISIBLE : View.GONE
+        
+        // Speed/Pitch: Only show for System TTS
+        boolean isSystemTts = systemOption.equals(selectedModel);
+        layoutTtsSpeed.setVisibility(isSystemTts ? View.VISIBLE : View.GONE);
+        layoutTtsPitch.setVisibility(isSystemTts ? View.VISIBLE : View.GONE);
+    }
     
     private void handleDirectorySelection(Uri uri, EditText targetEditText) {
         if (uri != null && getContext() != null) {

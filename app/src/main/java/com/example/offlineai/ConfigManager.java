@@ -144,6 +144,9 @@ public class ConfigManager {
     public static final String KEY_TTS_MODEL = "tts_model"; // TTS模型选择
     public static final String KEY_TTS_DIT_STEPS = "tts_dit_steps"; // DiT步数 (1-10)
     public static final String KEY_TTS_AUTO_PLAY = "tts_auto_play"; // TTS自动播放
+    public static final String KEY_TTS_SPEAKER_ID = "tts_speaker_id"; // TTS角色ID (0-9)
+    public static final String KEY_TTS_SPEED = "tts_speed"; // TTS语速 (0.5-2.0)
+    public static final String KEY_TTS_PITCH = "tts_pitch"; // TTS音调 (0.5-2.0)
     
     // 语言设置配置键
     public static final String KEY_LANGUAGE = "language"; // 语言设置
@@ -1585,6 +1588,41 @@ public class ConfigManager {
     }
 
     /**
+     * Get float configuration value
+     * @param context Context
+     * @param key Configuration key
+     * @param defaultValue Default value
+     * @return Configuration value
+     */
+    public static float getFloat(Context context, String key, float defaultValue) {
+        try {
+            JSONObject config = loadConfig(context);
+            if (config.has(key)) {
+                return (float) config.getDouble(key);
+            }
+        } catch (JSONException e) {
+            LogManager.logE(TAG, "Get float config failed: " + key, e);
+        }
+        return defaultValue;
+    }
+
+    /**
+     * Set float configuration value
+     * @param context Context
+     * @param key Configuration key
+     * @param value Configuration value
+     */
+    public static void setFloat(Context context, String key, float value) {
+        try {
+            JSONObject config = loadConfig(context);
+            config.put(key, (double) value);
+            saveConfig(context, config);
+        } catch (JSONException e) {
+            LogManager.logE(TAG, "Set float config failed: " + key, e);
+        }
+    }
+
+    /**
      * 保存API Key
      * @param context 上下文
      * @param apiUrl API URL
@@ -1903,41 +1941,6 @@ public class ConfigManager {
             }
         } catch (JSONException e) {
             LogManager.logE(TAG, "删除API URL失败: " + apiUrl, e);
-        }
-    }
-
-    /**
-     * 获取浮点数配置
-     * @param context 上下文
-     * @param key 配置键
-     * @param defaultValue 默认值
-     * @return 配置值
-     */
-    public static float getFloat(Context context, String key, float defaultValue) {
-        try {
-            JSONObject config = loadConfig(context);
-            if (config.has(key)) {
-                return (float)config.getDouble(key);
-            }
-        } catch (JSONException e) {
-            LogManager.logE(TAG, "获取浮点数配置失败: " + key, e);
-        }
-        return defaultValue;
-    }
-
-    /**
-     * 设置浮点数配置
-     * @param context 上下文
-     * @param key 配置键
-     * @param value 配置值
-     */
-    public static void setFloat(Context context, String key, float value) {
-        try {
-            JSONObject config = loadConfig(context);
-            config.put(key, value);
-            saveConfig(context, config);
-        } catch (JSONException e) {
-            LogManager.logE(TAG, "设置浮点数配置失败: " + key, e);
         }
     }
 
@@ -2261,6 +2264,62 @@ public class ConfigManager {
     
     private static SharedPreferences getSharedPreferences(Context context) {
         return context.getSharedPreferences("config", Context.MODE_PRIVATE);
+    }
+
+    // ========== TTS Parameter Getters/Setters ==========
+
+    /**
+     * Get TTS speaker ID (0-9)
+     * @param context Context
+     * @return Speaker ID
+     */
+    public static int getTtsSpeakerId(Context context) {
+        return getInt(context, KEY_TTS_SPEAKER_ID, 0);
+    }
+
+    /**
+     * Set TTS speaker ID
+     * @param context Context
+     * @param id Speaker ID (0-9)
+     */
+    public static void setTtsSpeakerId(Context context, int id) {
+        setInt(context, KEY_TTS_SPEAKER_ID, id);
+    }
+
+    /**
+     * Get TTS speech rate (0.5-2.0)
+     * @param context Context
+     * @return Speech rate
+     */
+    public static float getTtsSpeed(Context context) {
+        return getFloat(context, KEY_TTS_SPEED, 1.0f);
+    }
+
+    /**
+     * Set TTS speech rate
+     * @param context Context
+     * @param speed Speech rate (0.5-2.0)
+     */
+    public static void setTtsSpeed(Context context, float speed) {
+        setFloat(context, KEY_TTS_SPEED, speed);
+    }
+
+    /**
+     * Get TTS pitch (0.5-2.0)
+     * @param context Context
+     * @return Pitch
+     */
+    public static float getTtsPitch(Context context) {
+        return getFloat(context, KEY_TTS_PITCH, 1.0f);
+    }
+
+    /**
+     * Set TTS pitch
+     * @param context Context
+     * @param pitch Pitch (0.5-2.0)
+     */
+    public static void setTtsPitch(Context context, float pitch) {
+        setFloat(context, KEY_TTS_PITCH, pitch);
     }
 }
 

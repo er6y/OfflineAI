@@ -137,6 +137,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private boolean externalTtsLoaded = false;  // Whether external TTS is loaded
     private boolean externalTtsLoadFailed = false;  // Whether external TTS load failed (avoid retry)
     private final AtomicBoolean externalTtsLoading = new AtomicBoolean(false);  // Loading flag
+    
+    // System TTS support (using Android TextToSpeech)
+    private com.example.offlineai.api.SystemTtsService systemTtsService = null;
+    private boolean systemTtsLoaded = false;
     private String currentTtsModelSelection = "";  // Current TTS model selection
     
     // Sentence boundary regex for streaming TTS
@@ -1067,8 +1071,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         String ttsModelSelection = ConfigManager.getString(context, ConfigManager.KEY_TTS_MODEL, 
             ConfigManager.DEFAULT_TTS_MODEL);
         String nativeOmniName = context.getString(R.string.settings_tts_model_native_omni);
+        String systemTtsName = context.getString(R.string.settings_tts_model_system);
         
-        // Determine TTS mode: Native Omni, External, or None
+        // Determine TTS mode: Native Omni, System, External, or None
         this.enableNativeTts = false;
         String noneOption = context.getString(R.string.settings_tts_model_none);
         
@@ -1084,54 +1089,29 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             builder.ditSolver(1);        // 1=Euler (fast), 4=RK4 (4x slower but better)
             LogManager.logI(TAG, "🔊 Native TTS enabled: dit_steps=" + ditSteps + ", dit_solver=1");
             
-            // Release external TTS if switching from external to native
-            if (ttsModelChanged && externalTtsService != null) {
-                try {
-                    externalTtsService.destroy();
-                    externalTtsService = null;
-                    externalTtsLoaded = false;
-                    externalTtsLoadFailed = false;
-                    LogManager.logI(TAG, "[TTS] External TTS released due to mode change to native");
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "[TTS] Error releasing TTS service", e);
-                }
-            }
+            // Release other TTS services
+            releaseOtherTtsServices(ttsModelChanged, false, false);
+            
+        } else if (systemTtsName.equals(ttsModelSelection)) {
+            // System TTS (Android TextToSpeech)
+            LogManager.logI(TAG, "🔊 System TTS selected (will lazy load)");
+            
+            // Release other TTS services
+            releaseOtherTtsServices(ttsModelChanged, true, false);
+            
         } else if (!noneOption.equals(ttsModelSelection) && !ttsModelSelection.isEmpty()) {
-            // External TTS model selected
+            // External TTS model selected (bert-vits2-MNN, etc.)
             LogManager.logI(TAG, "🔊 External TTS selected: " + ttsModelSelection + " (will lazy load)");
             
-            // Release old external TTS if model changed
-            if (ttsModelChanged && externalTtsService != null) {
-                try {
-                    externalTtsService.destroy();
-                    externalTtsService = null;
-                    externalTtsLoaded = false;
-                    externalTtsLoadFailed = false;  // Reset failed flag for new model
-                    LogManager.logI(TAG, "[TTS] External TTS released due to model change");
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "[TTS] Error releasing TTS service", e);
-                }
-            }
+            // Release other TTS services
+            releaseOtherTtsServices(ttsModelChanged, false, true);
+            
         } else {
             // TTS disabled
             LogManager.logI(TAG, "🔊 TTS disabled (user selected: " + ttsModelSelection + ")");
             
-            // Note: No need to set ditSteps=0 hack
-            // C++ layer controls TTS via enable_audio_output_ flag (like ChatMNN)
-            // TTS will not be generated because setTtsOutputPath(null) is called
-            
-            // Release external TTS if switching to disabled
-            if (ttsModelChanged && externalTtsService != null) {
-                try {
-                    externalTtsService.destroy();
-                    externalTtsService = null;
-                    externalTtsLoaded = false;
-                    externalTtsLoadFailed = false;
-                    LogManager.logI(TAG, "[TTS] External TTS released due to mode change to disabled");
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "[TTS] Error releasing TTS service", e);
-                }
-            }
+            // Release all TTS services
+            releaseOtherTtsServices(ttsModelChanged, false, false);
         }
         
         // Add temp path for weight mmap (not for kvcache)
@@ -1708,6 +1688,74 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     /**
+     * Release other TTS services when switching TTS mode
+     * @param ttsModelChanged Whether TTS model selection changed
+     * @param keepSystemTts Whether to keep System TTS
+     * @param keepExternalTts Whether to keep External TTS
+     */
+    private void releaseOtherTtsServices(boolean ttsModelChanged, boolean keepSystemTts, boolean keepExternalTts) {
+        if (!ttsModelChanged) {
+            return;  // No need to release if model didn't change
+        }
+        
+        // Release System TTS if not keeping it
+        if (!keepSystemTts && systemTtsService != null) {
+            try {
+                systemTtsService.shutdown();
+                systemTtsService = null;
+                systemTtsLoaded = false;
+                LogManager.logI(TAG, "[TTS] System TTS released");
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TTS] Error releasing System TTS", e);
+            }
+        }
+        
+        // Release External TTS if not keeping it
+        if (!keepExternalTts && externalTtsService != null) {
+            try {
+                externalTtsService.destroy();
+                externalTtsService = null;
+                externalTtsLoaded = false;
+                externalTtsLoadFailed = false;
+                LogManager.logI(TAG, "[TTS] External TTS released");
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TTS] Error releasing External TTS", e);
+            }
+        }
+    }
+    
+    /**
+     * Lazy load System TTS (thread-safe)
+     * @return true if loaded successfully
+     */
+    private synchronized boolean ensureSystemTtsLoaded() {
+        if (systemTtsLoaded && systemTtsService != null) {
+            return true;
+        }
+        
+        LogManager.logI(TAG, "[TTS] Loading System TTS...");
+        
+        try {
+            systemTtsService = new com.example.offlineai.api.SystemTtsService(context);
+            boolean success = systemTtsService.initialize();
+            
+            if (success) {
+                systemTtsLoaded = true;
+                LogManager.logI(TAG, "[TTS] ✅ System TTS loaded successfully");
+                return true;
+            } else {
+                LogManager.logE(TAG, "[TTS] ❌ Failed to initialize System TTS");
+                systemTtsService = null;
+                return false;
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TTS] ❌ Exception loading System TTS", e);
+            systemTtsService = null;
+            return false;
+        }
+    }
+    
+    /**
      * Lazy load external TTS model (thread-safe)
      * Loads bert-vits2-MNN as a standard MNN LLM model
      * 
@@ -1832,6 +1880,38 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             
             // Initialize TTS service with model directory
             // Note: We use reflection to call nativeLoadResourcesFromFile directly (it's synchronous)
+            // Build cache path: /cache/mnn/<model_name>/tts/
+            String modelName = ttsModelDir.getName();
+            File cacheDir = new File(context.getCacheDir(), "mnn/" + modelName + "/tts");
+            if (!cacheDir.exists()) {
+                cacheDir.mkdirs();
+            }
+            String cachePath = cacheDir.getAbsolutePath();
+            LogManager.logI(TAG, "[TTS] Cache path: " + cachePath);
+            
+            // Update config.json with cache_folder parameter (in-place modification)
+            File configFile = new File(ttsModelDir, "config.json");
+            if (configFile.exists()) {
+                try {
+                    // Read original config
+                    String configContent = new String(java.nio.file.Files.readAllBytes(configFile.toPath()));
+                    org.json.JSONObject config = new org.json.JSONObject(configContent);
+                    
+                    // Set cache_folder parameter
+                    config.put("cache_folder", cachePath);
+                    
+                    // Try to write back to original config.json
+                    try {
+                        java.nio.file.Files.write(configFile.toPath(), config.toString(2).getBytes());
+                        LogManager.logI(TAG, "[TTS] Updated config.json with cache_folder: " + cachePath);
+                    } catch (java.nio.file.AccessDeniedException e) {
+                        LogManager.logW(TAG, "[TTS] config.json is read-only, cache will use default location");
+                    }
+                } catch (Exception e) {
+                    LogManager.logW(TAG, "[TTS] Failed to update config.json, will use default cache", e);
+                }
+            }
+            
             LogManager.logI(TAG, "[TTS] Initializing TTS service with model dir: " + ttsModelDir.getAbsolutePath());
             
             try {
@@ -2046,7 +2126,20 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                     // ========== Lazy load TTS on first sentence ==========
                     if (!ttsLoaded) {
                         LogManager.logI(TAG, "[TTS_CONSUMER] First sentence arrived, loading TTS on-demand...");
-                        if (!ensureExternalTtsLoaded()) {
+                        
+                        // Determine which TTS to load based on current selection
+                        String systemTtsName = context.getString(R.string.settings_tts_model_system);
+                        boolean loadSuccess = false;
+                        
+                        if (systemTtsName.equals(currentTtsModelSelection)) {
+                            // Load System TTS
+                            loadSuccess = ensureSystemTtsLoaded();
+                        } else {
+                            // Load External TTS
+                            loadSuccess = ensureExternalTtsLoaded();
+                        }
+                        
+                        if (!loadSuccess) {
                             LogManager.logE(TAG, "[TTS_CONSUMER] Failed to load TTS, aborting");
                             ttsCompleted.set(true);
                             
@@ -2072,41 +2165,65 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                     
                     // ========== Error handling for TTS processing ==========
                     try {
-                        if (externalTtsService == null) {
-                            LogManager.logE(TAG, "[TTS_CONSUMER] TTS service is null at sentence #" + processedCount);
-                            continue;  // Skip this sentence
-                        }
-                        
                         long startTime = System.currentTimeMillis();
-                        short[] audioSamples = externalTtsService.process(sentence, 0);
-                        long duration = System.currentTimeMillis() - startTime;
-                    
-                        if (audioSamples == null || audioSamples.length == 0) {
-                            LogManager.logW(TAG, "[TTS_CONSUMER] Sentence #" + processedCount + " returned empty audio");
+                        
+                        // Get speed and pitch parameters from settings
+                        float speed = ConfigManager.getTtsSpeed(context);
+                        float pitch = ConfigManager.getTtsPitch(context);
+                        
+                        // Prepare output file path
+                        String tempPath = String.format("%s/tts_temp_%d_%03d.wav",
+                                                       tempDir, sessionTimestamp, processedCount - 1);
+                        File tempFile = new File(tempPath);
+                        
+                        // Use System TTS or External TTS based on current selection
+                        String systemTtsName = context.getString(R.string.settings_tts_model_system);
+                        boolean success = false;
+                        
+                        if (systemTtsName.equals(currentTtsModelSelection) && systemTtsService != null) {
+                            // System TTS: directly generate WAV file
+                            success = systemTtsService.synthesizeToFile(sentence, tempFile, speed, pitch);
+                            long duration = System.currentTimeMillis() - startTime;
+                            
+                            if (success) {
+                                LogManager.logI(TAG, String.format("[TTS_CONSUMER] Sentence #%d: System TTS in %d ms",
+                                    processedCount, duration));
+                                LogManager.logI(TAG, String.format("[TTS_CONSUMER] Saved to temp: %s (%d bytes)",
+                                    tempPath, tempFile.length()));
+                            }
+                            
+                        } else if (externalTtsService != null) {
+                            // External TTS: process() returns short[] samples
+                            short[] audioSamples = externalTtsService.process(sentence, 0);
+                            long duration = System.currentTimeMillis() - startTime;
+                            
+                            if (audioSamples != null && audioSamples.length > 0) {
+                                LogManager.logI(TAG, String.format("[TTS_CONSUMER] Sentence #%d: %d samples (%.2f sec) in %d ms",
+                                    processedCount, audioSamples.length, audioSamples.length / 44100.0, duration));
+                                
+                                // Save to WAV file
+                                success = saveWavFile(tempPath, audioSamples, 44100);
+                                if (success) {
+                                    LogManager.logI(TAG, String.format("[TTS_CONSUMER] Saved to temp: %s (%d bytes)",
+                                        tempPath, tempFile.length()));
+                                }
+                            }
+                        } else {
+                            LogManager.logE(TAG, "[TTS_CONSUMER] No TTS service available at sentence #" + processedCount);
                             continue;
                         }
                         
-                        LogManager.logI(TAG, String.format("[TTS_CONSUMER] Sentence #%d: %d samples (%.2f sec) in %d ms",
-                            processedCount, audioSamples.length, audioSamples.length / 44100.0, duration));
+                        if (!success) {
+                            LogManager.logE(TAG, "[TTS_CONSUMER] Failed to generate audio for sentence #" + processedCount);
+                            continue;
+                        }
                         
-                        // Save to temp file
-                        String tempPath = String.format("%s/tts_temp_%d_%03d.wav",
-                                                       tempDir, sessionTimestamp, processedCount - 1);
+                        // Add to file list and playback queue
+                        allAudioFiles.add(tempPath);
                         
-                        if (saveWavFile(tempPath, audioSamples, 44100)) {
-                            File audioFile = new File(tempPath);
-                            LogManager.logI(TAG, String.format("[TTS_CONSUMER] Saved to temp: %s (%d bytes)",
-                                tempPath, audioFile.length()));
-                            
-                            allAudioFiles.add(tempPath);
-                            
-                            // Add to playback queue if auto-play enabled
-                            if (autoPlay) {
-                                playbackQueue.put(tempPath);
-                                LogManager.logI(TAG, "[TTS_CONSUMER] Added to playback queue");
-                            }
-                        } else {
-                            LogManager.logE(TAG, "[TTS_CONSUMER] Failed to save sentence #" + processedCount);
+                        if (autoPlay) {
+                            playbackQueue.put(tempPath);
+                            LogManager.logI(TAG, "[TTS_CONSUMER] Added to playback queue");
                         }
                         
                     } catch (Exception e) {

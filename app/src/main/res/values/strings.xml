@@ -1115,6 +1115,24 @@
     <string name="settings_tts_dit_steps_summary">DiT扩散步数，值越大质量越好但速度越慢</string>
     <string name="settings_tts_auto_play">TTS自动播放</string>
     <string name="settings_tts_auto_play_summary">AI生成语音后自动播放</string>
+    <string name="settings_tts_speaker">角色</string>
+    <string name="settings_tts_speed">语速</string>
+    <string name="settings_tts_pitch">音调</string>
+    <string name="settings_tts_model_system">系统</string>
+    
+    <!-- 角色选项 -->
+    <string-array name="tts_speaker_options">
+        <item>角色 0</item>
+        <item>角色 1</item>
+        <item>角色 2</item>
+        <item>角色 3</item>
+        <item>角色 4</item>
+        <item>角色 5</item>
+        <item>角色 6</item>
+        <item>角色 7</item>
+        <item>角色 8</item>
+        <item>角色 9</item>
+    </string-array>
     
     <!-- TTS Toast提示 -->
     <string name="toast_tts_generation_failed">语音生成失败</string>
