@@ -1385,6 +1385,15 @@ public class RagQaFragment extends Fragment {
                 // Normal flow: execute RAG query directly (audio will be embedded as <audio> tag if present)
                 ragTaskFuture = ragQueryExecutor.submit(() -> {
                     LogManager.logI(TAG, "[EXECUTOR] Task lambda ENTERED - thread=" + Thread.currentThread().getName());
+                    
+                    // ✅ FIX: Force reset globalStopFlag at task start to prevent inherited stop state
+                    // This fixes the issue where switching TTS and sending causes immediate abort
+                    if (globalStopFlag) {
+                        LogManager.logW(TAG, "[FIX] Detected stale globalStopFlag=true, resetting to false for new task");
+                        globalStopFlag = false;
+                        userRequestedStop = false;
+                    }
+                    
                     // Background thread snapshot at RAG task start (English log)
                     try {
                         Thread worker = Thread.currentThread();
@@ -1594,9 +1603,13 @@ public class RagQaFragment extends Fragment {
     private void resetSendingState() {
         LogManager.logI(TAG, "[STATE] resetSendingState enter - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isSending=" + isSending.get() + ", isTaskRunning=" + isTaskRunning + ", isTaskCancelled=" + isTaskCancelled + ", globalStopFlag=" + globalStopFlag);
         
+        // CRITICAL: Always save conversation history first, even if TTS is still generating
+        // This ensures AI response text is saved immediately after LLM completes
+        saveChatHistory();
+        
         // Check if TTS is still generating
         if (isTtsGenerating.get()) {
-            LogManager.logW(TAG, "[STATE] TTS is still generating, cannot reset sending state yet");
+            LogManager.logW(TAG, "[STATE] TTS is still generating, conversation saved but state reset deferred");
             return;
         }
         
@@ -1630,9 +1643,6 @@ public class RagQaFragment extends Fragment {
                 LogManager.logD(TAG, "Cleared media thumbnails after send");
             });
         }
-        
-        // Save conversation to markdown after AI response completes
-        saveChatHistory();
         
         // Auto-collapse collapsible sections after streaming completes
         if (!chatMessages.isEmpty()) {
@@ -2631,6 +2641,12 @@ public class RagQaFragment extends Fragment {
                         // External TTS playback completed
                         LogManager.logI(TAG, "[TTS] External TTS playback completed");
                         isTtsGenerating.set(false);
+                        
+                        // ✅ FIX: Force reset isSending when TTS playback completes
+                        // This handles the case where resetSendingState() returned early due to isTtsGenerating=true
+                        isSending.set(false);
+                        LogManager.logI(TAG, "[TTS] Forced isSending=false after playback completion");
+                        
                         if (mainHandler != null) {
                             mainHandler.post(() -> {
                                 updateButtonText();

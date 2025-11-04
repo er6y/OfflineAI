@@ -68,7 +68,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private ModelType currentModelType = ModelType.UNKNOWN;
     
     // Executor for async operations
-    private final ExecutorService executorService;
+    private ExecutorService executorService;  // NOT final - need to recreate after shutdown
     private volatile java.util.concurrent.Future<?> currentTask;
     
     // State management
@@ -112,7 +112,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private volatile boolean ttsEnabled = false;
     
     // Thread manager for forceful shutdown
-    private final InferenceThreadManager threadManager = new InferenceThreadManager();
+    private final ThreadManager threadManager = new ThreadManager();
+    
+    // Configuration snapshot (for change detection)
+    private ConfigSnapshot lastConfigSnapshot = null;
     
     // TTS parameters (saved when TTS is enabled, used for lazy thread start)
     private String ttsChatFolderPath = null;
@@ -470,12 +473,47 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                                                   List<String> audioPaths,
                                                   LocalLlmHandler.InferenceParams params,
                                                   LocalLlmHandler.StreamingCallback callback) {
+        // ========== CRITICAL: Fail-safe check for state consistency ==========
+        // If isInitialized is false but we're called, something went wrong (e.g. app restart)
+        // Force re-initialization to recover from inconsistent state
         if (!isInitialized.get()) {
-            LogManager.logE(TAG, "Handler not initialized");
-            if (callback != null) {
-                callback.onError("Handler not initialized");
+            LogManager.logW(TAG, "[FAILSAFE] Handler not initialized in inferenceWithConversationHistory - forcing re-initialization");
+            try {
+                if (currentModelPath != null && modelConfig != null) {
+                    // Re-create executor if terminated
+                    if (executorService == null || executorService.isShutdown() || executorService.isTerminated()) {
+                        LogManager.logW(TAG, "[FAILSAFE] ExecutorService is terminated, recreating...");
+                        executorService = Executors.newCachedThreadPool();
+                        LogManager.logI(TAG, "[FAILSAFE] ExecutorService recreated");
+                    }
+                    
+                    initializeLLM(currentModelPath, modelConfig);
+                    isInitialized.set(true);
+                    LogManager.logI(TAG, "[FAILSAFE] Handler re-initialized successfully in inferenceWithConversationHistory");
+                    
+                    // Re-load TTS model if needed
+                    if ("bert-vits2-MNN".equals(currentTtsModelSelection)) {
+                        LogManager.logI(TAG, "[FAILSAFE] Re-loading External TTS model...");
+                        // Reset TTS loading flags to allow reload
+                        externalTtsLoading.set(false);
+                        externalTtsLoadFailed = false;
+                        // Trigger TTS load
+                        ensureExternalTtsLoaded();
+                    }
+                } else {
+                    LogManager.logE(TAG, "[FAILSAFE] Cannot re-initialize: currentModelPath or modelConfig is null");
+                    if (callback != null) {
+                        callback.onError("模型未初始化，请重新加载模型");
+                    }
+                    return;
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[FAILSAFE] Re-initialization failed in inferenceWithConversationHistory", e);
+                if (callback != null) {
+                    callback.onError("模型初始化失败: " + e.getMessage());
+                }
+                return;
             }
-            return;
         }
         
         if (isGenerating.get()) {
@@ -587,6 +625,137 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private void performHistoryInference(List<android.util.Pair<String, String>> history,
                                          LocalLlmHandler.InferenceParams params,
                                          LocalLlmHandler.StreamingCallback callback) {
+        // ========== CRITICAL: Fail-safe check for state consistency ==========
+        // If isInitialized is false but we're called, something went wrong (e.g. app restart)
+        // Force re-initialization to recover from inconsistent state
+        if (!isInitialized.get()) {
+            LogManager.logW(TAG, "[FAILSAFE] Handler not initialized but inference requested - forcing re-initialization");
+            try {
+                if (currentModelPath != null && modelConfig != null) {
+                    initializeLLM(currentModelPath, modelConfig);
+                    isInitialized.set(true);
+                    LogManager.logI(TAG, "[FAILSAFE] Handler re-initialized successfully");
+                } else {
+                    LogManager.logE(TAG, "[FAILSAFE] Cannot re-initialize: currentModelPath or modelConfig is null");
+                    if (callback != null) {
+                        callback.onError("模型未初始化，请重新加载模型");
+                    }
+                    return;
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[FAILSAFE] Re-initialization failed", e);
+                if (callback != null) {
+                    callback.onError("模型初始化失败: " + e.getMessage());
+                }
+                return;
+            }
+        }
+        
+    // ========== Configuration Change Detection ==========
+        try {
+            ConfigSnapshot currentConfig = ConfigSnapshot.fromCurrentSettings(context);
+            
+            if (lastConfigSnapshot == null) {
+                // First inference: save snapshot
+                lastConfigSnapshot = currentConfig;
+                LogManager.logI(TAG, "[CONFIG] First inference, snapshot saved");
+            } else {
+                // Compare with last snapshot
+                ReloadPlan plan = lastConfigSnapshot.compareWith(currentConfig);
+                
+                if (plan.needAnyReload()) {
+                    LogManager.logI(TAG, "[CONFIG] Configuration changes detected:");
+                    LogManager.logI(TAG, "[CONFIG] " + plan.getDetailedSummary());
+                    
+                    // Execute reload plan
+                    if (plan.needReloadLlm) {
+                        LogManager.logI(TAG, "[CONFIG] Reloading LLM Session...");
+                        
+                        if (callback != null) {
+                            callback.onToken("\n\n🔄 检测到重要配置变化，正在重新加载模型...\n");
+                            callback.onToken(plan.getDetailedSummary() + "\n");
+                        }
+                        
+                        // Save old session handle for potential rollback
+                        long oldSessionHandle = llmSessionHandle;
+                        
+                        try {
+                            // Release old session
+                            if (llmSessionHandle != 0) {
+                                MnnInference.destroySession(llmSessionHandle);
+                                llmSessionHandle = 0;
+                                isInitialized.set(false);
+                                LogManager.logI(TAG, "[CONFIG] Old LLM Session released");
+                            }
+                            
+                            // Reinitialize with new config
+                            // Note: initializeLLM() will call buildMnnConfig() with updated settings
+                            initializeLLM(currentModelPath, modelConfig);
+                            isInitialized.set(true);
+                            LogManager.logI(TAG, "[CONFIG] LLM Session reloaded successfully with new config");
+                            
+                            if (callback != null) {
+                                callback.onToken("✅ 模型重新加载完成\n\n");
+                            }
+                        } catch (Exception reloadException) {
+                            // Reload failed - keep old snapshot, don't update
+                            LogManager.logE(TAG, "[CONFIG] LLM Session reload failed", reloadException);
+                            if (callback != null) {
+                                callback.onError("❌ 模型重新加载失败，请检查配置: " + reloadException.getMessage());
+                            }
+                            isInitialized.set(false);
+                            // Don't update lastConfigSnapshot - keep old one for retry
+                            return;  // Abort config update, inference will be skipped
+                        }
+                    }
+                    
+                    if (plan.needReloadExternalTts) {
+                        LogManager.logI(TAG, "[CONFIG] Reloading external TTS service...");
+                        releaseAllTtsServices();
+                        
+                        // ✅ FIX: Force update currentTtsModelSelection to reflect new config
+                        // This ensures the lazy-loaded TTS service uses the correct model
+                        currentTtsModelSelection = ConfigManager.getString(context, ConfigManager.KEY_TTS_MODEL, 
+                                context.getString(R.string.settings_tts_model_none));
+                        lastTtsModelSelection = currentTtsModelSelection; // Align last with current after reload
+                        LogManager.logI(TAG, "[CONFIG] External TTS service reloaded. currentTtsModelSelection updated to: " + currentTtsModelSelection);
+                    }
+                    
+                    if (plan.needReloadDiffusion) {
+                        LogManager.logI(TAG, "[CONFIG] Reloading Diffusion Session...");
+                        
+                        if (callback != null) {
+                            callback.onToken("🔄 Diffusion配置变化，重新加载...\n");
+                        }
+                        
+                        // Release old diffusion session
+                        if (diffusionHandle != 0) {
+                            MnnInference.releaseDiffusion(diffusionHandle);
+                            diffusionHandle = 0;
+                            LogManager.logI(TAG, "[CONFIG] Old Diffusion Session released");
+                        }
+                        
+                        // Reinitialize will happen on next generateImage() call
+                        LogManager.logI(TAG, "[CONFIG] Diffusion Session will reinit on next use");
+                        
+                        if (callback != null) {
+                            callback.onToken("✅ Diffusion配置已更新\n");
+                        }
+                    }
+                    
+                    // Update snapshot
+                    lastConfigSnapshot = currentConfig;
+                    LogManager.logI(TAG, "[CONFIG] Configuration snapshot updated");
+                }
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[CONFIG] Failed to check/reload configuration", e);
+            if (callback != null) {
+                callback.onError("配置检测失败: " + e.getMessage());
+            }
+            // Don't abort inference on config check failure
+        }
+        // ====================================================
         isGenerating.set(true);
         shouldStop.set(false);
         fullResponseBuilder.setLength(0);
@@ -968,26 +1137,31 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // 
         // TEST MODE: No timeout - wait indefinitely to see how long MNN actually takes
         try {
-            executorService.submit(() -> {
-                long startTime = System.currentTimeMillis();
-                int waits = 0;
-                
-                // Wait indefinitely, but log progress every 5 seconds
-                while (isGenerating.get()) {
-                    try { Thread.sleep(100); } catch (InterruptedException ignored) {}
-                    waits++;
+            // Check if executor is still usable
+            if (executorService != null && !executorService.isShutdown() && !executorService.isTerminated()) {
+                executorService.submit(() -> {
+                    long startTime = System.currentTimeMillis();
+                    int waits = 0;
                     
-                    // Log every 5 seconds
-                    if (waits % 50 == 0) {
-                        long elapsed = System.currentTimeMillis() - startTime;
-                        LogManager.logI(TAG, String.format("Still waiting for MNN to stop... elapsed: %.1fs", elapsed / 1000.0));
+                    // Wait indefinitely, but log progress every 5 seconds
+                    while (isGenerating.get()) {
+                        try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+                        waits++;
+                        
+                        // Log every 5 seconds
+                        if (waits % 50 == 0) {
+                            long elapsed = System.currentTimeMillis() - startTime;
+                            LogManager.logI(TAG, String.format("Still waiting for MNN to stop... elapsed: %.1fs", elapsed / 1000.0));
+                        }
                     }
-                }
-                
-                // Log final stop time
-                long totalTime = System.currentTimeMillis() - startTime;
-                LogManager.logI(TAG, String.format("✓ MNN stopped successfully after %.3fs", totalTime / 1000.0));
-            });
+                    
+                    // Log final stop time
+                    long totalTime = System.currentTimeMillis() - startTime;
+                    LogManager.logI(TAG, String.format("✓ MNN stopped successfully after %.3fs", totalTime / 1000.0));
+                });
+            } else {
+                LogManager.logW(TAG, "ExecutorService is not available for stop monitoring");
+            }
         } catch (Throwable ignored) {}
     }
     
@@ -1973,27 +2147,35 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             String cachePath = cacheDir.getAbsolutePath();
             LogManager.logI(TAG, "[TTS] Cache path: " + cachePath);
             
-            // Update config.json with cache_folder parameter (in-place modification)
+            // ✅ FIX: Update config.json with ABSOLUTE cache path
+            // MNN TTS SDK: cache_folder = config_folder + "/" + config.cache_folder_
+            // IMPORTANT: Use absolute path directly to avoid cross-filesystem relative path issues
+            // Model: /storage/emulated/0/Download/OfflineAIData/tts/bert-vits2-MNN
+            // Cache: /data/user/0/com.example.offlineai/cache/mnn/bert-vits2-MNN/tts
             File configFile = new File(ttsModelDir, "config.json");
             if (configFile.exists()) {
                 try {
+                    // Use absolute path directly (not relative path)
+                    // This avoids issues when model dir and cache dir are on different filesystem branches
+                    String absoluteCachePath = cacheDir.getAbsolutePath();
+                    LogManager.logI(TAG, "[TTS] Using absolute cache path: " + absoluteCachePath);
+                    
                     // Read original config
                     String configContent = new String(java.nio.file.Files.readAllBytes(configFile.toPath()));
                     org.json.JSONObject config = new org.json.JSONObject(configContent);
                     
-                    // Set cache_folder parameter
-                    config.put("cache_folder", cachePath);
+                    // Set absolute path
+                    config.put("cache_folder", absoluteCachePath);
                     
-                    // Try to write back to original config.json
-                    try {
-                        java.nio.file.Files.write(configFile.toPath(), config.toString(2).getBytes());
-                        LogManager.logI(TAG, "[TTS] Updated config.json with cache_folder: " + cachePath);
-                    } catch (java.nio.file.AccessDeniedException e) {
-                        LogManager.logW(TAG, "[TTS] config.json is read-only, cache will use default location");
-                    }
+                    // Write back with proper formatting (2-space indent, matching original)
+                    java.nio.file.Files.write(configFile.toPath(), config.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    LogManager.logI(TAG, "[TTS] Updated config.json: cache_folder=" + absoluteCachePath);
                 } catch (Exception e) {
-                    LogManager.logW(TAG, "[TTS] Failed to update config.json, will use default cache", e);
+                    LogManager.logW(TAG, "[TTS] Failed to update config.json, cache may not work", e);
+                    // Continue anyway, TTS will use default cache location
                 }
+            } else {
+                LogManager.logW(TAG, "[TTS] config.json not found, cache configuration skipped");
             }
             
             LogManager.logI(TAG, "[TTS] Initializing TTS service with model dir: " + ttsModelDir.getAbsolutePath());
@@ -2005,6 +2187,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 long nativePtr = nativeField.getLong(externalTtsService);
                 
                 // Call nativeLoadResourcesFromFile via reflection
+                // This will trigger MNNTTSSDK construction which reads config.json
                 java.lang.reflect.Method loadMethod = TtsService.class.getDeclaredMethod(
                     "nativeLoadResourcesFromFile", long.class, String.class, String.class, String.class);
                 loadMethod.setAccessible(true);
@@ -2848,5 +3031,330 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     @Override
     public String getEngineType() {
         return "MNN";
+    }
+    
+    // ========== Inner Classes: Configuration Management ==========
+    
+    /**
+     * Configuration Snapshot for change detection
+     * Records all configuration that may require model/service reload
+     * 
+     * Configuration Reload Matrix:
+     * ┌────────────────────────────┬────────────────────┬────────────────────────┐
+     * │ Configuration              │ Reload Required    │ Update Method          │
+     * ├────────────────────────────┼────────────────────┼────────────────────────┤
+     * │ Backend (CPU/GPU/Vulkan)   │ ✅ LLM Session     │ Release + Reinitialize │
+     * │ Thread Count               │ ✅ LLM Session     │ Release + Reinitialize │
+     * │ Max Sequence Length        │ ✅ LLM Session     │ Release + Reinitialize │
+     * │ Max New Tokens             │ ✅ LLM Session     │ Release + Reinitialize │
+     * │ Omni TTS Enable/Disable    │ ✅ LLM Session     │ Release + Reinitialize │
+     * │ TTS DiT Steps (Omni)       │ ✅ LLM Session     │ Release + Reinitialize │
+     * │ External TTS Model         │ ✅ TTS Service     │ Release old service    │
+     * │ Diffusion Memory Mode      │ ✅ Diffusion       │ Release + Reinitialize │
+     * │ Temperature/TopP/TopK      │ ❌ Runtime         │ updateConfig()         │
+     * │ Thinking Mode              │ ❌ Runtime         │ updateConfig()         │
+     * │ Diffusion Steps/Seed       │ ❌ Runtime         │ Per-generation params  │
+     * └────────────────────────────┴────────────────────┴────────────────────────┘
+     */
+    private static class ConfigSnapshot {
+        // LLM Session configuration (requires reload if changed)
+        String backend;          // CPU, OpenCL, Vulkan, NNAPI
+        int threadCount;         // Thread number
+        int maxSequenceLength;   // Total context window
+        int maxNewTokens;        // Max tokens per response
+        
+        // TTS configuration
+        String ttsModel;         // none, system, external_xxx, native_omni
+        boolean omniTtsEnabled;  // Whether Omni native TTS is enabled
+        int ttsDitSteps;         // TTS DiT steps (affects Session creation for Omni)
+        
+        // Diffusion configuration (requires reload if changed)
+        int diffusionMemoryMode; // Diffusion memory mode (affects Session creation)
+        // Note: diffusionSteps and diffusionSeed are runtime params, no reload needed
+        
+        /**
+         * Create snapshot from current settings
+         */
+        static ConfigSnapshot fromCurrentSettings(Context context) {
+            ConfigSnapshot snapshot = new ConfigSnapshot();
+            
+            // LLM Session configuration
+            snapshot.backend = SettingsFragment.getBackendPreference(context);
+            snapshot.threadCount = ConfigManager.getThreads(context);
+            snapshot.maxSequenceLength = ConfigManager.getMaxSequenceLength(context);
+            snapshot.maxNewTokens = ConfigManager.getMaxNewTokens(context);
+            
+            // TTS configuration
+            snapshot.ttsModel = ConfigManager.getString(context, ConfigManager.KEY_TTS_MODEL, 
+                context.getString(R.string.settings_tts_model_none));
+            snapshot.omniTtsEnabled = context.getString(R.string.settings_tts_model_native_omni)
+                .equals(snapshot.ttsModel);
+            snapshot.ttsDitSteps = ConfigManager.getTtsDitSteps(context);
+            
+            // Diffusion configuration
+            snapshot.diffusionMemoryMode = ConfigManager.getDiffusionMemoryMode(context);
+            
+            return snapshot;
+        }
+        
+        /**
+         * Compare with another snapshot and generate reload plan
+         */
+        ReloadPlan compareWith(ConfigSnapshot current) {
+            ReloadPlan plan = new ReloadPlan();
+            
+            // ========== Check LLM Session Configuration ==========
+            // Any of these changes require complete LLM Session reload
+            
+            if (!safeEquals(backend, current.backend)) {
+                plan.needReloadLlm = true;
+                plan.needReloadDiffusion = true;  // Backend affects both LLM and Diffusion!
+                plan.reasons.add("Backend: " + backend + " → " + current.backend);
+            }
+            
+            if (threadCount != current.threadCount) {
+                plan.needReloadLlm = true;
+                plan.reasons.add("Threads: " + threadCount + " → " + current.threadCount);
+            }
+            
+            if (maxSequenceLength != current.maxSequenceLength) {
+                plan.needReloadLlm = true;
+                plan.reasons.add("MaxSeqLen: " + maxSequenceLength + " → " + current.maxSequenceLength);
+            }
+            
+            if (maxNewTokens != current.maxNewTokens) {
+                plan.needReloadLlm = true;
+                plan.reasons.add("MaxNewTokens: " + maxNewTokens + " → " + current.maxNewTokens);
+            }
+            
+            // Omni TTS enable/disable requires LLM reload (affects Session creation)
+            if (omniTtsEnabled != current.omniTtsEnabled) {
+                plan.needReloadLlm = true;
+                plan.reasons.add("Omni TTS: " + (omniTtsEnabled ? "enabled" : "disabled") + 
+                               " → " + (current.omniTtsEnabled ? "enabled" : "disabled"));
+            }
+            
+            // ========== Check TTS Service Configuration ==========
+            // External TTS model change only requires service reload, not LLM
+            
+            if (!safeEquals(ttsModel, current.ttsModel) && 
+                !omniTtsEnabled && !current.omniTtsEnabled) {
+                plan.needReloadExternalTts = true;
+                plan.reasons.add("TTS Model: " + ttsModel + " → " + current.ttsModel);
+            }
+            
+            // ========== Check TTS DiT Steps ==========
+            // DiT steps change requires LLM reload for Omni native TTS
+            if (omniTtsEnabled && ttsDitSteps != current.ttsDitSteps) {
+                plan.needReloadLlm = true;
+                plan.reasons.add("TTS DiT Steps: " + ttsDitSteps + " → " + current.ttsDitSteps);
+            }
+            
+            // ========== Check Diffusion Configuration ==========
+            // Diffusion memory mode change requires Diffusion Session reload
+            if (diffusionMemoryMode != current.diffusionMemoryMode) {
+                plan.needReloadDiffusion = true;
+                plan.reasons.add("Diffusion Memory Mode: " + diffusionMemoryMode + " → " + current.diffusionMemoryMode);
+            }
+            
+            return plan;
+        }
+        
+        private static boolean safeEquals(Object a, Object b) {
+            if (a == null && b == null) return true;
+            if (a == null || b == null) return false;
+            return a.equals(b);
+        }
+    }
+    
+    /**
+     * Reload Plan - describes what needs to be reloaded
+     */
+    private static class ReloadPlan {
+        boolean needReloadLlm = false;           // Need to reload LLM Session
+        boolean needReloadExternalTts = false;   // Need to reload external TTS
+        boolean needReloadDiffusion = false;     // Need to reload Diffusion Session
+        
+        java.util.List<String> reasons = new java.util.ArrayList<>();
+        
+        boolean needAnyReload() {
+            return needReloadLlm || needReloadExternalTts || needReloadDiffusion;
+        }
+        
+        String getSummary() {
+            if (!needAnyReload()) {
+                return "No changes";
+            }
+            return String.join(", ", reasons);
+        }
+        
+        String getDetailedSummary() {
+            StringBuilder sb = new StringBuilder();
+            if (needReloadLlm) {
+                sb.append("• LLM Session需要重载\n");
+            }
+            if (needReloadExternalTts) {
+                sb.append("• TTS服务需要重载\n");
+            }
+            if (needReloadDiffusion) {
+                sb.append("• Diffusion Session需要重载\n");
+            }
+            if (reasons.size() > 0) {
+                sb.append("变化详情：").append(String.join(", ", reasons));
+            }
+            return sb.toString();
+        }
+    }
+    
+    // ========== Inner Class: Thread Manager ==========
+    
+    /**
+     * Thread Manager for forceful shutdown
+     * Manages all inference-related threads and provides interrupt-based stop
+     */
+    private static class ThreadManager {
+        private static final String TAG = "ThreadManager";
+        
+        private final java.util.Set<java.util.concurrent.Future<?>> activeTasks = 
+            java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+        private final AtomicBoolean globalStopFlag = new AtomicBoolean(false);
+        
+        void registerTask(java.util.concurrent.Future<?> task) {
+            if (task != null) {
+                activeTasks.add(task);
+                LogManager.logD(TAG, "Task registered, total active: " + activeTasks.size());
+            }
+        }
+        
+        void unregisterTask(java.util.concurrent.Future<?> task) {
+            if (task != null) {
+                activeTasks.remove(task);
+                LogManager.logD(TAG, "Task unregistered, total active: " + activeTasks.size());
+            }
+        }
+        
+        AtomicBoolean getGlobalStopFlag() {
+            return globalStopFlag;
+        }
+        
+        /**
+         * Stop all tasks FORCEFULLY with interrupt
+         * @param timeoutMs Maximum wait time before force clear
+         * @return Number of tasks interrupted
+         */
+        int stopAllTasksForcefully(long timeoutMs) {
+            LogManager.logI(TAG, "========== FORCE STOPPING ALL TASKS ==========");
+            LogManager.logI(TAG, "Active tasks before stop: " + activeTasks.size());
+            
+            // Set global stop flag
+            globalStopFlag.set(true);
+            
+            // Force interrupt all tasks
+            int interruptedCount = 0;
+            for (java.util.concurrent.Future<?> task : activeTasks) {
+                if (!task.isDone()) {
+                    task.cancel(true);  // interrupt=true
+                    interruptedCount++;
+                    LogManager.logI(TAG, "Force interrupted task #" + interruptedCount);
+                }
+            }
+            
+            LogManager.logI(TAG, "Interrupted " + interruptedCount + " tasks, waiting " + timeoutMs + "ms...");
+            
+            // Wait briefly for threads to respond
+            long startTime = System.currentTimeMillis();
+            while (!activeTasks.isEmpty() && (System.currentTimeMillis() - startTime < timeoutMs)) {
+                activeTasks.removeIf(java.util.concurrent.Future::isDone);
+                
+                if (!activeTasks.isEmpty()) {
+                    try {
+                        Thread.sleep(100);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
+            
+            // Force clear remaining tasks
+            int remainingTasks = activeTasks.size();
+            if (remainingTasks > 0) {
+                LogManager.logW(TAG, "⚠️ " + remainingTasks + " tasks still running, force clearing");
+                activeTasks.clear();
+            }
+            
+            LogManager.logI(TAG, "✅ All tasks stopped, interrupted=" + interruptedCount + ", remaining=" + remainingTasks);
+            LogManager.logI(TAG, "========== FORCE STOP COMPLETE ==========");
+            
+            return interruptedCount;
+        }
+        
+        void reset() {
+            activeTasks.clear();
+            globalStopFlag.set(false);
+            LogManager.logI(TAG, "Thread manager reset");
+        }
+        
+        int getActiveTaskCount() {
+            activeTasks.removeIf(java.util.concurrent.Future::isDone);
+            return activeTasks.size();
+        }
+        
+        boolean hasActiveTasks() {
+            return getActiveTaskCount() > 0;
+        }
+    }
+    
+    /**
+     * Calculate relative path from base directory to target directory
+     * Example: base=/storage/emulated/0/Download/OfflineAIData/tts/bert-vits2-MNN
+     *          target=/data/user/0/com.example.offlineai/cache/mnn/bert-vits2-MNN/tts
+     *          result=../../../../../../../data/user/0/com.example.offlineai/cache/mnn/bert-vits2-MNN/tts
+     * 
+     * @param basePath Base directory (absolute path)
+     * @param targetPath Target directory (absolute path)
+     * @return Relative path from base to target
+     */
+    private static String calculateRelativePath(String basePath, String targetPath) {
+        // Normalize paths (remove trailing slashes)
+        basePath = basePath.replaceAll("/+$", "");
+        targetPath = targetPath.replaceAll("/+$", "");
+        
+        // Split paths into components
+        String[] baseComponents = basePath.split("/");
+        String[] targetComponents = targetPath.split("/");
+        
+        // Find common prefix length
+        int commonLength = 0;
+        int minLength = Math.min(baseComponents.length, targetComponents.length);
+        for (int i = 0; i < minLength; i++) {
+            if (baseComponents[i].equals(targetComponents[i])) {
+                commonLength++;
+            } else {
+                break;
+            }
+        }
+        
+        // Build relative path
+        StringBuilder relativePath = new StringBuilder();
+        
+        // Add "../" for each remaining component in base path
+        int upLevels = baseComponents.length - commonLength;
+        for (int i = 0; i < upLevels; i++) {
+            if (relativePath.length() > 0) {
+                relativePath.append("/");
+            }
+            relativePath.append("..");
+        }
+        
+        // Add remaining components from target path
+        for (int i = commonLength; i < targetComponents.length; i++) {
+            if (relativePath.length() > 0) {
+                relativePath.append("/");
+            }
+            relativePath.append(targetComponents[i]);
+        }
+        
+        return relativePath.toString();
     }
 }
