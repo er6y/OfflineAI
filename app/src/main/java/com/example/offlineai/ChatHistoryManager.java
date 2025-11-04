@@ -44,11 +44,61 @@ public class ChatHistoryManager {
         public String preview; // 前20个字符预览
         public long timestamp; // 用于排序
         
+        // Statistics fields
+        public int messageCount;   // 对话条数
+        public int audioCount;     // 语音数
+        public int imageCount;     // 图片数
+        public long totalSize;     // 总文件大小 (bytes)
+        
         public ChatHistoryItem(String folderPath, String folderName, String preview, long timestamp) {
             this.folderPath = folderPath;
             this.folderName = folderName;
             this.preview = preview;
             this.timestamp = timestamp;
+            this.messageCount = 0;
+            this.audioCount = 0;
+            this.imageCount = 0;
+            this.totalSize = 0;
+        }
+        
+        /**
+         * Get formatted size string with smart unit scaling
+         * Rules:
+         * - < 1KB: show in Bytes (e.g., 512B)
+         * - 1KB ~ 999KB: show in KB (e.g., 1.5KB, 128KB)
+         * - 1MB ~ 999MB: show in MB (e.g., 2.3MB, 512MB)
+         * - >= 1GB: show in GB (e.g., 1.2GB)
+         * - Use 1 decimal place for values < 10, no decimal for >= 10
+         */
+        public String getFormattedSize() {
+            if (totalSize < 1024) {
+                // < 1KB: show bytes
+                return totalSize + "B";
+            } else if (totalSize < 1024 * 1024) {
+                // 1KB ~ 999KB
+                double kb = totalSize / 1024.0;
+                if (kb < 10) {
+                    return String.format("%.1fKB", kb);  // e.g., 1.5KB, 9.8KB
+                } else {
+                    return String.format("%.0fKB", kb);  // e.g., 128KB, 512KB
+                }
+            } else if (totalSize < 1024L * 1024 * 1024) {
+                // 1MB ~ 999MB
+                double mb = totalSize / (1024.0 * 1024.0);
+                if (mb < 10) {
+                    return String.format("%.1fMB", mb);  // e.g., 2.3MB, 9.8MB
+                } else {
+                    return String.format("%.0fMB", mb);  // e.g., 128MB, 512MB
+                }
+            } else {
+                // >= 1GB
+                double gb = totalSize / (1024.0 * 1024.0 * 1024.0);
+                if (gb < 10) {
+                    return String.format("%.1fGB", gb);  // e.g., 1.2GB, 9.8GB
+                } else {
+                    return String.format("%.0fGB", gb);  // e.g., 15GB, 128GB
+                }
+            }
         }
     }
     
@@ -610,6 +660,10 @@ public class ChatHistoryManager {
                     preview,
                     timestamp
                 );
+                
+                // Calculate statistics for this conversation
+                calculateStatistics(folder, item);
+                
                 historyList.add(item);
             }
             
@@ -791,6 +845,69 @@ public class ChatHistoryManager {
         } catch (IOException e) {
             LogManager.logE(TAG, "Error saving image to chat folder", e);
             return null;
+        }
+    }
+    
+    /**
+     * Calculate statistics for a conversation folder
+     * @param folder Conversation folder
+     * @param item ChatHistoryItem to update
+     */
+    private static void calculateStatistics(File folder, ChatHistoryItem item) {
+        try {
+            File conversationFile = new File(folder, CONVERSATION_FILE_NAME);
+            if (!conversationFile.exists()) {
+                return;
+            }
+            
+            // Count messages by parsing conversation.md
+            BufferedReader reader = new BufferedReader(new FileReader(conversationFile));
+            String line;
+            int userMessages = 0;
+            int aiMessages = 0;
+            
+            while ((line = reader.readLine()) != null) {
+                // Match both Chinese and English headers
+                if (line.startsWith("## 用户") || line.startsWith("## User")) {
+                    userMessages++;
+                } else if (line.startsWith("## AI助手") || line.startsWith("## Assistant")) {
+                    aiMessages++;
+                }
+            }
+            reader.close();
+            
+            item.messageCount = userMessages + aiMessages;
+            
+            // Count audio and image files, calculate total size
+            File[] files = folder.listFiles();
+            if (files != null) {
+                for (File file : files) {
+                    if (!file.isFile()) continue;
+                    
+                    String fileName = file.getName().toLowerCase();
+                    long fileSize = file.length();
+                    
+                    // Count audio files (wav, mp3, etc.)
+                    if (fileName.endsWith(".wav") || fileName.endsWith(".mp3") || 
+                        fileName.endsWith(".m4a") || fileName.endsWith(".aac")) {
+                        item.audioCount++;
+                        item.totalSize += fileSize;
+                    }
+                    // Count image files
+                    else if (fileName.endsWith(".jpg") || fileName.endsWith(".jpeg") || 
+                             fileName.endsWith(".png") || fileName.endsWith(".webp")) {
+                        item.imageCount++;
+                        item.totalSize += fileSize;
+                    }
+                    // Include conversation.md in total size
+                    else if (fileName.equals("conversation.md")) {
+                        item.totalSize += fileSize;
+                    }
+                }
+            }
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to calculate statistics for " + folder.getName(), e);
         }
     }
     

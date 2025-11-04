@@ -51,18 +51,25 @@ public class ChatHistoryAdapter extends RecyclerView.Adapter<ChatHistoryAdapter.
     static class ViewHolder extends RecyclerView.ViewHolder {
         TextView textPreview;
         TextView textFolderName;
+        TextView textStats;
         ImageButton buttonDelete;
         
         ViewHolder(View itemView) {
             super(itemView);
             textPreview = itemView.findViewById(R.id.textViewPreview);
             textFolderName = itemView.findViewById(R.id.textViewFolderName);
+            textStats = itemView.findViewById(R.id.textViewStats);
             buttonDelete = itemView.findViewById(R.id.buttonDelete);
         }
         
         void bind(ChatHistoryManager.ChatHistoryItem item, OnItemClickListener listener) {
             textPreview.setText(item.preview);
             textFolderName.setText(item.folderName);
+            
+            // Display statistics
+            String stats = String.format("%d messages • %d audios • %d images • %s",
+                item.messageCount, item.audioCount, item.imageCount, item.getFormattedSize());
+            textStats.setText(stats);
             
             // Click to load conversation
             itemView.setOnClickListener(v -> {

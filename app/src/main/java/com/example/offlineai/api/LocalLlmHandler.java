@@ -73,8 +73,6 @@ public class LocalLlmHandler {
     
     // 是否使用GPU
     private String useGpu = "CPU";
-    // 全局思考模式开关，默认关闭，避免未勾选也插入 <think>
-    private volatile boolean thinkingModeEnabled = false;
     
     // 推理停止标志
     private final AtomicBoolean shouldStopInference = new AtomicBoolean(false);
@@ -390,10 +388,8 @@ public class LocalLlmHandler {
         this.useGpu = ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
         LogManager.logD(TAG, "LocalLlmHandler初始化: 后端偏好设置为 " + this.useGpu);
 
-        // 从配置管理器读取思考模式（cfgmng 负责持久化），默认不禁用思考
-        boolean noThinking = ConfigManager.getNoThinking(context);
-        this.thinkingModeEnabled = !noThinking;
-        LogManager.logD(TAG, "LocalLlmHandler初始化: 思考模式=" + (this.thinkingModeEnabled ? "启用" : "禁用") + "（来自配置管理器）");
+        // Note: Thinking mode is now controlled by MNN's enable_thinking parameter
+        // See LocalLLMMNNHandler.performHistoryInference() Line 694-708
         
         // Inference engine will be auto-selected when loading model
         // Supported engine: MNN (Mobile Neural Network)
@@ -438,10 +434,8 @@ public class LocalLlmHandler {
         this.useGpu = useGpu;
     }
 
-    // 设置全局思考模式，供 UI 开关调用
-    public void setThinkingMode(boolean thinkingMode) {
-        this.thinkingModeEnabled = thinkingMode;
-    }
+    // Note: setThinkingMode() removed - thinking mode is now controlled by MNN's enable_thinking
+    // Configuration is read from ConfigManager.getNoThinking() at inference time
     
     /**
      * 根据配置更新推理引擎

@@ -1686,10 +1686,13 @@ public class RagQaFragment extends Fragment {
         
         if (isTtsGenerating.get()) {
             buttonSendStop.setText(getString(R.string.button_generating_tts));
+            buttonSendStop.setEnabled(true); // Allow stopping TTS
         } else if (isSending.get()) {
             buttonSendStop.setText(getString(R.string.button_inferring));
+            buttonSendStop.setEnabled(true); // Allow stopping inference
         } else {
             buttonSendStop.setText(getString(R.string.button_send));
+            buttonSendStop.setEnabled(true); // Allow sending new message
         }
     }
     
@@ -2605,11 +2608,36 @@ public class RagQaFragment extends Fragment {
                         filteredChunk = chunk.replace("[TTS_START]", "");
                     } else if (chunk.contains("[TTS_END]")) {
                         LogManager.logI(TAG, "[TTS] TTS generation ended");
+                        
+                        // CRITICAL: Only reset state if auto-play is disabled
+                        // If auto-play enabled, state will be reset after playback completes
+                        boolean ttsAutoPlay = ConfigManager.getTtsAutoPlay(requireContext());
+                        if (!ttsAutoPlay) {
+                            // No auto-play: reset state immediately after generation
+                            isTtsGenerating.set(false);
+                            if (mainHandler != null) {
+                                mainHandler.post(() -> {
+                                    updateButtonText();
+                                    LogManager.logI(TAG, "[TTS] No auto-play, button state reset to Send");
+                                });
+                            }
+                        } else {
+                            // Auto-play enabled: state will be reset when [PLAYBACK_END] received
+                            LogManager.logI(TAG, "[TTS] Auto-play enabled, waiting for [PLAYBACK_END] to reset state");
+                        }
+                        
+                        filteredChunk = chunk.replace("[TTS_END]", "");
+                    } else if (chunk.contains("[PLAYBACK_END]")) {
+                        // External TTS playback completed
+                        LogManager.logI(TAG, "[TTS] External TTS playback completed");
                         isTtsGenerating.set(false);
                         if (mainHandler != null) {
-                            mainHandler.post(() -> updateButtonText());
+                            mainHandler.post(() -> {
+                                updateButtonText();
+                                LogManager.logI(TAG, "[TTS] Playback completed, button state reset to Send");
+                            });
                         }
-                        filteredChunk = chunk.replace("[TTS_END]", "");
+                        filteredChunk = chunk.replace("[PLAYBACK_END]", "");
                     }
                     
                     // Close debug when detecting head markers
@@ -6224,6 +6252,16 @@ private static class UserInput {
             autoPlayMediaPlayer.setOnCompletionListener(mp -> {
                 mp.release();
                 autoPlayMediaPlayer = null;
+                
+                // CRITICAL: Reset TTS state after playback completes
+                // This ensures button returns to "Send" state
+                isTtsGenerating.set(false);
+                if (mainHandler != null) {
+                    mainHandler.post(() -> {
+                        updateButtonText();
+                        LogManager.logI(TAG, "[TTS] Playback completed, button state reset to Send");
+                    });
+                }
             });
             
             LogManager.logI(TAG, "[TTS] Auto-play via MediaPlayer (fallback)");

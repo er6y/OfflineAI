@@ -111,6 +111,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     // TTS enabled flag: true when External TTS is selected
     private volatile boolean ttsEnabled = false;
     
+    // Thread manager for forceful shutdown
+    private final InferenceThreadManager threadManager = new InferenceThreadManager();
+    
     // TTS parameters (saved when TTS is enabled, used for lazy thread start)
     private String ttsChatFolderPath = null;
     private boolean ttsAutoPlay = false;
@@ -142,6 +145,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private com.example.offlineai.api.SystemTtsService systemTtsService = null;
     private boolean systemTtsLoaded = false;
     private String currentTtsModelSelection = "";  // Current TTS model selection
+    private String lastTtsModelSelection = "";  // Last TTS model selection (for change detection)
     
     // Sentence boundary regex for streaming TTS
     // Part 1: [^。！？.!?\r\n]+[。！？.!?]+ → Match text + punctuation
@@ -690,6 +694,52 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             LogManager.logI(TAG, "[TTS] Streaming TTS enabled, thread will start on first sentence");
         }
         // Scenario 4: Non-Omni + None → No action needed
+        
+        // ========== Check TTS model change and release old services ==========
+        if (!currentTtsModelSelection.equals(lastTtsModelSelection)) {
+            LogManager.logI(TAG, "[TTS] Model changed: [" + lastTtsModelSelection + "] → [" + currentTtsModelSelection + "]");
+            
+            // Release all TTS services
+            releaseAllTtsServices();
+            
+            // Update last selection
+            lastTtsModelSelection = currentTtsModelSelection;
+            
+            // Special handling for Omni native TTS change
+            if (hasTtsSupport && !enableNativeTts && 
+                context.getString(R.string.settings_tts_model_native_omni).equals(currentTtsModelSelection)) {
+                // User switched to Omni native TTS, but it's not enabled
+                // Need to reload model to enable it
+                if (callback != null) {
+                    callback.onToken("\n\n⚠️ 提示：切换到Omni内置TTS需要重新加载模型才能生效。\n\n");
+                }
+                LogManager.logW(TAG, "[TTS] Omni native TTS requires model reload");
+            } else if (hasTtsSupport && enableNativeTts && 
+                      !context.getString(R.string.settings_tts_model_native_omni).equals(currentTtsModelSelection)) {
+                // User switched away from Omni native TTS
+                if (callback != null) {
+                    callback.onToken("\n\n⚠️ 提示：关闭Omni内置TTS需要重新加载模型才能生效。\n\n");
+                }
+                LogManager.logW(TAG, "[TTS] Disabling Omni native TTS requires model reload");
+            }
+        }
+        // =====================================================================
+        
+        // ========== Configure thinking mode (Qwen3 support) ==========
+        // Reference: MNN iOS app LLMInferenceEngineWrapper.mm Line 637-643
+        // Qwen3 defaults to enable_thinking=true, must explicitly disable if needed
+        boolean thinkingEnabled = !ConfigManager.getNoThinking(context);
+        try {
+            String thinkingConfig = String.format(
+                "{\"jinja\":{\"context\":{\"enable_thinking\":%s}}}",
+                thinkingEnabled ? "true" : "false"
+            );
+            MnnInference.updateConfig(llmSessionHandle, thinkingConfig);
+            LogManager.logI(TAG, "[THINKING] Thinking mode " + (thinkingEnabled ? "enabled" : "disabled"));
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[THINKING] Failed to set thinking mode: " + e.getMessage());
+        }
+        // =============================================================
         
         currentTask = executorService.submit(() -> {
             try {
@@ -1688,8 +1738,42 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     /**
-     * Release other TTS services when switching TTS mode
-     * @param ttsModelChanged Whether TTS model selection changed
+     * Release all TTS services (for model switching)
+     */
+    private void releaseAllTtsServices() {
+        LogManager.logI(TAG, "[TTS] Releasing all TTS services");
+        
+        // Release System TTS
+        if (systemTtsService != null) {
+            try {
+                systemTtsService.shutdown();
+                systemTtsService = null;
+                systemTtsLoaded = false;
+                LogManager.logI(TAG, "[TTS] System TTS released");
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TTS] Error releasing System TTS", e);
+            }
+        }
+        
+        // Release External TTS
+        if (externalTtsService != null) {
+            try {
+                externalTtsService.destroy();
+                externalTtsService = null;
+                externalTtsLoaded = false;
+                externalTtsLoadFailed = false;
+                LogManager.logI(TAG, "[TTS] External TTS released");
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TTS] Error releasing External TTS", e);
+            }
+        }
+        
+        // Note: Native Omni TTS cannot be released without reloading model
+    }
+    
+    /**
+     * Release other TTS services when switching TTS model
+     * @param ttsModelChanged Whether TTS model changed
      * @param keepSystemTts Whether to keep System TTS
      * @param keepExternalTts Whether to keep External TTS
      */
@@ -1987,7 +2071,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         
         // Start playback thread (if auto-play enabled)
         if (autoPlay) {
-            startPlaybackThread(playbackQueue, ttsCompleted);
+            startPlaybackThread(playbackQueue, ttsCompleted, callback);
         }
         
         // Start TTS consumer thread
@@ -2002,9 +2086,11 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
      * 
      * @param playbackQueue Queue of audio file paths to play
      * @param ttsCompleted Flag indicating TTS processing is complete
+     * @param callback Callback for UI updates (to reset button state)
      */
     private void startPlaybackThread(java.util.concurrent.BlockingQueue<String> playbackQueue,
-                                     java.util.concurrent.atomic.AtomicBoolean ttsCompleted) {
+                                     java.util.concurrent.atomic.AtomicBoolean ttsCompleted,
+                                     LocalLlmHandler.StreamingCallback callback) {
         executorService.submit(() -> {
             try {
                 AudioPlayerHelper player = new AudioPlayerHelper();
@@ -2069,6 +2155,12 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 player.release();
                 LogManager.logI(TAG, "[TTS_PLAYBACK] Playback thread finished");
                 
+                // CRITICAL: Notify UI that playback is complete (reset button state)
+                if (callback != null) {
+                    callback.onToken("\n\n[PLAYBACK_END]");
+                    LogManager.logI(TAG, "[TTS_PLAYBACK] Sent [PLAYBACK_END] marker to UI");
+                }
+                
             } catch (Exception e) {
                 LogManager.logE(TAG, "[TTS_PLAYBACK] Playback thread error", e);
             }
@@ -2126,6 +2218,11 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                     // ========== Lazy load TTS on first sentence ==========
                     if (!ttsLoaded) {
                         LogManager.logI(TAG, "[TTS_CONSUMER] First sentence arrived, loading TTS on-demand...");
+                        
+                        // Notify UI: TTS generation started
+                        new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                            callback.onToken("[TTS_START]");
+                        });
                         
                         // Determine which TTS to load based on current selection
                         String systemTtsName = context.getString(R.string.settings_tts_model_system);
@@ -2458,12 +2555,27 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             // Read all audio samples
             java.util.List<short[]> allSamples = new java.util.ArrayList<>();
             int totalSamples = 0;
-            int sampleRate = 44100;  // Assume all files have same sample rate
+            int sampleRate = 0;  // Will be read from first file's WAV header
             
             for (String path : audioPaths) {
                 try (java.io.FileInputStream fis = new java.io.FileInputStream(path)) {
-                    // Skip WAV header (44 bytes)
-                    fis.skip(44);
+                    // Read WAV header to get sample rate
+                    byte[] header = new byte[44];
+                    fis.read(header);
+                    
+                    // Extract sample rate from WAV header (bytes 24-27, little-endian)
+                    int fileSampleRate = (header[24] & 0xFF) | 
+                                        ((header[25] & 0xFF) << 8) | 
+                                        ((header[26] & 0xFF) << 16) | 
+                                        ((header[27] & 0xFF) << 24);
+                    
+                    if (sampleRate == 0) {
+                        sampleRate = fileSampleRate;
+                        LogManager.logI(TAG, "[TTS_MERGER] Detected sample rate: " + sampleRate + " Hz");
+                    } else if (sampleRate != fileSampleRate) {
+                        LogManager.logW(TAG, String.format("[TTS_MERGER] Sample rate mismatch: expected %d Hz, got %d Hz in %s",
+                            sampleRate, fileSampleRate, new File(path).getName()));
+                    }
                     
                     // Read PCM data
                     byte[] buffer = new byte[fis.available()];
@@ -2489,9 +2601,14 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             }
             
             // Save merged file to specified path
+            if (sampleRate == 0) {
+                LogManager.logE(TAG, "[TTS_MERGER] Failed to detect sample rate from audio files");
+                return false;
+            }
+            
             if (saveWavFile(outputPath, mergedSamples, sampleRate)) {
-                LogManager.logI(TAG, String.format("[TTS_MERGER] Merged %d files (%d samples, %.2f sec) to %s",
-                    audioPaths.size(), totalSamples, totalSamples / (float)sampleRate, outputPath));
+                LogManager.logI(TAG, String.format("[TTS_MERGER] Merged %d files (%d samples, %.2f sec @ %d Hz) to %s",
+                    audioPaths.size(), totalSamples, totalSamples / (float)sampleRate, sampleRate, outputPath));
                 return true;
             }
             

@@ -40,6 +40,16 @@
                 android:textColor="@android:color/darker_gray"
                 android:text="chat_20250120_143015" />
 
+            <!-- Statistics -->
+            <TextView
+                android:id="@+id/textViewStats"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="2dp"
+                android:textSize="11sp"
+                android:textColor="@android:color/tertiary_text_light"
+                android:text="0 messages • 0 audios • 0 images • 0KB" />
+
         </LinearLayout>
 
         <!-- Delete button -->
