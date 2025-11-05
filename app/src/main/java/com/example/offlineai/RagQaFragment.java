@@ -66,6 +66,7 @@ import com.android.volley.toolbox.Volley;
 
 import com.example.offlineai.api.LocalLlmHandler;
 import com.example.offlineai.api.LocalLlmAdapter;
+import com.example.offlineai.api.TtsAdapter;
 import com.example.offlineai.ApiUrlAdapter;
 import com.example.offlineai.RerankerHandler;
 import com.example.offlineai.AppConstants;
@@ -218,6 +219,9 @@ public class RagQaFragment extends Fragment {
     // TTS auto-play MediaPlayer
     private MediaPlayer autoPlayMediaPlayer;
     
+    // TTS Adapter for streaming TTS (System/External TTS)
+    private TtsAdapter ttsAdapter = null;
+    
     // RAG query thread pool
     private ExecutorService ragQueryExecutor = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "RagQa-Query-Thread");
@@ -226,6 +230,10 @@ public class RagQaFragment extends Fragment {
     });
     // Main thread Handler
     private Handler mainHandler;
+    
+    // Auto-scroll state tracking
+    private boolean userScrolledAway = false; // Track if user manually scrolled away from bottom
+    private Runnable pendingScrollRunnable = null; // Pending scroll task for debouncing
 
     // Search result documents
     private List<String> relevantDocuments;
@@ -277,9 +285,40 @@ public class RagQaFragment extends Fragment {
             return null; // Return Unit for Kotlin compatibility
         });
         
-        recyclerViewChat.setLayoutManager(new LinearLayoutManager(requireContext()));
+        LinearLayoutManager layoutManager = new LinearLayoutManager(requireContext());
+        recyclerViewChat.setLayoutManager(layoutManager);
         recyclerViewChat.setAdapter(chatAdapter);
-        LogManager.logD(TAG, "Chat RecyclerView initialized with callbacks");
+        
+        // Add scroll listener to detect user manual scrolling
+        recyclerViewChat.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override
+            public void onScrollStateChanged(@NonNull RecyclerView recyclerView, int newState) {
+                super.onScrollStateChanged(recyclerView, newState);
+                
+                // When user starts dragging, mark as scrolled away
+                if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+                    if (!isAtBottom(layoutManager)) {
+                        userScrolledAway = true;
+                        LogManager.logD(TAG, "[SCROLL] User scrolled away from bottom");
+                    }
+                }
+            }
+            
+            @Override
+            public void onScrolled(@NonNull RecyclerView recyclerView, int dx, int dy) {
+                super.onScrolled(recyclerView, dx, dy);
+                
+                // If user scrolled to bottom, reset the flag
+                if (isAtBottom(layoutManager)) {
+                    if (userScrolledAway) {
+                        userScrolledAway = false;
+                        LogManager.logD(TAG, "[SCROLL] User returned to bottom");
+                    }
+                }
+            }
+        });
+        
+        LogManager.logD(TAG, "Chat RecyclerView initialized with callbacks and scroll listener");
         
         // Initialize media thumbnail adapter and RecyclerView
         mediaThumbnailAdapter = new MediaThumbnailAdapter();
@@ -507,6 +546,10 @@ public class RagQaFragment extends Fragment {
         
         // Initialize main thread Handler
         mainHandler = new Handler(Looper.getMainLooper());
+        
+        // Initialize TtsAdapter
+        ttsAdapter = TtsAdapter.getInstance(requireContext());
+        LogManager.logI(TAG, "[TTS] TtsAdapter initialized");
         
         // Setup custom action mode for long press on input field (must be after view is created)
         setupInputFieldLongPressMenu();
@@ -1303,7 +1346,9 @@ public class RagQaFragment extends Fragment {
         aiMsg.setLoading(true);
         chatMessages.add(aiMsg);
         chatAdapter.notifyItemInserted(chatMessages.size() - 1);
-        recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+        // Immediately scroll to bottom when adding new message (no animation)
+        recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
+        userScrolledAway = false; // Reset flag for new message
         
         LogManager.logD(TAG, "Chat messages created: user + AI placeholder, total=" + chatMessages.size());
         
@@ -1712,6 +1757,12 @@ public class RagQaFragment extends Fragment {
     private void stopTtsGeneration() {
         LogManager.logI(TAG, "[TTS] Stopping TTS generation");
         
+        // Stop TtsAdapter
+        if (ttsAdapter != null) {
+            ttsAdapter.stop();
+            LogManager.logI(TAG, "[TTS] TtsAdapter.stop() called");
+        }
+        
         // Set global stop flag to stop TTS service
         globalStopFlag = true;
         
@@ -1750,6 +1801,36 @@ public class RagQaFragment extends Fragment {
     }
     // Overload: without ASR info and UserInput
     private void executeRagQuery(String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt, String userPrompt, UserInput userInput) {
+        // ✅ 统一 ASR 检测（无论本地还是在线模型）
+        // CRITICAL: Check if audio needs ASR processing before RAG query
+        if (userInput != null && userInput.hasAudio()) {
+            String asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
+            if (!"无".equals(asrModel)) {
+                // ASR enabled: convert audio to text first, then continue RAG flow
+                String audioPath = userInput.audioPaths.get(0); // Use first audio file
+                LogManager.logI(TAG, "[ASR] Audio detected with ASR enabled, converting to text first");
+                LogManager.logI(TAG, "[ASR] Model: " + asrModel + ", Audio: " + audioPath);
+                
+                // Submit ASR task (will call executeRagQueryWithAsr after conversion)
+                ragTaskFuture = ragQueryExecutor.submit(() -> {
+                    try {
+                        convertAndSendAsTextInternal(audioPath, userPrompt, asrModel, 
+                                                     apiUrl, apiKey, model, knowledgeBase, systemPrompt, userInput);
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[ASR] Conversion failed", e);
+                        mainHandler.post(() -> {
+                            Toast.makeText(requireContext(), "ASR processing failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+                            resetSendingState();
+                        });
+                    }
+                });
+                return; // Exit early, ASR will continue the flow
+            } else {
+                LogManager.logI(TAG, "[ASR] Audio detected but ASR disabled, will use <audio> tag");
+            }
+        }
+        
+        // No ASR needed: continue normal RAG flow
         executeRagQueryWithAsr(apiUrl, apiKey, model, knowledgeBase, systemPrompt, userPrompt, null, false, userInput);
     }
     
@@ -1759,6 +1840,84 @@ public class RagQaFragment extends Fragment {
         initializeSendingState();
         
         LogManager.logD(TAG, "Starting RAG query execution with preserved global stop flag state");
+        
+        // ============================================
+        // Initialize TtsAdapter (if System/External TTS enabled)
+        // ============================================
+        String ttsModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_TTS_MODEL, "无");
+        boolean isLocalModel = AppConstants.ApiUrl.LOCAL.equals(apiUrl);
+        String nativeTtsName = getString(R.string.settings_tts_model_native_omni);
+        boolean isOmniNativeTts = nativeTtsName.equals(ttsModel);
+        
+        // Enable TtsAdapter for System/External TTS (not Omni Native)
+        if (!"无".equals(ttsModel) && !isOmniNativeTts) {
+            try {
+                String chatFolderPath = ConfigManager.getString(requireContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                boolean autoPlay = ConfigManager.getTtsAutoPlay(requireContext());
+                
+                // Create TtsCallback
+                TtsAdapter.TtsCallback ttsCallback = new TtsAdapter.TtsCallback() {
+                    @Override
+                    public void onTtsComplete(String mergedAudioPath, boolean playbackComplete) {
+                        LogManager.logI(TAG, "[TTS] onTtsComplete: path=" + mergedAudioPath + ", playbackDone=" + playbackComplete);
+                        
+                        mainHandler.post(() -> {
+                            if (getActivity() == null || !isAdded() || isDetached()) {
+                                LogManager.logW(TAG, "[TTS] Fragment not attached, skipping TTS complete handling");
+                                return;
+                            }
+                            
+                            // Set audio URI to last message
+                            if (!chatMessages.isEmpty()) {
+                                ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
+                                lastMsg.audioUri = Uri.fromFile(new File(mergedAudioPath));
+                                lastMsg.setHasOmniAudio(true);
+                                chatAdapter.notifyItemChanged(chatMessages.size() - 1);
+                                LogManager.logI(TAG, "[TTS] Audio URI set to last message");
+                            }
+                            
+                            // Save history (with audio)
+                            try {
+                                String currentFolder = ConfigManager.getString(requireContext(), 
+                                    ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                                if (!currentFolder.isEmpty()) {
+                                    ChatHistoryManager.saveConversation(requireContext(), chatMessages, currentFolder);
+                                    LogManager.logI(TAG, "[TTS] Conversation saved with audio");
+                                }
+                            } catch (Exception e) {
+                                LogManager.logE(TAG, "[TTS] Failed to save conversation", e);
+                            }
+                            
+                            // Reset button state
+                            isTtsGenerating.set(false);
+                            resetSendingState();
+                            LogManager.logI(TAG, "[TTS] Button state reset to Send");
+                        });
+                    }
+                    
+                    @Override
+                    public void onError(String error) {
+                        LogManager.logE(TAG, "[TTS] TtsAdapter error: " + error);
+                        mainHandler.post(() -> {
+                            if (getActivity() != null && isAdded()) {
+                                Toast.makeText(requireContext(), "TTS Error: " + error, Toast.LENGTH_SHORT).show();
+                                
+                                // Reset state on error
+                                isTtsGenerating.set(false);
+                                resetSendingState();
+                            }
+                        });
+                    }
+                };
+                
+                ttsAdapter.enable(ttsModel, chatFolderPath, autoPlay, ttsCallback);
+                LogManager.logI(TAG, "[TTS] TtsAdapter enabled: model=" + ttsModel + ", autoPlay=" + autoPlay);
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TTS] Failed to enable TtsAdapter", e);
+            }
+        } else {
+            LogManager.logI(TAG, "[TTS] TtsAdapter not enabled: ttsModel=" + ttsModel + ", isOmniNative=" + isOmniNativeTts);
+        }
         
         // ============================================
         // START: Unified Debug Section Management
@@ -2550,9 +2709,25 @@ public class RagQaFragment extends Fragment {
                                 LogManager.logD(TAG, "Final Markdown rendering completed");
                             }
                             
-                            // Use unified state reset method
-                            resetSendingState();
-                            LogManager.logD(TAG, "Task completed, all states reset");
+                            // Complete TtsAdapter (if enabled)
+                            // CRITICAL: Check both ttsAdapter existence AND enabled state
+                            // - ttsAdapter == null: TTS设置为"无"或Omni Native，没有创建adapter
+                            // - ttsAdapter.isEnabled() == false: adapter存在但未启用（之前启用过，现在禁用了）
+                            boolean hasTtsEnabled = (ttsAdapter != null && ttsAdapter.isEnabled());
+                            
+                            if (hasTtsEnabled) {
+                                // Set TTS generating state and update button
+                                isTtsGenerating.set(true);
+                                updateButtonText();  // Button shows "生成语音中"
+                                LogManager.logI(TAG, "[TTS] TTS generation started, button updated");
+                                
+                                ttsAdapter.complete();
+                                LogManager.logI(TAG, "[TTS] TtsAdapter.complete() called, waiting for callback");
+                            } else {
+                                // No TTS or TTS not enabled, reset state immediately
+                                resetSendingState();
+                                LogManager.logD(TAG, "Task completed (no TTS or TTS disabled), all states reset");
+                            }
                         } catch (Exception e) {
                             LogManager.logE(TAG, "Final Markdown rendering failed", e);
                             // Use unified state reset method
@@ -2568,7 +2743,9 @@ public class RagQaFragment extends Fragment {
                 // Last displayed response content
                 private final String[] lastDisplayedResponse = {""};
                 // Track if debug section has been closed
-                private boolean debugClosed = false;
+                // CRITICAL: For online API, debug section doesn't exist, so default to true
+                // For local API, will be set to false in executeRagQueryWithAsr and closed when [TEXT:] detected
+                private boolean debugClosed = !isLocalModel;
                 // Detect if it's a Huawei device
                 private static boolean isHuaweiDevice() {
                     return Build.MANUFACTURER.toLowerCase().contains("huawei") || 
@@ -2603,58 +2780,25 @@ public class RagQaFragment extends Fragment {
                     //LogManager.logD(TAG, "Received data chunk: [" + chunk + "]");
                     
                     // ============================================
+                    // Feed token to TtsAdapter (if enabled)
+                    // Filter out debug/performance tags, image/audio tags before sending to TTS
+                    // Only send to TTS after debug section is closed (debugClosed=true)
+                    // ============================================
+                    if (ttsAdapter != null && ttsAdapter.isEnabled() && debugClosed) {
+                        String ttsChunk = filterTtsContent(chunk);
+                        // Only send to TTS if there's valid text content after filtering
+                        if (!ttsChunk.trim().isEmpty()) {
+                            ttsAdapter.processToken(ttsChunk);
+                        }
+                    }
+                    
+                    // ============================================
                     // CRITICAL: Detect head markers to close debug section
                     // ============================================
                     String filteredChunk = chunk;
                     //LogManager.logD(TAG, "[DEBUG_TRACE] Chunk received: [" + chunk + "], debugClosed=" + debugClosed);
                     
-                    // Handle TTS state markers
-                    if (chunk.contains("[TTS_START]")) {
-                        LogManager.logI(TAG, "[TTS] TTS generation started");
-                        isTtsGenerating.set(true);
-                        if (mainHandler != null) {
-                            mainHandler.post(() -> updateButtonText());
-                        }
-                        filteredChunk = chunk.replace("[TTS_START]", "");
-                    } else if (chunk.contains("[TTS_END]")) {
-                        LogManager.logI(TAG, "[TTS] TTS generation ended");
-                        
-                        // CRITICAL: Only reset state if auto-play is disabled
-                        // If auto-play enabled, state will be reset after playback completes
-                        boolean ttsAutoPlay = ConfigManager.getTtsAutoPlay(requireContext());
-                        if (!ttsAutoPlay) {
-                            // No auto-play: reset state immediately after generation
-                            isTtsGenerating.set(false);
-                            if (mainHandler != null) {
-                                mainHandler.post(() -> {
-                                    updateButtonText();
-                                    LogManager.logI(TAG, "[TTS] No auto-play, button state reset to Send");
-                                });
-                            }
-                        } else {
-                            // Auto-play enabled: state will be reset when [PLAYBACK_END] received
-                            LogManager.logI(TAG, "[TTS] Auto-play enabled, waiting for [PLAYBACK_END] to reset state");
-                        }
-                        
-                        filteredChunk = chunk.replace("[TTS_END]", "");
-                    } else if (chunk.contains("[PLAYBACK_END]")) {
-                        // External TTS playback completed
-                        LogManager.logI(TAG, "[TTS] External TTS playback completed");
-                        isTtsGenerating.set(false);
-                        
-                        // ✅ FIX: Force reset isSending when TTS playback completes
-                        // This handles the case where resetSendingState() returned early due to isTtsGenerating=true
-                        isSending.set(false);
-                        LogManager.logI(TAG, "[TTS] Forced isSending=false after playback completion");
-                        
-                        if (mainHandler != null) {
-                            mainHandler.post(() -> {
-                                updateButtonText();
-                                LogManager.logI(TAG, "[TTS] Playback completed, button state reset to Send");
-                            });
-                        }
-                        filteredChunk = chunk.replace("[PLAYBACK_END]", "");
-                    }
+                    // NOTE: TTS state is now managed by callback, no need to handle markers here
                     
                     // Close debug when detecting head markers
                     if (!debugClosed && (chunk.contains("[TEXT:]") || 
@@ -2663,7 +2807,7 @@ public class RagQaFragment extends Fragment {
                         LogManager.logD(TAG, "[DEBUG_TRACE] Detected head marker, closing debug section");
                         updateChatMessage("</debug>\n");
                         debugClosed = true;
-                        LogManager.logD(TAG, "[DEBUG_TRACE] Debug section closed, debugClosed=" + debugClosed);
+                        LogManager.logD(TAG, "[DEBUG_TRACE] Debug section closed, TTS now enabled");
                         
                         // Filter out [TEXT:] and [IMAGE:] markers (but keep [AUDIO:path] intact for updateChatMessage)
                         filteredChunk = filteredChunk.replace("[TEXT:]", "")
@@ -3462,8 +3606,9 @@ public class RagQaFragment extends Fragment {
                 // Generate query vector
                 updateChatMessage("\n[RAG] Generating query vector...");
                 
-                // Get user query
-                String userQuery = editTextUserPrompt.getText().toString().trim();
+                // CRITICAL: Use query parameter (from prepareAndSaveUserInput), NOT editTextUserPrompt
+                // Input field has been cleared at send moment, reading from it will get empty string
+                String userQuery = query;
                 
                 // Generate vector
                 float[] queryVector;
@@ -5257,24 +5402,16 @@ public class RagQaFragment extends Fragment {
                 }
             }
             
-            // Check for audio marker [AUDIO:path]
+            // Check for audio marker [AUDIO:path] and remove from UI display
+            // Audio is handled by TTS callback, marker should not be shown in chat
             if (newText.contains("[AUDIO:")) {
                 int startIdx = newText.indexOf("[AUDIO:");
                 int endIdx = newText.indexOf("]", startIdx);
                 if (endIdx > startIdx) {
                     String audioPath = newText.substring(startIdx + 7, endIdx);
-                    // Set audio URI (for TTS playback)
-                    lastMsg.audioUri = Uri.fromFile(new File(audioPath));
-                    lastMsg.setHasOmniAudio(true);  // CRITICAL: Enable audio player UI
-                    // Remove marker from text
+                    // Remove marker from text (audio URI is set by TTS callback)
                     newText = newText.substring(0, startIdx) + newText.substring(endIdx + 1);
-                    LogManager.logI(TAG, "[TTS] Audio marker detected, path: " + audioPath);
-                    
-                    // CRITICAL: Do NOT auto-play here if backend auto-play is enabled
-                    // Backend (LocalLLMMNNHandler) already handles streaming playback
-                    // This [AUDIO:] marker is just for UI display and manual playback
-                    // Auto-play here would cause duplicate playback (segments + merged file)
-                    LogManager.logI(TAG, "[TTS] Audio UI enabled, backend handles auto-play if configured");
+                    LogManager.logI(TAG, "Audio marker detected and removed from UI, path: " + audioPath);
                 }
             }
             
@@ -5288,12 +5425,61 @@ public class RagQaFragment extends Fragment {
             // Incremental update
             chatAdapter.updateRecentItem(lastMsg);
             
-            // Auto scroll
-            recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+            // Smart auto-scroll: only scroll if user is at bottom
+            smartScrollToBottom();
             
         } catch (Exception e) {
             LogManager.logE(TAG, "Failed to update chat message", e);
         }
+    }
+    
+    /**
+     * Check if RecyclerView is at bottom
+     */
+    private boolean isAtBottom(LinearLayoutManager layoutManager) {
+        if (layoutManager == null || chatMessages.isEmpty()) return true;
+        
+        int lastVisiblePosition = layoutManager.findLastCompletelyVisibleItemPosition();
+        int lastItemPosition = chatMessages.size() - 1;
+        
+        // At bottom if last item is completely visible
+        return lastVisiblePosition == lastItemPosition;
+    }
+    
+    /**
+     * Smart scroll to bottom with debouncing
+     * Only scrolls if user hasn't manually scrolled away
+     */
+    private void smartScrollToBottom() {
+        // Don't scroll if user has manually scrolled away
+        if (userScrolledAway) {
+            // Skip auto-scroll silently (too verbose)
+            return;
+        }
+        
+        // Cancel pending scroll task
+        if (pendingScrollRunnable != null) {
+            recyclerViewChat.removeCallbacks(pendingScrollRunnable);
+        }
+        
+        // Create new scroll task with debouncing (100ms)
+        pendingScrollRunnable = () -> {
+            try {
+                if (!userScrolledAway && !chatMessages.isEmpty()) {
+                    // Use scrollToPosition for instant scroll (no animation)
+                    // This prevents the jumping effect caused by smoothScrollToPosition
+                    recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
+                } else {
+                    LogManager.logD(TAG, "[SCROLL] Skip scroll in runnable: userScrolledAway=" + userScrolledAway + ", isEmpty=" + chatMessages.isEmpty());
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[SCROLL] Failed to scroll to bottom", e);
+            }
+            pendingScrollRunnable = null;
+        };
+        
+        // Post delayed to debounce rapid updates
+        recyclerViewChat.postDelayed(pendingScrollRunnable, 100);
     }
     
     /**
@@ -5488,6 +5674,7 @@ public class RagQaFragment extends Fragment {
 /**
  * Start voice recording
  */
+@SuppressWarnings("deprecation")
 private void startVoiceRecording() {
     // Check recording permission
     if (ContextCompat.checkSelfPermission(requireContext(), 
@@ -5517,18 +5704,18 @@ private void startVoiceRecording() {
             } else {
                 LogManager.logW(TAG, "[VOICE] VibratorManager is null");
             }
-        } else {
-            android.os.Vibrator vibrator = (android.os.Vibrator) 
-                requireContext().getSystemService(Context.VIBRATOR_SERVICE);
-            if (vibrator != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        } else if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            Object service = requireContext().getSystemService(Context.VIBRATOR_SERVICE);
+            if (service instanceof android.os.Vibrator) {
+                android.os.Vibrator vibrator = (android.os.Vibrator) service;
                 vibrator.vibrate(android.os.VibrationEffect.createOneShot(200, android.os.VibrationEffect.DEFAULT_AMPLITUDE));
                 LogManager.logD(TAG, "[VOICE] Vibrated (API 26+)");
-            } else if (vibrator != null) {
-                vibrator.vibrate(200);
-                LogManager.logD(TAG, "[VOICE] Vibrated (legacy API)");
             } else {
                 LogManager.logW(TAG, "[VOICE] Vibrator service is null");
             }
+        } else {
+            // For API < 26, must use deprecated APIs
+            vibrateWithLegacyApi();
         }
     } catch (Exception e) {
         LogManager.logE(TAG, "[VOICE] Vibrate failed: " + e.getMessage(), e);
@@ -5642,8 +5829,19 @@ private void sendVoiceMessage() {
     buttonSendStop.setText(getString(R.string.button_stop_with_icon));
     LogManager.logI(TAG, "[VOICE] Acquired sending lock and updated button to STOP");
     
-    // CRITICAL: Prepare and save user input (move audio file, create message, save markdown)
+    // CRITICAL: Read all configuration at send moment (same as handleSendStopClick)
+    // This ensures configuration snapshot is taken before any async operations
+    String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
+    String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
+    String apiKey = editTextApiKey.getText().toString();
+    String model = spinnerApiModel.getSelectedItem().toString();
+    String knowledgeBase = spinnerKnowledgeBase.getSelectedItem().toString();
+    String systemPrompt = editTextSystemPrompt.getText().toString();
     String userPrompt = editTextUserPrompt.getText().toString().trim();
+    
+    LogManager.logI(TAG, "[VOICE][PARAM] apiUrl=" + apiUrl + ", model=" + model + ", kb=" + knowledgeBase);
+    
+    // CRITICAL: Prepare and save user input (move audio file, create message, save markdown)
     UserInput userInput = prepareAndSaveUserInput(userPrompt, audioFile);
     if (userInput == null) {
         // Failed to prepare input - restore state
@@ -5661,7 +5859,8 @@ private void sendVoiceMessage() {
     // Trigger audio inference (use saved audio path from userInput)
     // NOTE: isSending already set to true above with compareAndSet
     if (!userInput.audioPaths.isEmpty()) {
-        sendAudioToModel(userInput.audioPaths.get(0), userPrompt, userInput);
+        sendAudioToModel(userInput.audioPaths.get(0), userPrompt, userInput, 
+                        apiUrl, apiKey, model, knowledgeBase, systemPrompt);
     } else {
         LogManager.logE(TAG, "[VOICE] No audio path in userInput after preparation");
         Toast.makeText(requireContext(), "录音保存失败", Toast.LENGTH_SHORT).show();
@@ -5675,14 +5874,17 @@ private void sendVoiceMessage() {
  * Send audio to model for inference
  * Note: User message with audioUri has already been created and added to chat
  * @param userInput User input structure containing image/audio paths (for ASR flow to preserve images)
+ * @param apiUrl API URL (from configuration snapshot)
+ * @param apiKey API Key (from configuration snapshot)
+ * @param model Model name (from configuration snapshot)
+ * @param knowledgeBase Knowledge base name (from configuration snapshot)
+ * @param systemPrompt System prompt (from configuration snapshot)
  */
-private void sendAudioToModel(String audioPath, String textPrompt, UserInput userInput) {
-    String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
-    String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
-    String apiKey = editTextApiKey.getText().toString();
-    String model = spinnerApiModel.getSelectedItem().toString();
-    String knowledgeBase = spinnerKnowledgeBase.getSelectedItem().toString();
-    String systemPrompt = editTextSystemPrompt.getText().toString();
+private void sendAudioToModel(String audioPath, String textPrompt, UserInput userInput,
+                              String apiUrl, String apiKey, String model, 
+                              String knowledgeBase, String systemPrompt) {
+    // CRITICAL: All configuration passed as parameters (snapshot taken at send moment)
+    // Do NOT read from UI controls - configuration may have been modified by user
     
     // Only local models support audio for now
     if (!AppConstants.ApiUrl.LOCAL.equals(apiUrl)) {
@@ -5698,7 +5900,9 @@ private void sendAudioToModel(String audioPath, String textPrompt, UserInput use
     aiMessage.setLoading(true);
     chatMessages.add(aiMessage);
     chatAdapter.notifyItemInserted(chatMessages.size() - 1);
-    recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+    // Immediately scroll to bottom when adding new message (no animation)
+    recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
+    userScrolledAway = false; // Reset flag for new message
     LogManager.logD(TAG, "[AUDIO] Created AI placeholder message");
     
     // Get ASR model selection
@@ -5927,7 +6131,9 @@ private void sendAudioToModelInternal(String audioPath, String textPrompt, Strin
     aiMsg.setLoading(true);
     chatMessages.add(aiMsg);
     chatAdapter.notifyItemInserted(chatMessages.size() - 1);
-    recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+    // Immediately scroll to bottom when adding new message (no animation)
+    recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
+    userScrolledAway = false; // Reset flag for new message
     
     // Create UserInput with audio path (unified approach)
     java.util.List<String> audioPaths = new java.util.ArrayList<>();
@@ -6142,7 +6348,9 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
     
     chatMessages.add(userMsg);
     chatAdapter.notifyItemInserted(chatMessages.size() - 1);
-    recyclerViewChat.smoothScrollToPosition(chatMessages.size() - 1);
+    // Immediately scroll to bottom when adding user message (no animation)
+    recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
+    userScrolledAway = false; // Reset flag for new message
     LogManager.logI(TAG, "[PREPARE_INPUT] User message added to chat");
     
     // Step 5: Save to conversation.md immediately
@@ -6236,6 +6444,40 @@ private static class UserInput {
 }
 
     /**
+     * Filter content for TTS processing
+     * Removes debug/performance tags, image/audio tags and their content
+     * @param chunk Raw chunk from LLM/Diffusion
+     * @return Filtered text suitable for TTS, or empty string if no valid text
+     */
+    private String filterTtsContent(String chunk) {
+        if (chunk == null || chunk.isEmpty()) {
+            return "";
+        }
+        
+        String filtered = chunk;
+        
+        // 1. Filter debug tags and content (e.g., <debug>...</debug>)
+        filtered = filtered.replaceAll("<debug>.*?</debug>", "");
+        filtered = filtered.replaceAll("</?debug>", "");
+        
+        // 2. Filter performance tags and content (e.g., <performance>...</performance>)
+        // Use (?s) flag to enable DOTALL mode (. matches newlines)
+        filtered = filtered.replaceAll("(?s)<performance>.*?</performance>", "");
+        filtered = filtered.replaceAll("</?performance>", "");
+        
+        // 3. Filter head markers
+        filtered = filtered.replace("[TEXT:]", "");
+        
+        // 4. Filter image tags and paths (e.g., [IMAGE:path/to/image.jpg])
+        filtered = filtered.replaceAll("\\[IMAGE:[^\\]]*\\]", "");
+        
+        // 5. Filter audio tags and paths (e.g., [AUDIO:path/to/audio.wav])
+        filtered = filtered.replaceAll("\\[AUDIO:[^\\]]*\\]", "");
+        
+        return filtered;
+    }
+    
+    /**
      * Auto-play TTS generated audio
      * Uses direct MediaPlayer playback
      */
@@ -6290,6 +6532,13 @@ private static class UserInput {
     @Override
     public void onDestroyView() {
         super.onDestroyView();
+        
+        // Release TtsAdapter
+        if (ttsAdapter != null) {
+            ttsAdapter.release();
+            LogManager.logI(TAG, "[TTS] TtsAdapter released");
+        }
+        
         // Release auto-play MediaPlayer
         if (autoPlayMediaPlayer != null) {
             if (autoPlayMediaPlayer.isPlaying()) {
@@ -6297,6 +6546,18 @@ private static class UserInput {
             }
             autoPlayMediaPlayer.release();
             autoPlayMediaPlayer = null;
+        }
+    }
+    
+    @SuppressWarnings("deprecation")
+    private void vibrateWithLegacyApi() {
+        android.os.Vibrator vibrator = (android.os.Vibrator) 
+            requireContext().getSystemService(Context.VIBRATOR_SERVICE);
+        if (vibrator != null) {
+            vibrator.vibrate(200);
+            LogManager.logD(TAG, "[VOICE] Vibrated (legacy API)");
+        } else {
+            LogManager.logW(TAG, "[VOICE] Vibrator service is null");
         }
     }
 

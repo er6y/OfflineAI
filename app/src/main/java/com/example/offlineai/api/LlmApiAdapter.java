@@ -130,9 +130,7 @@ public class LlmApiAdapter {
             streamingClient.streamRequest(fullApiUrl, apiKey, model, prompt, new StreamingApiClient.StreamingCallback() {
                 @Override
                 public void onToken(String token) {
-                    int size = token != null ? token.length() : 0;
-                    String preview = (token != null) ? token.substring(0, Math.min(40, token.length())).replace("\n", "\\n") : "";
-                    LogManager.logD(TAG, "[STREAM] onToken - source=api, apiType=" + apiType.name() + ", size=" + size + (size > 0 ? (", preview=\"" + preview + "\"") : "") + ", thread=" + Thread.currentThread().getName());
+                    // Removed verbose per-token logging for online API (too much output)
                     callback.onStreamingData(token);
                 }
                 

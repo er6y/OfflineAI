@@ -182,6 +182,16 @@
     public <methods>;
 }
 
+# CRITICAL: Keep MNN TTS Service for reflection access
+# TtsAdapter uses reflection to access fields and methods
+-keep class com.taobao.meta.avatar.tts.TtsService { *; }
+-keepclassmembers class com.taobao.meta.avatar.tts.TtsService {
+    private long ttsServiceNative;
+    private boolean isLoaded;
+    native <methods>;
+    public <methods>;
+}
+
 # 保持所有应用的Fragment和Activity类
 -keep class com.example.offlineai.*Fragment { *; }
 -keep class com.example.offlineai.*Activity { *; }
@@ -583,6 +593,46 @@
     @com.fasterxml.jackson.annotation.* <fields>;
     @com.fasterxml.jackson.annotation.* <methods>;
 }
+
+# ===== Kotlin Coroutines 相关 =====
+# CRITICAL: 保留 Kotlin 协程相关类和方法，防止 R8 混淆导致反射调用失败
+# TtsAdapter 使用反射调用 kotlinx.coroutines.runBlocking，必须完全保留
+
+# 保留所有 Kotlin 协程核心类
+-keep class kotlin.coroutines.** { *; }
+-keep class kotlinx.coroutines.** { *; }
+-dontwarn kotlinx.coroutines.**
+
+# CRITICAL: 完全保留 BuildersKt 类及其所有方法（包括 runBlocking）
+# 不允许 R8 进行任何优化、内联或混淆
+-keep class kotlinx.coroutines.BuildersKt {
+    public static <methods>;
+}
+
+# 保留 runBlocking 的所有重载版本
+-keepclassmembers class kotlinx.coroutines.BuildersKt {
+    public static ** runBlocking(...);
+    public static ** runBlocking$default(...);
+}
+
+# 保留 Continuation 和 CoroutineContext 及其所有实现
+-keep class kotlin.coroutines.Continuation { *; }
+-keep class kotlin.coroutines.CoroutineContext { *; }
+-keep class kotlin.coroutines.EmptyCoroutineContext { *; }
+-keep class kotlin.coroutines.jvm.internal.** { *; }
+
+# 保留 Kotlin 函数接口（Lambda）及其实现
+-keep class kotlin.jvm.functions.** { *; }
+-keep class kotlin.jvm.internal.** { *; }
+
+# 保留 CoroutineScope 接口
+-keep interface kotlinx.coroutines.CoroutineScope { *; }
+
+# 防止 R8 内联或优化协程相关的方法调用
+-keepattributes *Annotation*
+-keepattributes Signature
+-keepattributes InnerClasses
+-keepattributes EnclosingMethod
 
 # ===== Apache POI 和 PDFBox AWT 警告抑制 =====
 # 这些库使用了 java.awt 包，但 Android 不支持

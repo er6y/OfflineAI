@@ -8707,4 +8707,336 @@ TTS 串行处理（后台单线程）
 
 ---
 
+## H.10 RAG 查询用户问题丢失问题（2025-11-05）
+
+### 问题现象
+
+在 RAG 流程中，点击发送按钮后，知识库查询无法获取到用户问题，导致向量检索失败。
+
+### 根本原因
+
+**文件**：`RagQaFragment.java` Line 3466
+
+**问题代码**：
+```java
+// Get user query
+String userQuery = editTextUserPrompt.getText().toString().trim();
+```
+
+**时序问题**：
+```
+点击发送 (Line 1188) → 获取 userPrompt 变量
+    ↓
+prepareAndSaveUserInput() (Line 1289) → 清空输入框 (Line 6162)
+    ↓
+executeRagQuery() (Line 1440) → 传入 userPrompt 参数
+    ↓
+loadModelAndProcessQuery() (Line 3466) → ❌ 重新从输入框读取（已清空！）
+```
+
+**核心问题**：`loadModelAndProcessQuery()` 方法接收了 `query` 参数，但没有使用，而是重新从已清空的输入框读取，导致获取到空字符串。
+
+### 解决方案
+
+**使用传入的 `query` 参数，而不是从输入框重新读取**：
+
+```java
+// CRITICAL: Use query parameter (from prepareAndSaveUserInput), NOT editTextUserPrompt
+// Input field has been cleared at send moment, reading from it will get empty string
+String userQuery = query;
+```
+
+### 设计原则回顾
+
+根据 `prepareAndSaveUserInput()` 的核心设计原则：
+
+1. **在用户点击发送的瞬间**，立即完成所有文件操作和数据保存
+2. **清空输入框和媒体缩略图**（Line 6162-6169）
+3. **通过参数传递**保存的数据（`UserInput` 结构体、`userPrompt` 字符串）
+4. **后台线程不应该访问 UI 控件**（输入框、适配器等）
+
+### 相关流程
+
+**正确的数据流**：
+```
+handleSendStopClick() (Line 1188)
+  ↓ 获取 userPrompt 变量
+prepareAndSaveUserInput(userPrompt) (Line 1289)
+  ↓ 保存文件、清空输入框、返回 UserInput
+executeRagQuery(..., userPrompt, userInput) (Line 1440)
+  ↓ 传递 userPrompt 参数
+queryKnowledgeBase(knowledgeBase, userPrompt) (Line 1873)
+  ↓ 传递 query 参数
+loadModelAndProcessQuery(modelPath, query, vectorDb) (Line 2285/2303)
+  ↓ ✅ 使用 query 参数（不从输入框读取）
+```
+
+### 修复位置
+
+- **文件**：`RagQaFragment.java`
+- **行号**：Line 3467
+- **修改**：`String userQuery = query;`（原为 `editTextUserPrompt.getText().toString().trim()`）
+
+### 经验教训
+
+1. **后台线程不应访问 UI 控件**：输入框、适配器等 UI 组件的状态可能在用户操作后被清空
+2. **通过参数传递数据**：所有需要的数据应在发送瞬间保存并通过参数传递
+3. **遵循设计原则**：`prepareAndSaveUserInput()` 已经设计了完整的数据保存和传递机制，后续流程应该使用传递的参数
+4. **检查方法签名**：如果方法接收了参数但没有使用，很可能是错误的实现
+
+### 相关改进：ASR 流程配置读取优化
+
+**问题**：在长按录音流程中，配置（apiKey、model、knowledgeBase、systemPrompt）是在 `sendAudioToModel()` 方法中读取的，而不是在发送瞬间读取。虽然该方法在主线程调用，但这与点击发送流程不一致，且存在用户在录音后修改配置的风险。
+
+**修复**：
+- **文件**：`RagQaFragment.java` Line 5646-5677
+- **改进**：在 `sendVoiceMessage()` 中读取所有配置（Line 5648-5654），与 `handleSendStopClick()` 保持一致
+- **传递方式**：通过参数传递给 `sendAudioToModel()`，而不是在方法内部读取 UI 控件
+
+**统一的配置快照时机**：
+```
+点击发送 (handleSendStopClick) → Line 1182-1188 读取配置
+长按录音 (sendVoiceMessage)     → Line 5648-5654 读取配置
+                                  ↓
+                          两者都在发送瞬间完成配置快照
+```
+
+---
+
+## H.11 max_new_tokens 参数传递问题（2025-11-05）
+
+### 问题现象
+
+用户设置了 `max_new_tokens=512`（最大输出 token 数），但实际输出达到了 2048 tokens，说明参数设置没有生效。
+
+### 参数混淆
+
+两个容易混淆的参数：
+
+1. **maxAllTokens (maxSeqLength=2048)**：上下文窗口大小（输入+输出总和）
+2. **maxNewTokens (512)**：单次推理的最大输出 token 数
+
+### 根本原因
+
+**Java 层设置正确**：
+- `LocalLLMMNNHandler.java` Line 1234：`int maxNewTokens = ConfigManager.getMaxNewTokens(context)` → 512
+- `LocalLLMMNNHandler.java` Line 1275：`builder.maxNewTokens(maxNewTokens)` → 传递给 C++
+
+**C++ 层有默认值覆盖**：
+- `mnn_jni.cpp` Line 615, 826, 1022, 1175：
+  ```cpp
+  int max_new_tokens = 2048; // default
+  try {
+      if (!config_json_.empty()) {
+          json config = json::parse(config_json_);
+          if (config.contains("max_new_tokens")) {
+              max_new_tokens = config["max_new_tokens"].get<int>();
+          }
+      }
+  } catch (...) {
+      // Keep defaults if parsing fails
+  }
+  ```
+
+**问题**：
+1. `buildMnnConfig()` 中设置的 `maxNewTokens(512)` 只在**模型加载时**生效
+2. 每次推理时，C++ 会重新读取 `config_json_`，但这个 JSON 中**没有包含 `max_new_tokens`**
+3. 因此使用默认值 2048
+
+### 解决方案
+
+在每次推理前通过 `updateConfig()` 动态设置 `max_new_tokens`，类似 `enable_thinking` 的处理方式。
+
+**修复位置**：`LocalLLMMNNHandler.java` Line 913-924
+
+```java
+// ========== Configure max_new_tokens (runtime parameter) ==========
+// CRITICAL: C++ layer reads max_new_tokens from config_json_ at inference time
+// Must set this via updateConfig() to override the default 2048
+int maxNewTokens = ConfigManager.getMaxNewTokens(context);
+try {
+    String maxTokensConfig = String.format("{\"max_new_tokens\":%d}", maxNewTokens);
+    MnnInference.updateConfig(llmSessionHandle, maxTokensConfig);
+    LogManager.logI(TAG, "[INFERENCE] max_new_tokens set to " + maxNewTokens);
+} catch (Exception e) {
+    LogManager.logW(TAG, "[INFERENCE] Failed to set max_new_tokens: " + e.getMessage());
+}
+// ==================================================================
+```
+
+### 参数传递流程
+
+```
+Java: ConfigManager.getMaxNewTokens() → 512
+  ↓
+Java: buildMnnConfig() → builder.maxNewTokens(512) → 模型加载时生效
+  ↓
+Java: performHistoryInference() → updateConfig("{\"max_new_tokens\":512}") → 推理时生效
+  ↓
+C++: inferenceWithHistory() → 读取 config_json_ → 使用 512
+```
+
+### 经验教训
+
+1. **区分加载时参数和运行时参数**：
+   - 加载时参数：通过 `ConfigBuilder` 设置，在 `load()` 时生效
+   - 运行时参数：通过 `updateConfig()` 设置，在每次推理时生效
+
+2. **参数优先级**：
+   - Runtime config (`updateConfig()`) > ConfigBuilder > C++ 默认值
+
+3. **参数命名要清晰**：
+   - `maxAllTokens`：上下文窗口（输入+输出）
+   - `maxNewTokens`：单次输出限制
+
+4. **验证方法**：
+   - 查看 C++ 日志：`[INFERENCE] max_new_tokens set to 512`
+   - 查看生成日志：`Generation loop finished: current_size=XXX`
+
+---
+
+## H.12 Chat UI 滚动跳动问题（2025-11-05）
+
+### 问题现象
+
+当流式输出文本超出屏幕高度时，界面出现上下跳动：
+- 输出一个 token → 立即滚动到顶部 → 再滚动到底部
+- 整个界面文字不停上下跳动，用户体验很差
+
+### 根本原因
+
+**频繁调用 `smoothScrollToPosition()`**：
+- `RagQaFragment.java` Line 5293：每次更新都调用
+- 流式输出时每个 token 都会触发一次滚动
+- 平滑滚动动画叠加，导致上下跳动
+
+**没有检查用户状态**：
+- 即使用户正在查看上面的内容，也会强制滚动
+- 没有区分用户手动滚动和自动滚动
+
+### 解决方案
+
+#### 1. 添加状态跟踪
+
+**文件**：`RagQaFragment.java` Line 230-232
+
+```java
+// Auto-scroll state tracking
+private boolean userScrolledAway = false; // Track if user manually scrolled away from bottom
+private Runnable pendingScrollRunnable = null; // Pending scroll task for debouncing
+```
+
+#### 2. 添加滚动监听器
+
+**文件**：`RagQaFragment.java` Line 288-315
+
+```java
+// Add scroll listener to detect user manual scrolling
+recyclerViewChat.addOnScrollListener(new RecyclerView.OnScrollListener() {
+    @Override
+    public void onScrollStateChanged(@NonNull RecyclerView recyclerView, int newState) {
+        // When user starts dragging, mark as scrolled away
+        if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
+            if (!isAtBottom(layoutManager)) {
+                userScrolledAway = true;
+            }
+        }
+    }
+    
+    @Override
+    public void onScrolled(@NonNull RecyclerView recyclerView, int dx, int dy) {
+        // If user scrolled to bottom, reset the flag
+        if (isAtBottom(layoutManager)) {
+            if (userScrolledAway) {
+                userScrolledAway = false;
+            }
+        }
+    }
+});
+```
+
+#### 3. 智能滚动逻辑
+
+**文件**：`RagQaFragment.java` Line 5352-5379
+
+```java
+/**
+ * Smart scroll to bottom with debouncing
+ * Only scrolls if user hasn't manually scrolled away
+ */
+private void smartScrollToBottom() {
+    // Don't scroll if user has manually scrolled away
+    if (userScrolledAway) {
+        return;
+    }
+    
+    // Cancel pending scroll task
+    if (pendingScrollRunnable != null) {
+        recyclerViewChat.removeCallbacks(pendingScrollRunnable);
+    }
+    
+    // Create new scroll task with debouncing (100ms)
+    pendingScrollRunnable = () -> {
+        try {
+            if (!userScrolledAway && !chatMessages.isEmpty()) {
+                // Use scrollToPosition for instant scroll (no animation)
+                // This prevents the jumping effect caused by smoothScrollToPosition
+                recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[SCROLL] Failed to scroll to bottom", e);
+        }
+        pendingScrollRunnable = null;
+    };
+    
+    // Post delayed to debounce rapid updates
+    recyclerViewChat.postDelayed(pendingScrollRunnable, 100);
+}
+```
+
+#### 4. 替换所有滚动调用
+
+**流式更新时**：使用 `smartScrollToBottom()`（Line 5328）
+**添加新消息时**：使用 `scrollToPosition()` + 重置标志（Line 1342-1343, 5801-5802, 6032-6033, 6249-6250）
+
+### 关键改进
+
+1. **用户意图检测**：
+   - 用户手动滚动离开底部 → 不自动滚动
+   - 用户滚动回底部 → 恢复自动滚动
+
+2. **防抖机制**：
+   - 100ms 延迟，避免频繁滚动
+   - 取消待处理的滚动任务
+
+3. **无动画滚动**：
+   - 使用 `scrollToPosition()` 代替 `smoothScrollToPosition()`
+   - 避免动画叠加导致的跳动
+
+4. **状态重置**：
+   - 添加新消息时重置 `userScrolledAway` 标志
+   - 确保新对话开始时自动滚动
+
+### 效果对比
+
+**修复前**：
+- ❌ 每个 token 触发一次平滑滚动
+- ❌ 动画叠加导致上下跳动
+- ❌ 无法查看历史消息
+
+**修复后**：
+- ✅ 100ms 防抖，减少滚动次数
+- ✅ 无动画滚动，流畅稳定
+- ✅ 用户可以查看历史，不会被强制滚动
+- ✅ 滚动回底部后自动恢复跟随
+
+### 相关文件
+
+- `RagQaFragment.java` Line 230-232：状态变量
+- `RagQaFragment.java` Line 288-315：滚动监听器
+- `RagQaFragment.java` Line 5335-5379：智能滚动实现
+- `RagQaFragment.java` Line 5328：流式更新调用点
+
+---
+
 

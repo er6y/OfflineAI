@@ -3117,19 +3117,22 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
         int total_steps = iterNum;
         int last_step = 0;
         bool unet_started = false;
+        bool text_encoder_printed = false;
         
-        std::function<void(int)> progressCallback = [env, callback, onProgressMethod, onTokenMethod, total_steps, &last_step, &unet_started](int progress) {
+        std::function<void(int)> progressCallback = [env, callback, onProgressMethod, onTokenMethod, total_steps, &last_step, &unet_started, &text_encoder_printed](int progress) {
             LOGD("[DIFF_DEBUG] Progress callback invoked: %d%%", progress);
             
             // Send detailed progress to UI via onToken
             if (onTokenMethod) {
                 char buf[256];
                 
-                // Text Encoder完成 (progress < 10%)
-                if (progress > 0 && progress < 10 && !unet_started) {
+                // Text Encoder完成 + UNet开始 (progress >= 10% for first time)
+                // NOTE: MNN may skip 0-10% callbacks, so check on first >= 10% callback
+                if (progress >= 10 && !unet_started) {
                     snprintf(buf, sizeof(buf), "\nText Encoder: done\nUNet Steps(%d): ", total_steps);
                     last_step = 0;
                     unet_started = true;
+                    text_encoder_printed = true;
                 }
                 // UNet步骤 (10% ~ 95%)
                 else if (progress >= 10 && progress < 95 && unet_started) {
