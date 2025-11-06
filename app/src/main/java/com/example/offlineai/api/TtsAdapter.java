@@ -186,6 +186,16 @@ public class TtsAdapter {
             try {
                 sentenceQueue.put(remaining);
                 LogManager.logI(TAG, "[TTS] Queued final: " + remaining);
+                
+                // CRITICAL: Start threads if not started yet (for very short text)
+                // This handles the race condition where complete() is called before any sentence break
+                if (ttsThreadStarted.compareAndSet(false, true)) {
+                    LogManager.logI(TAG, "[TTS] Starting threads in complete() for short text");
+                    startTtsConsumerThread();
+                    if (autoPlay) {
+                        startPlaybackThread();
+                    }
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -790,8 +800,8 @@ public class TtsAdapter {
     }
     
     /**
-     * Filter Markdown syntax from text for TTS
-     * Uses CommonMark parser to extract plain text content
+     * Filter Markdown syntax for TTS
+     * Uses hybrid approach: CommonMark parser + regex cleanup
      * Preserves semantic content (e.g., "C#", "3*5=15")
      * 
      * @param text Raw text with potential Markdown syntax
@@ -803,15 +813,58 @@ public class TtsAdapter {
         }
         
         try {
-            // Use CommonMark standard parser
+            // Step 1: Pre-process to protect spaces in normal text
+            // Replace multiple spaces with placeholder to prevent CommonMark from collapsing them
+            String preprocessed = text.replaceAll(" {2,}", "  "); // Normalize multiple spaces
+            
+            // Step 2: Use CommonMark parser for initial conversion
             Parser parser = Parser.builder().build();
             TextContentRenderer renderer = TextContentRenderer.builder().build();
+            String plainText = renderer.render(parser.parse(preprocessed));
             
-            // Parse and render to plain text
-            String plainText = renderer.render(parser.parse(text));
+            // Step 3: Aggressive cleanup of remaining Markdown artifacts
+            // Remove bold/italic markers (**, *, __, _)
+            // CRITICAL: Use word boundaries to preserve math expressions like "3*5"
+            plainText = plainText.replaceAll("\\*\\*([^*]+)\\*\\*", "$1");  // **bold**
+            plainText = plainText.replaceAll("__([^_]+)__", "$1");          // __bold__
+            plainText = plainText.replaceAll("(?<!\\w)\\*([^*]+)\\*(?!\\w)", "$1");  // *italic* (not in math)
+            plainText = plainText.replaceAll("(?<!\\w)_([^_]+)_(?!\\w)", "$1");      // _italic_ (not in math)
             
-            // CommonMark may add extra newlines, normalize them
+            // Remove strikethrough (~~text~~)
+            plainText = plainText.replaceAll("~~([^~]+)~~", "$1");
+            
+            // Remove inline code markers (`code`)
+            plainText = plainText.replaceAll("`([^`]+)`", "$1");
+            
+            // Remove headers (### text) - multiline mode
+            plainText = plainText.replaceAll("(?m)^#{1,6}\\s+", "");
+            
+            // Remove list markers (- item, * item, 1. item) - multiline mode
+            plainText = plainText.replaceAll("(?m)^[\\s]*[-*+]\\s+", "");
+            plainText = plainText.replaceAll("(?m)^[\\s]*\\d+\\.\\s+", "");
+            
+            // Remove blockquote markers (> text) - multiline mode
+            plainText = plainText.replaceAll("(?m)^>\\s+", "");
+            
+            // Remove horizontal rules (---, ***, ___) - multiline mode
+            plainText = plainText.replaceAll("(?m)^[-*_]{3,}$", "");
+            
+            // Remove link syntax [text](url) -> text
+            plainText = plainText.replaceAll("\\[([^\\]]+)\\]\\([^)]+\\)", "$1");
+            
+            // Remove image syntax ![alt](url) -> alt
+            plainText = plainText.replaceAll("!\\[([^\\]]*)\\]\\([^)]+\\)", "$1");
+            
+            // Remove remaining standalone asterisks (not part of math)
+            // Only remove if surrounded by spaces or at boundaries
+            plainText = plainText.replaceAll("\\s+\\*+\\s+", " ");
+            plainText = plainText.replaceAll("^\\*+\\s+", "");
+            plainText = plainText.replaceAll("\\s+\\*+$", "");
+            
+            // Normalize whitespace
+            plainText = plainText.replaceAll("\\s{2,}", " ");
             plainText = plainText.replaceAll("\n{3,}", "\n\n");
+            plainText = plainText.trim();
             
             return plainText;
         } catch (Exception e) {

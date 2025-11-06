@@ -58,6 +58,7 @@ public class SettingsFragment extends Fragment {
     private TextView textViewMinChunkSizeValue;
     private EditText editTextDataRootPath;
     private Button buttonSelectDataRootPath;
+    private SwitchCompat switchShowDebugPerformance; // Show debug & performance switch
     private SwitchCompat switchDebugMode;
     private Spinner spinnerUseGpu;
     // ONNX引擎开关已移除
@@ -168,6 +169,7 @@ public class SettingsFragment extends Fragment {
         textViewMinChunkSizeValue = view.findViewById(R.id.textViewMinChunkSizeValue);
         editTextDataRootPath = view.findViewById(R.id.editTextDataRootPath);
         buttonSelectDataRootPath = view.findViewById(R.id.buttonSelectDataRootPath);
+        switchShowDebugPerformance = view.findViewById(R.id.switchShowDebugPerformance); // Show debug & performance switch
         switchDebugMode = view.findViewById(R.id.switchDebugMode);
         spinnerUseGpu = view.findViewById(R.id.spinnerBackendPreference);
         // ONNX引擎开关初始化已移除
@@ -399,6 +401,10 @@ public class SettingsFragment extends Fragment {
         });
         
         // 设置Switch监听器
+        switchShowDebugPerformance.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            ConfigManager.setShowDebugPerformance(requireContext(), isChecked);
+        });
+        
         switchDebugMode.setOnCheckedChangeListener((buttonView, isChecked) -> {
             ConfigManager.setDebugMode(requireContext(), isChecked);
         });
@@ -1054,6 +1060,9 @@ public class SettingsFragment extends Fragment {
         updateTtsSettingsVisibility(ttsModel);
         
         // Switches
+        boolean showDebugPerformance = ConfigManager.getShowDebugPerformance(ctx);
+        switchShowDebugPerformance.setChecked(showDebugPerformance);
+        
         boolean debugMode = ConfigManager.getDebugMode(ctx);
         switchDebugMode.setChecked(debugMode);
         

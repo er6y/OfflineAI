@@ -874,6 +874,7 @@
     </string-array>
     
     <string name="title_global_settings">全局设置</string>
+    <string name="label_show_debug_performance">对话显示调试和性能</string>
     <string name="label_debug_mode">调试模式</string>
     <string name="label_backend_preference">后端偏好:</string>
 

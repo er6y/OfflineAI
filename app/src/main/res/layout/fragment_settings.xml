@@ -890,6 +890,27 @@
             android:layout_marginTop="16dp"
             android:layout_marginBottom="8dp" />
 
+        <!-- Show Debug & Performance Switch -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/label_show_debug_performance"
+                android:textSize="16sp" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchShowDebugPerformance"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
         <!-- 调试模式开关 -->
         <LinearLayout
             android:layout_width="match_parent"

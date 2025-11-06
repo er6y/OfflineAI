@@ -139,6 +139,22 @@ object ChatViewHolders {
     class AssistantViewHolder(view: View) : RecyclerView.ViewHolder(view), 
         View.OnClickListener, View.OnLongClickListener {
         
+        companion object {
+            const val TAG: String = "AssistantViewHolder"
+            
+            // Static switches to control collapsible sections visibility
+            // These are controlled by upper layer (e.g., RagQaFragment)
+            // Use @JvmField to expose as public static fields to Java
+            @JvmField
+            var showThinkingEnabled = true  // Default: show thinking
+            
+            @JvmField
+            var showDebugEnabled = true  // Default: show debug
+            
+            @JvmField
+            var showPerformanceEnabled = true  // Default: show performance
+        }
+        
         private val viewText: TextView = view.findViewById(R.id.tv_chat_text)
         private val imageGenerated: ImageView = view.findViewById(R.id.image_generated)
         var viewAssistantLoading: View = view.findViewById(R.id.view_assistant_loading)
@@ -449,10 +465,10 @@ object ChatViewHolders {
         }
         
         private fun updateCollapsibleSections(data: ChatDataItem) {
-            // Update thinking section
+            // Update thinking section (controlled by static switch)
             val thinkingHeaderBase = itemView.context.getString(com.example.offlineai.R.string.collapsible_thinking)
             updateSection(
-                hasContent = !TextUtils.isEmpty(data.thinkingText),
+                hasContent = showThinkingEnabled && !TextUtils.isEmpty(data.thinkingText),
                 isExpanded = data.showThinking,
                 toggleView = thinkingToggle,
                 containerView = thinkingContainer,
@@ -466,9 +482,9 @@ object ChatViewHolders {
                 else "$thinkingHeaderBase..."
             )
             
-            // Update debug section
+            // Update debug section (controlled by static switch)
             updateSection(
-                hasContent = !TextUtils.isEmpty(data.debugText),
+                hasContent = showDebugEnabled && !TextUtils.isEmpty(data.debugText),
                 isExpanded = data.showDebug,
                 toggleView = debugToggle,
                 containerView = debugContainer,
@@ -480,9 +496,9 @@ object ChatViewHolders {
                 headerText = itemView.context.getString(com.example.offlineai.R.string.collapsible_debug)
             )
             
-            // Update performance section
+            // Update performance section (controlled by static switch)
             updateSection(
-                hasContent = !TextUtils.isEmpty(data.performanceText),
+                hasContent = showPerformanceEnabled && !TextUtils.isEmpty(data.performanceText),
                 isExpanded = data.showPerformance,
                 toggleView = performanceToggle,
                 containerView = performanceContainer,
@@ -699,9 +715,5 @@ object ChatViewHolders {
 
         // Text selection is now handled by system via setTextIsSelectable(true)
         // Custom "Transfer to Note" menu is added via customSelectionActionModeCallback
-
-        companion object {
-            const val TAG: String = "AssistantViewHolder"
-        }
     }
 }

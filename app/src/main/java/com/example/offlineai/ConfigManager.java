@@ -151,6 +151,9 @@ public class ConfigManager {
     // 语言设置配置键
     public static final String KEY_LANGUAGE = "language"; // 语言设置
     
+    // 全局设置相关的键
+    public static final String KEY_SHOW_DEBUG_PERFORMANCE = "show_debug_performance"; // 对话显示调试和性能
+    
     // 文本大小相关的键
     public static final String KEY_GLOBAL_TEXT_SIZE = "global_text_size";
     public static final String KEY_RAG_RESPONSE_TEXT_SIZE = "rag_response_text_size";
@@ -2012,6 +2015,24 @@ public class ConfigManager {
     }
 
     /**
+     * Get show debug & performance setting
+     * @param context Context
+     * @return Whether to show debug & performance sections
+     */
+    public static boolean getShowDebugPerformance(Context context) {
+        return getBoolean(context, KEY_SHOW_DEBUG_PERFORMANCE, true); // Default: true (show)
+    }
+
+    /**
+     * Set show debug & performance setting
+     * @param context Context
+     * @param show Whether to show debug & performance sections
+     */
+    public static void setShowDebugPerformance(Context context, boolean show) {
+        setBoolean(context, KEY_SHOW_DEBUG_PERFORMANCE, show);
+    }
+
+    /**
      * 获取全局字体大小
      * @param context 上下文
      * @return 全局字体大小
@@ -2253,6 +2274,9 @@ public class ConfigManager {
             
             // 语言设置
             config.put(KEY_LANGUAGE, DEFAULT_LANGUAGE);
+            
+            // Global settings
+            config.put(KEY_SHOW_DEBUG_PERFORMANCE, true); // Default: show debug & performance
             
             Log.d(TAG, "创建默认配置: " + config.toString(2));
             return config;

@@ -375,7 +375,7 @@ public class ChatHistoryManager {
                     continue;
                 }
                 
-                ChatDataItem item = markdownToChatItem(part.trim(), folderPath);
+                ChatDataItem item = markdownToChatItem(context, part.trim(), folderPath);
                 if (item != null) {
                     messages.add(item);
                 }
@@ -392,11 +392,12 @@ public class ChatHistoryManager {
     
     /**
      * 将Markdown文本转换为ChatDataItem
+     * @param context Context
      * @param markdown Markdown文本
      * @param folderPath 对话文件夹路径
      * @return ChatDataItem对象
      */
-    private static ChatDataItem markdownToChatItem(String markdown, String folderPath) {
+    private static ChatDataItem markdownToChatItem(Context context, String markdown, String folderPath) {
         try {
             // 确定消息类型
             int type = ChatViewHolders.USER;

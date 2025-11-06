@@ -544,6 +544,13 @@ public class RagQaFragment extends Fragment {
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
         
+        // Initialize collapsible section switches based on config
+        ChatViewHolders.AssistantViewHolder.showThinkingEnabled = true;  // Always show thinking
+        boolean showDebugPerf = ConfigManager.getShowDebugPerformance(requireContext());
+        ChatViewHolders.AssistantViewHolder.showDebugEnabled = showDebugPerf;
+        ChatViewHolders.AssistantViewHolder.showPerformanceEnabled = showDebugPerf;
+        LogManager.logD(TAG, "Collapsible section switches initialized: thinking=true, debug=" + showDebugPerf + ", performance=" + showDebugPerf);
+        
         // Initialize main thread Handler
         mainHandler = new Handler(Looper.getMainLooper());
         
@@ -2597,11 +2604,14 @@ public class RagQaFragment extends Fragment {
             } else {
                 // Online API
                 updateChatMessage("[LLM] Using online API: " + model + "\n");
+                // CRITICAL: Close debug section for online API (no [TEXT:] marker from online models)
+                updateChatMessage("</debug>\n\n");
             }
             
             // ============================================
-            // NOTE: Debug section will be closed when [TEXT:]/[IMAGE:]/[AUDIO:] head is detected
+            // NOTE: For local models, debug section will be closed when [TEXT:]/[IMAGE:]/[AUDIO:] head is detected
             // in onStreamingData callback below
+            // For online models, debug section is already closed above
             // ============================================
             
             LogManager.logD(TAG, "Starting to call LLM API: " + apiUrl);
@@ -2800,7 +2810,7 @@ public class RagQaFragment extends Fragment {
                     
                     // NOTE: TTS state is now managed by callback, no need to handle markers here
                     
-                    // Close debug when detecting head markers
+                    // Close debug when detecting head markers (local model only)
                     if (!debugClosed && (chunk.contains("[TEXT:]") || 
                                         chunk.contains("[IMAGE:]") || 
                                         chunk.contains("[AUDIO:]"))) {
@@ -2808,12 +2818,13 @@ public class RagQaFragment extends Fragment {
                         updateChatMessage("</debug>\n");
                         debugClosed = true;
                         LogManager.logD(TAG, "[DEBUG_TRACE] Debug section closed, TTS now enabled");
-                        
-                        // Filter out [TEXT:] and [IMAGE:] markers (but keep [AUDIO:path] intact for updateChatMessage)
-                        filteredChunk = filteredChunk.replace("[TEXT:]", "")
-                                            .replace("[IMAGE:]", "");
-                        // NOTE: [AUDIO:path] is NOT filtered here - it will be handled in updateChatMessage()
                     }
+                    
+                    // CRITICAL: Always filter out [TEXT:] and [IMAGE:] markers from ALL chunks
+                    // (not just the first one, as online models may send [TEXT:] in response)
+                    filteredChunk = filteredChunk.replace("[TEXT:]", "")
+                                        .replace("[IMAGE:]", "");
+                    // NOTE: [AUDIO:path] is NOT filtered here - it will be handled in updateChatMessage()
                     
                     // Update chat message with filtered chunk
                     updateChatMessage(filteredChunk);
@@ -6473,6 +6484,11 @@ private static class UserInput {
         
         // 5. Filter audio tags and paths (e.g., [AUDIO:path/to/audio.wav])
         filtered = filtered.replaceAll("\\[AUDIO:[^\\]]*\\]", "");
+        
+        // 6. Filter ASR audio markers (e.g., [Audio]"text" or [Audio0]"text")
+        // CRITICAL: Remove [Audio] prefix but keep the quoted text content
+        filtered = filtered.replaceAll("\\[Audio\\d*\\]\"([^\"]+)\"", "$1");
+        filtered = filtered.replaceAll("\\[Audio\\d*\\]", "");
         
         return filtered;
     }

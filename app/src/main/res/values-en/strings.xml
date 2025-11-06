@@ -868,6 +868,7 @@
     </string-array>
     
     <string name="title_global_settings">Global Settings</string>
+    <string name="label_show_debug_performance">Show Debug &amp; Performance</string>
     <string name="label_debug_mode">Debug Mode</string>
     <string name="label_backend_preference">Backend:</string>
 
