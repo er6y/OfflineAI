@@ -116,6 +116,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -147,7 +148,7 @@ public class RagQaFragment extends Fragment {
     private Spinner spinnerRerankCount; // Rerank count dropdown
     
     // Voice recording components
-    private AudioRecorderHelper audioRecorderHelper;
+    private AudioService audioRecorder;
     private VoiceRecordingDialog recordingDialog;
     private boolean isRecordingVoice = false;
     private long pressStartTime = 0;
@@ -192,6 +193,17 @@ public class RagQaFragment extends Fragment {
 
     private final AtomicBoolean isSending = new AtomicBoolean(false); // Track the state of the send/stop button with atomic operations
     private final AtomicBoolean isTtsGenerating = new AtomicBoolean(false); // Track TTS generation state
+    
+    // Audio compression state tracking (for ANR prevention)
+    private final AtomicBoolean isUserAudioCompressing = new AtomicBoolean(false); // User audio compression in progress
+    private final AtomicBoolean isAiAudioCompressing = new AtomicBoolean(false);   // AI audio compression in progress
+    private volatile String pendingUserAudioM4aPath = null;  // User audio M4A path after compression
+    private volatile String pendingAiAudioM4aPath = null;    // AI audio M4A path after compression
+    
+    // Audio decoding state tracking (for selected audio files)
+    private final AtomicBoolean isAudioDecoding = new AtomicBoolean(false); // Audio decoding in progress
+    private final AtomicInteger decodingProgress = new AtomicInteger(0);    // Decoding progress (0-100)
+    
     private static final String CONFIG_FILE = ".config"; // Configuration file name
     private List<String> systemPromptHistory = new ArrayList<>(); // System prompt history
     private Map<String, String> apiKeyMap = new HashMap<>(); // API Key mapping
@@ -228,6 +240,14 @@ public class RagQaFragment extends Fragment {
         t.setDaemon(true);
         return t;
     });
+    
+    // Audio compression thread pool (for ANR prevention)
+    private ExecutorService audioCompressionExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "Audio-Compression-Thread");
+        t.setDaemon(true);
+        return t;
+    });
+    
     // Main thread Handler
     private Handler mainHandler;
     
@@ -520,13 +540,12 @@ public class RagQaFragment extends Fragment {
             }
             // Note: no_thinking=TRUE unchecks, false checks
             // So logic needs to be inverted here
-            boolean noThinking = !isChecked;
-            ConfigManager.setNoThinking(requireContext(), noThinking);
-            LogManager.logD(TAG, "Saved thinking mode setting: " + (isChecked ? "enabled" : "disabled"));
+            ConfigManager.setBoolean(requireContext(), ConfigManager.KEY_NO_THINKING, !isChecked);
+            LogManager.logD(TAG, "Thinking mode changed: " + (isChecked ? "enabled" : "disabled"));
         });
         
         // Initialize voice recording components
-        audioRecorderHelper = new AudioRecorderHelper();
+        audioRecorder = new AudioService();
         recordingDialog = new VoiceRecordingDialog(requireContext());
         longPressHandler = new Handler(Looper.getMainLooper());
         
@@ -1404,8 +1423,10 @@ public class RagQaFragment extends Fragment {
             if (needsAsrProcessing) {
                 // ASR flow: convert audio to text first, then execute RAG query
                 String asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
-                String audioPath = userInput.audioPaths.get(0); // Use first audio file
-                LogManager.logI(TAG, "[SEND] Routing to ASR flow: model=" + asrModel + ", audio=" + audioPath);
+                // CRITICAL: Use cache WAV for ASR, NOT M4A from userInput!
+                File cacheWav = AudioService.getCacheWavFile(requireContext());
+                String audioPath = cacheWav.getAbsolutePath();
+                LogManager.logI(TAG, "[SEND] Routing to ASR flow: model=" + asrModel + ", audio=" + audioPath + " (cache WAV)");
                 
                 ragTaskFuture = ragQueryExecutor.submit(() -> {
                     LogManager.logI(TAG, "[EXECUTOR] ASR task lambda ENTERED - thread=" + Thread.currentThread().getName());
@@ -1737,16 +1758,26 @@ public class RagQaFragment extends Fragment {
                 }
             });
         }
+        
+        // CHECKPOINT: Check if all audio compressions are complete
+        // Scenarios: 1) No TTS, 2) TTS without auto-play, 4) No user audio
+        LogManager.logI(TAG, "[STATE] Inference complete, checking compression status...");
+        mainHandler.post(() -> checkCompressionCompleteAndFinalize());
     }
     
     /**
      * Update button text based on current state
-     * Priority: TTS generating > LLM inferring > Send
+     * Priority: Audio decoding > TTS generating > LLM inferring > Send
      */
     private void updateButtonText() {
         if (buttonSendStop == null) return;
         
-        if (isTtsGenerating.get()) {
+        if (isAudioDecoding.get()) {
+            // Audio decoding in progress - lock button and show progress
+            int progress = decodingProgress.get();
+            buttonSendStop.setText("解压音频中... " + progress + "%");
+            buttonSendStop.setEnabled(false); // Lock button during decoding
+        } else if (isTtsGenerating.get()) {
             buttonSendStop.setText(getString(R.string.button_generating_tts));
             buttonSendStop.setEnabled(true); // Allow stopping TTS
         } else if (isSending.get()) {
@@ -1814,9 +1845,11 @@ public class RagQaFragment extends Fragment {
             String asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
             if (!"无".equals(asrModel)) {
                 // ASR enabled: convert audio to text first, then continue RAG flow
-                String audioPath = userInput.audioPaths.get(0); // Use first audio file
+                // CRITICAL: Use cache WAV for ASR, NOT M4A from userInput!
+                File cacheWav = AudioService.getCacheWavFile(requireContext());
+                String audioPath = cacheWav.getAbsolutePath();
                 LogManager.logI(TAG, "[ASR] Audio detected with ASR enabled, converting to text first");
-                LogManager.logI(TAG, "[ASR] Model: " + asrModel + ", Audio: " + audioPath);
+                LogManager.logI(TAG, "[ASR] Model: " + asrModel + ", Audio: " + audioPath + " (cache WAV)");
                 
                 // Submit ASR task (will call executeRagQueryWithAsr after conversion)
                 ragTaskFuture = ragQueryExecutor.submit(() -> {
@@ -1866,45 +1899,22 @@ public class RagQaFragment extends Fragment {
                 TtsAdapter.TtsCallback ttsCallback = new TtsAdapter.TtsCallback() {
                     @Override
                     public void onTtsComplete(String mergedAudioPath, boolean playbackComplete) {
-                        LogManager.logI(TAG, "[TTS] onTtsComplete: path=" + mergedAudioPath + ", playbackDone=" + playbackComplete);
+                        LogManager.logI(TAG, "[TTS] ========== CALLBACK RECEIVED ==========");
+                        LogManager.logI(TAG, "[TTS] External TTS complete: " + mergedAudioPath);
+                        LogManager.logI(TAG, "[TTS] playbackComplete: " + playbackComplete);
+                        LogManager.logI(TAG, "[TTS] Current thread: " + Thread.currentThread().getName());
                         
+                        // CRITICAL: Ensure callback runs on main thread
                         mainHandler.post(() -> {
-                            if (getActivity() == null || !isAdded() || isDetached()) {
-                                LogManager.logW(TAG, "[TTS] Fragment not attached, skipping TTS complete handling");
-                                return;
-                            }
-                            
-                            // Set audio URI to last message
-                            if (!chatMessages.isEmpty()) {
-                                ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
-                                lastMsg.audioUri = Uri.fromFile(new File(mergedAudioPath));
-                                lastMsg.setHasOmniAudio(true);
-                                chatAdapter.notifyItemChanged(chatMessages.size() - 1);
-                                LogManager.logI(TAG, "[TTS] Audio URI set to last message");
-                            }
-                            
-                            // Save history (with audio)
-                            try {
-                                String currentFolder = ConfigManager.getString(requireContext(), 
-                                    ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
-                                if (!currentFolder.isEmpty()) {
-                                    ChatHistoryManager.saveConversation(requireContext(), chatMessages, currentFolder);
-                                    LogManager.logI(TAG, "[TTS] Conversation saved with audio");
-                                }
-                            } catch (Exception e) {
-                                LogManager.logE(TAG, "[TTS] Failed to save conversation", e);
-                            }
-                            
-                            // Reset button state
-                            isTtsGenerating.set(false);
-                            resetSendingState();
-                            LogManager.logI(TAG, "[TTS] Button state reset to Send");
+                            LogManager.logI(TAG, "[TTS] ✅ Processing TTS completion on main thread");
+                            handleTtsAudioComplete(mergedAudioPath);
+                            LogManager.logI(TAG, "[TTS] ✅ handleTtsAudioComplete finished");
                         });
                     }
                     
                     @Override
                     public void onError(String error) {
-                        LogManager.logE(TAG, "[TTS] TtsAdapter error: " + error);
+                        LogManager.logE(TAG, "[TTS] External TTS error: " + error);
                         mainHandler.post(() -> {
                             if (getActivity() != null && isAdded()) {
                                 Toast.makeText(requireContext(), "TTS Error: " + error, Toast.LENGTH_SHORT).show();
@@ -1946,11 +1956,19 @@ public class RagQaFragment extends Fragment {
         
         // Use audio paths from UserInput (will be handled by JNI layer, similar to images)
         // CRITICAL: Skip audio if ASR already converted audio to text
+        // CRITICAL: Use cache WAV for Omni, NOT M4A from userInput!
         java.util.List<String> audioPaths = null;
         final String originalUserPrompt = userPrompt; // Save original prompt for lambda
         if (!skipAudioEmbedding && userInput != null && userInput.hasAudio()) {
-            audioPaths = userInput.audioPaths;
-            LogManager.logI(TAG, "[MULTIMODAL] Using " + audioPaths.size() + " audio file(s) from UserInput, will pass to JNI");
+            // Use cache WAV for Omni audio understanding
+            File cacheWav = AudioService.getCacheWavFile(requireContext());
+            if (cacheWav.exists()) {
+                audioPaths = new java.util.ArrayList<>();
+                audioPaths.add(cacheWav.getAbsolutePath());
+                LogManager.logI(TAG, "[MULTIMODAL] Using cache WAV for Omni: " + cacheWav.getAbsolutePath());
+            } else {
+                LogManager.logW(TAG, "[MULTIMODAL] Cache WAV not found, skipping audio");
+            }
             // NOTE: Audio tags will be added by JNI layer (similar to image handling)
             // No need to modify userPrompt here
         } else if (skipAudioEmbedding) {
@@ -5022,20 +5040,93 @@ public class RagQaFragment extends Fragment {
                 Toast.makeText(requireContext(), R.string.toast_unsupported_file_type, Toast.LENGTH_SHORT).show();
             }
         } catch (Exception e) {
-            Toast.makeText(requireContext(), R.string.toast_media_pick_failed, Toast.LENGTH_SHORT).show();
-            LogManager.logE(TAG, "Error handling selected media file", e);
+            Toast.makeText(requireContext(), R.string.toast_unsupported_file_type, Toast.LENGTH_SHORT).show();
+            LogManager.logE(TAG, "Error handling media file: " + e.getMessage());
         }
     }
     
     /**
-     * Handle selected audio file: add to media thumbnail adapter for conversion
+     * Handle selected audio file: decode and append to cache WAV asynchronously
      */
     private void handleAudioFileSelected(Uri audioUri) {
-        // Add audio to media adapter (will convert in background)
+        // Check if max audio files reached (3 max)
+        if (mediaThumbnailAdapter.getAudioCount() >= 3) {
+            Toast.makeText(requireContext(), "最多支持3个音频文件", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        
+        // Check if already decoding
+        if (isAudioDecoding.get()) {
+            Toast.makeText(requireContext(), "音频解压中，请稍候", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        
+        // CRITICAL: If this is the first audio file, clear cache WAV to ensure "全新"
+        int currentAudioCount = mediaThumbnailAdapter.getAudioCount();
+        if (currentAudioCount == 0) {
+            File cacheWav = AudioService.getCacheWavFile(requireContext());
+            if (cacheWav.exists()) {
+                boolean deleted = cacheWav.delete();
+                LogManager.logI(TAG, "[AUDIO_DECODE] First audio file, cleared cache WAV: " + deleted);
+            }
+        } else {
+            LogManager.logI(TAG, "[AUDIO_DECODE] Subsequent audio file (#" + (currentAudioCount + 1) + "), will append to cache WAV");
+        }
+        
+        // Add audio to media adapter (for display)
         mediaThumbnailAdapter.addAudio(audioUri);
-        // Show RecyclerView
         recyclerViewImageThumbnails.setVisibility(View.VISIBLE);
-        LogManager.logI(TAG, "Audio added to media adapter (will convert in background): " + audioUri.toString());
+        
+        // Start async decoding
+        isAudioDecoding.set(true);
+        decodingProgress.set(0);
+        updateButtonText();
+        
+        LogManager.logI(TAG, "[AUDIO_DECODE] Starting async decode for: " + audioUri);
+        
+        audioCompressionExecutor.submit(() -> {
+            try {
+                boolean success = MediaThumbnailAdapter.decodeAndAppendAudio(
+                    requireContext(), 
+                    audioUri, 
+                    new MediaThumbnailAdapter.AudioDecodeCallback() {
+                        @Override
+                        public void onProgress(int progress) {
+                            decodingProgress.set(progress);
+                            mainHandler.post(() -> updateButtonText());
+                        }
+                        
+                        @Override
+                        public void onComplete(float duration) {
+                            LogManager.logI(TAG, "[AUDIO_DECODE] Decode complete, duration: " + String.format("%.1fs", duration));
+                            mainHandler.post(() -> {
+                                Toast.makeText(requireContext(), 
+                                    "音频已添加 (" + String.format("%.1fs", duration) + ")", 
+                                    Toast.LENGTH_SHORT).show();
+                            });
+                        }
+                        
+                        @Override
+                        public void onError(String error) {
+                            LogManager.logE(TAG, "[AUDIO_DECODE] Decode failed: " + error);
+                            mainHandler.post(() -> {
+                                Toast.makeText(requireContext(), "音频解压失败: " + error, Toast.LENGTH_SHORT).show();
+                            });
+                        }
+                    }
+                );
+                
+                if (!success) {
+                    LogManager.logE(TAG, "[AUDIO_DECODE] Decode failed");
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[AUDIO_DECODE] Exception during decode", e);
+            } finally {
+                isAudioDecoding.set(false);
+                decodingProgress.set(0);
+                mainHandler.post(() -> updateButtonText());
+            }
+        });
     }
     
     /**
@@ -5394,7 +5485,8 @@ public class RagQaFragment extends Fragment {
                 return;
             }
             
-            // Accumulate text
+            // CRITICAL FIX: Accumulate to lastMsg.text directly, no separate buffer
+            // The buffer approach was causing duplicate rendering
             String currentText = lastMsg.text;
             if (currentText == null) currentText = "";
             String newText = currentText + chunk;
@@ -5419,10 +5511,21 @@ public class RagQaFragment extends Fragment {
                 int startIdx = newText.indexOf("[AUDIO:");
                 int endIdx = newText.indexOf("]", startIdx);
                 if (endIdx > startIdx) {
-                    String audioPath = newText.substring(startIdx + 7, endIdx);
-                    // Remove marker from text (audio URI is set by TTS callback)
+                    String wavPath = newText.substring(startIdx + 7, endIdx);
+                    
+                    // Check if auto-play is enabled
+                    boolean autoPlayEnabled = ConfigManager.getTtsAutoPlay(requireContext());
+                    
+                    if (!autoPlayEnabled) {
+                        // No auto-play: compress immediately
+                        LogManager.logI(TAG, "[AUDIO] No auto-play, compressing immediately");
+                        handleTtsAudioComplete(wavPath);
+                    }
+                    // If auto-play: will be handled in playAudioDirect's onCompletionListener
+                    
+                    // Remove marker from text
                     newText = newText.substring(0, startIdx) + newText.substring(endIdx + 1);
-                    LogManager.logI(TAG, "Audio marker detected and removed from UI, path: " + audioPath);
+                    LogManager.logI(TAG, "[AUDIO] Marker detected: " + wavPath);
                 }
             }
             
@@ -5456,7 +5559,6 @@ public class RagQaFragment extends Fragment {
         // At bottom if last item is completely visible
         return lastVisiblePosition == lastItemPosition;
     }
-    
     /**
      * Smart scroll to bottom with debouncing
      * Only scrolls if user hasn't manually scrolled away
@@ -5464,38 +5566,26 @@ public class RagQaFragment extends Fragment {
     private void smartScrollToBottom() {
         // Don't scroll if user has manually scrolled away
         if (userScrolledAway) {
-            // Skip auto-scroll silently (too verbose)
+            LogManager.logD(TAG, "[SCROLL] Skip auto-scroll: userScrolledAway=true");
             return;
         }
         
-        // Cancel pending scroll task
-        if (pendingScrollRunnable != null) {
-            recyclerViewChat.removeCallbacks(pendingScrollRunnable);
-        }
-        
-        // Create new scroll task with debouncing (100ms)
-        pendingScrollRunnable = () -> {
-            try {
-                if (!userScrolledAway && !chatMessages.isEmpty()) {
-                    // Use scrollToPosition for instant scroll (no animation)
-                    // This prevents the jumping effect caused by smoothScrollToPosition
-                    recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
-                } else {
-                    LogManager.logD(TAG, "[SCROLL] Skip scroll in runnable: userScrolledAway=" + userScrolledAway + ", isEmpty=" + chatMessages.isEmpty());
-                }
-            } catch (Exception e) {
-                LogManager.logE(TAG, "[SCROLL] Failed to scroll to bottom", e);
+        // Scroll immediately without debouncing (for streaming updates)
+        try {
+            if (!chatMessages.isEmpty()) {
+                // Use scrollToPosition for instant scroll (no animation)
+                recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
+                // Removed: [SCROLL] Auto-scrolled log (too verbose, 1000+ times per session)
             }
-            pendingScrollRunnable = null;
-        };
-        
-        // Post delayed to debounce rapid updates
-        recyclerViewChat.postDelayed(pendingScrollRunnable, 100);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[SCROLL] Failed to scroll to bottom", e);
+        }
     }
     
     /**
      * Save chat history to markdown file
      */
+// ... (unchanged code)
     private void saveChatHistory() {
         try {
             String currentFolder = ConfigManager.getString(getContext(), 
@@ -5610,8 +5700,8 @@ public class RagQaFragment extends Fragment {
         }
         
         // Clean up recording resources
-        if (audioRecorderHelper != null && audioRecorderHelper.isRecording()) {
-            audioRecorderHelper.cancelRecording();
+        if (audioRecorder != null && audioRecorder.isRecording()) {
+            audioRecorder.cancelRecording();
         }
         if (recordingDialog != null && recordingDialog.isShowing()) {
             recordingDialog.dismiss();
@@ -5754,12 +5844,11 @@ private void startVoiceRecording() {
         currentChatFolderPath = chatFolder;
     }
     
-    // Create audio file
-    File audioFile = new File(currentChatFolderPath, 
-        "audio_" + System.currentTimeMillis() + "_user.wav");
+    // Record to cache directory (will be compressed to M4A later)
+    File cacheWav = AudioService.getCacheWavFile(requireContext());
     
     // Start recording
-    boolean started = audioRecorderHelper.startRecording(audioFile, new AudioRecorderHelper.RecordingCallback() {
+    boolean started = audioRecorder.startRecording(cacheWav, new AudioService.RecordingCallback() {
         @Override
         public void onAmplitudeUpdate(int amplitude) {
             if (recordingDialog.isShowing()) {
@@ -5790,7 +5879,7 @@ private void startVoiceRecording() {
     
     if (started) {
         isRecordingVoice = true;
-        LogManager.logI(TAG, "Voice recording started: " + audioFile.getName());
+        LogManager.logI(TAG, "Voice recording started to cache: " + cacheWav.getName());
     } else {
         recordingDialog.dismiss();
         Toast.makeText(requireContext(), "录音启动失败", Toast.LENGTH_SHORT).show();
@@ -5808,7 +5897,7 @@ private void sendVoiceMessage() {
     recordingDialog.dismiss();
     
     // Stop recording and get file
-    File audioFile = audioRecorderHelper.stopRecording();
+    File audioFile = audioRecorder.stopRecording();
     isRecordingVoice = false;
     
     if (audioFile == null || !audioFile.exists()) {
@@ -5818,7 +5907,7 @@ private void sendVoiceMessage() {
     }
     
     // Check minimum duration (0.5 seconds)
-    long duration = audioRecorderHelper.getCurrentDuration();
+    long duration = audioRecorder.getCurrentDuration();
     if (duration < 500) {
         LogManager.logW(TAG, "Recording too short: " + duration + "ms");
         Toast.makeText(requireContext(), R.string.recording_too_short, Toast.LENGTH_SHORT).show();
@@ -5867,14 +5956,16 @@ private void sendVoiceMessage() {
     LogManager.logI(TAG, String.format("[VOICE] User input prepared: text=%s, audio=%d",
         userInput.hasText() ? "yes" : "no", userInput.audioPaths.size()));
     
-    // Trigger audio inference (use saved audio path from userInput)
+    // Trigger audio inference
     // NOTE: isSending already set to true above with compareAndSet
-    if (!userInput.audioPaths.isEmpty()) {
-        sendAudioToModel(userInput.audioPaths.get(0), userPrompt, userInput, 
+    // CRITICAL: Use cache WAV for ASR/Omni (M4A in userInput is only for MD/ChatUI)
+    File cacheWav = AudioService.getCacheWavFile(requireContext());
+    if (cacheWav.exists()) {
+        sendAudioToModel(cacheWav.getAbsolutePath(), userPrompt, userInput, 
                         apiUrl, apiKey, model, knowledgeBase, systemPrompt);
     } else {
-        LogManager.logE(TAG, "[VOICE] No audio path in userInput after preparation");
-        Toast.makeText(requireContext(), "录音保存失败", Toast.LENGTH_SHORT).show();
+        LogManager.logE(TAG, "[VOICE] Cache WAV not found after recording");
+        Toast.makeText(requireContext(), "录音文件丢失", Toast.LENGTH_SHORT).show();
         // Restore state on failure
         isSending.set(false);
         buttonSendStop.setText(getString(R.string.button_send));
@@ -5884,7 +5975,8 @@ private void sendVoiceMessage() {
 /**
  * Send audio to model for inference
  * Note: User message with audioUri has already been created and added to chat
- * @param userInput User input structure containing image/audio paths (for ASR flow to preserve images)
+ * @param audioPath CRITICAL: Must be WAV file path (cache WAV for ASR/Omni), NOT M4A!
+ * @param userInput User input structure containing M4A paths (for MD record) and images
  * @param apiUrl API URL (from configuration snapshot)
  * @param apiKey API Key (from configuration snapshot)
  * @param model Model name (from configuration snapshot)
@@ -6129,6 +6221,7 @@ private void convertAndSendAsTextInternal(String audioPath, String textPrompt, S
 
 /**
  * Internal method to send audio after model is confirmed ready (ASR fallback)
+ * @param audioPath CRITICAL: Must be WAV file path (cache WAV for Omni), NOT M4A!
  */
 private void sendAudioToModelInternal(String audioPath, String textPrompt, String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt) {
     LogManager.logI(TAG, "[AUDIO] Starting audio inference with model: " + model);
@@ -6228,40 +6321,53 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
     
     // Process recorded audio (from long-press)
     if (recordedAudioFile != null && recordedAudioFile.exists()) {
-        // Move recorded audio to chat folder
-        String fileName = "audio_" + System.currentTimeMillis() + "_user.wav";
-        File targetFile = new File(chatFolderPath, fileName);
-        try {
-            if (recordedAudioFile.renameTo(targetFile)) {
-                audioPaths.add(targetFile.getAbsolutePath());
-                // Get duration
-                try {
-                    MediaPlayer mp = new MediaPlayer();
-                    mp.setDataSource(targetFile.getAbsolutePath());
-                    mp.prepare();
-                    audioDuration = mp.getDuration() / 1000.0f;
-                    mp.release();
-                } catch (Exception e) {
-                    LogManager.logW(TAG, "[PREPARE_INPUT] Failed to get audio duration: " + e.getMessage());
+        // ASYNC COMPRESSION: Start compression in background, don't block main thread
+        String timestamp = String.valueOf(System.currentTimeMillis());
+        File m4aFile = new File(chatFolderPath, "audio_" + timestamp + "_user.m4a");
+        
+        // Get duration from cache WAV (quick, no blocking)
+        audioDuration = AudioService.getAudioDuration(recordedAudioFile.getAbsolutePath());
+        
+        // Add placeholder path (will be updated after compression)
+        audioPaths.add(m4aFile.getAbsolutePath());
+        
+        // Start async compression
+        isUserAudioCompressing.set(true);
+        final String finalChatFolderPath = chatFolderPath;
+        audioCompressionExecutor.submit(() -> {
+            try {
+                LogManager.logI(TAG, "[ASYNC_COMPRESS] Starting user audio compression: " + 
+                    recordedAudioFile.getAbsolutePath() + " -> " + m4aFile.getAbsolutePath());
+                
+                boolean success = AudioService.compressWavToM4a(
+                    recordedAudioFile.getAbsolutePath(), 
+                    m4aFile.getAbsolutePath()
+                );
+                
+                if (success) {
+                    LogManager.logI(TAG, "[ASYNC_COMPRESS] User audio compressed successfully: " + m4aFile.getAbsolutePath());
+                    pendingUserAudioM4aPath = m4aFile.getAbsolutePath();
+                } else {
+                    LogManager.logE(TAG, "[ASYNC_COMPRESS] User audio compression failed");
                 }
-                LogManager.logI(TAG, "[PREPARE_INPUT] Moved recorded audio to: " + targetFile.getAbsolutePath());
-            } else {
-                // CRITICAL: Recorded audio move failed - this is unrecoverable
-                LogManager.logE(TAG, "[PREPARE_INPUT] Failed to move recorded audio");
-                Toast.makeText(requireContext(), "录音文件保存失败", Toast.LENGTH_SHORT).show();
-                return null;
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[ASYNC_COMPRESS] Error compressing user audio", e);
+            } finally {
+                isUserAudioCompressing.set(false);
+                LogManager.logI(TAG, "[ASYNC_COMPRESS] User audio compression done, checking finalization...");
+                // Check if all compressions are done
+                mainHandler.post(() -> checkCompressionCompleteAndFinalize());
             }
-        } catch (Exception e) {
-            // CRITICAL: Exception during audio move - unrecoverable
-            LogManager.logE(TAG, "[PREPARE_INPUT] Error moving recorded audio", e);
-            Toast.makeText(requireContext(), "录音文件保存失败: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-            return null;
-        }
+        });
+        
+        LogManager.logI(TAG, "[PREPARE_INPUT] User audio compression started in background (duration: " + audioDuration + "s)");
     }
     
     // Process media from MediaThumbnailAdapter
     int totalMediaCount = 0;
     int failedMediaCount = 0;
+    boolean hasAudioFiles = false;
+    
     if (mediaThumbnailAdapter != null && mediaThumbnailAdapter.getMediaCount() > 0) {
         List<MediaThumbnailAdapter.MediaItem> items;
         synchronized (mediaThumbnailAdapter.getMediaItems()) {
@@ -6286,31 +6392,60 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
                     LogManager.logE(TAG, "[PREPARE_INPUT] Error processing image", e);
                 }
             } else if (item instanceof MediaThumbnailAdapter.AudioItem) {
-                // Process audio: convert to WAV
+                // Audio already decoded and appended to user_voice.wav in handleAudioFileSelected()
+                // Mark that we have audio files (will compress cache WAV after loop)
+                hasAudioFiles = true;
+                LogManager.logI(TAG, "[PREPARE_INPUT] Audio file detected (already decoded to cache WAV)");
+            }
+        }
+    }
+    
+    // Process merged audio (if any audio files were selected)
+    if (hasAudioFiles) {
+        File cacheWav = AudioService.getCacheWavFile(requireContext());
+        if (cacheWav.exists()) {
+            // Start async compression of merged audio
+            String timestamp = String.valueOf(System.currentTimeMillis());
+            File m4aFile = new File(chatFolderPath, "audio_" + timestamp + "_user.m4a");
+            
+            // Get duration from cache WAV (contains all merged audio)
+            audioDuration = AudioService.getAudioDuration(cacheWav.getAbsolutePath());
+            
+            // Add placeholder path (will be updated after compression)
+            audioPaths.add(m4aFile.getAbsolutePath());
+            
+            // Start async compression
+            isUserAudioCompressing.set(true);
+            final String finalChatFolderPath = chatFolderPath;
+            audioCompressionExecutor.submit(() -> {
                 try {
-                    String audioPath = convertAudioToChatFolder(item.getOriginalUri(), chatFolderPath);
-                    if (audioPath != null) {
-                        audioPaths.add(audioPath);
-                        // Get duration
-                        try {
-                            MediaPlayer mp = new MediaPlayer();
-                            mp.setDataSource(audioPath);
-                            mp.prepare();
-                            audioDuration = mp.getDuration() / 1000.0f;
-                            mp.release();
-                        } catch (Exception e) {
-                            LogManager.logW(TAG, "[PREPARE_INPUT] Failed to get audio duration");
-                        }
-                        LogManager.logI(TAG, "[PREPARE_INPUT] Saved audio: " + audioPath);
+                    LogManager.logI(TAG, "[ASYNC_COMPRESS] Starting user audio compression: " + 
+                        cacheWav.getAbsolutePath() + " -> " + m4aFile.getAbsolutePath());
+                    
+                    boolean success = AudioService.compressWavToM4a(
+                        cacheWav.getAbsolutePath(), 
+                        m4aFile.getAbsolutePath()
+                    );
+                    
+                    if (success) {
+                        LogManager.logI(TAG, "[ASYNC_COMPRESS] User audio compressed successfully: " + m4aFile.getAbsolutePath());
+                        pendingUserAudioM4aPath = m4aFile.getAbsolutePath();
                     } else {
-                        failedMediaCount++;
-                        LogManager.logE(TAG, "[PREPARE_INPUT] Failed to convert audio (returned null)");
+                        LogManager.logE(TAG, "[ASYNC_COMPRESS] User audio compression failed");
                     }
                 } catch (Exception e) {
-                    failedMediaCount++;
-                    LogManager.logE(TAG, "[PREPARE_INPUT] Error processing audio", e);
+                    LogManager.logE(TAG, "[ASYNC_COMPRESS] Error compressing user audio", e);
+                } finally {
+                    isUserAudioCompressing.set(false);
+                    LogManager.logI(TAG, "[ASYNC_COMPRESS] User audio compression done, checking finalization...");
+                    // Check if all compressions are done
+                    mainHandler.post(() -> checkCompressionCompleteAndFinalize());
                 }
-            }
+            });
+            
+            LogManager.logI(TAG, "[PREPARE_INPUT] User audio compression started (duration: " + audioDuration + "s)");
+        } else {
+            LogManager.logE(TAG, "[PREPARE_INPUT] Cache WAV not found!");
         }
     }
     
@@ -6414,7 +6549,7 @@ private void cancelVoiceRecording() {
     }
     
     recordingDialog.dismiss();
-    audioRecorderHelper.cancelRecording();
+    audioRecorder.cancelRecording();
     isRecordingVoice = false;
     
     Toast.makeText(requireContext(), R.string.recording_canceled, Toast.LENGTH_SHORT).show();
@@ -6523,25 +6658,138 @@ private static class UserInput {
             autoPlayMediaPlayer.prepare();
             autoPlayMediaPlayer.start();
             
+            // Capture audioPath for completion listener
+            final String playedAudioPath = audioPath;
+            
             autoPlayMediaPlayer.setOnCompletionListener(mp -> {
                 mp.release();
                 autoPlayMediaPlayer = null;
                 
-                // CRITICAL: Reset TTS state after playback completes
-                // This ensures button returns to "Send" state
-                isTtsGenerating.set(false);
-                if (mainHandler != null) {
-                    mainHandler.post(() -> {
-                        updateButtonText();
-                        LogManager.logI(TAG, "[TTS] Playback completed, button state reset to Send");
-                    });
-                }
+                LogManager.logI(TAG, "[TTS] Omni playback completed");
+                
+                // Unified handling: compress and update
+                handleTtsAudioComplete(playedAudioPath);
             });
             
-            LogManager.logI(TAG, "[TTS] Auto-play via MediaPlayer (fallback)");
+            LogManager.logI(TAG, "[TTS] Auto-play started (Omni)");
             
         } catch (IOException e) {
             LogManager.logE(TAG, "[TTS] Auto-play failed", e);
+            // Even if playback fails, still try to handle the audio file
+            handleTtsAudioComplete(audioPath);
+        }
+    }
+    
+    /**
+     * Handle TTS audio completion: compress WAV to M4A, update UI and save history
+     * Unified entry point for both Omni TTS and External TTS
+     * 
+     * @param wavPath Original WAV file path from TTS generation
+     */
+    private void handleTtsAudioComplete(String wavPath) {
+        if (wavPath == null || wavPath.isEmpty()) {
+            LogManager.logE(TAG, "[TTS] handleTtsAudioComplete: wavPath is null");
+            return;
+        }
+        
+        LogManager.logI(TAG, "[TTS] handleTtsAudioComplete: " + wavPath);
+        
+        // ASYNC COMPRESSION: Execute compression in background using dedicated thread pool
+        isAiAudioCompressing.set(true);
+        audioCompressionExecutor.submit(() -> {
+            try {
+                File wavFile = new File(wavPath);
+                if (!wavFile.exists()) {
+                    LogManager.logE(TAG, "[ASYNC_COMPRESS] AI WAV file not found: " + wavPath);
+                    return;
+                }
+                
+                // Generate M4A path (same directory, same name, different extension)
+                String m4aPath = wavPath.replace(".wav", ".m4a");
+                
+                LogManager.logI(TAG, "[ASYNC_COMPRESS] Starting AI audio compression: " + wavPath + " -> " + m4aPath);
+                boolean success = AudioService.compressWavToM4a(wavPath, m4aPath);
+                
+                if (success) {
+                    // Delete WAV after successful compression
+                    if (wavFile.delete()) {
+                        LogManager.logI(TAG, "[ASYNC_COMPRESS] AI WAV deleted after compression: " + wavPath);
+                    } else {
+                        LogManager.logW(TAG, "[ASYNC_COMPRESS] Failed to delete AI WAV: " + wavPath);
+                    }
+                    
+                    LogManager.logI(TAG, "[ASYNC_COMPRESS] AI audio compressed successfully: " + m4aPath);
+                    pendingAiAudioM4aPath = m4aPath;
+                    
+                    // Update UI with M4A path (immediately, don't wait for user audio)
+                    mainHandler.post(() -> updateChatMessageWithAudio(m4aPath));
+                } else {
+                    LogManager.logE(TAG, "[ASYNC_COMPRESS] AI audio compression failed");
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[ASYNC_COMPRESS] Error compressing AI audio", e);
+            } finally {
+                isAiAudioCompressing.set(false);
+                LogManager.logI(TAG, "[ASYNC_COMPRESS] AI audio compression done, checking finalization...");
+                // Check if all compressions are done
+                mainHandler.post(() -> checkCompressionCompleteAndFinalize());
+            }
+        });
+    }
+    
+    /**
+     * Update chat message with audio file path
+     * Must be called on main thread
+     * 
+     * @param audioPath Audio file path (WAV or M4A)
+     */
+    private void updateChatMessageWithAudio(String audioPath) {
+        if (getActivity() == null || !isAdded() || isDetached()) {
+            LogManager.logW(TAG, "[TTS] Fragment not attached, skipping audio update");
+            return;
+        }
+        
+        try {
+            File audioFile = new File(audioPath);
+            if (!audioFile.exists()) {
+                LogManager.logE(TAG, "[TTS] Audio file not found: " + audioPath);
+                return;
+            }
+            
+            // Set audio URI to last assistant message
+            if (!chatMessages.isEmpty()) {
+                ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
+                if (lastMsg.getType() == ChatViewHolders.ASSISTANT) {
+                    lastMsg.audioUri = Uri.fromFile(audioFile);
+                    lastMsg.setHasOmniAudio(true);
+                    
+                    // Get audio duration
+                    float duration = AudioService.getAudioDuration(audioPath);
+                    lastMsg.setAudioDuration(duration);
+                    
+                    // Notify adapter to refresh UI
+                    chatAdapter.notifyItemChanged(chatMessages.size() - 1);
+                    
+                    LogManager.logI(TAG, "[TTS] Audio URI updated: " + audioPath + 
+                        " (duration: " + String.format("%.1fs", duration) + ")");
+                } else {
+                    LogManager.logW(TAG, "[TTS] Last message is not assistant type");
+                }
+            } else {
+                LogManager.logW(TAG, "[TTS] No messages to update");
+            }
+            
+            // Save chat history with audio
+            saveChatHistory();
+            LogManager.logI(TAG, "[TTS] Chat history saved with audio");
+            
+            // Reset TTS state
+            isTtsGenerating.set(false);
+            updateButtonText();
+            LogManager.logI(TAG, "[TTS] TTS state reset, button updated");
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TTS] Error updating chat message with audio", e);
         }
     }
     
@@ -6563,6 +6811,63 @@ private static class UserInput {
             autoPlayMediaPlayer.release();
             autoPlayMediaPlayer = null;
         }
+        
+        // Shutdown audio compression thread pool
+        if (audioCompressionExecutor != null) {
+            audioCompressionExecutor.shutdown();
+            LogManager.logI(TAG, "[ASYNC_COMPRESS] Audio compression executor shutdown");
+        }
+    }
+    
+    /**
+     * Unified checkpoint: Check if all audio compression tasks are complete
+     * Called at key moments:
+     * 1. After inference completes (no TTS)
+     * 2. After TTS generation completes (no auto-play)
+     * 3. After audio playback completes (with auto-play)
+     * 
+     * Only when all compression tasks are done, update UI and save MD to avoid race conditions
+     */
+    private void checkCompressionCompleteAndFinalize() {
+        // If any compression is still in progress, wait
+        if (isUserAudioCompressing.get() || isAiAudioCompressing.get()) {
+            return;
+        }
+        
+        // All compressions done, update user message with M4A path if needed
+        if (pendingUserAudioM4aPath != null) {
+            // Find the last user message and update its audioUri
+            for (int i = chatMessages.size() - 1; i >= 0; i--) {
+                ChatDataItem item = chatMessages.get(i);
+                if (item.getType() == ChatViewHolders.USER) {
+                    // CRITICAL: Use Uri.fromFile() to create proper file:// URI with scheme
+                    item.audioUri = Uri.fromFile(new File(pendingUserAudioM4aPath));
+                    chatAdapter.notifyItemChanged(i);
+                    break;
+                }
+            }
+            pendingUserAudioM4aPath = null;
+        }
+        
+        // AI audio M4A path is already updated in updateChatMessageWithAudio()
+        String aiAudioPathForAutoPlay = null;
+        if (pendingAiAudioM4aPath != null) {
+            aiAudioPathForAutoPlay = pendingAiAudioM4aPath;  // Save for auto-play before clearing
+            pendingAiAudioM4aPath = null;
+        }
+        
+        // Save chat history (final step)
+        saveChatHistory();
+        LogManager.logI(TAG, "[COMPRESSION_CHECK] Finalized: chat saved, state reset");
+        
+        // Reset sending state (CRITICAL: must reset after all done)
+        isSending.set(false);
+        updateButtonText();
+        
+        // TODO: Add auto-play feature if needed
+        // if (aiAudioPathForAutoPlay != null) {
+        //     mainHandler.postDelayed(() -> playAudioDirect(aiAudioPathForAutoPlay), 300);
+        // }
     }
     
     @SuppressWarnings("deprecation")

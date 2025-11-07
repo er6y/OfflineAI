@@ -67,8 +67,26 @@ class ChatDataItem {
 
     val audioPath: String?
         get() {
-            if (this.audioUri != null && "file" == audioUri!!.scheme) {
-                return audioUri!!.path
+            if (this.audioUri != null) {
+                val scheme = audioUri!!.scheme
+                val uriString = audioUri.toString()
+                
+                // Handle different URI formats
+                return when (scheme) {
+                    "file" -> {
+                        // Proper file:// URI, remove the "file://" prefix
+                        if (uriString.startsWith("file://")) {
+                            uriString.substring(7)
+                        } else {
+                            audioUri!!.path
+                        }
+                    }
+                    null -> {
+                        // Direct path string (from Uri.parse(path)), return as-is
+                        uriString
+                    }
+                    else -> null  // Other schemes (content://, etc.)
+                }
             }
             return null
         }

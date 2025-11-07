@@ -33,7 +33,9 @@ public class ChatHistoryManager {
     private static final String CONVERSATION_FILE_NAME = "conversation.md";
     private static final String IMAGE_PREFIX = "img_";
     private static final String AUDIO_PREFIX = "audio_";
-    private static final String SEPARATOR = "\n\n---\n\n";
+    // Use a unique separator that won't conflict with Markdown syntax
+    // Format: newline + comment-style separator + newline
+    private static final String SEPARATOR = "\n\n<!-- MESSAGE_SEPARATOR -->\n\n";
     
     /**
      * 对话历史列表项
@@ -367,7 +369,11 @@ public class ChatHistoryManager {
             reader.close();
             
             // 按分隔符分割消息
-            String[] messageParts = content.toString().split(SEPARATOR);
+            // Support both old separator (---) and new separator (HTML comment)
+            // CRITICAL: Only split on separators that appear BEFORE message headers (## 用户 or ## AI助手)
+            // This prevents splitting on --- that appears in message content
+            String separatorPattern = "\\n\\n(?:<!\\-\\- MESSAGE_SEPARATOR \\-\\->|\\-\\-\\-)\\n\\n(?=## )";
+            String[] messageParts = content.toString().split(separatorPattern);
             List<ChatDataItem> messages = new ArrayList<>();
             
             for (String part : messageParts) {

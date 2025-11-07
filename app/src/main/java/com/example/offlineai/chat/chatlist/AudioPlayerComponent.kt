@@ -19,10 +19,13 @@ class AudioPlayerComponent(private val chatDataItem: ChatDataItem) {
     private var viewHolder: UserViewHolder? = null
 
     fun onPlayPauseClicked() {
+        android.util.Log.i(TAG, "[PLAY_PAUSE] Clicked, isPlaying=$isPlaying, audioPath=${chatDataItem.audioPath}")
         if (isPlaying) {
+            android.util.Log.i(TAG, "[PLAY_PAUSE] Pausing audio")
             audioPlayService.pauseAudio(chatDataItem.audioPath)
             setPlaying(false)
         } else {
+            android.util.Log.i(TAG, "[PLAY_PAUSE] Starting playback: ${chatDataItem.audioPath}")
             audioPlayService.playAudio(chatDataItem.audioPath, object : AudioPlayerCallback {
                 override fun onPlayFinish() {
                     setPlaying(false)
@@ -32,6 +35,14 @@ class AudioPlayerComponent(private val chatDataItem: ChatDataItem) {
                 override fun onPlayError() {
                     setPlaying(false)
                     setProgress(0.0f)
+                    // Show user-friendly message
+                    viewHolder?.itemView?.let { view ->
+                        android.widget.Toast.makeText(
+                            view.context,
+                            "音频文件可能正在生成中，请稍后重试",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
                 }
 
                 override fun onPlayStart() {

@@ -20,6 +20,8 @@ import androidx.recyclerview.widget.RecyclerView
 import com.example.offlineai.R
 import com.example.offlineai.chat.model.ChatDataItem
 import io.noties.markwon.Markwon
+import io.noties.markwon.ext.latex.JLatexMathPlugin
+import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
 
 object ChatViewHolders {
     const val HEADER: Int = 0
@@ -203,8 +205,14 @@ object ChatViewHolders {
         private val ivPerformanceHeader: ImageView = view.findViewById(R.id.iv_performance_header)
         private val performanceMarker: View = view.findViewById(R.id.view_performance_marker)
         
-        private val markdown = Markwon.create(itemView.context)
-
+        // Markwon with LaTeX support (inline $...$ and block $$...$$)
+        private val markdown = Markwon.builder(itemView.context)
+            .usePlugin(MarkwonInlineParserPlugin.create())  // Required for inline LaTeX
+            .usePlugin(JLatexMathPlugin.create(32f) { builder ->
+                builder.inlinesEnabled(true)  // Enable $...$ inline formulas
+            })
+            .build()
+        
         init {
             // Enable text selection for all text views
             setupTextSelection(viewText)
@@ -316,14 +324,14 @@ object ChatViewHolders {
             applyGlobalTextSize()
             
             if (!payloads.isNullOrEmpty()) {
-                // Incremental update
+                // Incremental update (streaming) - only update text
                 updateCollapsibleSections(data)
                 if (data.displayText != null) {
-                    markdown.setMarkdown(viewText, data.displayText!!)
+                    markdown.setMarkdown(viewText, normalizeLatex(data.displayText!!))
                 }
                 return
             }
-
+            
             // Full bind
             updateCollapsibleSections(data)
             
@@ -331,7 +339,7 @@ object ChatViewHolders {
             if (TextUtils.isEmpty(data.displayText)) {
                 viewText.visibility = View.GONE
             } else {
-                markdown.setMarkdown(viewText, data.displayText!!)
+                markdown.setMarkdown(viewText, normalizeLatex(data.displayText!!))
                 viewText.visibility = View.VISIBLE
             }
 
@@ -450,6 +458,26 @@ object ChatViewHolders {
             val minutes = (durationMs / 1000) / 60
             // Always use minutes:seconds format for consistency
             return String.format("%d:%02d", minutes, seconds)
+        }
+        
+        /**
+         * Normalize LaTeX formulas:
+         * 1. Remove spaces adjacent to $ symbols
+         * 2. Convert single $ formulas to $$ (Markwon only supports $$)
+         * Example: "$ x $" -> "$$x$$", "$$ x + y $$" -> "$$x + y$$"
+         */
+        private fun normalizeLatex(text: String): String {
+            var result = text
+                .replace(Regex("\\$\\s+")) { "$" }  // Remove spaces after $
+                .replace(Regex("\\s+\\$")) { "$" }  // Remove spaces before $
+            
+            // Convert single $ to $$ (match $...$ but not $$...$$)
+            // Pattern: $ followed by non-$ text, then $ (not preceded/followed by $)
+            result = result.replace(Regex("(?<!\\$)\\$(?!\\$)([^\\$]+?)\\$(?!\\$)")) { matchResult ->
+                "$$" + matchResult.groupValues[1] + "$$"
+            }
+            
+            return result
         }
         
         private fun applyGlobalTextSize() {

@@ -23,6 +23,18 @@ class AudioPlayService private constructor() {
         if (audioPath == null) {
             return
         }
+        
+        // CRITICAL: Check if file exists before attempting to play
+        val audioFile = java.io.File(audioPath)
+        android.util.Log.i(TAG, "[PLAY_AUDIO] Attempting to play: $audioPath")
+        android.util.Log.i(TAG, "[PLAY_AUDIO] File exists: ${audioFile.exists()}, canRead: ${audioFile.canRead()}, size: ${audioFile.length()}")
+        
+        if (!audioFile.exists()) {
+            android.util.Log.e(TAG, "[PLAY_AUDIO] File not found: $audioPath")
+            callback?.onPlayError()
+            return
+        }
+        
         if (isMediaPlaying) {
             mediaPlayer!!.stop()
             mediaPlayer!!.reset()
@@ -52,6 +64,7 @@ class AudioPlayService private constructor() {
                 true
             }
         } catch (e: Exception) {
+            android.util.Log.e(TAG, "[PLAY_AUDIO] Error playing audio: ${e.message}", e)
             callback?.onPlayError()
             resetMediaPlayer()
         }

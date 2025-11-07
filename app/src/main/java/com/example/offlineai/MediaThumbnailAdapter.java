@@ -190,8 +190,325 @@ public class MediaThumbnailAdapter extends RecyclerView.Adapter<MediaThumbnailAd
     // in prepareAndSaveUserInput() when user clicks send, avoiding chat folder issues
 
     /**
-     * Convert audio file to WAV format (16kHz, mono, 16-bit PCM)
-     * Supports WAV (direct copy), MP3, M4A (MediaCodec conversion)
+     * Progress callback for audio decoding
+     */
+    public interface AudioDecodeCallback {
+        void onProgress(int progress); // 0-100
+        void onComplete(float duration); // Duration in seconds
+        void onError(String error);
+    }
+    
+    /**
+     * Decode audio file and append to cache WAV (user_voice.wav)
+     * Process: Decode → Resample to 16kHz mono → Append to cache WAV
+     * Supports WAV, MP3, M4A input formats
+     * 
+     * @param context Context
+     * @param audioUri Audio file URI
+     * @param callback Progress callback (optional)
+     * @return true if successful
+     */
+    public static boolean decodeAndAppendAudio(Context context, Uri audioUri, AudioDecodeCallback callback) {
+        try {
+            // Get MIME type
+            String mimeType = context.getContentResolver().getType(audioUri);
+            LogManager.logI("MediaThumbnailAdapter", "[DECODE_APPEND] Processing audio: " + audioUri + ", MIME: " + mimeType);
+            
+            if (callback != null) {
+                callback.onProgress(10);
+            }
+            
+            // Get cache WAV file
+            File cacheWav = AudioService.getCacheWavFile(context);
+            
+            // Decode audio to PCM
+            byte[] pcmData;
+            int sampleRate;
+            int channels;
+            
+            if (mimeType != null && (mimeType.equals("audio/wav") || mimeType.equals("audio/x-wav"))) {
+                // WAV file: read and extract PCM data
+                LogManager.logI("MediaThumbnailAdapter", "[DECODE_APPEND] Audio is WAV, reading PCM data");
+                WavInfo wavInfo = readWavFile(context, audioUri);
+                pcmData = wavInfo.pcmData;
+                sampleRate = wavInfo.sampleRate;
+                channels = wavInfo.channels;
+            } else {
+                // MP3/M4A: decode using MediaCodec
+                LogManager.logI("MediaThumbnailAdapter", "[DECODE_APPEND] Decoding " + mimeType + " to PCM");
+                DecodedAudio decoded = decodeAudioToPcm(context, audioUri, callback);
+                pcmData = decoded.pcmData;
+                sampleRate = decoded.sampleRate;
+                channels = decoded.channels;
+            }
+            
+            if (callback != null) {
+                callback.onProgress(70);
+            }
+            
+            // Resample to 16kHz mono if needed
+            if (sampleRate != 16000 || channels != 1) {
+                LogManager.logI("MediaThumbnailAdapter", "[DECODE_APPEND] Resampling from " + sampleRate + "Hz " + channels + "ch to 16kHz mono");
+                pcmData = resampleTo16kMono(pcmData, sampleRate, channels);
+                sampleRate = 16000;
+                channels = 1;
+            }
+            
+            if (callback != null) {
+                callback.onProgress(90);
+            }
+            
+            // Append to cache WAV
+            boolean success = AudioService.appendToWav(cacheWav, pcmData, sampleRate, channels, 16);
+            
+            if (success) {
+                float duration = (float) pcmData.length / (sampleRate * channels * 2); // 16-bit = 2 bytes
+                LogManager.logI("MediaThumbnailAdapter", "[DECODE_APPEND] Successfully appended audio, duration: " + String.format("%.1fs", duration));
+                
+                if (callback != null) {
+                    callback.onProgress(100);
+                    callback.onComplete(duration);
+                }
+                return true;
+            } else {
+                throw new IOException("Failed to append to cache WAV");
+            }
+            
+        } catch (Exception e) {
+            LogManager.logE("MediaThumbnailAdapter", "[DECODE_APPEND] Failed to decode and append audio", e);
+            if (callback != null) {
+                callback.onError(e.getMessage());
+            }
+            return false;
+        }
+    }
+    
+    /**
+     * WAV file info
+     */
+    private static class WavInfo {
+        byte[] pcmData;
+        int sampleRate;
+        int channels;
+    }
+    
+    /**
+     * Read WAV file and extract PCM data
+     */
+    private static WavInfo readWavFile(Context context, Uri audioUri) throws IOException {
+        try (InputStream inputStream = context.getContentResolver().openInputStream(audioUri)) {
+            if (inputStream == null) {
+                throw new IOException("Failed to open input stream");
+            }
+            
+            // Read WAV header (44 bytes)
+            byte[] header = new byte[44];
+            if (inputStream.read(header) != 44) {
+                throw new IOException("Invalid WAV file: header too short");
+            }
+            
+            // Parse header
+            int sampleRate = ((header[27] & 0xFF) << 24) | ((header[26] & 0xFF) << 16) | 
+                           ((header[25] & 0xFF) << 8) | (header[24] & 0xFF);
+            int channels = ((header[23] & 0xFF) << 8) | (header[22] & 0xFF);
+            int dataSize = ((header[43] & 0xFF) << 24) | ((header[42] & 0xFF) << 16) | 
+                         ((header[41] & 0xFF) << 8) | (header[40] & 0xFF);
+            
+            LogManager.logI("MediaThumbnailAdapter", "[READ_WAV] Sample rate: " + sampleRate + "Hz, channels: " + channels + ", data size: " + dataSize);
+            
+            // Read PCM data
+            byte[] pcmData = new byte[dataSize];
+            int totalRead = 0;
+            while (totalRead < dataSize) {
+                int read = inputStream.read(pcmData, totalRead, dataSize - totalRead);
+                if (read < 0) break;
+                totalRead += read;
+            }
+            
+            WavInfo info = new WavInfo();
+            info.pcmData = pcmData;
+            info.sampleRate = sampleRate;
+            info.channels = channels;
+            return info;
+        }
+    }
+    
+    /**
+     * Decoded audio info
+     */
+    private static class DecodedAudio {
+        byte[] pcmData;
+        int sampleRate;
+        int channels;
+    }
+    
+    /**
+     * Decode audio to PCM using MediaCodec
+     */
+    private static DecodedAudio decodeAudioToPcm(Context context, Uri audioUri, AudioDecodeCallback callback) throws IOException {
+        // Similar to convertWithMediaCodec, but returns PCM data instead of writing to file
+        MediaExtractor extractor = new MediaExtractor();
+        extractor.setDataSource(context, audioUri, null);
+        
+        // Find audio track
+        int trackIndex = -1;
+        MediaFormat format = null;
+        for (int i = 0; i < extractor.getTrackCount(); i++) {
+            MediaFormat trackFormat = extractor.getTrackFormat(i);
+            String mime = trackFormat.getString(MediaFormat.KEY_MIME);
+            if (mime != null && mime.startsWith("audio/")) {
+                trackIndex = i;
+                format = trackFormat;
+                break;
+            }
+        }
+        
+        if (trackIndex < 0 || format == null) {
+            extractor.release();
+            throw new IOException("No audio track found");
+        }
+        
+        extractor.selectTrack(trackIndex);
+        
+        // Create decoder
+        String mime = format.getString(MediaFormat.KEY_MIME);
+        MediaCodec decoder = MediaCodec.createDecoderByType(mime);
+        decoder.configure(format, null, null, 0);
+        decoder.start();
+        
+        // Decode audio
+        List<byte[]> pcmChunks = new ArrayList<>();
+        int sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE);
+        int channels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT);
+        
+        LogManager.logI("MediaThumbnailAdapter", "[DECODE_PCM] Sample rate: " + sampleRate + "Hz, channels: " + channels);
+        
+        boolean inputDone = false;
+        boolean outputDone = false;
+        MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+        int progress = 30;
+        
+        while (!outputDone) {
+            // Feed input
+            if (!inputDone) {
+                int inputBufferId = decoder.dequeueInputBuffer(10000);
+                if (inputBufferId >= 0) {
+                    ByteBuffer inputBuffer = decoder.getInputBuffer(inputBufferId);
+                    if (inputBuffer != null) {
+                        int sampleSize = extractor.readSampleData(inputBuffer, 0);
+                        if (sampleSize < 0) {
+                            decoder.queueInputBuffer(inputBufferId, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                            inputDone = true;
+                        } else {
+                            long presentationTimeUs = extractor.getSampleTime();
+                            decoder.queueInputBuffer(inputBufferId, 0, sampleSize, presentationTimeUs, 0);
+                            extractor.advance();
+                        }
+                    }
+                }
+            }
+            
+            // Get output
+            int outputBufferId = decoder.dequeueOutputBuffer(info, 10000);
+            if (outputBufferId >= 0) {
+                ByteBuffer outputBuffer = decoder.getOutputBuffer(outputBufferId);
+                if (outputBuffer != null && info.size > 0) {
+                    byte[] chunk = new byte[info.size];
+                    outputBuffer.get(chunk);
+                    pcmChunks.add(chunk);
+                    
+                    // Update progress
+                    if (callback != null && progress < 60) {
+                        progress++;
+                        callback.onProgress(progress);
+                    }
+                }
+                decoder.releaseOutputBuffer(outputBufferId, false);
+                
+                if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                    outputDone = true;
+                }
+            }
+        }
+        
+        decoder.stop();
+        decoder.release();
+        extractor.release();
+        
+        // Merge PCM chunks
+        int totalSize = 0;
+        for (byte[] chunk : pcmChunks) {
+            totalSize += chunk.length;
+        }
+        
+        byte[] pcmData = new byte[totalSize];
+        int offset = 0;
+        for (byte[] chunk : pcmChunks) {
+            System.arraycopy(chunk, 0, pcmData, offset, chunk.length);
+            offset += chunk.length;
+        }
+        
+        DecodedAudio decoded = new DecodedAudio();
+        decoded.pcmData = pcmData;
+        decoded.sampleRate = sampleRate;
+        decoded.channels = channels;
+        return decoded;
+    }
+    
+    /**
+     * Resample PCM data to 16kHz mono
+     * Simple linear interpolation resampling
+     */
+    private static byte[] resampleTo16kMono(byte[] pcmData, int srcSampleRate, int srcChannels) {
+        // Convert to 16-bit samples
+        int srcSampleCount = pcmData.length / (srcChannels * 2);
+        short[] srcSamples = new short[srcSampleCount * srcChannels];
+        for (int i = 0; i < srcSamples.length; i++) {
+            int byteIndex = i * 2;
+            srcSamples[i] = (short) ((pcmData[byteIndex + 1] << 8) | (pcmData[byteIndex] & 0xFF));
+        }
+        
+        // Calculate output sample count
+        int dstSampleCount = (int) ((long) srcSampleCount * 16000 / srcSampleRate);
+        short[] dstSamples = new short[dstSampleCount];
+        
+        // Resample and convert to mono
+        for (int i = 0; i < dstSampleCount; i++) {
+            // Calculate source position
+            float srcPos = (float) i * srcSampleRate / 16000;
+            int srcIndex = (int) srcPos;
+            
+            if (srcIndex >= srcSampleCount - 1) {
+                srcIndex = srcSampleCount - 1;
+            }
+            
+            // Average channels if stereo
+            short sample;
+            if (srcChannels == 2) {
+                short left = srcSamples[srcIndex * 2];
+                short right = srcSamples[srcIndex * 2 + 1];
+                sample = (short) ((left + right) / 2);
+            } else {
+                sample = srcSamples[srcIndex];
+            }
+            
+            dstSamples[i] = sample;
+        }
+        
+        // Convert back to bytes
+        byte[] result = new byte[dstSampleCount * 2];
+        for (int i = 0; i < dstSampleCount; i++) {
+            result[i * 2] = (byte) (dstSamples[i] & 0xFF);
+            result[i * 2 + 1] = (byte) ((dstSamples[i] >> 8) & 0xFF);
+        }
+        
+        return result;
+    }
+    
+    /**
+     * Convert audio file to M4A format (compressed)
+     * Process: Decode to cache WAV → Compress to M4A in chat folder
+     * Supports WAV, MP3, M4A input formats
      */
     public static String convertAudioToWav(Context context, Uri audioUri, String chatFolderPath) throws IOException {
         // Get MIME type
@@ -210,14 +527,14 @@ public class MediaThumbnailAdapter extends RecyclerView.Adapter<MediaThumbnailAd
             return null;
         }
 
-        String fileName = "audio_" + System.currentTimeMillis() + "_user.wav";
-        File outputFile = new File(outputDir, fileName);
-
-        // If already WAV, just copy
+        // 1. Decode to cache WAV
+        File cacheWav = AudioService.getCacheWavFile(context);
+        
         if (mimeType != null && (mimeType.equals("audio/wav") || mimeType.equals("audio/x-wav"))) {
-            LogManager.logI("MediaThumbnailAdapter", "Audio is already WAV, copying directly");
+            // Copy WAV to cache
+            LogManager.logI("MediaThumbnailAdapter", "Audio is WAV, copying to cache");
             try (InputStream inputStream = context.getContentResolver().openInputStream(audioUri);
-                 FileOutputStream outputStream = new FileOutputStream(outputFile)) {
+                 FileOutputStream outputStream = new FileOutputStream(cacheWav)) {
                 if (inputStream == null) {
                     throw new IOException("Failed to open input stream");
                 }
@@ -226,14 +543,32 @@ public class MediaThumbnailAdapter extends RecyclerView.Adapter<MediaThumbnailAd
                 while ((bytesRead = inputStream.read(buffer)) != -1) {
                     outputStream.write(buffer, 0, bytesRead);
                 }
-                LogManager.logI("MediaThumbnailAdapter", "WAV file copied: " + outputFile.getAbsolutePath());
-                return outputFile.getAbsolutePath();
+                LogManager.logI("MediaThumbnailAdapter", "WAV copied to cache: " + cacheWav.getAbsolutePath());
             }
+        } else {
+            // Decode MP3/M4A to cache WAV using MediaCodec
+            LogManager.logI("MediaThumbnailAdapter", "Decoding " + mimeType + " to cache WAV");
+            convertWithMediaCodec(context, audioUri, cacheWav);
         }
-
-        // For MP3/M4A, use MediaCodec to decode and save as WAV
-        LogManager.logI("MediaThumbnailAdapter", "Converting " + mimeType + " to WAV using MediaCodec");
-        return convertWithMediaCodec(context, audioUri, outputFile);
+        
+        // 2. Compress cache WAV to M4A in chat folder
+        String timestamp = String.valueOf(System.currentTimeMillis());
+        File m4aFile = new File(outputDir, "audio_" + timestamp + "_user.m4a");
+        
+        LogManager.logI("MediaThumbnailAdapter", "Compressing cache WAV to M4A: " + m4aFile.getAbsolutePath());
+        boolean success = AudioService.compressWavToM4a(
+            cacheWav.getAbsolutePath(), 
+            m4aFile.getAbsolutePath()
+        );
+        
+        if (!success) {
+            throw new IOException("Audio compression failed");
+        }
+        
+        LogManager.logI("MediaThumbnailAdapter", "Audio converted and compressed to M4A: " + m4aFile.getAbsolutePath());
+        
+        // 3. Return M4A path (for MD record)
+        return m4aFile.getAbsolutePath();
     }
 
     /**

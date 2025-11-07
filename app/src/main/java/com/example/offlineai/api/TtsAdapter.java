@@ -48,6 +48,7 @@ public class TtsAdapter {
     
     // State
     private final StringBuilder sentenceBuffer = new StringBuilder();
+    private String lastLoggedTtsModel = null;  // Track last logged model to avoid repeated logs
     private final BlockingQueue<String> sentenceQueue = new LinkedBlockingQueue<>();
     private final AtomicBoolean sentenceQueueCompleted = new AtomicBoolean(false);
     private final AtomicBoolean ttsThreadStarted = new AtomicBoolean(false);
@@ -130,14 +131,11 @@ public class TtsAdapter {
         if (!ttsEnabled || shouldStop.get()) return;
         if (token == null || token.isEmpty()) return;
         
-        // Filter think tags (performance tags filtered by RAG layer)
+        // Filter simple tags (not Markdown - that's done on complete sentences)
         String filteredToken = token.replaceAll("</?think>", "");
-        
-        // Filter Markdown syntax (### ** * etc.)
-        filteredToken = filterMarkdown(filteredToken);
-        
         if (filteredToken.isEmpty()) return;
         
+        // Append to buffer WITHOUT Markdown filtering
         sentenceBuffer.append(filteredToken);
         String currentText = sentenceBuffer.toString();
         
@@ -158,9 +156,13 @@ public class TtsAdapter {
         }
         
         if (shouldBreak && sentenceToQueue != null && !sentenceToQueue.trim().isEmpty()) {
+            // Filter Markdown on complete sentence
+            String cleanedSentence = filterMarkdown(sentenceToQueue.trim());
+            if (cleanedSentence.isEmpty()) return;
+            
             try {
-                sentenceQueue.put(sentenceToQueue.trim());
-                LogManager.logI(TAG, "[TTS] Queued sentence: " + sentenceToQueue.trim());
+                sentenceQueue.put(cleanedSentence);
+                LogManager.logI(TAG, "[TTS] Queued: " + cleanedSentence);
                 
                 // Start threads on first sentence
                 if (ttsThreadStarted.compareAndSet(false, true)) {
@@ -178,31 +180,48 @@ public class TtsAdapter {
     }
     
     public void complete() {
-        if (!ttsEnabled) return;
+        if (!ttsEnabled) {
+            LogManager.logW(TAG, "[TTS] complete() called but TTS not enabled");
+            return;
+        }
+        
+        LogManager.logI(TAG, "[TTS] ========== complete() ENTER ==========");
         
         // Process remaining buffer
         String remaining = sentenceBuffer.toString().trim();
+        LogManager.logI(TAG, "[TTS] Remaining buffer length: " + remaining.length());
+        
         if (!remaining.isEmpty()) {
-            try {
-                sentenceQueue.put(remaining);
-                LogManager.logI(TAG, "[TTS] Queued final: " + remaining);
-                
-                // CRITICAL: Start threads if not started yet (for very short text)
-                // This handles the race condition where complete() is called before any sentence break
-                if (ttsThreadStarted.compareAndSet(false, true)) {
-                    LogManager.logI(TAG, "[TTS] Starting threads in complete() for short text");
-                    startTtsConsumerThread();
-                    if (autoPlay) {
-                        startPlaybackThread();
+            String cleanedSentence = filterMarkdown(remaining);
+            LogManager.logI(TAG, "[TTS] After filter: '" + cleanedSentence + "' (length=" + cleanedSentence.length() + ")");
+            
+            if (!cleanedSentence.isEmpty()) {
+                try {
+                    sentenceQueue.put(cleanedSentence);
+                    LogManager.logI(TAG, "[TTS] Queued final: " + cleanedSentence);
+                    
+                    // CRITICAL: Start threads if not started yet (for very short text)
+                    // This handles the race condition where complete() is called before any sentence break
+                    if (ttsThreadStarted.compareAndSet(false, true)) {
+                        LogManager.logI(TAG, "[TTS] Starting threads in complete() for short text");
+                        startTtsConsumerThread();
+                        if (autoPlay) {
+                            startPlaybackThread();
+                        }
                     }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+            } else {
+                LogManager.logW(TAG, "[TTS] Final buffer filtered to empty, skipping queue");
             }
+        } else {
+            LogManager.logI(TAG, "[TTS] No remaining buffer to process");
         }
         
+        // CRITICAL: ALWAYS set completion flag, even if buffer was empty or filtered
         sentenceQueueCompleted.set(true);
-        LogManager.logI(TAG, "[TTS] complete() called");
+        LogManager.logI(TAG, "[TTS] ✅ complete() finished, sentenceQueueCompleted=true");
     }
     
     private void startTtsConsumerThread() {
@@ -223,13 +242,12 @@ public class TtsAdapter {
                     String audioPath = generateTtsForSentence(sentence);
                     if (audioPath != null) {
                         generatedAudioFiles.add(audioPath);
-                        LogManager.logI(TAG, "[TTS] Generated [" + generatedAudioFiles.size() + "]: " + audioPath);
+                        // Removed: per-file generation logs (too verbose)
                         
                         // Add to playback queue for streaming playback
                         if (autoPlay) {
                             try {
                                 audioPlaybackQueue.put(audioPath);
-                                LogManager.logI(TAG, "[TTS] Added to playback queue [" + generatedAudioFiles.size() + "]");
                             } catch (InterruptedException e) {
                                 LogManager.logE(TAG, "[TTS] Failed to add to playback queue", e);
                             }
@@ -240,22 +258,25 @@ public class TtsAdapter {
                 }
                 
                 // Signal playback thread that generation is complete
+                LogManager.logI(TAG, "[TTS] ========== CONSUMER LOOP FINISHED ==========");
+                LogManager.logI(TAG, "[TTS] autoPlay=" + autoPlay);
+                LogManager.logI(TAG, "[TTS] generatedAudioFiles.size()=" + generatedAudioFiles.size());
+                
                 if (autoPlay) {
                     try {
                         // Add END marker to playback queue
+                        LogManager.logI(TAG, "[TTS] Putting END marker to playback queue...");
                         audioPlaybackQueue.put("__END_MARKER__");
-                        LogManager.logI(TAG, "[TTS] Added END marker to playback queue");
+                        LogManager.logI(TAG, "[TTS] ✅ END marker added to playback queue");
                     } catch (InterruptedException e) {
-                        LogManager.logE(TAG, "[TTS] Failed to add END marker", e);
+                        LogManager.logE(TAG, "[TTS] ❌ Failed to add END marker", e);
                     }
+                } else {
+                    LogManager.logI(TAG, "[TTS] autoPlay=false, skipping END marker");
                 }
                 
                 // Merge audio files immediately after generation
-                LogManager.logI(TAG, "[TTS] ========== MERGE START ==========");
-                LogManager.logI(TAG, "[TTS] Total generated files: " + generatedAudioFiles.size());
-                for (int i = 0; i < generatedAudioFiles.size(); i++) {
-                    LogManager.logI(TAG, "[TTS]   File[" + i + "]: " + generatedAudioFiles.get(i));
-                }
+                LogManager.logI(TAG, "[TTS] ========== MERGE START: " + generatedAudioFiles.size() + " files ==========");
                 
                 if (!shouldStop.get() && !generatedAudioFiles.isEmpty()) {
                     mergedAudioPath = mergeAudioFiles(generatedAudioFiles, outputDir);
@@ -317,10 +338,9 @@ public class TtsAdapter {
                         continue;
                     }
                     
-                    LogManager.logI(TAG, "[TTS] Got audio from queue: " + audioPath);
+                    // Removed: per-file playback logs (too verbose)
                     
                     // Play audio
-                    LogManager.logI(TAG, "[TTS] Playing audio: " + audioPath);
                     // CRITICAL: Keep strong reference to prevent GC
                     final android.media.MediaPlayer mp;
                     try {
@@ -331,7 +351,7 @@ public class TtsAdapter {
                         mp.setOnCompletionListener(mediaPlayer -> {
                             playbackCompleted[0] = true;
                             mediaPlayer.release();
-                            LogManager.logI(TAG, "[TTS] Audio playback completed: " + audioPath);
+                            // Removed: per-file completion logs (too verbose)
                         });
                         mp.setOnErrorListener((mediaPlayer, what, extra) -> {
                             playbackCompleted[0] = true;
@@ -385,11 +405,17 @@ public class TtsAdapter {
             LogManager.logI(TAG, "[TTS] Playback thread finished");
             
             // Callback with playback complete
+            LogManager.logI(TAG, "[TTS] ========== PLAYBACK COMPLETE CHECK ==========");
+            LogManager.logI(TAG, "[TTS] callback is null? " + (callback == null));
+            LogManager.logI(TAG, "[TTS] mergedAudioPath is null? " + (mergedAudioPath == null));
+            LogManager.logI(TAG, "[TTS] mergedAudioPath value: " + mergedAudioPath);
+            
             if (callback != null && mergedAudioPath != null) {
-                LogManager.logI(TAG, "[TTS] Playback complete, calling onTtsComplete");
+                LogManager.logI(TAG, "[TTS] ✅ Calling onTtsComplete with path: " + mergedAudioPath);
                 callback.onTtsComplete(mergedAudioPath, true);
+                LogManager.logI(TAG, "[TTS] ✅ onTtsComplete call finished");
             } else {
-                LogManager.logE(TAG, "[TTS] ERROR: callback or mergedAudioPath is null!");
+                LogManager.logE(TAG, "[TTS] ❌ ERROR: callback or mergedAudioPath is null!");
             }
         });
         playbackThread.start();
@@ -400,7 +426,11 @@ public class TtsAdapter {
             String systemTtsName = context.getString(R.string.settings_tts_model_system);
             boolean useSystemTts = systemTtsName.equals(currentTtsModel);
             
-            LogManager.logI(TAG, "[TTS] TTS type check: currentModel='" + currentTtsModel + "', systemName='" + systemTtsName + "', useSystem=" + useSystemTts);
+            // Only log when TTS model changes (avoid 35+ repeated logs per session)
+            if (!currentTtsModel.equals(lastLoggedTtsModel)) {
+                LogManager.logI(TAG, "[TTS] TTS model switched: '" + currentTtsModel + "' (useSystem=" + useSystemTts + ")");
+                lastLoggedTtsModel = currentTtsModel;
+            }
             
             File tempDir = new File(context.getCacheDir(), "tts_temp");
             if (!tempDir.exists()) tempDir.mkdirs();
@@ -696,8 +726,7 @@ public class TtsAdapter {
                 for (String audioPath : audioPaths) {
                     File inputFile = new File(audioPath);
                     long fileSize = inputFile.length();
-                    LogManager.logI(TAG, "[TTS] >>> Merging file [" + fileIndex + "]: " + audioPath);
-                    LogManager.logI(TAG, "[TTS] >>> File size: " + fileSize + " bytes");
+                    // Removed: per-file merge logs (too verbose, 35+ times per session)
                     
                     try (FileInputStream fis = new FileInputStream(audioPath)) {
                         if (firstFile) {
@@ -710,7 +739,6 @@ public class TtsAdapter {
                                 totalBytes += read;
                             }
                             totalMergedBytes += totalBytes;
-                            LogManager.logI(TAG, "[TTS] >>> First file copied: " + totalBytes + " bytes (expected: " + fileSize + ")");
                             if (totalBytes != fileSize) {
                                 LogManager.logE(TAG, "[TTS] >>> ERROR: Size mismatch! Read " + totalBytes + " but file is " + fileSize);
                             }
@@ -718,7 +746,6 @@ public class TtsAdapter {
                         } else {
                             // Skip WAV header (44 bytes) for subsequent files
                             long skipped = fis.skip(44);
-                            LogManager.logI(TAG, "[TTS] >>> Skipped header: " + skipped + " bytes");
                             
                             byte[] buffer = new byte[8192];
                             int read;
@@ -728,7 +755,6 @@ public class TtsAdapter {
                                 totalBytes += read;
                             }
                             totalMergedBytes += totalBytes;
-                            LogManager.logI(TAG, "[TTS] >>> Appended: " + totalBytes + " bytes (file size: " + fileSize + ", data: " + (fileSize - 44) + ")");
                             if (totalBytes != (fileSize - 44)) {
                                 LogManager.logE(TAG, "[TTS] >>> ERROR: Size mismatch! Read " + totalBytes + " but expected " + (fileSize - 44));
                             }
@@ -799,77 +825,96 @@ public class TtsAdapter {
         }
     }
     
-    /**
-     * Filter Markdown syntax for TTS
-     * Uses hybrid approach: CommonMark parser + regex cleanup
-     * Preserves semantic content (e.g., "C#", "3*5=15")
-     * 
-     * @param text Raw text with potential Markdown syntax
-     * @return Plain text without Markdown formatting
-     */
+    // /**
+    //  * Manual Markdown filter - removes common Markdown syntax while preserving text content
+    //  * 
+    //  * Filters:
+    //  * - Headers: # ## ### etc.
+    //  * - Bold/Italic: **bold** *italic* __bold__ _italic_
+    //  * - Strikethrough: ~~text~~
+    //  * - Code: `code` and ``` blocks
+    //  * - Lists: - * + 1. 2. etc.
+    //  * - Quotes: > text
+    //  * - Links: [text](url)
+    //  * - Images: ![alt](url)
+    //  * - Horizontal rules: --- *** ___
+    //  * - Tables: | col1 | col2 |
+    //  * 
+    //  * Preserves:
+    //  * - All text content and spaces
+    //  * - Math expressions like 3*5 (not treated as italic)
+    //  * - Normal punctuation
+    //  */
     private String filterMarkdown(String text) {
         if (text == null || text.isEmpty()) {
             return text;
         }
         
         try {
-            // Step 1: Pre-process to protect spaces in normal text
-            // Replace multiple spaces with placeholder to prevent CommonMark from collapsing them
-            String preprocessed = text.replaceAll(" {2,}", "  "); // Normalize multiple spaces
+            String result = text;
             
-            // Step 2: Use CommonMark parser for initial conversion
-            Parser parser = Parser.builder().build();
-            TextContentRenderer renderer = TextContentRenderer.builder().build();
-            String plainText = renderer.render(parser.parse(preprocessed));
+            // Remove LaTeX $ symbols but KEEP formula content (for TTS readability)
+            // Example: "$ x $" or "$x$" becomes " x " (TTS will read "x", not "dollar sign")
+            // Block formulas: $$...$$ -> " ... "
+            result = result.replaceAll("\\$\\$", " ");
+            // Inline formulas: $ -> (empty, just remove the dollar sign)
+            result = result.replaceAll("\\$", " ");
             
-            // Step 3: Aggressive cleanup of remaining Markdown artifacts
-            // Remove bold/italic markers (**, *, __, _)
-            // CRITICAL: Use word boundaries to preserve math expressions like "3*5"
-            plainText = plainText.replaceAll("\\*\\*([^*]+)\\*\\*", "$1");  // **bold**
-            plainText = plainText.replaceAll("__([^_]+)__", "$1");          // __bold__
-            plainText = plainText.replaceAll("(?<!\\w)\\*([^*]+)\\*(?!\\w)", "$1");  // *italic* (not in math)
-            plainText = plainText.replaceAll("(?<!\\w)_([^_]+)_(?!\\w)", "$1");      // _italic_ (not in math)
+            // Remove code blocks first
+            result = result.replaceAll("(?s)```[^\\n]*\\n.*?```", "");
+            result = result.replaceAll("(?s)~~~[^\\n]*\\n.*?~~~", "");
             
-            // Remove strikethrough (~~text~~)
-            plainText = plainText.replaceAll("~~([^~]+)~~", "$1");
+            // Remove headers
+            result = result.replaceAll("(?m)^#{1,6}\\s+", "");
             
-            // Remove inline code markers (`code`)
-            plainText = plainText.replaceAll("`([^`]+)`", "$1");
+            // Remove bold/italic (order matters: ** and __ before * and _)
+            result = result.replaceAll("\\*\\*([^*]+)\\*\\*", "$1");
+            result = result.replaceAll("__([^_]+)__", "$1");
+            result = result.replaceAll("(?<!\\w)\\*([^*\\s][^*]*?)\\*(?!\\w)", "$1");
+            result = result.replaceAll("(?<!\\w)_([^_\\s][^_]*?)_(?!\\w)", "$1");
             
-            // Remove headers (### text) - multiline mode
-            plainText = plainText.replaceAll("(?m)^#{1,6}\\s+", "");
+            // Remove other syntax
+            result = result.replaceAll("~~([^~]+)~~", "$1");  // strikethrough
+            result = result.replaceAll("`([^`]+)`", "$1");    // inline code
             
-            // Remove list markers (- item, * item, 1. item) - multiline mode
-            plainText = plainText.replaceAll("(?m)^[\\s]*[-*+]\\s+", "");
-            plainText = plainText.replaceAll("(?m)^[\\s]*\\d+\\.\\s+", "");
+            // Remove list markers
+            result = result.replaceAll("(?m)^[\\s]*[-*+]\\s+", "");
+            result = result.replaceAll("(?m)^[\\s]*\\d+\\.\\s+", "");
+            result = result.replaceAll("(?m)^[\\s]*\\[[ xX]\\]\\s+", "");
             
-            // Remove blockquote markers (> text) - multiline mode
-            plainText = plainText.replaceAll("(?m)^>\\s+", "");
+            // Remove blockquote and horizontal rules
+            result = result.replaceAll("(?m)^>+\\s*", "");
+            result = result.replaceAll("(?m)^\\s*[-*_]{3,}\\s*$", "");
             
-            // Remove horizontal rules (---, ***, ___) - multiline mode
-            plainText = plainText.replaceAll("(?m)^[-*_]{3,}$", "");
+            // Remove links and images
+            result = result.replaceAll("!\\[([^\\]]*)\\]\\([^)]+\\)", "$1");
+            result = result.replaceAll("\\[([^\\]]+)\\]\\([^)]+\\)", "$1");
+            result = result.replaceAll("\\[([^\\]]+)\\]\\[[^\\]]*\\]", "$1");
             
-            // Remove link syntax [text](url) -> text
-            plainText = plainText.replaceAll("\\[([^\\]]+)\\]\\([^)]+\\)", "$1");
+            // Remove table syntax
+            result = result.replaceAll("(?m)^\\s*\\|.*\\|\\s*$", "");
+            result = result.replaceAll("(?m)^\\s*[|:]+[-:| ]+[|:]+\\s*$", "");
             
-            // Remove image syntax ![alt](url) -> alt
-            plainText = plainText.replaceAll("!\\[([^\\]]*)\\]\\([^)]+\\)", "$1");
-            
-            // Remove remaining standalone asterisks (not part of math)
-            // Only remove if surrounded by spaces or at boundaries
-            plainText = plainText.replaceAll("\\s+\\*+\\s+", " ");
-            plainText = plainText.replaceAll("^\\*+\\s+", "");
-            plainText = plainText.replaceAll("\\s+\\*+$", "");
+            // Clean up standalone symbols
+            result = result.replaceAll("(?m)^\\*+\\s+", "");
+            result = result.replaceAll("(?m)\\s+\\*+$", "");
+            result = result.replaceAll("\\s+\\*+\\s+", " ");
             
             // Normalize whitespace
-            plainText = plainText.replaceAll("\\s{2,}", " ");
-            plainText = plainText.replaceAll("\n{3,}", "\n\n");
-            plainText = plainText.trim();
+            result = result.replaceAll("[ \\t]{2,}", " ");
+            result = result.replaceAll("\\n{3,}", "\n\n");
+            result = result.replaceAll("(?m)^[ \\t]+", "");
+            result = result.trim();
             
-            return plainText;
+            // Log only if changed
+            if (!result.equals(text)) {
+                LogManager.logD(TAG, "[MARKDOWN] Filtered: [" + text + "] -> [" + result + "]");
+            }
+            
+            return result;
         } catch (Exception e) {
-            // Fallback to original text if parsing fails
-            LogManager.logW(TAG, "[TTS] Markdown filtering failed, using original text", e);
+            // Fallback to original text if filtering fails
+            LogManager.logW(TAG, "[MARKDOWN_FILTER] Filtering failed, using original text", e);
             return text;
         }
     }

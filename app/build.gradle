@@ -164,37 +164,17 @@ dependencies {
     // 网络请求 - 使用 OkHttp 和 Volley
     
     // Markwon - Markdown渲染库（用于UI显示）
-    // Exclude old commonmark to avoid conflict with new version
-    implementation('io.noties.markwon:core:4.6.2') {
-        exclude group: 'com.atlassian.commonmark', module: 'commonmark'
-    }
-    implementation('io.noties.markwon:html:4.6.2') {
-        exclude group: 'com.atlassian.commonmark', module: 'commonmark'
-    }
-    implementation('io.noties.markwon:linkify:4.6.2') {
-        exclude group: 'com.atlassian.commonmark', module: 'commonmark'
-    }
-    implementation('io.noties.markwon:ext-tables:4.6.2') {
-        exclude group: 'com.atlassian.commonmark', module: 'commonmark'
-    }
-    implementation('io.noties.markwon:ext-tasklist:4.6.2') {
-        exclude group: 'com.atlassian.commonmark', module: 'commonmark'
-    }
-    implementation('io.noties.markwon:ext-strikethrough:4.6.2') {
-        exclude group: 'com.atlassian.commonmark', module: 'commonmark'
-    }
-    implementation('io.noties.markwon:image:4.6.2') {
-        exclude group: 'com.atlassian.commonmark', module: 'commonmark'
-    }
-    implementation('io.noties.markwon:syntax-highlight:4.6.2') {
-        exclude group: 'com.atlassian.commonmark', module: 'commonmark'
-    }
-    implementation('io.noties.markwon:ext-latex:4.6.2') {
-        exclude group: 'com.atlassian.commonmark', module: 'commonmark'
-    }
-    
-    // CommonMark - Markdown解析库（用于TTS文本提取和Markwon依赖）
-    implementation 'org.commonmark:commonmark:0.21.0'
+    // 使用 Markwon 自带的 CommonMark 版本，不要 exclude 也不要覆盖
+    implementation 'io.noties.markwon:core:4.6.2'
+    implementation 'io.noties.markwon:html:4.6.2'
+    implementation 'io.noties.markwon:linkify:4.6.2'
+    implementation 'io.noties.markwon:ext-tables:4.6.2'
+    implementation 'io.noties.markwon:ext-tasklist:4.6.2'
+    implementation 'io.noties.markwon:ext-strikethrough:4.6.2'
+    implementation 'io.noties.markwon:image:4.6.2'
+    implementation 'io.noties.markwon:syntax-highlight:4.6.2'
+    implementation 'io.noties.markwon:ext-latex:4.6.2'
+    implementation 'io.noties.markwon:inline-parser:4.6.2'
     
     // MNN Library - Standalone libMNN.so (built first, shared by other modules)
     implementation project(':libs:mnn-lib')
