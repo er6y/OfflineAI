@@ -77,6 +77,9 @@ object ChatViewHolders {
             iconPlayPause.tag = data
             itemView.tag = data
             
+            // CRITICAL: Debug audio binding
+            android.util.Log.i("UserViewHolder", "[BIND] audioUri=${data.audioUri}, audioPath=${data.audioPath}, duration=${data.audioDuration}, component=${data.audioPlayComponent != null}")
+            
             // Text
             viewText.text = data.text
             viewText.tag = data
@@ -104,14 +107,23 @@ object ChatViewHolders {
 
         override fun onClick(v: View) {
             val chatDataItem = v.tag as ChatDataItem
+            android.util.Log.i("UserViewHolder", "[CLICK] View clicked: ${v.id}, audioUri=${chatDataItem.audioUri}")
+            
             when (v.id) {
                 R.id.iv_audio_play_pause -> {
+                    android.util.Log.i("UserViewHolder", "[CLICK] Play/Pause button clicked")
                     if (chatDataItem.audioUri != null) {
+                        android.util.Log.i("UserViewHolder", "[CLICK] audioUri exists: ${chatDataItem.audioUri}, audioPath=${chatDataItem.audioPath}")
                         if (chatDataItem.audioPlayComponent == null) {
+                            android.util.Log.i("UserViewHolder", "[CLICK] Creating new AudioPlayerComponent")
                             chatDataItem.audioPlayComponent = AudioPlayerComponent(chatDataItem)
+                        } else {
+                            android.util.Log.i("UserViewHolder", "[CLICK] Reusing existing AudioPlayerComponent")
                         }
                         chatDataItem.audioPlayComponent!!.bindViewHolder(this)
                         chatDataItem.audioPlayComponent!!.onPlayPauseClicked()
+                    } else {
+                        android.util.Log.w("UserViewHolder", "[CLICK] audioUri is NULL, cannot play")
                     }
                 }
                 R.id.tv_chat_image -> {
