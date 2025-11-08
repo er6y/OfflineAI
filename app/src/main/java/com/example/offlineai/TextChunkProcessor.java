@@ -4,6 +4,8 @@ import android.content.Context;
 import android.net.Uri;
 import android.util.Log;
 import com.example.offlineai.LogManager;
+import com.example.offlineai.KnowledgeGraphDatabase;
+import com.example.offlineai.HanLpNerHandler;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -16,6 +18,10 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Future;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -47,6 +53,10 @@ public class TextChunkProcessor {
     // 中间文件名
     private static final String INTERMEDIATE_FILE_NAME = "intermediate_chunks.json";
     
+    // Knowledge Graph components (TODO: Phase 6 - Re-implement with LLM NER)
+    // private EntityRecognizer entityRecognizer;
+    private KnowledgeGraphDatabase graphDatabase;
+    
     /**
      * Text chunk class
      */
@@ -65,6 +75,97 @@ public class TextChunkProcessor {
     }
     
     /**
+     * Write knowledge base metadata to SQLite metadata table and metadata.json file
+     */
+    private void writeKnowledgeBaseMetadata(String fullKnowledgeBasePath,
+                                            String knowledgeBaseName,
+                                            String embeddingModel,
+                                            String rerankerModel,
+                                            int embeddingDimension) {
+        try {
+            logMessage("Writing knowledge base metadata for: " + knowledgeBaseName);
+
+            // 1) Update SQLite metadata via KnowledgeGraphDatabase
+            KnowledgeGraphDatabase metaDb = null;
+            try {
+                String dbPath = fullKnowledgeBasePath + File.separator + "knowledge_graph.db";
+                metaDb = new KnowledgeGraphDatabase(context, dbPath, knowledgeBaseName);
+
+                KnowledgeGraphDatabase.DatabaseMetadata metadata =
+                        new KnowledgeGraphDatabase.DatabaseMetadata(embeddingModel);
+                metadata.setEmbeddingDimension(embeddingDimension);
+                metadata.setModeldir(embeddingModel);
+                if (rerankerModel != null && !rerankerModel.isEmpty()) {
+                    metadata.setRerankerdir(rerankerModel);
+                }
+
+                boolean updated = metaDb.updateMetadata(metadata);
+                if (updated) {
+                    LogManager.logD(TAG, "Knowledge base DB metadata updated successfully");
+                } else {
+                    LogManager.logW(TAG, "Failed to update knowledge base DB metadata");
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Error updating DB metadata: " + e.getMessage(), e);
+            } finally {
+                if (metaDb != null) {
+                    try {
+                        metaDb.close();
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Error closing metadata DB: " + e.getMessage(), e);
+                    }
+                }
+            }
+
+            // 2) Write metadata.json for compatibility
+            try {
+                File kbDir = new File(fullKnowledgeBasePath);
+                File jsonMetadataFile = new File(kbDir, "metadata.json");
+
+                JSONObject json = new JSONObject();
+                json.put("knowledgeBase", knowledgeBaseName);
+                json.put("embeddingModel", embeddingModel);
+                json.put("modeldir", embeddingModel);
+                if (rerankerModel != null && !rerankerModel.isEmpty()) {
+                    json.put("rerankerModel", rerankerModel);
+                }
+                json.put("embeddingDimension", embeddingDimension);
+                json.put("updated", System.currentTimeMillis());
+
+                FileWriter writer = null;
+                try {
+                    writer = new FileWriter(jsonMetadataFile, false);
+                    writer.write(json.toString());
+                    writer.flush();
+                    LogManager.logD(TAG, "metadata.json written successfully: " + jsonMetadataFile.getAbsolutePath());
+                } finally {
+                    if (writer != null) {
+                        try {
+                            writer.close();
+                        } catch (IOException e) {
+                            LogManager.logE(TAG, "Error closing metadata.json writer: " + e.getMessage(), e);
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Error writing metadata.json: " + e.getMessage(), e);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Unexpected error in writeKnowledgeBaseMetadata: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Chunk processing result (for serial execution)
+     */
+    private static class ChunkProcessResult {
+        public float[] embedding = null;
+        public List<HanLpNerHandler.NerResult.Entity> entities = new ArrayList<>();
+        public long embeddingTime = 0;
+        public long nerTime = 0;
+    }
+    
+    /**
      * Progress callback interface
      */
     public interface ProgressCallback {
@@ -72,6 +173,7 @@ public class TextChunkProcessor {
         void onVectorizationProgress(int processedChunks, int totalChunks, float percentage);
         void onTextExtractionComplete(int totalChunks);
         void onVectorizationComplete(int totalVectors);
+        void onGraphBuildingProgress(int processedChunks, int totalChunks, float percentage);
         void onError(String errorMessage);
         void onLog(String message);
     }
@@ -92,6 +194,9 @@ public class TextChunkProcessor {
         this.minChunkSize = ConfigManager.getMinChunkSize(context);
         this.isTaskCancelled = new AtomicBoolean(false);
         this.documentParser = new DocumentParser(context);
+        
+        // Initialize Knowledge Graph components
+        initializeKnowledgeGraph();
     }
     
     /**
@@ -120,50 +225,13 @@ public class TextChunkProcessor {
     }
     
     /**
-     * Process file list
-     * @param knowledgeBasePath Knowledge base path
-     * @param files File list
-     * @param chunkSize Chunk size
-     * @param chunkOverlap Chunk overlap size
-     * @param embeddingModel Embedding model
-     * @param vectorDB Vector database
-     * @return Whether successful
+     * Process file list (DEPRECATED - use processFilesAndBuildKnowledgeBase instead)
+     * @deprecated Use processFilesAndBuildKnowledgeBase for unified processing
      */
+    @Deprecated
     public boolean processFiles(String knowledgeBasePath, List<Uri> files, int chunkSize, int chunkOverlap, 
-                               EmbeddingHandler embeddingModel, SQLiteVectorDatabaseHandler vectorDB) {
-        try {
-            // 第一阶段：提取文本并分块
-            List<TextChunk> chunks = extractTextFromFiles(knowledgeBasePath, files, chunkSize, chunkOverlap);
-            if (chunks == null || chunks.isEmpty()) {
-                logMessage("Failed to extract any text chunks");
-                return false;
-            }
-            
-            // 保存中间结果
-            saveIntermediateChunks(knowledgeBasePath, chunks);
-            
-            // Notify text extraction completed
-            if (progressCallback != null) {
-                progressCallback.onTextExtractionComplete(chunks.size());
-            }
-            
-            // Check if task is cancelled
-            if (isTaskCancelled.get()) {
-                logMessage("Task cancelled");
-                return false;
-            }
-            
-            // 第二阶段：向量化
-            boolean success = processChunksToVectors(chunks, embeddingModel, vectorDB);
-            
-            // 删除中间文件
-            deleteIntermediateFile(knowledgeBasePath);
-            
-            return success;
-        } catch (Exception e) {
-            logError("Failed to process files: " + e.getMessage(), e);
-            return false;
-        }
+                               EmbeddingHandler embeddingModel, Object vectorDB) {
+        throw new UnsupportedOperationException("Deprecated - use processFilesAndBuildKnowledgeBase instead");
     }
     
     /**
@@ -202,7 +270,6 @@ public class TextChunkProcessor {
                     
                     // Record file size
                     int textLength = text.length();
-                    logMessage("File: " + fileName + " extracted text size: " + (textLength / 1024) + "KB");
                     
                     // Check if it's JSON content
                     boolean isJson = false;
@@ -244,7 +311,13 @@ public class TextChunkProcessor {
                     // Clearly display JSON format recognition result
                     String jsonStatusMessage = "File: " + fileName + (isJson ? " is JSON format" : " is not JSON format") + 
                                               (isSpecialDataset ? " (specific dataset, ignore minimum chunk size limit)" : "");
-                    logMessage(jsonStatusMessage);
+                    if (isJson || isSpecialDataset) {
+                        // Send JSON-related status to UI so that special datasets and real JSON files are visible
+                        logMessage(jsonStatusMessage);
+                    } else {
+                        // For non-JSON files, keep this information only in debug log to avoid UI noise
+                        LogManager.logD(TAG, jsonStatusMessage);
+                    }
                     
                     if (isJson) {
                         String configStatusMessage = "JSON optimization config status: " + (jsonOptimizationEnabled ? "enabled" : "disabled");
@@ -373,10 +446,10 @@ public class TextChunkProcessor {
                                 logError("JSON processing failed: " + e.getMessage() + ", will fallback to standard chunking", e);
                             }
                         } else {
-                            logMessage("JSON optimization disabled, will use standard chunking");
+                            LogManager.logD(TAG, "JSON optimization disabled, will use standard chunking");
                         }
                     } else {
-                        logMessage("JSON optimization disabled, will use standard chunking");
+                        LogManager.logD(TAG, "JSON optimization disabled, will use standard chunking");
                     }
                     
                     // Process text chunking
@@ -416,13 +489,14 @@ public class TextChunkProcessor {
                         fileChunkCount = jsonChunks.size();
                     } else {
                         // Use standard chunking processing
-                        logMessage("Using standard chunking, chunk size: " + chunkSize + ", overlap size: " + chunkOverlap);
+                        LogManager.logD(TAG, "Using standard chunking, chunk size: " + chunkSize + ", overlap size: " + chunkOverlap);
                         chunks = splitTextIntoChunks(text, chunkSize, chunkOverlap);
                         fileChunkCount = chunks.size();
                     }
                     
-                    // Record the number of text chunks generated by this file
-                    logMessage("File: " + fileName + " generated " + fileChunkCount + " text chunks");
+                    // Record the number of text chunks generated by this file (merged with text size for concise UI output)
+                    int textSizeKb = textLength / 1024;
+                    logMessage("File: " + fileName + " extracted text size: " + textSizeKb + "KB, generated " + fileChunkCount + " text chunks");
                     
                     // Warn if chunk count is abnormally high (may indicate formatting issues)
                     if (fileChunkCount > 1000) {
@@ -489,152 +563,12 @@ public class TextChunkProcessor {
     }
     
     /**
-     * Vectorize text chunks and store them in database
+     * Process chunks to vectors (DEPRECATED - integrated into processFilesAndBuildKnowledgeBase)
+     * @deprecated Use processFilesAndBuildKnowledgeBase for unified processing
      */
-    private boolean processChunksToVectors(List<TextChunk> chunks, EmbeddingHandler model, 
-                                          SQLiteVectorDatabaseHandler vectorDB) {
-        if (chunks == null || chunks.isEmpty()) {
-            logError("No text chunks to process", null);
-            return false;
-        }
-        
-        try {
-            int totalChunks = chunks.size();
-            logMessage("Starting vectorization processing, total " + totalChunks + " text chunks");
-            LogManager.logD(TAG, "Starting vectorization processing, total " + totalChunks + " text chunks");
-            
-            // MNN embedding handler manages model lifecycle automatically
-            
-            try {
-                // Process chunks
-                LogManager.logD(TAG, "Processing chunks with MNN embedding handler");
-                
-                // Initialize progress log
-                String vectorizationProgress = context.getString(R.string.status_vectorization_progress);
-                StringBuilder progressLog = new StringBuilder(vectorizationProgress);
-                int lastPercentage = 0;
-                
-                // First send initial progress log
-                if (progressCallback != null) {
-                    progressCallback.onLog(progressLog.toString());
-                }
-                
-                // Process all text chunks
-                for (int i = 0; i < totalChunks; i++) {
-                    // Check if task is cancelled
-                    if (isTaskCancelled.get()) {
-                        logMessage("Task cancelled");
-                        return false;
-                    }
-                    
-                    TextChunk chunk = chunks.get(i);
-                    String text = chunk.text;
-                    String source = chunk.source;
-                    JSONObject metadata = chunk.metadata;
-                    
-                    try {
-                        // Add a dot for each processed text chunk
-                        progressLog.append(".");
-                        
-                        // Calculate current percentage
-                        int currentPercentage = (i + 1) * 100 / totalChunks;
-                        
-                        // Check if percentage needs to be displayed
-                        boolean showPercentage = currentPercentage / 10 > lastPercentage / 10 || i == totalChunks - 1;
-                        
-                        if (showPercentage) {
-                            // Print percentage
-                            progressLog.append(currentPercentage + "%");
-                            lastPercentage = currentPercentage;
-                        }
-                        
-                        // Update UI display for each processed text chunk
-                        if (progressCallback != null) {
-                            progressCallback.onLog(progressLog.toString());
-                        }
-                        
-                        // Record detailed log every 100 text chunks or at the last text chunk (only shown in debug log)
-                        if (i % 100 == 0 || i == totalChunks - 1) {
-                            LogManager.logD(TAG, "Vectorization detailed progress: " + (i + 1) + "/" + totalChunks + 
-                                  ", Thread ID: " + Thread.currentThread().getId() + 
-                                  ", Source file: " + source);
-                        }
-                        
-                        // Generate vector
-                        float[] embedding = model.computeEmbedding(text);
-                        
-                        // 向量异常处理
-                        if (embedding != null && embedding.length > 0) {
-                            // 检测向量异常
-                            VectorAnomalyHandler.AnomalyResult anomalyResult = VectorAnomalyHandler.detectAnomalies(embedding, -1);
-                            
-                            if (anomalyResult.isAnomalous) {
-                                LogManager.logW(TAG, String.format("Vector anomaly detected for chunk %d/%d: %s (severity: %.2f) - %s", 
-                                        i + 1, totalChunks, anomalyResult.type.name(), anomalyResult.severity, anomalyResult.description));
-                                
-                                // 修复向量异常
-                                float[] repairedEmbedding = VectorAnomalyHandler.repairVector(embedding, anomalyResult.type);
-                                if (repairedEmbedding != null) {
-                                    embedding = repairedEmbedding;
-                                    LogManager.logD(TAG, String.format("Vector anomaly repaired for chunk %d/%d", i + 1, totalChunks));
-                                } else {
-                                    LogManager.logW(TAG, String.format("Failed to repair vector anomaly for chunk %d/%d, using original vector", i + 1, totalChunks));
-                                }
-                            }
-                            
-                            // 最终向量验证
-                            VectorAnomalyHandler.AnomalyResult finalCheck = VectorAnomalyHandler.detectAnomalies(embedding, -1);
-                            if (finalCheck.isAnomalous && finalCheck.severity > 0.8f) {
-                                LogManager.logE(TAG, String.format("Critical vector anomaly remains after repair for chunk %d/%d: %s", 
-                                        i + 1, totalChunks, finalCheck.description));
-                                // 对于严重异常，生成随机单位向量作为备用
-                                embedding = VectorAnomalyHandler.generateRandomUnitVector(embedding.length);
-                                LogManager.logW(TAG, String.format("Generated random unit vector as fallback for chunk %d/%d", i + 1, totalChunks));
-                            }
-                        }
-                        
-                        // Add to database
-                        vectorDB.addVector(text, embedding, source, metadata.toString());
-                        
-                        // Update progress
-                        float percentage = (float) (i + 1) / totalChunks * 100;
-                        if (progressCallback != null) {
-                            progressCallback.onVectorizationProgress(i + 1, totalChunks, percentage);
-                        }
-                        
-                        // Notify progress update
-                        if (notificationProgressCallback != null) {
-                            notificationProgressCallback.onNotificationProgressUpdate(i + 1, totalChunks, percentage);
-                        }
-                    } catch (Exception e) {
-                        logError("Vectorization failed: " + e.getMessage(), e);
-                    }
-                }
-                
-                // Save database
-                vectorDB.saveDatabase();
-                logMessage("Vectorization processing completed");
-                LogManager.logD(TAG, "Vectorization processing fully completed, processed " + totalChunks + " text chunks, Thread ID: " + Thread.currentThread().getId());
-                
-                // Notify vectorization processing completed
-                if (progressCallback != null) {
-                    progressCallback.onVectorizationComplete(totalChunks);
-                }
-            } finally {
-                // Whether successful or failed, finally mark model as not in use
-                // MNN embedding handler manages model lifecycle automatically
-                LogManager.logD(TAG, "Batch vectorization processing completed, marked model as not in use");
-                
-                // Close database
-                vectorDB.close();
-                LogManager.logD(TAG, "Vector database closed");
-            }
-            
-            return !isTaskCancelled.get();
-        } catch (Exception e) {
-            logError("Failed to process knowledge base: " + e.getMessage(), e);
-            return false;
-        }
+    @Deprecated
+    private boolean processChunksToVectors(List<TextChunk> chunks, EmbeddingHandler model, Object vectorDB) {
+        throw new UnsupportedOperationException("Deprecated - use processFilesAndBuildKnowledgeBase instead");
     }
     
     /**
@@ -743,7 +677,6 @@ public class TextChunkProcessor {
             String knowledgeBasePath = ConfigManager.getKnowledgeBasePath(context);
             String fullKnowledgeBasePath = knowledgeBasePath + File.separator + knowledgeBaseName;
             LogManager.logD(TAG, "Knowledge base directory: " + fullKnowledgeBasePath);
-            logMessage("Knowledge base directory: " + fullKnowledgeBasePath);
             
             // Create knowledge base directory
             File knowledgeBaseDir = new File(fullKnowledgeBasePath);
@@ -756,10 +689,9 @@ public class TextChunkProcessor {
             
             // Get embedding model path
             String embeddingModelPath = ConfigManager.getEmbeddingModelPath(context) + File.separator + embeddingModel;
-            logMessage("Using embedding model: " + embeddingModelPath);
+            LogManager.logD(TAG, "Using embedding model: " + embeddingModelPath);
             
-            // Use EmbeddingHandler to get model
-            // Use LOW memory mode (HIGH memory is actually slower for short texts)
+            // Use EmbeddingHandler to get model (LOW memory mode)
             EmbeddingHandler model = EmbeddingHandler.getInstance(context);
             if (!model.loadModel(embeddingModelPath, EmbeddingHandler.MemoryMode.LOW)) {
                 throw new Exception("Failed to load embedding model");
@@ -775,19 +707,28 @@ public class TextChunkProcessor {
             // MNN embedding has built-in tokenizer, no external tokenizer needed
             logMessage("Using MNN built-in tokenizer for consistent embedding generation");
             
-            // Initialize vector database
-            SQLiteVectorDatabaseHandler vectorDB = new SQLiteVectorDatabaseHandler(
-                    new File(fullKnowledgeBasePath), model.getEmbeddingModel(), embeddingDimension);
-            
-            // Set embedding model directory to metadata
-            vectorDB.getMetadata().setModeldir(embeddingModel);
-            logMessage("Set embedding model directory: " + embeddingModel);
-            
-            // Set reranker model information to metadata
-            String valueNone = context.getString(R.string.common_none);
-            if (rerankerModel != null && !rerankerModel.isEmpty() && !valueNone.equals(rerankerModel)) {
-                vectorDB.getMetadata().setRerankerdir(rerankerModel);
-                logMessage("Set reranker model: " + rerankerModel);
+            // Initialize knowledge graph database (unified storage for vectors + entities + graph)
+            String graphDbPath = fullKnowledgeBasePath + File.separator + "knowledge_graph.db";
+            KnowledgeGraphDatabase graphDB = new KnowledgeGraphDatabase(context, graphDbPath, knowledgeBaseName);
+
+            // Load graph stopwords and hub threshold config
+            String stopwordsPath = ConfigManager.getGraphStopwordsPath(context);
+            int hubThreshold = ConfigManager.getGraphHubThreshold(context);
+            GraphStopwordsMatcher stopwordsMatcher = null;
+            if (stopwordsPath != null && !stopwordsPath.isEmpty()) {
+                try {
+                    stopwordsMatcher = GraphStopwordsMatcher.loadFromFile(stopwordsPath);
+                    File stopFile = new File(stopwordsPath);
+                    logMessage("[STOPWORDS] Loaded graph stopwords file: " + stopFile.getName()
+                            + " (exact=" + stopwordsMatcher.getExactCount()
+                            + ", prefix=" + stopwordsMatcher.getPrefixCount()
+                            + ", regex=" + stopwordsMatcher.getRegexCount() + ")");
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[STOPWORDS] Failed to load graph stopwords file: " + stopwordsPath, e);
+                    logMessage("Warning: Failed to load graph stopwords file: " + stopwordsPath);
+                }
+            } else {
+                LogManager.logD(TAG, "[STOPWORDS] No graph stopwords file configured");
             }
             
             // Extract text and chunk
@@ -796,7 +737,7 @@ public class TextChunkProcessor {
             // Check if cancelled
             if (isTaskCancelled.get()) {
                 logMessage("Task cancelled");
-                vectorDB.close();
+                graphDB.close();
                 return false;
             }
             
@@ -805,75 +746,323 @@ public class TextChunkProcessor {
                 progressCallback.onTextExtractionComplete(chunks.size());
             }
             
-            // MNN embedding handler manages model lifecycle automatically
-            LogManager.logD(TAG, "Starting batch vectorization processing, marked model as in use to prevent automatic unloading");
+            // Initialize NER handler (always enabled; custom dictionary is optional)
+            String dictPath = ConfigManager.getString(context, ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, null);
+            String valueNoneGraph = context.getString(R.string.common_none);
+
+            String customDictPath = null;
+            if (dictPath != null && !dictPath.isEmpty() && !valueNoneGraph.equals(dictPath)) {
+                customDictPath = dictPath;
+            }
+
+            boolean nerEnabled = true;
+
+            final HanLpNerHandler nerHandler = new HanLpNerHandler(customDictPath);
+
+            // Report dictionary status to UI via logMessage (ProgressCallback.onLog)
+            if (customDictPath == null) {
+                // No custom dictionary selected
+                logMessage("Dictionary: None");
+            } else {
+                String dictFileName = new File(customDictPath).getName();
+                if (nerHandler.isDictionaryLoaded()) {
+                    int wordCount = nerHandler.getLoadedWordCount();
+                    logMessage("Dictionary: " + dictFileName + " (loaded " + wordCount + " words)");
+                } else {
+                    logMessage("Dictionary: " + dictFileName);
+                    String dictError = nerHandler.getDictionaryErrorMessage();
+                    if (dictError != null && !dictError.isEmpty()) {
+                        logMessage("Dictionary load error: " + dictError);
+                    } else {
+                        logMessage("Dictionary load error: Unknown error");
+                    }
+                }
+            }
+
+            LogManager.logD(TAG, "Starting unified knowledge base building (NER: " + (nerEnabled ? "ON" : "OFF") + ")");
+            
+            // Create ExecutorService for SERIAL chunk processing (single thread)
+            ExecutorService executorService = Executors.newFixedThreadPool(1);
+            LogManager.logI(TAG, "[EXECUTOR] Created single-thread executor for serial chunk processing");
+            
+            // Begin database transaction for batch insert
+            graphDB.getWritableDatabase().beginTransaction();
             
             try {
-                // Generate vectors and add to database
                 int totalChunks = chunks.size();
-                logMessage("Starting vectorization processing, total " + totalChunks + " text chunks");
+                logMessage("Starting unified processing: " + totalChunks + " chunks" + (nerEnabled ? " with NER" : ""));
+                int lastLoggedPercent = -10;
+                if (totalChunks > 0) {
+                    // Initial 0% milestone
+                    logMessage("Vectorization progress: 0% (0/" + totalChunks + ")");
+                    lastLoggedPercent = 0;
+                }
                 
-                // Vectorization processing
+                // Process each chunk: Embedding and NER serially in a single task
+                LogManager.logI(TAG, String.format("[LOOP] Starting chunk processing loop: %d chunks total", totalChunks));
                 for (int i = 0; i < totalChunks; i++) {
-                    // Check if task is cancelled
+                    LogManager.logD(TAG, String.format("[LOOP] ========== Iteration %d/%d START ==========", i + 1, totalChunks));
                     if (isTaskCancelled.get()) {
                         logMessage("Task cancelled");
-                        LogManager.logD(TAG, "Vectorization processing interrupted: task cancelled, processed " + i + "/" + totalChunks + " text chunks");
-                        vectorDB.close();
-                        return false;
+                        LogManager.logD(TAG, "Processing interrupted: cancelled at chunk " + i + "/" + totalChunks);
+                        break;  // Exit loop, finally block will handle cleanup
                     }
                     
                     TextChunk chunk = chunks.get(i);
-                    String text = chunk.text;
-                    String source = chunk.source;
-                    JSONObject metadata = chunk.metadata;
+                    LogManager.logI(TAG, String.format("[LOOP] Chunk %d/%d: source=%s, textLen=%d", i + 1, totalChunks, chunk.source, chunk.text.length()));
                     
                     try {
-                        // Log every 100 text chunks
-                        if (i % 100 == 0 || i == totalChunks - 1) {
-                            LogManager.logD(TAG, "Vectorization progress: " + i + "/" + totalChunks + 
-                                  ", Thread ID: " + Thread.currentThread().getId() + 
-                                  ", Source file: " + source);
+                        long chunkStartTime = System.currentTimeMillis();
+                        
+                        // Step 1 & 2: Process Embedding and NER serially in a single task
+                        final String chunkText = chunk.text;
+                        final int chunkIndex = i + 1;  // Make final for lambda
+                        final boolean nerEnabledForChunk = nerEnabled && nerHandler != null;
+                        
+                        LogManager.logI(TAG, String.format("[SUBMIT] About to submit chunk %d task to executor...", chunkIndex));
+                        long submitTime = System.currentTimeMillis();
+                        
+                        // Submit a single task that does: embedding -> NER -> return results
+                        Future<ChunkProcessResult> chunkFuture = executorService.submit(() -> {
+                            LogManager.logI(TAG, String.format("[TASK %d] Task started in executor, Thread: %s", chunkIndex, Thread.currentThread().getName()));
+                            ChunkProcessResult result = new ChunkProcessResult();
+                            
+                            // 1. Embedding (串行执行)
+                            long embeddingStart = System.currentTimeMillis();
+                            LogManager.logD(TAG, String.format("[CHUNK %d] Starting embedding...", chunkIndex));
+                            try {
+                                result.embedding = model.computeEmbedding(chunkText);
+                                result.embeddingTime = System.currentTimeMillis() - embeddingStart;
+                                LogManager.logI(TAG, String.format("[CHUNK %d] Embedding completed: %dms", chunkIndex, result.embeddingTime));
+                            } catch (Exception e) {
+                                LogManager.logE(TAG, String.format("[CHUNK %d] Embedding failed: %s", chunkIndex, e.getMessage()), e);
+                                throw e;
+                            }
+                            
+                            // 2. NER (串行执行，在embedding之后)
+                            if (nerEnabledForChunk) {
+                                long nerStart = System.currentTimeMillis();
+                                LogManager.logD(TAG, String.format("[CHUNK %d] Starting NER...", chunkIndex));
+                                try {
+                                    HanLpNerHandler.NerResult nerResult = nerHandler.extractEntities(chunkText);
+                                    result.nerTime = System.currentTimeMillis() - nerStart;
+                                    
+                                    if (nerResult != null && nerResult.isSuccess()) {
+                                        result.entities = nerResult.getEntities();
+                                        LogManager.logI(TAG, String.format("[CHUNK %d] NER completed: %dms, entities=%d", 
+                                            chunkIndex, result.nerTime, result.entities.size()));
+                                    } else {
+                                        LogManager.logW(TAG, String.format("[CHUNK %d] NER failed", chunkIndex));
+                                    }
+                                } catch (Exception e) {
+                                    LogManager.logE(TAG, String.format("[CHUNK %d] NER error: %s", chunkIndex, e.getMessage()), e);
+                                    // NER failure is not fatal, continue with empty entities
+                                }
+                            }
+                            
+                            LogManager.logI(TAG, String.format("[TASK %d] Task completed, returning result", chunkIndex));
+                            return result;
+                        });
+                        
+                        LogManager.logI(TAG, String.format("[SUBMIT] Chunk %d task submitted (took %dms), now waiting for completion...", chunkIndex, System.currentTimeMillis() - submitTime));
+                        
+                        // Wait for the entire chunk processing to complete (NO TIMEOUT - wait forever)
+                        ChunkProcessResult result = null;
+                        long getStartTime = System.currentTimeMillis();
+                        try {
+                            LogManager.logI(TAG, String.format("[GET] Calling future.get() for chunk %d (NO TIMEOUT - will wait forever)...", chunkIndex));
+                            result = chunkFuture.get();  // NO TIMEOUT - wait forever for debugging
+                            LogManager.logI(TAG, String.format("[GET] future.get() returned for chunk %d (waited %dms)", chunkIndex, System.currentTimeMillis() - getStartTime));
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, String.format("Chunk %d processing error: %s", i + 1, e.getMessage()), e);
+                            throw e;
                         }
                         
-                        // Generate vector
-                        float[] embedding = model.computeEmbedding(text);
+                        float[] embedding = result.embedding;
+                        List<HanLpNerHandler.NerResult.Entity> entities = result.entities;
+                        if (stopwordsMatcher != null && entities != null && !entities.isEmpty()) {
+                            List<HanLpNerHandler.NerResult.Entity> filteredEntities = new ArrayList<>();
+                            int filteredCount = 0;
+                            for (HanLpNerHandler.NerResult.Entity entity : entities) {
+                                if (stopwordsMatcher.matches(entity.text)) {
+                                    filteredCount++;
+                                } else {
+                                    filteredEntities.add(entity);
+                                }
+                            }
+                            if (filteredCount > 0) {
+                                LogManager.logD(TAG, String.format(
+                                        "[STOPWORDS] Chunk %d: filtered %d entities by stopwords (original=%d, remaining=%d)",
+                                        chunkIndex, filteredCount, entities.size(), filteredEntities.size()));
+                            }
+                            entities = filteredEntities;
+                        }
+                        long embeddingTime = result.embeddingTime;
+                        long nerTime = result.nerTime;
+                        long totalTime = System.currentTimeMillis() - chunkStartTime;
                         
-                        // Add to database
-                        vectorDB.addVector(text, embedding, source, metadata.toString());
+                        // Step 3: Save to database (chunk + vector + entities)
+                        LogManager.logD(TAG, String.format("[DB] Chunk %d: Saving to database...", chunkIndex));
+                        long dbStartTime = System.currentTimeMillis();
+                        long docId = graphDB.addChunk(chunk.text, chunk.source, embedding, chunk.metadata.toString());
+                        long dbTime = System.currentTimeMillis() - dbStartTime;
+                        LogManager.logD(TAG, String.format("[DB] Chunk %d: Saved docId=%d (took %dms)", chunkIndex, docId, dbTime));
+                        
+                        if (!entities.isEmpty()) {
+                            LogManager.logD(TAG, String.format("[DB] Chunk %d: Saving %d entities and building relationships...", chunkIndex, entities.size()));
+                            long entitiesStartTime = System.currentTimeMillis();
+                            
+                            // Step 1: Add entities and collect entity IDs
+                            List<Long> entityIds = new ArrayList<>();
+                            for (HanLpNerHandler.NerResult.Entity entity : entities) {
+                                long entityId = graphDB.addEntity(entity.text, entity.type, entity.confidence);
+                                if (entityId > 0) {
+                                    entityIds.add(entityId);
+                                    // Link chunk to entity
+                                    graphDB.linkChunkToEntity(docId, entity.text, entity.type, entity.confidence);
+                                }
+                            }
+                            
+                            // Step 2: Build co-occurrence edges (entities in same chunk are related)
+                            if (entityIds.size() > 1) {
+                                for (int j = 0; j < entityIds.size(); j++) {
+                                    for (int k = j + 1; k < entityIds.size(); k++) {
+                                        long fromId = entityIds.get(j);
+                                        long toId = entityIds.get(k);
+                                        // Add bidirectional edges with weight 1.0
+                                        graphDB.addEdge(fromId, toId, 1.0f);
+                                        graphDB.addEdge(toId, fromId, 1.0f);
+                                    }
+                                }
+                                LogManager.logD(TAG, String.format("[DB] Chunk %d: Built %d co-occurrence edges", 
+                                    chunkIndex, entityIds.size() * (entityIds.size() - 1)));
+                            }
+                            
+                            long entitiesTime = System.currentTimeMillis() - entitiesStartTime;
+                            LogManager.logD(TAG, String.format("[DB] Chunk %d: Entities and relationships saved (took %dms)", chunkIndex, entitiesTime));
+                        }
+                        
+                        LogManager.logI(TAG, String.format("[SUMMARY] Chunk %d/%d: total=%dms (embed=%dms, ner=%dms, db=%dms), entities=%d", 
+                            i + 1, totalChunks, totalTime, embeddingTime, nerTime, dbTime, entities.size()));
                         
                         // Update progress
                         float percentage = (float) (i + 1) / totalChunks * 100;
                         if (progressCallback != null) {
                             progressCallback.onVectorizationProgress(i + 1, totalChunks, percentage);
                         }
-                        
-                        // Notify progress update
                         if (notificationProgressCallback != null) {
                             notificationProgressCallback.onNotificationProgressUpdate(i + 1, totalChunks, percentage);
                         }
+
+                        // Dot-style and milestone progress logs for UI
+                        logMessage(".");
+                        int currentPercent = (int) percentage;
+                        int milestone = (currentPercent / 10) * 10;
+                        if (milestone >= 0 && milestone <= 100 && milestone > lastLoggedPercent) {
+                            logMessage("Vectorization progress: " + milestone + "% (" + (i + 1) + "/" + totalChunks + ")");
+                            lastLoggedPercent = milestone;
+                        }
+                        
                     } catch (Exception e) {
-                        logError("Vectorization failed: " + e.getMessage(), e);
+                        logError("Failed to process chunk " + (i + 1) + ": " + e.getMessage(), e);
+                        LogManager.logE(TAG, String.format("[LOOP] Chunk %d failed, continuing to next chunk", i + 1), e);
+                        // Continue processing next chunk
                     }
+                    
+                    LogManager.logD(TAG, String.format("[LOOP] ========== Iteration %d/%d END ==========", i + 1, totalChunks));
                 }
                 
-                // Save database
-                vectorDB.saveDatabase();
-                logMessage("Vectorization processing completed");
-                LogManager.logD(TAG, "Vectorization processing fully completed, processed " + totalChunks + " text chunks, Thread ID: " + Thread.currentThread().getId());
+                LogManager.logI(TAG, "[LOOP] Chunk processing loop completed");
                 
-                // Notify vectorization processing completed
+                // Commit transaction if not cancelled
+                if (!isTaskCancelled.get()) {
+                    graphDB.getWritableDatabase().setTransactionSuccessful();
+                    logMessage("Unified processing completed: " + totalChunks + " chunks");
+                    LogManager.logI(TAG, "Knowledge base building completed successfully");
+                } else {
+                    logMessage("Processing cancelled, changes rolled back");
+                    LogManager.logW(TAG, "Knowledge base building cancelled");
+                }
+                
                 if (progressCallback != null) {
                     progressCallback.onVectorizationComplete(totalChunks);
                 }
-            } finally {
-                // Whether successful or failed, finally mark model as not in use
-                // MNN embedding handler manages model lifecycle automatically
-                LogManager.logD(TAG, "Batch vectorization processing completed, marked model as not in use");
                 
-                // Close database
-                vectorDB.close();
-                LogManager.logD(TAG, "Vector database closed");
+            } finally {
+                // Shutdown ExecutorService
+                if (executorService != null) {
+                    try {
+                        executorService.shutdown();
+                        if (!executorService.awaitTermination(10, TimeUnit.SECONDS)) {
+                            executorService.shutdownNow();
+                        }
+                        LogManager.logD(TAG, "ExecutorService shut down");
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Error shutting down ExecutorService: " + e.getMessage(), e);
+                        executorService.shutdownNow();
+                    }
+                }
+                
+                // End transaction (commit or rollback)
+                try {
+                    graphDB.getWritableDatabase().endTransaction();
+                    LogManager.logD(TAG, "Database transaction ended");
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "Error ending transaction: " + e.getMessage(), e);
+                }
+                
+                // Cleanup resources
+                LogManager.logD(TAG, "Cleaning up resources");
+                
+                if (graphDB != null) {
+                    try {
+                        graphDB.close();
+                        LogManager.logD(TAG, "Graph database closed");
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Error closing database: " + e.getMessage(), e);
+                    }
+                }
+                
+                if (nerHandler != null) {
+                    try {
+                        nerHandler.release();
+                        LogManager.logD(TAG, "NER handler released");
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Error releasing NER handler: " + e.getMessage(), e);
+                    }
+                }
+            }
+
+            // After successful processing, persist metadata to database and metadata.json
+            if (!isTaskCancelled.get()) {
+                // Apply hub threshold filter on completed graph if enabled
+                if (hubThreshold > 0) {
+                    KnowledgeGraphDatabase hubDb = null;
+                    try {
+                        hubDb = new KnowledgeGraphDatabase(context, graphDbPath, knowledgeBaseName);
+                        int removed = hubDb.applyHubThreshold(hubThreshold);
+                        logMessage("Graph hub filter applied: threshold=" + hubThreshold + ", removed hub entities: " + removed);
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[HUB_FILTER] Failed to apply hub threshold: " + e.getMessage(), e);
+                        logMessage("Warning: Failed to apply graph hub threshold: " + e.getMessage());
+                    } finally {
+                        if (hubDb != null) {
+                            try {
+                                hubDb.close();
+                            } catch (Exception e) {
+                                LogManager.logE(TAG, "[HUB_FILTER] Failed to close graph DB after hub filtering: " + e.getMessage(), e);
+                            }
+                        }
+                    }
+                } else {
+                    LogManager.logD(TAG, "[HUB_FILTER] Hub threshold is disabled (<=0), skipping hub filtering");
+                }
+
+                try {
+                    writeKnowledgeBaseMetadata(fullKnowledgeBasePath, knowledgeBaseName, embeddingModel, rerankerModel, embeddingDimension);
+                } catch (Exception e) {
+                    logError("Failed to write knowledge base metadata: " + e.getMessage(), e);
+                }
             }
             
             return !isTaskCancelled.get();
@@ -937,6 +1126,146 @@ public class TextChunkProcessor {
         if (progressCallback != null) {
             progressCallback.onError(message);
         }
+    }
+    
+    // ========== Knowledge Graph RAG Methods ==========
+    
+    /**
+     * Initialize Knowledge Graph components
+     * TODO: Phase 6 - Re-implement with LLM NER
+     */
+    private void initializeKnowledgeGraph() {
+        // TODO: Phase 6 - Re-implement with LLM NER
+        LogManager.logD(TAG, "[KG] Knowledge Graph initialization temporarily disabled (Phase 6)");
+        graphDatabase = null;
+        /*
+        try {
+            LogManager.logD(TAG, "[KG] Initializing Knowledge Graph components...");
+            
+            // Initialize Entity Recognizer
+            entityRecognizer = new HybridEntityRecognizer();
+            boolean nerReady = entityRecognizer.initialize(context);
+            
+            if (!nerReady) {
+                LogManager.logW(TAG, "[KG] Entity Recognizer initialization failed, Knowledge Graph disabled");
+                entityRecognizer = null;
+            } else {
+                LogManager.logI(TAG, "[KG] Entity Recognizer initialized successfully");
+            }
+            
+            // Initialize Knowledge Graph Database
+            String dbPath = context.getDatabasePath("knowledge_graph.db").getAbsolutePath();
+            graphDatabase = new KnowledgeGraphDatabase(context, dbPath);
+            LogManager.logI(TAG, "[KG] Knowledge Graph Database initialized at: " + dbPath);
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[KG] Failed to initialize Knowledge Graph: " + e.getMessage(), e);
+            entityRecognizer = null;
+            graphDatabase = null;
+        }
+        */
+    }
+    
+    /**
+     * Process chunk for Knowledge Graph (extract entities and build graph)
+     * TODO: Phase 6 - Re-implement with LLM NER
+     * @param chunkId Chunk ID in vector database
+     * @param text Chunk text
+     * @param source Source document
+     * @param chunkIndex Chunk index in document
+     */
+    private void processChunkForKnowledgeGraph(long chunkId, String text, String source, int chunkIndex) {
+        // TODO: Phase 6 - Re-implement with LLM NER
+        // Temporarily disabled
+        return;
+        /*
+        // Skip if Knowledge Graph is not initialized
+        if (entityRecognizer == null || graphDatabase == null) {
+            return;
+        }
+        
+        try {
+            long startTime = System.currentTimeMillis();
+            
+            // Extract entities from text
+            List<EntityRecognizer.Entity> entities = entityRecognizer.extractEntities(text);
+            
+            if (entities.isEmpty()) {
+                LogManager.logD(TAG, String.format("[KG] No entities found in chunk %d (source: %s)", 
+                    chunkIndex, source));
+                return;
+            }
+            
+            // Filter entities by confidence threshold
+            float confidenceThreshold = ConfigManager.getGraphEntityConfidenceThreshold(context);
+            List<EntityRecognizer.Entity> filteredEntities = new ArrayList<>();
+            for (EntityRecognizer.Entity entity : entities) {
+                if (entity.confidence >= confidenceThreshold) {
+                    filteredEntities.add(entity);
+                }
+            }
+            
+            if (filteredEntities.isEmpty()) {
+                LogManager.logD(TAG, String.format("[KG] No high-confidence entities (threshold=%.2f) in chunk %d", 
+                    confidenceThreshold, chunkIndex));
+                return;
+            }
+            
+            // Add document to graph database
+            long docId = graphDatabase.addDocument(source, text);
+            
+            // Add entities and build relationships
+            List<Long> entityIds = new ArrayList<>();
+            for (EntityRecognizer.Entity entity : filteredEntities) {
+                long entityId = graphDatabase.addEntity(entity.text, entity.type, entity.confidence);
+                entityIds.add(entityId);
+                
+                // Link entity to chunk
+                graphDatabase.addChunkEntity(chunkId, entityId, entity.confidence);
+            }
+            
+            // Build co-occurrence edges (entities in same chunk)
+            for (int i = 0; i < entityIds.size(); i++) {
+                for (int j = i + 1; j < entityIds.size(); j++) {
+                    graphDatabase.addOrUpdateEdge(entityIds.get(i), entityIds.get(j), docId);
+                }
+            }
+            
+            long elapsedTime = System.currentTimeMillis() - startTime;
+            LogManager.logD(TAG, String.format("[KG] Processed chunk %d: %d entities, %d edges, time=%dms", 
+                chunkIndex, filteredEntities.size(), 
+                (entityIds.size() * (entityIds.size() - 1)) / 2, elapsedTime));
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, String.format("[KG] Failed to process chunk %d for Knowledge Graph: %s", 
+                chunkIndex, e.getMessage()), e);
+        }
+        */
+    }
+    
+    /**
+     * Release Knowledge Graph resources
+     * TODO: Phase 6 - Re-implement
+     */
+    private void releaseKnowledgeGraph() {
+        // TODO: Phase 6 - Re-implement
+        /*
+        try {
+            if (entityRecognizer != null) {
+                entityRecognizer.release();
+                entityRecognizer = null;
+                LogManager.logD(TAG, "[KG] Entity Recognizer released");
+            }
+            
+            if (graphDatabase != null) {
+                graphDatabase.close();
+                graphDatabase = null;
+                LogManager.logD(TAG, "[KG] Knowledge Graph Database closed");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[KG] Error releasing Knowledge Graph resources: " + e.getMessage(), e);
+        }
+        */
     }
 }
 

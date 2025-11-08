@@ -86,7 +86,7 @@ flowchart TB
           Categories --> Options --> Actions --> Progress
       end
   ```
-- **Settings/Help/LogViewFragment**：设置页强调配置项互斥与即时生效（如手动参数优先），帮助页加载 assets 内文档并支持跳转锚点；日志页需读写本地 .log 文件并支持过滤/导出。**主要 API**：`SettingsFragment.saveSettings()`、`SettingsFragment.loadSettings()`、`HelpFragment.loadMarkdown()`、`LogViewFragment.refreshLogs()`、`LogViewFragment.filterByLevel()`。**关键数据结构**：`StateDisplayManager.DisplayEntry`、`LogManager.LogBuffer`、`MarkdownRenderer`。**布局示意**：
+- **Settings/Help/LogViewFragment/KnowledgeGraphViewerFragment**：设置页强调配置项互斥与即时生效（如手动参数优先），帮助页加载 assets 内文档并支持跳转锚点；日志页需读写本地 .log 文件并支持过滤/导出；图谱查看器展示知识库的实体关系网络。**菜单导航策略（方案 2）**：所有菜单 Fragment（Help、GraphViewer、Settings、Log 等）作为顶层页面处理，`MainActivity.onOptionsItemSelected()` 在打开新的菜单 Fragment 之前调用 `popBackStack(null, POP_BACK_STACK_INCLUSIVE)` 清空现有 Fragment back stack，确保任意时刻栈中最多只有一个菜单 Fragment，避免嵌套导航和复杂生命周期。**统一关闭按钮**：所有菜单 Fragment 使用 `MenuProvider` API 在 ActionBar 显示关闭按钮（X），点击后清空 back stack 并返回主界面（恢复 ViewPager）。**实现位置**：`onViewCreated()` 中注册 `MenuProvider`，处理 `android.R.id.home` 点击事件。**主要 API**：`SettingsFragment.saveSettings()`、`SettingsFragment.loadSettings()`、`HelpFragment.loadMarkdown()`、`LogViewFragment.refreshLogs()`、`LogViewFragment.filterByLevel()`、`KnowledgeGraphViewerFragment.loadGraphData()`。**关键数据结构**：`StateDisplayManager.DisplayEntry`、`LogManager.LogBuffer`、`MarkdownRenderer`、`KnowledgeGraphExporter.GraphStats`。**布局示意**：
   ```mermaid
   flowchart TB
       subgraph SettingsFragment
@@ -167,13 +167,20 @@ flowchart TB
 - **文档处理**：支持 PDF/Office/TXT/Markdown/JSON 等格式。需求：解析时保留文档结构（标题、表格、列表），对 JSON 特殊格式（instruction、对话等）需按语义拆分。设计：DocumentParser 针对不同格式采用专用解析器，输出结构化段落，后续由 TextChunkProcessor 处理。
 - **分块策略**：chunkSize/overlap/minChunkSize 可配置。需求：既要保证上下文连贯又要限制单块长度。设计：采用“自然段优先 + 长段二次切分”策略，重叠区用于保留衔接，Chunk 元数据记录来源段落与页码。
 - **向量化与重排**：现统一走 MNN Embedding/Reranker。需求：支持低内存模式与高性能模式切换，自动过滤异常向量。设计：EmbeddingHandler loadModel 时指定 memory mode，并在 computeEmbedding 后调用 VectorAnomalyHandler 校验；重排结果低于阈值时记录日志提醒。**主要 API**：`EmbeddingHandler.getModel()`、`computeEmbedding()`、`VectorAnomalyHandler.detectAndFix()`、`RerankerHandler.rerank()`。**关键数据结构**：`TextChunkProcessor.TextChunk`、`SQLiteVectorDatabaseHandler.SearchResult`。
-- **数据落盘**：向量与原文存入 SQLite，配套保存 intermediate_chunks.json 做断点续建，成功后清理临时文件。设计：TextChunkProcessor 在每阶段结束写入 checkpoint，失败时可回滚后续阶段。**主要 API**：`SQLiteVectorDatabaseHandler.insertChunk()`、`TextChunkProcessor.saveIntermediateChunks()`、`deleteIntermediateFile()`。**关键数据结构**：`intermediate_chunks.json`、SQLite 表。
+- **数据落盘**：向量与原文统一存入 `KnowledgeGraphDatabase` 管理的 SQLite 文件（规范命名为 `knowledge_graph.db`），配套保存 `intermediate_chunks.json` 做断点续建，成功后清理临时文件。设计：`TextChunkProcessor` 在每阶段结束写入 checkpoint，失败时可回滚后续阶段。**主要 API**：`KnowledgeGraphDatabase.addChunk()`、`TextChunkProcessor.saveIntermediateChunks()`、`deleteIntermediateFile()`。**关键数据结构**：`intermediate_chunks.json`、`KnowledgeGraphDatabase.SearchResult`、SQLite 表。
 - **日志/诊断**：构建过程强制写入日志文件，包含解析、分块、向量化统计；UI 调试窗口实时输出当前文件、耗时、错误信息，便于查找格式或权限问题。
+- **进度与日志模型（2025-11-16 重构）**：统一使用 `ProgressManager` + `UnifiedForegroundService.ProgressCallback` 提供结构化进度与文本日志。设计：
+  - `ProgressManager` 作为单例，集中维护知识库构建的数值状态（处理文件/块、当前阶段、elapsed、ETA）以及构建配置快照（知识库名、Embedding/Reranker 模型、chunkSize/overlap、自定义词典文件名），对外暴露只读 `ProgressData` 作为 UI 唯一数据源。
+  - `UnifiedForegroundService` 负责驱动长任务，并通过 `TextChunkProcessor.ProgressCallback` 将底层进度写入 `ProgressManager`。`onProgressUpdate(int progress, String status)` 只承载数值进度（0–100），所有可读文本统一通过 `onLogLine(String message)` 回传到 UI，避免在 Service/Processor 层拼接 UI 文案或控制换行。
+  - `BuildKnowledgeBaseFragment` 仅消费结构化数据与日志：利用 `ProgressManager.getCurrentProgress()` 生成统一格式的进度标签（`[files/chunks: current/total] XX.X% | elapsed HH:MM:SS | ETA HH:MM:SS`），并在 `onLogLine` 中将所有日志行追加到进度 TextView（包括构建配置、文本提取进度、词典加载状态、向量化/图谱构建摘要），由 Fragment 独立管理滚动与全局字号。
 
 ### 3.3 知识库笔记
 - **功能点**：手动创建、标题/正文编辑、转换聊天回复为笔记、标签/分类扩展位。
 - **数据流**：新笔记在保存后立即向量化并写入当前知识库，提供进度提示与统计（条目数增长）。
 - **互操作**：笔记内容可回流至 RAG 问答作为知识源。
+- **进度与词典日志（2025-11-16 重构）**：知识库笔记复用统一的 Embedding/图谱管线，并在 UI 中展示简化版进度与词典加载信息。设计：
+  - `KnowledgeNoteFragment` 在保存笔记后触发向量化与实体识别，将结果写入当前知识库对应的向量库/图谱数据库；进度 TextView 采用全局字号设置，保持与知识库构建页面一致的可读性。
+  - 实体识别使用 `HanLpNerHandler`，在加载外挂自定义词典时，将“无词典 / 词典文件名 + 词数 / 词典加载错误”等状态通过统一格式的英文日志行（`Dictionary: None / Dictionary: <file>(loaded N words) / Dictionary load error: <msg>`）写入 UI 与 Logcat，风格与 Graph RAG 查询保持一致，便于用户快速判断词典是否生效。
 
 ### 3.4 模型下载管理
 - **数据来源**：ModelDownloadList.json 按类别列出模型包与 URL。需求：用户可按需下载或自定义来源。设计：首次进入时校验 JSON 并自动创建目录，支持用户替换文件指向自定义镜像。
@@ -253,8 +260,25 @@ flowchart TB
 | `downloads/` | 模型下载缓存 | 临时文件、断点续传记录 |
 
 ### 5.2 知识库存储
-- **SQLiteVectorDatabaseHandler**：负责向量存储、元数据维护、构建统计。需求：批量写入时需事务保证，提供查询/删除接口。设计：表结构包括向量表、文档元信息表、构建进度表，支持相似度查询与统计接口。
+- **KnowledgeGraphDatabase**：统一的知识图谱数据库与向量库，实现“单库文件”方案（`knowledge_graph.db`），负责向量存储、实体管理、关系构建与元数据记录（embedding 模型、维度、reranker 等）。需求：批量写入时需事务保证，提供查询/删除接口，并作为 RAG 与图谱查看的唯一数据源。设计：表结构包括：
+  - `documents` 表：文本块 + 向量（支持相似度查询）
+  - `entities` 表：实体信息（文本、类型、频率、置信度）
+  - `entity_edges` 表：实体关系（共现关系、权重）
+  - `chunk_entities` 表：文本块-实体映射（多对多）
+  - `metadata` 表：数据库元信息（版本、创建时间等）
+- **实体关系构建**：在知识库构建过程中自动提取实体并建立关系：
+  - **实体提取**：使用 HanLP NER 识别人名、地名、机构名等实体
+  - **关系建立**：同一文本块中的实体视为共现关系，建立双向边
+  - **权重累积**：多次共现的实体对权重递增，反映关系强度
+  - **实现位置**：`TextChunkProcessor.java` Line 762-794
+- **构建期图谱清洗（停用词 + hub 门限）**：在写入实体和关系时即执行一次“源头去噪”，减少后续查询阶段的过滤负担：
+  - **停用词过滤**：若在设置中选择了图谱停用词文件（`KEY_GRAPH_STOPWORDS_PATH`），构建期会通过 `GraphStopwordsMatcher` 解析 UTF-8 JSON（`exact`/`prefix`/`regex` 三类规则），在实体入库前过滤命中的实体文本，避免“测试/进行/系统/包括”“第X章/图1/表1”等低信息量实体进入图谱。
+  - **hub 实体清理**：构建完成后，根据 `KEY_GRAPH_HUB_THRESHOLD`（0=关闭）在 `KnowledgeGraphDatabase.applyHubThreshold()` 中统计每个实体文本的邻居数量与总边权重，当任一指标超过阈值时视为“超大实体（hub）”，删除对应的 `entities` 记录、`chunk_entities` 关联以及 `entity_edges` 中涉及该实体的边，并输出统计日志，确保最终图谱更稀疏、更有判别力。
 - **RAG 查询**：调用时按相似度排序返回 Top-N，并在必要时进行重排。需求：多线程安全、支持停止检查。设计：检索阶段可并行，返回结果附带分数与元数据，供 RagQueryManager 拼接上下文。
+- **图谱导出**：`KnowledgeGraphExporter` 提供 Markdown 格式导出，包括：
+  - 核心关系网络 TOP N（实体对及共现次数）
+  - 实体分类统计（按类型分组的高频实体）
+  - 数据库统计（文本块数、实体数、关系数）
 
 ### 5.3 会话历史
 - **ChatHistoryManager**：负责对话序列化、附件管理。需求：保存聊天 Markdown、图像、AI 音频、Diffusion 图片，并能加载恢复 UI 状态。设计：Markdown 中以特定标记记录附件，加载时解析并生成相应 ViewHolder。
@@ -9036,6 +9060,473 @@ private void smartScrollToBottom() {
 - `RagQaFragment.java` Line 288-315：滚动监听器
 - `RagQaFragment.java` Line 5335-5379：智能滚动实现
 - `RagQaFragment.java` Line 5328：流式更新调用点
+
+---
+
+## 附录 H：知识图谱RAG实现（Knowledge Graph RAG）
+
+### H.1 架构设计
+
+**设计理念**：在现有向量检索基础上，通过实体识别和关系图谱增强召回能力，提升10-15%的召回率。
+
+**核心组件**：
+1. **NER模块**（`com.example.offlineai.ner`）
+   - `EntityRecognizer` - 统一接口
+   - `HybridEntityRecognizer` - 混合实现（OpenNLP + 规则 + 词典）
+
+2. **图数据库**（`com.example.offlineai.graph`）
+   - `KnowledgeGraphDatabase` - 全新设计，无历史包袱
+   - 表结构：documents / entities / entity_edges / chunk_entities
+
+3. **查询流程**：
+   ```
+   用户查询 → 向量检索(Top-K) → 实体提取 → 图扩展(1-hop) → 补充召回 → 合并去重 → Reranker → 返回
+   ```
+
+### H.2 NER实现细节
+
+**技术栈**：
+- **英文**：OpenNLP 2.3.0（预训练模型）
+  - 模型文件：`en-ner-person.bin`, `en-ner-location.bin`, `en-ner-organization.bin`
+  - 下载地址：http://opennlp.sourceforge.net/models-1.5/
+  
+- **中文**：规则 + 词典
+  - 姓氏词典：Top 100 常见姓氏
+  - 地名后缀：省市县区 + 地标（30+）
+  - 组织后缀：公司/大学/政府机构（30+）
+  - 高频实体词典：名人/公司（可扩展）
+
+**当前 Android 实现（HanLP NER + 外挂词典）**：
+- 使用 `HanLpNerHandler` 作为统一 NER 入口，基于 HanLP `StandardTokenizer`，不再依赖 OpenNLP 中文模型
+- 支持可选**外挂 JSON 词典**，用于补充领域实体，JSON 结构兼容两种顶层形式：
+  1. 推荐格式：完整对象，包含 `version` / `domain` / `description` / `entries` 字段，其中 `entries` 为条目数组
+  2. 兼容格式：顶层直接为条目数组 `[{...}, {...}]`
+- 每个条目字段约定：
+  - `word`：术语文本（必填）
+  - `nature`：HanLP 词性，默认 `nz`
+  - `frequency`：词频，默认 `10000`
+  - `aliases`：同义词/别名数组（可选），别名会以相同 `nature frequency` 写入自定义词典
+- 解析策略：
+  - 若顶层是对象且包含 `entries`，使用 `entries` 数组
+  - 若顶层是数组，则直接视为词典条目数组
+  - 若既不是数组、也不存在 `entries` 数组，则视为配置错误并记录详细异常
+
+**性能指标**：
+- 处理速度：~5-10ms per 200-char chunk
+- 准确率：词典匹配 95%+，规则匹配 70-80%
+- 置信度阈值：默认 0.7（可配置）
+
+### H.3 图数据库Schema
+
+**表结构**（全新设计）：
+
+```sql
+-- 1. documents: 文本块 + 向量
+CREATE TABLE documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source TEXT,
+    metadata TEXT,
+    embedding BLOB NOT NULL,
+    created_at INTEGER
+);
+
+-- 2. entities: 实体（去重、频次统计）
+CREATE TABLE entities (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection TEXT NOT NULL,
+    entity_text TEXT NOT NULL,
+    entity_type TEXT NOT NULL,  -- person/location/organization
+    language TEXT,               -- zh/en/mixed
+    frequency INTEGER DEFAULT 1,
+    avg_confidence REAL,
+    first_seen INTEGER,
+    last_seen INTEGER,
+    UNIQUE(collection, entity_text, entity_type)
+);
+
+-- 3. entity_edges: 共现关系（加权图）
+CREATE TABLE entity_edges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    collection TEXT NOT NULL,
+    from_entity TEXT NOT NULL,
+    to_entity TEXT NOT NULL,
+    weight INTEGER DEFAULT 1,    -- 共现次数
+    chunk_ids TEXT,              -- JSON数组
+    created_at INTEGER,
+    updated_at INTEGER,
+    UNIQUE(collection, from_entity, to_entity)
+);
+
+-- 4. chunk_entities: 块-实体关联（多对多）
+CREATE TABLE chunk_entities (
+    chunk_id INTEGER NOT NULL,
+    entity_text TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    confidence REAL,
+    FOREIGN KEY(chunk_id) REFERENCES documents(id),
+    PRIMARY KEY(chunk_id, entity_text, entity_type)
+);
+```
+
+**索引优化**（8个索引）：
+- documents: collection
+- entities: entity_text, entity_type, collection, frequency DESC
+- entity_edges: from_entity, to_entity, collection, weight DESC
+- chunk_entities: chunk_id, entity_text
+
+**分块级图构建策略（Android 实现）**：
+- 构建阶段由 `TextChunkProcessor` 按 chunk 流式执行：每处理完一个 chunk，即刻进行 NER、实体入库、chunk–实体映射写入，以及实体–实体共现边更新。
+- 对每个 chunk 内部的实体，两两成对写入/更新 `entity_edges`，边权重表示这些实体在多少个 chunk 中共同出现，随着更多 chunk 写入而累加。
+- `chunk_entities` 记录了“实体在哪些 chunk 中出现”，在查询阶段通过 `getChunkIdsByEntities()` 由实体反查所有相关 chunk，实现**跨 chunk 关联**，即使没有显式的 chunk–chunk 边，仍然可以通过实体把多个 chunk 关联起来。
+- 当前不显式构建 chunk–chunk 边（例如相邻段落或章节级关系），但图谱 RAG v1 的设计已经可以覆盖“同一实体多次出现在不同 chunk 中”的跨文档语义连接；如需更强的结构关系，可在后续版本增加独立的 chunk–chunk 图层。
+ - **构建期图谱清洗（停用词 + hub 门限）**：在实体关系构建阶段，通过停用词过滤和 hub 门限清理，去除噪音实体和高频实体对图谱的负面影响，具体包括：
+  - **批量导入路径（TextChunkProcessor）**：在分块 NER 之后，对实体集合应用 `GraphStopwordsMatcher`（exact/prefix/regex 三类规则），丢弃命中停用词的实体；完成所有 chunk 处理后，通过 `KnowledgeGraphDatabase.applyHubThreshold()` 按邻居数 / 总边权重一次性清理 hub 实体及其相关边与 chunk–entity 关系。
+  - **知识库笔记路径（KnowledgeNoteFragment）**：用户在“知识库笔记”界面新增笔记时，使用 `HanLpNerHandler` 做 NER，并复用同一套 `GraphStopwordsMatcher` 规则在**写入图数据库前**过滤实体；完成该笔记的图构建后，同样调用 `applyHubThreshold()` 做 hub 清理，保证笔记入口与批量导入入口在图谱质量上的一致性。
+  - **查询期二次清洗（stop/hub）**：RAG 查询阶段在 `RagQaFragment.processGraphRagResults()` 中再次加载当前停用词表和 hub 门限，基于 `GraphStopwordsMatcher` + `KnowledgeGraphDatabase.getHubEntities()` 对“查询 NER 实体 + Top-K chunk 实体 + 图扩展实体 + 候选 chunk 内实体”做一次**只读的二次过滤**：
+    - 任何命中停用词或被判定为 hub 的实体都不会进入种子集合、不会参与图扩展，也不会参与最终重叠计分与图分数累积；
+    - 二次清洗的阈值设计为“**不比构建期更宽松**”：如果构建期已经通过更严格的 stop/hub 配置把某些实体删除，查询期只是对剩余实体再做一次 in-memory 过滤，不会放宽条件恢复被删除的实体；
+    - 通过修改 stopwords JSON 或调节 hub 阈值，用户可以在**无需重建知识库**的前提下，对 Graph RAG 效果做精细调参（多洗一点 / 少洗一点），便于在不同知识库规模和噪声分布下快速迭代。
+
+### H.4 配置参数
+
+**ConfigManager新增键**：
+```java
+// Knowledge Graph RAG 相关的键
+KEY_GRAPH_MIN_EDGE_WEIGHT = "graph_min_edge_weight"           // 图扩展最小边权重
+KEY_GRAPH_MAX_EXPAND_ENTITIES = "graph_max_expand_entities"   // 图扩展最大实体数（控制图扩展的实体规模）
+KEY_GRAPH_ENTITY_CONFIDENCE_THRESHOLD = "graph_entity_confidence_threshold" // 实体置信度阈值
+KEY_GRAPH_RAG_ENABLED = "graph_rag_enabled"                    // 是否启用 Graph RAG 查询模式
+KEY_GRAPH_RAG_WEIGHT_PRESET = "graph_rag_weight_preset"       // Graph RAG 融合权重预设索引
+KEY_GRAPH_MAX_EXPAND_CHUNKS = "graph_max_expand_chunks"       // 图扩展阶段允许返回的最大 chunk 数
+KEY_GRAPH_HUB_THRESHOLD = "graph_hub_threshold"               // 超大实体（hub）门限：按邻居数/总边权重过滤，0=关闭
+KEY_GRAPH_STOPWORDS_PATH = "graph_stopwords_path"             // 图谱停用词 JSON 文件绝对路径（空字符串表示未启用）
+
+// 默认值（逻辑层）
+DEFAULT_GRAPH_MIN_EDGE_WEIGHT = 2               // 过滤低频共现
+DEFAULT_GRAPH_MAX_EXPAND_ENTITIES = 50          // 限制扩展实体规模
+DEFAULT_GRAPH_ENTITY_CONFIDENCE_THRESHOLD = 0.7f // 只保留高置信度实体
+DEFAULT_GRAPH_RAG_ENABLED = true                 // 默认开启 Graph RAG，在手机端通过合理上限控制性能
+DEFAULT_GRAPH_MAX_EXPAND_CHUNKS = 50             // 图扩展最多增加 50 个候选 chunk
+DEFAULT_GRAPH_RAG_WEIGHT_PRESET = 1              // 融合权重预设：1=平衡（0.7/0.2/0.1）
+DEFAULT_GRAPH_HUB_THRESHOLD = 200                // hub 门限默认 200（按邻居数/总边权重），对中小型知识库有适度清洗
+
+**停用词表与文本编辑器（TextEditorFragment）**：
+- 图谱停用词 JSON 文件位于 `dataRoot/stopwords` 目录，由 `ConfigManager.ensureDefaultStopwordsExample()` 在首次启动或缺失时，将 `assets/example_stop.json` 复制为 `example_stop.json` 示例文件，供用户参考和修改。
+- 设置界面中的“图谱停用词表”下拉框与 `KEY_GRAPH_STOPWORDS_PATH` 共同决定当前生效的停用词文件路径；批量构建（`TextChunkProcessor`）和知识库笔记构建（`KnowledgeNoteFragment`）都从该路径加载停用词规则。
+- 主菜单提供“文本编辑器”入口，对应 `TextEditorFragment`：
+  - 顶部显示当前 stopwords 目录路径，便于用户快速定位停用词与相关配置文件所在位置；
+  - 通过“浏览文件”按钮使用系统文件选择器（`ACTION_OPEN_DOCUMENT`）选择要编辑的 `.json` / `.txt` 文件，用户可导航到 `dataRoot/stopwords` 目录中选择图谱停用词表或其他文本配置文件；
+  - 选中文件后自动以 **UTF-8 编码**加载内容，并通过 `ContentResolver` 的输入/输出流进行读写，避免跨平台或手工编辑导致的乱码问题；
+  - 编辑区会跟踪“未保存”状态，在用户返回主界面或重新浏览其他文件前，如果当前文件已修改但尚未保存，会弹出“是否保存更改”的确认对话框，避免误操作丢失停用词规则；
+  - 文本编辑器与设置页面共享同一 stopwords 目录，推荐用户在此统一维护 Graph 停用词与相关配置文件，减少路径和编码不一致的风险。
+- 图扩展最小边权重：
+  - 文案：`label_graph_min_edge_weight` – "图扩展最小边权重\n(1~10):" / "Graph Min Edge Weight\n(1~10):"
+  - 提示：`hint_graph_min_edge_weight` – "过滤低权重边，避免噪音"。
+  - UI 映射：`weight = progress + 1`（1–10）。
+- 图扩展最大实体数：
+  - 文案：`label_graph_max_expand_entities` – "图扩展最大实体数\n(10~100):" / "Graph Max Expand Entities\n(10~100):"
+  - 提示：`hint_graph_max_expand_entities` – 限制图扩展返回的实体数量。
+  - UI 映射：`entities = progress * 10 + 10`（10–100，步长 10）。
+- 实体置信度阈值：
+  - 文案：`label_graph_entity_confidence_threshold` – "实体置信度阈值\n(0.5~1.0):" / "Entity Confidence Threshold\n(0.5~1.0):"
+  - 提示：`hint_graph_entity_confidence_threshold` – 只保留高置信度实体。
+  - UI 映射：`threshold = 0.5f + progress * 0.05f`（0.5–1.0，步长 0.05），并在 `SettingsFragment.loadSettings()` 中对读取到的历史值进行 clamp（小于 0.5 视为 0.5，大于 1.0 视为 1.0），保证不会出现过于宽松的实体筛选。
+- 图谱 RAG 融合权重预设（Spinner）：
+  - 文案：`label_graph_rag_weight_preset` – "图谱RAG融合权重预设:" / "Graph RAG Fusion Preset:"。
+  - 选项数组：`graph_rag_weight_presets`，对应典型预设：
+    - 索引 0：向量优先 (α=0.9, β=0.1, γ=0.0)
+    - 索引 1：平衡 (α=0.7, β=0.2, γ=0.1) —— 默认值
+    - 索引 2：图谱增强 (α=0.4, β=0.4, γ=0.2)
+  - 数值保存到 `KEY_GRAPH_RAG_WEIGHT_PRESET`，由查询阶段读取。
+- 图扩展最大 chunk 数（SeekBar）：
+  - 文案：`label_graph_max_expand_chunks` – "图扩展最大chunk数\n(10~100):" / "Graph Max Expand Chunks\n(10~100):"
+  - 提示：`hint_graph_max_expand_chunks` – 限制图扩展阶段参与打分的 chunk 数量。
+  - UI 映射：`chunks = progress * 10 + 10`（10–100，步长 10），写入 `KEY_GRAPH_MAX_EXPAND_CHUNKS`。
+
+> 说明：上述范围收紧通过 UI 映射和 `SettingsFragment` 内的 clamp 实现，只影响运行时参数的可选范围，不改变已有知识库的结构与数据，无需触发 KB 重建。
+
+**种子实体过滤机制（RagQaFragment 实现）**：
+- 查询阶段首先通过 `HanLpNerHandler` 对用户问题做 NER，并结合向量检索 Top-K（默认 5 个）结果对应 chunk 的实体，构造“种子实体候选集”。
+- 全局高频实体和明显无区分度的结构性词（章节号/图表编号等）在 **知识库构建阶段** 通过 `GraphStopwordsMatcher` + hub 门限完成第一轮清洗，在此基础上，查询阶段再通过相同的停用词规则和基于 `getHubEntities()` 计算的 hub 集合做一次**只读二次清洗**。
+- 种子实体构建规则：
+  - 仅保留置信度 ≥ `KEY_GRAPH_ENTITY_CONFIDENCE_THRESHOLD` 的实体；
+  - 对实体文本进行 normalize（trim 空白，空串视为无效）；
+  - 命中停用词或属于 hub 集合的实体将被跳过；
+  - 依次从“查询 NER 结果”和“Top-K chunk 的实体”中去重追加到 `seedOrder` 列表。
+- 为防止一次查询触发过宽的图扩展，RagQaFragment 对最终种子实体个数施加硬限制：
+  - 使用 `GRAPH_RAG_MAX_SEED_ENTITIES = 32` 作为 **每次查询级别的种子上限**；
+  - 仅取 `seedOrder` 中前 32 个实体作为 `seedEntities`；
+  - 若过滤后 `seedEntities` 为空，则直接回退到纯向量 RAG 路径，不再尝试 Graph RAG 扩展。
+- 最终用于“实体重叠计分”的集合 `queryEntityTexts` 也基于 `seedEntities` 重建，并在 chunk 级别再次应用 stop/hub 过滤，保证整个图扩展和打分过程只围绕经过两轮清洗且经过截断的种子实体运行。
+
+**融合打分与性能保护（RagQaFragment 实现）**：
+- Graph RAG 查询阶段在 `RagQaFragment.processGraphRagResults()` 中对每个候选 chunk 计算三类原始特征：
+  - `vectorScore`：来自向量检索的相似度分数；
+  - `graphScore_raw`：该 chunk 所含实体在图中的边权累积（按实体共现权重求和，已按 stop-entity 过滤）；
+  - `entityOverlap`：chunk 内实体与最终种子实体集合 `seedEntities` 的重叠个数。
+- 为避免图分数在数值上碾压向量分数，`graphScore_raw` 先经过 `log1p` 压缩得到：
+  - `graphScore = log1p(max(graphScore_raw, 0))`。
+- 在完成全部候选的原始特征计算后，RagQaFragment 对向量分数、压缩后的图分数和实体重叠分别做 **按查询的 min-max 归一化**：
+  - 统计 `vecMin/vecMax`、`graphMin/graphMax`、`overlapMin/overlapMax`；
+  - 对每个候选：
+    - 若 `vecMax > vecMin`，则 `vecNorm = (vectorScore - vecMin) / (vecMax - vecMin)`；否则若 `vecMax > 0` 则视为 1.0，否则为 0.0；
+    - 若 `graphMax > graphMin`，则 `graphNorm = (graphScore - graphMin) / (graphMax - graphMin)`；否则若 `graphMax > 0` 则视为 1.0，否则为 0.0；
+    - 若 `overlapMax > overlapMin`，则 `overlapNorm = (overlap - overlapMin) / (overlapMax - overlapMin)`；否则若 `overlapMax > 0` 则视为 1.0，否则为 0.0。
+- 最终融合得分在 **归一化后的三路特征** 上按预设权重线性组合：
+  - `finalScore = alpha * vecNorm + beta * graphNorm + gamma * overlapNorm`；
+  - `alpha / beta / gamma` 由 `KEY_GRAPH_RAG_WEIGHT_PRESET` 所选预设决定：
+    - 向量优先：`alpha=0.9, beta=0.1, gamma=0.0`；
+    - 平衡：`alpha=0.7, beta=0.2, gamma=0.1`；
+    - 图谱增强：`alpha=0.4, beta=0.4, gamma=0.2`。
+- 图扩展的 chunk 数量在从实体反查 chunk（`getChunkIdsByEntities()`）后立即受 `KEY_GRAPH_MAX_EXPAND_CHUNKS` 限制：
+  - 若返回的 chunk id 数量大于该上限，只保留前 `maxExpandChunks` 条参与后续 `getChunksByIds()` 与融合打分，避免在知识库较大时图扩展导致候选过多、内存与排序开销失控。
+
+**Graph RAG 推荐配置 / Recommended Graph RAG Presets**：
+- **在线大模型（云端 LLM，如 GPT/深度大模型 API） / Online Large LLMs**：
+  - 适用场景：模型本身推理与逻辑能力强，更依赖高质量向量召回，Graph RAG 用于轻量增强召回覆盖面。
+  - 建议参数：
+    - `KEY_GRAPH_MIN_EDGE_WEIGHT`：2–3（过滤极低频共现，保留中高置信度关系）。
+    - `KEY_GRAPH_MAX_EXPAND_ENTITIES`：20–40（控制扩展宽度，避免一次拉入过多实体）。
+    - `KEY_GRAPH_MAX_EXPAND_CHUNKS`：20–40（限制图扩展带来的候选数量）。
+    - `KEY_GRAPH_ENTITY_CONFIDENCE_THRESHOLD`：0.7–0.8（偏保守，只使用高置信度实体）。
+    - `KEY_GRAPH_RAG_WEIGHT_PRESET`：0 或 1（向量优先 / 平衡）。
+  - 配合建议：向量检索近似深度设置在 4–8，重排数量约为近似深度的 2–3 倍；Graph RAG 建议保持开启，但权重偏向向量通道，避免过度依赖图谱纠错。
+
+- **本地小模型（0.6B–4B MNN，本机部署） / Local Small LLMs**：
+  - 适用场景：模型参数量较小，对上下文质量更敏感，可以通过更积极的 Graph RAG 扩展弥补模型表达能力不足。
+  - 建议参数：
+    - `KEY_GRAPH_MIN_EDGE_WEIGHT`：2（在中小型知识库中保留更多共现关系）。
+    - `KEY_GRAPH_MAX_EXPAND_ENTITIES`：40–60（适度加大实体扩展宽度，在种子上限 32 的前提下获取更多关联实体）。
+    - `KEY_GRAPH_MAX_EXPAND_CHUNKS`：20–40（为小模型提供适度但可控的候选上下文，避免图扩展过宽）。
+    - `KEY_GRAPH_ENTITY_CONFIDENCE_THRESHOLD`：0.6–0.7（在保证质量的前提下适当放宽召回）。
+    - `KEY_GRAPH_RAG_WEIGHT_PRESET`：1 或 2（平衡 / 图谱增强），在本地模型表现较弱时可考虑偏向图谱增强。
+  - 配合建议：检索数量 / 向量检索近似深度一般设置在 4–6（该数值同时限制最终送入 LLM 的文档条数），重排数量约为近似深度的 2 倍；在设备性能有限时优先通过调小 `KEY_GRAPH_MAX_EXPAND_ENTITIES/CHUNKS` 和检索数量控制图扩展与上下文长度成本，而不是关闭 Graph RAG。
+
+### H.5 详细日志设计
+
+**目的**：便于效果评估和调试
+
+**NER阶段**：
+```
+[NER] Extracted 5 entities in 8ms from 200-char text
+[NER] Entities: [马云:person:0.85] [阿里巴巴:organization:0.95] [杭州:location:0.80]
+```
+
+**外挂词典加载阶段（HanLpNerHandler）**：用于在**知识库构建**与 **Graph RAG 查询**时快速确认词典状态
+- 无自定义词典：
+  - Logcat/UI 进度框：`Dictionary: None`
+- 词典加载成功（例如 `Starblaze-tech.json`）：
+  - Logcat：`HanLP NER initialized with dictionary: /.../dictionary/Starblaze-tech.json (loaded 123 words)`
+  - KB 构建进度框：`Dictionary: Starblaze-tech.json (loaded 123 words)`
+  - Graph RAG 查询进度区：同样输出一行 `Dictionary: Starblaze-tech.json (loaded 123 words)`
+- 词典加载失败：
+  - Logcat：`Failed to load dictionary: /.../Starblaze-tech.json - <error>`
+  - KB 构建/查询进度框：
+    - `Dictionary: Starblaze-tech.json`
+    - `Dictionary load error: <error message>`
+- 典型错误示例：
+  - JSON 结构不合法（既不是对象+entries，也不是数组）
+  - 文件为空或仅包含空白字符
+  - 文件不存在：`Dictionary not found`
+
+**图构建阶段**：
+```
+[ADD_ENTITY] id=123, text='马云', type=person, conf=0.85
+[UPDATE_ENTITY] '阿里巴巴' freq: 5→6, conf: 0.92→0.93
+[BUILD_EDGES] chunk_id=456, entities=3, edges=3, time=5ms
+[ADD_EDGE] id=789, '马云'-'阿里巴巴'
+[UPDATE_EDGE] '马云'-'阿里巴巴' weight: 2→3
+```
+
+**图扩展阶段**：
+```
+[VECTOR_SEARCH] topK=5, scanned=1000 chunks, time=45ms
+[GRAPH_EXPAND] seeds=3, min_weight=2, found=7 entities, time=12ms
+[GRAPH_EXPAND] Connected: [淘宝:w=5] [支付宝:w=4] [蚂蚁金服:w=3] ...
+[GET_CHUNKS_BY_ENTITIES] entities=7, chunks=12, time=8ms
+[MERGE_RESULTS] vector=5, graph=12, final=15 (after dedup), time=3ms
+```
+
+**统计信息**：
+```
+[STATS] chunks=1000, entities=450, edges=1200, total_weight=3500
+[STATS] Entity types: {person=150, location=120, organization=180}
+[STATS] Top entities: [马云(25), 阿里巴巴(20), 杭州(18), ...]
+```
+
+### H.6 性能指标
+
+**目标性能**：
+- NER: <10ms per 200-char chunk
+- 图构建: <5ms per chunk (3 entities, 3 edges)
+- 图扩展: <50ms (1-hop, 10 seed entities)
+- 总开销: <15% vs 纯向量检索
+
+**存储开销**：
+- 实体表: ~100 bytes per entity
+- 边表: ~150 bytes per edge
+- 关联表: ~50 bytes per chunk-entity link
+- 总开销: ~10% vs 纯向量数据库
+
+**效果指标**：
+- 召回率提升: 目标 +10-15%（相比纯向量）
+- 准确率: 保持不变（图扩展不影响精度）
+
+### H.7 实施记录
+
+**Phase 1: 基础架构（已完成 ✅ 2025-11-08）**
+- ✅ OpenNLP依赖添加（`build.gradle`）
+- ✅ EntityRecognizer接口设计（`EntityRecognizer.java`）
+- ✅ HybridEntityRecognizer实现（`HybridEntityRecognizer.java`，600+行）
+- ✅ KnowledgeGraphDatabase实现（`KnowledgeGraphDatabase.java`，800+行）
+- ✅ ConfigManager配置扩展（3个新键，3个默认值，6个方法）
+- ✅ 资源文件更新（中英文，各6个新字符串）
+- ✅ OpenNLP模型下载（3个.bin文件，约15MB）
+
+**Phase 2: 集成到分块流程（已完成 ✅ 2025-11-08）**
+- ✅ `TextChunkProcessor.java` 修改：
+  - 添加成员变量：`entityRecognizer`, `graphDatabase`
+  - 添加初始化方法：`initializeKnowledgeGraph()` (Line 957-982)
+  - 添加处理方法：`processChunkForKnowledgeGraph()` (Line 991-1053)
+  - 添加释放方法：`releaseKnowledgeGraph()` (Line 1058-1074)
+  - 集成到向量化循环：每个chunk向量化后立即进行实体抽取和图构建
+  - 资源管理：在finally块中确保释放资源
+
+**Phase 3: 集成到查询流程（Android 端实际实现 ✅ 2025-11-16）**
+- ✅ `RagQaFragment.java` 修改：
+  - 新增 Graph RAG 处理入口：`processGraphRagResults()`，在向量检索完成后，根据当前配置决定是否执行图扩展与融合打分。
+  - 种子实体收集：从用户查询（HanLP NER）+ Top-K 向量结果对应 chunk 的实体中收集种子实体，按置信度阈值过滤（`KEY_GRAPH_ENTITY_CONFIDENCE_THRESHOLD`）。
+  - 图扩展：调用 `KnowledgeGraphDatabase.getConnectedEntities()` 依据 `KEY_GRAPH_MIN_EDGE_WEIGHT` 和 `KEY_GRAPH_MAX_EXPAND_ENTITIES` 做一跳扩展，得到与种子实体相关的高权重实体。
+  - chunk 召回：通过 `getChunkIdsByEntities()` 从实体反查 chunk，使用 `KEY_GRAPH_MAX_EXPAND_CHUNKS` 限制图扩展阶段新增 chunk 数量后，合并原始向量结果与图扩展 chunk，并去重。
+  - 融合打分：为每个候选 chunk 计算 `vectorScore` / `graphScore` / `entityOverlap`，并按 `finalScore = alpha * vectorScore + beta * graphScore + gamma * entityOverlap` 排序；权重由 `KEY_GRAPH_RAG_WEIGHT_PRESET` 所选预设决定。
+  - 调试输出：在调试区域打印融合前后的候选列表及各项分数，便于观察 Graph RAG 对排序的影响。
+- ⛔ 旧方案：早期设计中曾规划通过 `RagQueryManager.expandWithKnowledgeGraph()` 集成查询流程；该类在 Android 端已被判定为历史屎山并物理删除，仅保留本附录文档作为架构演进记录，实际实现以 `RagQaFragment` 为准。
+
+**Phase 4: UI配置界面（已完成 ✅ 2025-11-08）**
+- ✅ `fragment_settings.xml` 修改：
+  - 添加3个知识图谱RAG配置项（最小边权重、最大扩展实体数、实体置信度阈值）
+  - 每个配置项包含：Label TextView + SeekBar + Value TextView
+  - 插入位置：RAG设置部分，minChunkSize之后
+- ✅ `SettingsFragment.java` 修改：
+  - 添加UI组件声明：6个成员变量（3个SeekBar + 3个TextView）
+  - 添加UI组件初始化：`onCreateView()` 中 findViewById
+  - 添加监听器设置：`setupListeners()` 中调用3个setup方法
+  - 添加SeekBar监听器：在 `setupChunkSizeSeekBar()` 中配置3个SeekBar
+  - 添加update方法：3个 `updateGraphXxxText()` 方法
+  - 添加loadSettings逻辑：从ConfigManager加载配置并设置UI
+  - 配置范围：
+    - 最小边权重：1-10（SeekBar 0-9）
+    - 最大扩展实体数：10-200（SeekBar 0-19，步长10）
+    - 实体置信度阈值：0.1-1.0（SeekBar 0-9，步长0.1）
+
+**Phase 5: 测试验证（待实施）**
+- ⏳ 单元测试：NER准确率
+- ⏳ 集成测试：构建小型知识库
+- ⏳ 对比测试：向量 vs 向量+图谱
+
+### H.8 设计决策
+
+**决策1：完全替换旧架构，无兼容设计**
+- 理由：避免代码屎山，简化维护
+- 影响：旧知识库需要重建
+- 缓解：提供一键重建功能
+
+**决策2：OpenNLP + 中文扩展**
+- 理由：成熟框架 + 灵活扩展
+- 优势：英文准确率高（OpenNLP预训练），中文可定制（规则+词典）
+- 风险：中文准确率依赖规则质量
+
+**决策3：详细日志**
+- 理由：便于效果评估和调试
+- 开销：<1% CPU，日志可配置关闭
+- 价值：快速定位问题，量化效果提升
+
+### H.9 后续优化方向
+
+**短期（1-2周）**：
+- [ ] 增加TFLite NER模型（提升准确率到90%+）
+- [ ] 支持2-hop图扩展（可配置）
+- [ ] 增加实体类型过滤（只扩展特定类型）
+
+**中期（1-2月）**：
+- [ ] 实体消歧（Levenshtein + 语义相似度）
+- [ ] 边权重衰减（时间衰减、TF-IDF）
+- [ ] 图可视化（展示实体关系）
+
+**长期（3-6月）**：
+- [ ] HNSW索引（万级以上数据）
+- [ ] 多hop路径推理（2-3 hops）
+- [ ] 知识图谱补全（推断缺失边）
+
+### H.10 参考资料
+
+- OpenNLP官方文档：https://opennlp.apache.org/docs/
+- OpenNLP模型下载：http://opennlp.sourceforge.net/models-1.5/
+- 实施方案文档：`KNOWLEDGE_GRAPH_RAG_IMPLEMENTATION.md`
+- FudanNLP词表参考：https://github.com/FudanNLP/fnlp
+
+---
+
+## 附录 I：常见陷阱与最佳实践
+
+### I.1 路径拼接陷阱（重复拼接问题）
+
+**问题描述**：
+在 `LlmNerHandler` 中，模型路径被重复拼接导致 NER 加载失败。日志显示路径前缀重复：
+```
+Model directory not found: /storage/.../models/storage/.../models/Qwen3-0.6B-MNN-int4
+```
+
+**根本原因**：
+- `LlmNerHandler.initialize(modelName)` 接收模型名称后，内部拼接完整路径并保存到 `mModelPath`
+- `LocalLlmHandler.loadModel(modelPath)` 期望接收**模型名称**，内部会再次拼接完整路径
+- 结果：路径被拼接两次
+
+**修复方案**：
+```java
+// ❌ 错误：保存完整路径
+public synchronized boolean initialize(String modelName) {
+    String basePath = ConfigManager.getModelPath(mContext);
+    java.io.File modelDir = new java.io.File(basePath, modelName);
+    this.mModelPath = modelDir.getAbsolutePath();  // 完整路径
+    // ...
+}
+
+// ✅ 正确：只保存模型名称
+public synchronized boolean initialize(String modelName) {
+    String basePath = ConfigManager.getModelPath(mContext);
+    java.io.File modelDir = new java.io.File(basePath, modelName);
+    // 验证模型存在
+    if (!modelDir.exists() || !modelDir.isDirectory()) {
+        return false;
+    }
+    // CRITICAL: 只保存模型名称，LocalLlmHandler会自动拼接路径
+    this.mModelPath = modelName;  // 只保存名称
+    // ...
+}
+```
+
+**最佳实践**：
+1. **明确接口契约**：在方法注释中明确参数是"模型名称"还是"完整路径"
+2. **统一路径管理**：所有路径拼接统一由 `ConfigManager` 或底层 Handler 完成
+3. **验证但不保存**：上层可以验证路径存在性，但不应保存完整路径
+4. **日志检查**：路径相关错误日志中输出完整路径，便于快速发现重复拼接
+
+**影响范围**：
+- `LlmNerHandler`（已修复）
+- 其他可能存在类似问题的组件需要检查：
+  - `EmbeddingHandler`
+  - `RerankerHandler`
+  - `LocalLLMMNNHandler`
+
+**相关文件**：
+- `app/src/main/java/com/example/offlineai/LlmNerHandler.java`
+- `app/src/main/java/com/example/offlineai/api/LocalLlmHandler.java`
+
+**教训**：
+> 这是第N次踩同样的坑！路径拼接问题在多层架构中极易出现，必须在设计阶段明确"谁负责拼接路径"，避免每一层都尝试拼接。
 
 ---
 

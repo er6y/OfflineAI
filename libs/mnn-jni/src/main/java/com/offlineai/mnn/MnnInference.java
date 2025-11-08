@@ -540,6 +540,33 @@ public class MnnInference {
      */
     public static native void releaseReranker(long rerankerHandle);
     
+    // ========== NER (Named Entity Recognition) Support ==========
+    
+    /**
+     * Create MNN NER session with runtime config
+     * Optimized for entity extraction with KV Cache management
+     * @param modelDir Path to model directory
+     * @param runtimeConfig Runtime configuration JSON string (memory, power, precision, thread_num)
+     * @return NER handle (pointer)
+     */
+    public static native long createNerWithConfig(String modelDir, String runtimeConfig);
+    
+    /**
+     * Extract entities from text
+     * System prompt is cached in KV Cache for reuse
+     * @param nerHandle NER handle
+     * @param systemPrompt System prompt (cached on first call)
+     * @param text Input text to extract entities from
+     * @return LLM response (entity list in JSON or simple format)
+     */
+    public static native String extractEntities(long nerHandle, String systemPrompt, String text);
+    
+    /**
+     * Release NER session and free resources
+     * @param nerHandle NER handle
+     */
+    public static native void releaseNer(long nerHandle);
+    
     // ========== Diffusion (Text2Image) Support ==========
     
     /**

@@ -3,6 +3,7 @@ package com.example.offlineai;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.util.Log;
+import android.content.res.AssetManager;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -15,6 +16,7 @@ import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.util.ArrayList;
@@ -26,12 +28,13 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 import com.example.offlineai.FileUtil;
-import com.example.offlineai.SQLiteVectorDatabaseHandler;
+// Removed: import com.example.offlineai.SQLiteVectorDatabaseHandler; - Now using KnowledgeGraphDatabase directly
 
 /**
  * 配置管理器，用于保存和读取应用程序配置
  * 配置保存在应用程序目录下的.config文件中
  */
+@SuppressWarnings("deprecation")
 public class ConfigManager {
     private static final String TAG = "ConfigManager";
     
@@ -85,6 +88,17 @@ public class ConfigManager {
     public static final String KEY_LAST_SELECTED_KB = "last_selected_kb"; // 知识库相关键
     public static final String KEY_LAST_SELECTED_EMBEDDING_MODEL = "last_selected_embedding_model"; // 知识库相关键
     public static final String KEY_LAST_SELECTED_RERANKER_MODEL = "last_selected_reranker_model"; // 重排模型相关键
+    
+    // Knowledge Graph RAG 相关的键
+    public static final String KEY_GRAPH_CUSTOM_DICT_PATH = "graph_custom_dict_path"; // 图谱外挂词典路径
+    public static final String KEY_GRAPH_MIN_EDGE_WEIGHT = "graph_min_edge_weight"; // 图扩展最小边权重
+    public static final String KEY_GRAPH_MAX_EXPAND_ENTITIES = "graph_max_expand_entities"; // 图扩展最大实体数
+    public static final String KEY_GRAPH_ENTITY_CONFIDENCE_THRESHOLD = "graph_entity_confidence_threshold"; // 实体置信度阈值
+    public static final String KEY_GRAPH_RAG_ENABLED = "graph_rag_enabled";
+    public static final String KEY_GRAPH_RAG_WEIGHT_PRESET = "graph_rag_weight_preset";
+    public static final String KEY_GRAPH_MAX_EXPAND_CHUNKS = "graph_max_expand_chunks";
+    public static final String KEY_GRAPH_HUB_THRESHOLD = "graph_hub_threshold"; // 超大实体门限（0=关闭）
+    public static final String KEY_GRAPH_STOPWORDS_PATH = "graph_stopwords_path"; // 图谱停用词表路径
     
     // 设置相关的键
     public static final String KEY_DATA_ROOT_PATH = "data_root_path"; // 数据根目录
@@ -171,6 +185,15 @@ public class ConfigManager {
     public static final int DEFAULT_SEARCH_DEPTH = 20;
     public static final int DEFAULT_RERANK_COUNT = 5;
     
+    // Knowledge Graph RAG 默认值
+    public static final int DEFAULT_GRAPH_MIN_EDGE_WEIGHT = 2; // 最小边权重：2（过滤低频共现）
+    public static final int DEFAULT_GRAPH_MAX_EXPAND_ENTITIES = 50; // 最大扩展实体数：50
+    public static final float DEFAULT_GRAPH_ENTITY_CONFIDENCE_THRESHOLD = 0.7f; // 实体置信度阈值：0.7
+    public static final boolean DEFAULT_GRAPH_RAG_ENABLED = true;
+    public static final int DEFAULT_GRAPH_MAX_EXPAND_CHUNKS = 50;
+    public static final int DEFAULT_GRAPH_RAG_WEIGHT_PRESET = 1;
+    public static final int DEFAULT_GRAPH_HUB_THRESHOLD = 100; // 超大实体门限（基于连接数/总权重的经验默认值，0=关闭）
+    
     // 硬编码的子目录名称
     private static final String SUBDIR_MODELS = "models";
     private static final String SUBDIR_EMBEDDINGS = "embeddings";
@@ -178,6 +201,7 @@ public class ConfigManager {
     private static final String SUBDIR_ASR = "asr";
     private static final String SUBDIR_TTS = "tts";
     private static final String SUBDIR_KNOWLEDGE_BASES = "knowledge_bases";
+    private static final String SUBDIR_STOPWORDS = "stopwords";
     private static final String SUBDIR_CHAT_HISTORY = "chathistory";
 
     public static final float DEFAULT_TEXT_SIZE = 14f;
@@ -751,15 +775,17 @@ public class ConfigManager {
             return null;
         }
         
-        // 首先尝试从SQLite数据库中读取嵌入模型信息
-        File sqliteDbFile = new File(knowledgeBaseDir, "vectorstore.db");
+        // 首先尝试从SQLite数据库中读取嵌入模型信息（统一使用 knowledge_graph.db）
+        File sqliteDbFile = new File(knowledgeBaseDir, "knowledge_graph.db");
         if (sqliteDbFile.exists()) {
             LogManager.logD(TAG, getLogString(context, LOG_FOUND_SQLITE_DB));
-            SQLiteVectorDatabaseHandler vectorDb = null;
+            KnowledgeGraphDatabase vectorDb = null;
             try {
-                vectorDb = new SQLiteVectorDatabaseHandler(knowledgeBaseDir, "unknown");
-                if (vectorDb.loadDatabase()) {
-                    SQLiteVectorDatabaseHandler.DatabaseMetadata metadata = vectorDb.getMetadata();
+                String dbPath = sqliteDbFile.getAbsolutePath();
+                vectorDb = new KnowledgeGraphDatabase(context, dbPath, "unknown");
+                // KnowledgeGraphDatabase is auto-loaded on construction
+                {
+                    KnowledgeGraphDatabase.DatabaseMetadata metadata = vectorDb.getMetadata();
                     if (metadata != null) {
                         String embeddingModel = metadata.getModeldir();
                         LogManager.logD(TAG, LOG_READ_EMBEDDING_FROM_SQLITE + ": " + embeddingModel);
@@ -992,6 +1018,152 @@ public class ConfigManager {
     public static int getChunkOverlap(Context context) {
         return getInt(context, KEY_OVERLAP_SIZE, DEFAULT_OVERLAP_SIZE);
     }
+    
+    // ========== Knowledge Graph RAG Settings ==========
+    
+    /**
+     * Get graph expansion minimum edge weight
+     * @param context Context
+     * @return Minimum edge weight (1-10)
+     */
+    public static int getGraphMinEdgeWeight(Context context) {
+        return getInt(context, KEY_GRAPH_MIN_EDGE_WEIGHT, DEFAULT_GRAPH_MIN_EDGE_WEIGHT);
+    }
+    
+    /**
+     * Set graph expansion minimum edge weight
+     * @param context Context
+     * @param weight Minimum edge weight (1-10)
+     */
+    public static void setGraphMinEdgeWeight(Context context, int weight) {
+        setInt(context, KEY_GRAPH_MIN_EDGE_WEIGHT, weight);
+    }
+    
+    /**
+     * Get graph expansion maximum entities
+     * @param context Context
+     * @return Maximum number of entities (10-100)
+     */
+    public static int getGraphMaxExpandEntities(Context context) {
+        return getInt(context, KEY_GRAPH_MAX_EXPAND_ENTITIES, DEFAULT_GRAPH_MAX_EXPAND_ENTITIES);
+    }
+    
+    /**
+     * Set graph expansion maximum entities
+     * @param context Context
+     * @param maxEntities Maximum number of entities (10-100)
+     */
+    public static void setGraphMaxExpandEntities(Context context, int maxEntities) {
+        setInt(context, KEY_GRAPH_MAX_EXPAND_ENTITIES, maxEntities);
+    }
+    
+    /**
+     * Get entity confidence threshold
+     * @param context Context
+     * @return Confidence threshold (0.5-1.0)
+     */
+    public static float getGraphEntityConfidenceThreshold(Context context) {
+        return getFloat(context, KEY_GRAPH_ENTITY_CONFIDENCE_THRESHOLD, DEFAULT_GRAPH_ENTITY_CONFIDENCE_THRESHOLD);
+    }
+    
+    /**
+     * Set entity confidence threshold
+     * @param context Context
+     * @param threshold Confidence threshold (0.5-1.0)
+     */
+    public static void setGraphEntityConfidenceThreshold(Context context, float threshold) {
+        setFloat(context, KEY_GRAPH_ENTITY_CONFIDENCE_THRESHOLD, threshold);
+    }
+
+    /**
+     * Get maximum number of chunks allowed from graph expansion
+     * @param context Context
+     * @return Maximum number of chunks
+     */
+    public static int getGraphMaxExpandChunks(Context context) {
+        return getInt(context, KEY_GRAPH_MAX_EXPAND_CHUNKS, DEFAULT_GRAPH_MAX_EXPAND_CHUNKS);
+    }
+
+    /**
+     * Set maximum number of chunks allowed from graph expansion
+     * @param context Context
+     * @param maxChunks Maximum number of chunks
+     */
+    public static void setGraphMaxExpandChunks(Context context, int maxChunks) {
+        setInt(context, KEY_GRAPH_MAX_EXPAND_CHUNKS, maxChunks);
+    }
+
+    /**
+     * Get Graph RAG fusion weight preset index
+     * @param context Context
+     * @return Preset index (0-based)
+     */
+    public static int getGraphRagWeightPreset(Context context) {
+        return getInt(context, KEY_GRAPH_RAG_WEIGHT_PRESET, DEFAULT_GRAPH_RAG_WEIGHT_PRESET);
+    }
+
+    /**
+     * Set Graph RAG fusion weight preset index
+     * @param context Context
+     * @param preset Preset index (0-based)
+     */
+    public static void setGraphRagWeightPreset(Context context, int preset) {
+        setInt(context, KEY_GRAPH_RAG_WEIGHT_PRESET, preset);
+    }
+
+    /**
+     * Get whether Graph RAG mode is enabled for RAG QA
+     * @param context Context
+     * @return true if Graph RAG mode is enabled
+     */
+    public static boolean isGraphRagEnabled(Context context) {
+        return getBoolean(context, KEY_GRAPH_RAG_ENABLED, DEFAULT_GRAPH_RAG_ENABLED);
+    }
+
+    /**
+     * Set whether Graph RAG mode is enabled for RAG QA
+     * @param context Context
+     * @param enabled Whether Graph RAG mode is enabled
+     */
+    public static void setGraphRagEnabled(Context context, boolean enabled) {
+        setBoolean(context, KEY_GRAPH_RAG_ENABLED, enabled);
+    }
+
+    /**
+     * Get super-entity (hub) threshold for graph filtering
+     * @param context Context
+     * @return Hub threshold based on neighbor count (0 = disabled)
+     */
+    public static int getGraphHubThreshold(Context context) {
+        return getInt(context, KEY_GRAPH_HUB_THRESHOLD, DEFAULT_GRAPH_HUB_THRESHOLD);
+    }
+
+    /**
+     * Set super-entity (hub) threshold for graph filtering
+     * @param context Context
+     * @param threshold Hub threshold based on neighbor count (0 = disabled)
+     */
+    public static void setGraphHubThreshold(Context context, int threshold) {
+        setInt(context, KEY_GRAPH_HUB_THRESHOLD, threshold);
+    }
+
+    /**
+     * Get graph stopwords file path
+     * @param context Context
+     * @return Absolute path to selected stopwords JSON file, or empty string if none
+     */
+    public static String getGraphStopwordsPath(Context context) {
+        return getString(context, KEY_GRAPH_STOPWORDS_PATH, "");
+    }
+
+    /**
+     * Set graph stopwords file path
+     * @param context Context
+     * @param path Absolute path to stopwords JSON file, or empty/NULL for none
+     */
+    public static void setGraphStopwordsPath(Context context, String path) {
+        setString(context, KEY_GRAPH_STOPWORDS_PATH, path == null ? "" : path);
+    }
 
     /**
      * 获取数据根目录
@@ -1099,6 +1271,52 @@ public class ConfigManager {
      */
     public static String getKnowledgeBasePath(Context context) {
         return new File(getDataRootPath(context), SUBDIR_KNOWLEDGE_BASES).getAbsolutePath();
+    }
+
+    /**
+     * 获取停用词目录路径（根目录 + stopwords）
+     * @param context 上下文
+     * @return 停用词目录路径
+     */
+    public static String getStopwordsDirectoryPath(Context context) {
+        return new File(getDataRootPath(context), SUBDIR_STOPWORDS).getAbsolutePath();
+    }
+
+    /**
+     * Ensure default stopwords example JSON exists under data root / stopwords.
+     * This will copy assets/example_stop.json to that directory if needed.
+     */
+    public static void ensureDefaultStopwordsExample(Context context) {
+        try {
+            String dirPath = getStopwordsDirectoryPath(context);
+            File dir = new File(dirPath);
+            if (!dir.exists()) {
+                boolean created = dir.mkdirs();
+                if (!created) {
+                    LogManager.logW(TAG, "[STOPWORDS] Failed to create stopwords directory: " + dirPath);
+                    return;
+                }
+            }
+
+            File exampleFile = new File(dir, "example_stop.json");
+            if (exampleFile.exists() && exampleFile.length() > 0) {
+                return;
+            }
+
+            AssetManager assetManager = context.getAssets();
+            try (InputStream in = assetManager.open("example_stop.json");
+                 FileOutputStream out = new FileOutputStream(exampleFile)) {
+                byte[] buffer = new byte[4096];
+                int len;
+                while ((len = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, len);
+                }
+            }
+
+            LogManager.logD(TAG, "[STOPWORDS] Copied default example_stop.json to: " + exampleFile.getAbsolutePath());
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[STOPWORDS] Failed to ensure default stopwords example", e);
+        }
     }
 
     /**

@@ -25,6 +25,10 @@ import android.widget.Spinner;
 import android.widget.ArrayAdapter;
 import android.widget.AdapterView;
 
+import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
@@ -56,11 +60,28 @@ public class SettingsFragment extends Fragment {
     private TextView textViewOverlapSizeValue;
     private SeekBar seekBarMinChunkSize;
     private TextView textViewMinChunkSizeValue;
+    
+    // Knowledge Graph RAG UI组件
+    private SeekBar seekBarGraphMinEdgeWeight;
+    private TextView textViewGraphMinEdgeWeightValue;
+    private SeekBar seekBarGraphMaxExpandEntities;
+    private TextView textViewGraphMaxExpandEntitiesValue;
+    private SeekBar seekBarGraphEntityConfidenceThreshold;
+    private TextView textViewGraphEntityConfidenceThresholdValue;
+    private SwitchCompat switchGraphRagMode;
+    private Spinner spinnerGraphRagWeightPreset;
+    private SeekBar seekBarGraphMaxExpandChunks;
+    private TextView textViewGraphMaxExpandChunksValue;
+    private SeekBar seekBarGraphHubThreshold;
+    private TextView textViewGraphHubThresholdValue;
+    private Spinner spinnerGraphStopwords;
+    
     private EditText editTextDataRootPath;
     private Button buttonSelectDataRootPath;
     private SwitchCompat switchShowDebugPerformance; // Show debug & performance switch
     private SwitchCompat switchDebugMode;
     private Spinner spinnerUseGpu;
+    private Spinner spinnerGraphCustomDictionary;
     // ONNX引擎开关已移除
     private SwitchCompat switchJsonDatasetSplitting; // JSON训练集分块优化开关
     private SeekBar seekBarFontSize; // 字体大小拖动条
@@ -167,11 +188,28 @@ public class SettingsFragment extends Fragment {
         textViewOverlapSizeValue = view.findViewById(R.id.textViewOverlapSizeValue);
         seekBarMinChunkSize = view.findViewById(R.id.seekBarMinChunkSize);
         textViewMinChunkSizeValue = view.findViewById(R.id.textViewMinChunkSizeValue);
+        
+        // Knowledge Graph RAG UI组件初始化
+        seekBarGraphMinEdgeWeight = view.findViewById(R.id.seekBarGraphMinEdgeWeight);
+        textViewGraphMinEdgeWeightValue = view.findViewById(R.id.textViewGraphMinEdgeWeightValue);
+        seekBarGraphMaxExpandEntities = view.findViewById(R.id.seekBarGraphMaxExpandEntities);
+        textViewGraphMaxExpandEntitiesValue = view.findViewById(R.id.textViewGraphMaxExpandEntitiesValue);
+        seekBarGraphEntityConfidenceThreshold = view.findViewById(R.id.seekBarGraphEntityConfidenceThreshold);
+        textViewGraphEntityConfidenceThresholdValue = view.findViewById(R.id.textViewGraphEntityConfidenceThresholdValue);
+        switchGraphRagMode = view.findViewById(R.id.switchGraphRagMode);
+        spinnerGraphRagWeightPreset = view.findViewById(R.id.spinnerGraphRagWeightPreset);
+        seekBarGraphMaxExpandChunks = view.findViewById(R.id.seekBarGraphMaxExpandChunks);
+        textViewGraphMaxExpandChunksValue = view.findViewById(R.id.textViewGraphMaxExpandChunksValue);
+        seekBarGraphHubThreshold = view.findViewById(R.id.seekBarGraphHubThreshold);
+        textViewGraphHubThresholdValue = view.findViewById(R.id.textViewGraphHubThresholdValue);
+        spinnerGraphStopwords = view.findViewById(R.id.spinnerGraphStopwords);
+        
         editTextDataRootPath = view.findViewById(R.id.editTextDataRootPath);
         buttonSelectDataRootPath = view.findViewById(R.id.buttonSelectDataRootPath);
         switchShowDebugPerformance = view.findViewById(R.id.switchShowDebugPerformance); // Show debug & performance switch
         switchDebugMode = view.findViewById(R.id.switchDebugMode);
         spinnerUseGpu = view.findViewById(R.id.spinnerBackendPreference);
+        spinnerGraphCustomDictionary = view.findViewById(R.id.spinnerGraphCustomDictionary);
         // ONNX引擎开关初始化已移除
         switchJsonDatasetSplitting = view.findViewById(R.id.switchJsonDatasetSplitting); // JSON训练集分块优化开关
         
@@ -240,6 +278,11 @@ public class SettingsFragment extends Fragment {
         // 设置ASR/TTS模型Spinner适配器
         setupAsrTtsSpinners();
         
+        // 初始化图谱停用词与外挂词典下拉框
+        ConfigManager.ensureDefaultStopwordsExample(requireContext());
+        initializeGraphStopwordsSpinner();
+        initializeGraphCustomDictionarySpinner();
+        
         // 加载当前设置
         loadSettings();
         
@@ -260,22 +303,47 @@ public class SettingsFragment extends Fragment {
         requireActivity().addMenuProvider(new MenuProvider() {
             @Override
             public void onCreateMenu(@NonNull Menu menu, @NonNull MenuInflater menuInflater) {
-                menuInflater.inflate(R.menu.settings_menu, menu);
+                // No menu items for Settings Fragment
             }
             
             @Override
             public boolean onMenuItemSelected(@NonNull MenuItem menuItem) {
-                int id = menuItem.getItemId();
-                
-                if (id == R.id.action_close_settings) {
-                    // 关闭设置页面 - 使用Navigation组件的返回操作
-                    requireActivity().getOnBackPressedDispatcher().onBackPressed();
+                if (menuItem.getItemId() == android.R.id.home) {
+                    // CRITICAL: Check if fragment is still attached before accessing Activity
+                    if (!isAdded() || getActivity() == null) {
+                        android.util.Log.w("SettingsFragment", "[MENU] Fragment not attached, ignoring back button");
+                        return true;
+                    }
+                    
+                    // CRITICAL: Restore main UI BEFORE popBackStack (Fragment will be detached after pop)
+                    androidx.appcompat.app.ActionBar actionBar = ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar();
+                    if (actionBar != null) {
+                        actionBar.setDisplayHomeAsUpEnabled(false);
+                        actionBar.setTitle(R.string.app_name);
+                    }
+                    getActivity().findViewById(R.id.container).setVisibility(android.view.View.GONE);
+                    getActivity().findViewById(R.id.viewPager).setVisibility(android.view.View.VISIBLE);
+                    
+                    // Now clear all fragments from back stack
+                    androidx.fragment.app.FragmentManager fm = getActivity().getSupportFragmentManager();
+                    while (fm.getBackStackEntryCount() > 0) {
+                        fm.popBackStackImmediate();
+                    }
                     return true;
                 }
-                
                 return false;
             }
         }, getViewLifecycleOwner(), Lifecycle.State.RESUMED);
+    }
+    
+    @Override
+    public void onResume() {
+        super.onResume();
+        // Show back button and set title in ActionBar
+        if (getActivity() != null && ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar() != null) {
+            ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setDisplayHomeAsUpEnabled(true);
+            ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setTitle(R.string.title_settings);
+        }
     }
     
     private void setupListeners() {
@@ -325,6 +393,9 @@ public class SettingsFragment extends Fragment {
         setupChunkSizeSeekBar();
         setupOverlapSizeSeekBar();
         setupMinChunkSizeSeekBar();
+        setupGraphMinEdgeWeightSeekBar();
+        setupGraphMaxExpandEntitiesSeekBar();
+        setupGraphEntityConfidenceThresholdSeekBar();
         setupMaxSequenceLengthSeekBar();
         setupThreadsSeekBar();
         setupKvCacheSizeSeekBar();
@@ -411,6 +482,10 @@ public class SettingsFragment extends Fragment {
         
         switchJsonDatasetSplitting.setOnCheckedChangeListener((buttonView, isChecked) -> {
             ConfigManager.setJsonDatasetSplittingEnabled(requireContext(), isChecked);
+        });
+
+        switchGraphRagMode.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            ConfigManager.setGraphRagEnabled(requireContext(), isChecked);
         });
         
         switchPriorityManualParams.setOnCheckedChangeListener((buttonView, isChecked) -> {
@@ -513,6 +588,87 @@ public class SettingsFragment extends Fragment {
             public void onStopTrackingTouch(SeekBar seekBar) {
                 int size = (seekBar.getProgress() * 10) + 10;
                 ConfigManager.setMinChunkSize(requireContext(), size);
+            }
+        });
+        
+        // Knowledge Graph RAG SeekBars
+        seekBarGraphMinEdgeWeight.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateGraphMinEdgeWeightText(progress);
+            }
+            
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int weight = seekBar.getProgress() + 1; // 1-10
+                ConfigManager.setGraphMinEdgeWeight(requireContext(), weight);
+            }
+        });
+        
+        seekBarGraphMaxExpandEntities.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateGraphMaxExpandEntitiesText(progress);
+            }
+            
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int entities = (seekBar.getProgress() * 10) + 10; // 10-200
+                ConfigManager.setGraphMaxExpandEntities(requireContext(), entities);
+            }
+        });
+        
+        seekBarGraphEntityConfidenceThreshold.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateGraphEntityConfidenceThresholdText(progress);
+            }
+            
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                float threshold = (seekBar.getProgress() + 1) / 10.0f; // 0.1-1.0
+                ConfigManager.setGraphEntityConfidenceThreshold(requireContext(), threshold);
+            }
+        });
+        
+        seekBarGraphMaxExpandChunks.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateGraphMaxExpandChunksText(progress);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int chunks = (seekBar.getProgress() * 10) + 10;
+                ConfigManager.setGraphMaxExpandChunks(requireContext(), chunks);
+            }
+        });
+
+        seekBarGraphHubThreshold.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateGraphHubThresholdText(progress);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int threshold = mapHubProgressToThreshold(seekBar.getProgress());
+                ConfigManager.setGraphHubThreshold(requireContext(), threshold);
             }
         });
         
@@ -874,6 +1030,57 @@ public class SettingsFragment extends Fragment {
         textViewMinChunkSizeValue.setText(String.format("%d", size));
     }
     
+    private void updateGraphMinEdgeWeightText(int progress) {
+        int weight = progress + 1; // 1-10
+        textViewGraphMinEdgeWeightValue.setText(String.format("%d", weight));
+    }
+    
+    private void updateGraphMaxExpandEntitiesText(int progress) {
+        int entities = (progress * 10) + 10; // 10-200
+        textViewGraphMaxExpandEntitiesValue.setText(String.format("%d", entities));
+    }
+
+    private void updateGraphMaxExpandChunksText(int progress) {
+        int chunks = (progress * 10) + 10;
+        textViewGraphMaxExpandChunksValue.setText(String.format("%d", chunks));
+    }
+
+    private void updateGraphHubThresholdText(int progress) {
+        int threshold = mapHubProgressToThreshold(progress);
+        textViewGraphHubThresholdValue.setText(String.valueOf(threshold));
+    }
+
+    private int mapHubProgressToThreshold(int progress) {
+        if (progress <= 0) {
+            return 0;
+        }
+        // progress 1->50, 2->100, 3->200, ... (doubling)
+        int value = 50;
+        for (int i = 1; i < progress; i++) {
+            value *= 2;
+        }
+        return value;
+    }
+
+    private int mapHubThresholdToProgress(int threshold) {
+        if (threshold <= 0) {
+            return 0;
+        }
+        int value = 50;
+        int progress = 1;
+        while (progress < 10 && value < threshold) {
+            value *= 2;
+            progress++;
+        }
+        return progress;
+    }
+    
+    private void updateGraphEntityConfidenceThresholdText(int progress) {
+        // Map progress 0-10 -> threshold 0.5-1.0 (step 0.05)
+        float threshold = 0.5f + (progress * 0.05f);
+        textViewGraphEntityConfidenceThresholdValue.setText(String.format("%.1f", threshold));
+    }
+    
     private void updateMaxSequenceLengthText(int progress) {
         int length = (progress * 512) + 512;
         textViewMaxSequenceLengthValue.setText(String.format("%d", length));
@@ -896,6 +1103,9 @@ public class SettingsFragment extends Fragment {
     // Empty setup methods (all SeekBars configured in setupChunkSizeSeekBar)
     private void setupOverlapSizeSeekBar() {}
     private void setupMinChunkSizeSeekBar() {}
+    private void setupGraphMinEdgeWeightSeekBar() {}
+    private void setupGraphMaxExpandEntitiesSeekBar() {}
+    private void setupGraphEntityConfidenceThresholdSeekBar() {}
     private void setupMaxSequenceLengthSeekBar() {}
     private void setupThreadsSeekBar() {}
     private void setupKvCacheSizeSeekBar() {}
@@ -953,6 +1163,66 @@ public class SettingsFragment extends Fragment {
         minChunkProgress = Math.max(0, Math.min(minChunkProgress, seekBarMinChunkSize.getMax()));
         seekBarMinChunkSize.setProgress(minChunkProgress);
         updateMinChunkSizeText(minChunkProgress);
+        
+        // Knowledge Graph RAG settings
+        int graphMinEdgeWeight = ConfigManager.getGraphMinEdgeWeight(ctx);
+        int graphMinEdgeWeightProgress = graphMinEdgeWeight - 1; // 1-10 -> 0-9
+        graphMinEdgeWeightProgress = Math.max(0, Math.min(graphMinEdgeWeightProgress, seekBarGraphMinEdgeWeight.getMax()));
+        seekBarGraphMinEdgeWeight.setProgress(graphMinEdgeWeightProgress);
+        updateGraphMinEdgeWeightText(graphMinEdgeWeightProgress);
+        
+        int graphMaxExpandEntities = ConfigManager.getGraphMaxExpandEntities(ctx);
+        int graphMaxExpandEntitiesProgress = Math.round((graphMaxExpandEntities - 10) / 10f); // 10-200 -> 0-19
+        graphMaxExpandEntitiesProgress = Math.max(0, Math.min(graphMaxExpandEntitiesProgress, seekBarGraphMaxExpandEntities.getMax()));
+        seekBarGraphMaxExpandEntities.setProgress(graphMaxExpandEntitiesProgress);
+        updateGraphMaxExpandEntitiesText(graphMaxExpandEntitiesProgress);
+        
+        float graphEntityConfidenceThreshold = ConfigManager.getGraphEntityConfidenceThreshold(ctx);
+        // Clamp to [0.5, 1.0] to avoid unreasonable values
+        if (graphEntityConfidenceThreshold < 0.5f) graphEntityConfidenceThreshold = 0.5f;
+        if (graphEntityConfidenceThreshold > 1.0f) graphEntityConfidenceThreshold = 1.0f;
+        int graphEntityConfidenceThresholdProgress = Math.round((graphEntityConfidenceThreshold - 0.5f) / 0.05f);
+        graphEntityConfidenceThresholdProgress = Math.max(0, Math.min(graphEntityConfidenceThresholdProgress, seekBarGraphEntityConfidenceThreshold.getMax()));
+        seekBarGraphEntityConfidenceThreshold.setProgress(graphEntityConfidenceThresholdProgress);
+        updateGraphEntityConfidenceThresholdText(graphEntityConfidenceThresholdProgress);
+
+        int graphMaxExpandChunks = ConfigManager.getGraphMaxExpandChunks(ctx);
+        int graphMaxExpandChunksProgress = Math.round((graphMaxExpandChunks - 10) / 10f);
+        graphMaxExpandChunksProgress = Math.max(0, Math.min(graphMaxExpandChunksProgress, seekBarGraphMaxExpandChunks.getMax()));
+        seekBarGraphMaxExpandChunks.setProgress(graphMaxExpandChunksProgress);
+        updateGraphMaxExpandChunksText(graphMaxExpandChunksProgress);
+
+        int graphHubThreshold = ConfigManager.getGraphHubThreshold(ctx);
+        int graphHubProgress = mapHubThresholdToProgress(graphHubThreshold);
+        graphHubProgress = Math.max(0, Math.min(graphHubProgress, seekBarGraphHubThreshold.getMax()));
+        seekBarGraphHubThreshold.setProgress(graphHubProgress);
+        updateGraphHubThresholdText(graphHubProgress);
+
+        boolean graphRagEnabled = ConfigManager.isGraphRagEnabled(ctx);
+        switchGraphRagMode.setChecked(graphRagEnabled);
+
+        ArrayAdapter<CharSequence> graphWeightAdapter = ArrayAdapter.createFromResource(
+            requireContext(), R.array.graph_rag_weight_presets, android.R.layout.simple_spinner_item);
+        graphWeightAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerGraphRagWeightPreset.setAdapter(graphWeightAdapter);
+        int weightPreset = ConfigManager.getGraphRagWeightPreset(ctx);
+        if (weightPreset < 0) {
+            weightPreset = 0;
+        }
+        if (weightPreset >= graphWeightAdapter.getCount()) {
+            weightPreset = graphWeightAdapter.getCount() - 1;
+        }
+        spinnerGraphRagWeightPreset.setSelection(weightPreset, false);
+        spinnerGraphRagWeightPreset.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view1, int position, long id) {
+                ConfigManager.setGraphRagWeightPreset(requireContext(), position);
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
         
         // LLM settings
         int maxSeqLen = ConfigManager.getMaxSequenceLength(ctx);
@@ -1126,5 +1396,165 @@ public class SettingsFragment extends Fragment {
                 Toast.makeText(requireContext(), "Failed to set directory", Toast.LENGTH_SHORT).show();
             }
         }
+    }
+    
+    /**
+     * Initialize graph custom dictionary spinner
+     */
+    private void initializeGraphCustomDictionarySpinner() {
+        LogManager.logD(TAG, "[DICT_SPINNER] === Initializing graph custom dictionary spinner ===");
+        
+        // Get data root path
+        String dataRootPath = ConfigManager.getString(requireContext(), ConfigManager.KEY_DATA_ROOT_PATH, "");
+        LogManager.logD(TAG, "[DICT_SPINNER] Data root path: " + dataRootPath);
+        
+        if (dataRootPath.isEmpty()) {
+            LogManager.logW(TAG, "[DICT_SPINNER] Data root path is EMPTY, cannot scan dictionaries");
+            String[] noDictOptions = {getString(R.string.common_none)};
+            ArrayAdapter<String> adapter = new ArrayAdapter<>(requireContext(), 
+                android.R.layout.simple_spinner_item, noDictOptions);
+            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+            spinnerGraphCustomDictionary.setAdapter(adapter);
+            LogManager.logD(TAG, "[DICT_SPINNER] Set adapter with 'None' only (data root empty)");
+            return;
+        }
+        
+        // Scan dictionary directory
+        File dictDir = new File(dataRootPath, "dictionary");
+        LogManager.logD(TAG, "[DICT_SPINNER] Dictionary directory: " + dictDir.getAbsolutePath());
+        LogManager.logD(TAG, "[DICT_SPINNER] Directory exists: " + dictDir.exists());
+        
+        List<String> dictDisplayOptions = new ArrayList<>();
+        final List<String> dictPathOptions = new ArrayList<>();
+        
+        // First option: None
+        dictDisplayOptions.add(getString(R.string.common_none));
+        dictPathOptions.add("");
+        
+        if (dictDir.exists() && dictDir.isDirectory()) {
+            File[] dictFiles = dictDir.listFiles((dir, name) -> name.endsWith(".json"));
+            LogManager.logD(TAG, "[DICT_SPINNER] Found " + (dictFiles != null ? dictFiles.length : 0) + " .json files");
+            
+            if (dictFiles != null) {
+                for (File dictFile : dictFiles) {
+                    LogManager.logD(TAG, "[DICT_SPINNER]   - " + dictFile.getAbsolutePath());
+                    // Spinner only shows file name to keep UI concise
+                    dictDisplayOptions.add(dictFile.getName());
+                    dictPathOptions.add(dictFile.getAbsolutePath());
+                }
+            }
+        } else {
+            LogManager.logW(TAG, "[DICT_SPINNER] Dictionary directory does NOT exist or is not a directory");
+        }
+        
+        // Set adapter (display only file names / None)
+        String[] optionsArray = dictDisplayOptions.toArray(new String[0]);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(requireContext(), 
+            android.R.layout.simple_spinner_item, optionsArray);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerGraphCustomDictionary.setAdapter(adapter);
+        
+        // Load saved selection
+        String savedDict = ConfigManager.getString(requireContext(), ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, "");
+        if (!savedDict.isEmpty()) {
+            for (int i = 0; i < dictPathOptions.size(); i++) {
+                String path = dictPathOptions.get(i);
+                if (savedDict.equals(path)) {
+                    spinnerGraphCustomDictionary.setSelection(i);
+                    LogManager.logD(TAG, "Auto-selected dictionary: " + savedDict + " at index " + i);
+                    break;
+                }
+            }
+        }
+        
+        // Set listener
+        spinnerGraphCustomDictionary.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                String selectedLabel = parent.getItemAtPosition(position).toString();
+                String selectedPath = dictPathOptions.get(position);
+                if (position == 0 || selectedPath == null || selectedPath.isEmpty()) {
+                    ConfigManager.setString(requireContext(), ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, "");
+                    LogManager.logD(TAG, "No dictionary selected");
+                } else {
+                    ConfigManager.setString(requireContext(), ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, selectedPath);
+                    LogManager.logD(TAG, "Selected dictionary: " + selectedPath + " (label=" + selectedLabel + ")");
+                }
+            }
+            
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+        
+        LogManager.logD(TAG, "Dictionary spinner initialized with " + (optionsArray.length - 1) + " dictionaries");
+    }
+
+    /**
+     * Initialize graph stopwords spinner
+     */
+    private void initializeGraphStopwordsSpinner() {
+        LogManager.logD(TAG, "[STOPWORDS_SPINNER] === Initializing graph stopwords spinner ===");
+
+        String stopwordsDirPath = ConfigManager.getStopwordsDirectoryPath(requireContext());
+        File stopwordsDir = new File(stopwordsDirPath);
+        LogManager.logD(TAG, "[STOPWORDS_SPINNER] Directory: " + stopwordsDir.getAbsolutePath());
+
+        List<String> displayOptions = new ArrayList<>();
+        final List<String> pathOptions = new ArrayList<>();
+
+        // First option: None
+        displayOptions.add(getString(R.string.common_none));
+        pathOptions.add("");
+
+        if (stopwordsDir.exists() && stopwordsDir.isDirectory()) {
+            File[] jsonFiles = stopwordsDir.listFiles((dir, name) -> name.endsWith(".json"));
+            LogManager.logD(TAG, "[STOPWORDS_SPINNER] Found " + (jsonFiles != null ? jsonFiles.length : 0) + " .json files");
+
+            if (jsonFiles != null) {
+                for (File f : jsonFiles) {
+                    displayOptions.add(f.getName());
+                    pathOptions.add(f.getAbsolutePath());
+                }
+            }
+        } else {
+            LogManager.logW(TAG, "[STOPWORDS_SPINNER] Stopwords directory does NOT exist or is not a directory");
+        }
+
+        String[] optionsArray = displayOptions.toArray(new String[0]);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(requireContext(),
+            android.R.layout.simple_spinner_item, optionsArray);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerGraphStopwords.setAdapter(adapter);
+
+        // Load saved selection
+        String savedPath = ConfigManager.getGraphStopwordsPath(requireContext());
+        if (!savedPath.isEmpty()) {
+            for (int i = 0; i < pathOptions.size(); i++) {
+                if (savedPath.equals(pathOptions.get(i))) {
+                    spinnerGraphStopwords.setSelection(i);
+                    LogManager.logD(TAG, "[STOPWORDS_SPINNER] Auto-selected stopwords: " + savedPath + " at index " + i);
+                    break;
+                }
+            }
+        }
+
+        spinnerGraphStopwords.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                String selectedPath = pathOptions.get(position);
+                if (position == 0 || selectedPath == null || selectedPath.isEmpty()) {
+                    ConfigManager.setGraphStopwordsPath(requireContext(), "");
+                    LogManager.logD(TAG, "[STOPWORDS_SPINNER] No stopwords file selected");
+                } else {
+                    ConfigManager.setGraphStopwordsPath(requireContext(), selectedPath);
+                    LogManager.logD(TAG, "[STOPWORDS_SPINNER] Selected stopwords file: " + selectedPath);
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
     }
 }

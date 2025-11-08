@@ -148,6 +148,7 @@
     <string name="menu_exit">退出</string>
     <string name="menu_default_model_download">默认模型下载</string>
     <string name="menu_chat_history">历史对话</string>
+    <string name="menu_graph_viewer">知识库图谱查看器</string>
 
     <!-- 通用按钮 -->
     <string name="button_new_kb">新建知识库</string>
@@ -422,6 +423,7 @@
     <string name="button_browse_files">浏览文件</string>
     <string name="label_embedding_model">词嵌入模型:</string>
     <string name="label_reranker_model">重排模型:</string>
+    <string name="label_graph_custom_dictionary">图谱外挂词典:</string>
     <string name="label_selected_files">已选择文件:</string>
     <string name="label_processing_progress">处理进度:</string>
     <string name="text_ready_to_create_kb">准备就绪，等待创建知识库...</string>
@@ -431,14 +433,13 @@
     <string name="text_new_kb">新建知识库</string>
     <string name="text_add_to_kb">添加到知识库</string>
     <string name="text_settings">设置</string>
-    <string name="text_text_chunk_settings">文本分块设置</string>
+    <string name="text_text_chunk_settings">RAG设置</string>
     <string name="text_directory_settings">目录设置</string>
     <string name="text_select">选择</string>
     <string name="text_priority_manual_params">优先手动参数</string>
     <string name="text_global_settings">全局设置</string>
     <string name="text_debug_mode">调试模式</string>
     <string name="text_font_size">字体大小</string>
-    <string name="text_save_settings">保存设置</string>
     <string name="text_default_model_download">默认模型下载</string>
     <string name="text_embedding_model_list">嵌入模型列表</string>
     <string name="text_reranker_model_list">重排模型列表</string>
@@ -448,7 +449,7 @@
     <string name="text_empty_list">列表为空</string>
     <string name="text_knowledge_base">知识库</string>
     <string name="text_related">相关</string>
-    <string name="text_text_chunking_settings">文本分块设置</string>
+    <string name="text_text_chunking_settings">RAG设置</string>
     <!-- 文件类型显示文本 -->
     <string name="file_type_pdf">PDF文档</string>
     <string name="file_type_txt">文本文件</string>
@@ -831,11 +832,30 @@
     
     <!-- Settings Fragment -->
     <string name="title_settings">设置</string>
-    <string name="title_text_chunking_settings">文本分块设置</string>
+    <string name="title_text_chunking_settings">RAG设置</string>
     <string name="label_chunk_size">分块大小\n(100~4000):</string>
     <string name="label_overlap_size">重叠大小\n(20~800):</string>
     <string name="label_min_chunk_size">最小分块限制\n(10~100):</string>
     <string name="label_json_dataset_splitting">JSON训练集分块优化</string>
+    
+    <!-- Knowledge Graph RAG Settings -->
+    <string name="label_graph_min_edge_weight">图扩展最小边权重\n(1~10):</string>
+    <string name="label_graph_entity_confidence_threshold">实体置信度阈值\n(0.5~1.0):</string>
+    <string name="label_graph_max_expand_entities">图扩展最大实体数\n(10~100):</string>
+    <string name="label_graph_rag_mode">图谱RAG模式</string>
+    <string name="label_graph_hub_threshold">超大实体门限\n(邻居数,0=关闭):</string>
+    <string name="label_graph_stopwords">图谱停用词表:</string>
+    <string name="hint_graph_min_edge_weight">过滤低权重边，避免噪音</string>
+    <string name="hint_graph_max_expand_entities">限制图扩展返回的实体数量</string>
+    <string name="hint_graph_entity_confidence_threshold">只保留高置信度实体</string>
+    <string name="label_graph_rag_weight_preset">图谱RAG融合权重预设:</string>
+    <string name="label_graph_max_expand_chunks">图扩展最大chunk数\n(10~200):</string>
+    <string name="hint_graph_max_expand_chunks">限制图扩展阶段参与打分的chunk数量</string>
+    <string-array name="graph_rag_weight_presets">
+        <item>向量优先 (α=0.9, β=0.1, γ=0.0)</item>
+        <item>平衡 (α=0.7, β=0.2, γ=0.1)</item>
+        <item>图谱增强 (α=0.4, β=0.4, γ=0.2)</item>
+    </string-array>
     <string name="title_directory_settings">目录设置</string>
     <string name="label_data_root_directory">数据根目录:</string>
     <string name="hint_data_root_path">/sdcard/Download/OfflineAIData</string>
@@ -880,7 +900,6 @@
 
     <string name="label_font_size">字体大小</string>
     <string name="text_font_size_value">字体大小: 16sp</string>
-    <string name="button_save_settings">保存设置</string>
     <string name="button_select">选择</string>
     <string name="button_new_conversation">新对话</string>
     <string name="button_add_to_knowledge_base">添加到知识库</string>
@@ -893,11 +912,9 @@
     <string name="content_description_scroll_down">向下滚动</string>
     
     <!-- 编译告警修复：添加缺失的字符串资源 -->
-    <string name="button_directory_settings">目录设置</string>
     <string name="button_global_settings">全局设置</string>
     <string name="button_llm_inference_settings">LLM推理设置</string>
-    <string name="button_text_chunk_settings">文本分块设置</string>
-    <string name="directory_settings">目录设置</string>
+    <string name="button_text_chunk_settings">RAG设置</string>
     <string name="global_settings">全局设置</string>
     <string name="help_title">帮助</string>
     <string name="hint_api_address">输入API地址</string>
@@ -905,7 +922,7 @@
     <string name="label_api_address">API地址:</string>
     <string name="label_api_key">API密钥:</string>
     <string name="llm_inference_settings">LLM推理设置</string>
-    <string name="text_chunk_settings">文本分块设置</string>
+    <string name="text_chunk_settings">RAG设置</string>
     <!-- 修复ModelDownloadFragment中缺失的字符串 -->
     <string name="dialog_msg_dir_exists">以下目录已存在，继续下载将覆盖现有文件：</string>
     <string name="button_interrupt">中断下载</string>
@@ -989,6 +1006,22 @@
     
     <!-- HelpFragment Messages -->
     <string name="help_doc_load_failed">无法加载帮助文档，请确保应用正确安装。</string>
+
+    <!-- TextEditorFragment Messages -->
+    <string name="menu_text_editor">文本编辑器</string>
+    <string name="title_text_editor">文本编辑器</string>
+    <string name="label_text_editor_files">文件:</string>
+    <string name="label_text_editor_directory">目录: %1$s</string>
+    <string name="button_reload_files">刷新</string>
+    <string name="button_load_file">加载</string>
+    <string name="button_save_file">保存</string>
+    <string name="text_editor_no_files">没有可编辑的文件</string>
+    <string name="text_editor_invalid_selection">请选择有效的文件</string>
+    <string name="text_editor_load_success">已加载文件: %1$s</string>
+    <string name="text_editor_save_success">已保存文件: %1$s</string>
+    <string name="text_editor_save_success_toast">保存成功</string>
+    <string name="text_editor_save_failed">保存文件失败: %1$s</string>
+    <string name="text_editor_save_failed_toast">保存失败</string>
 
     <!-- RagQueryManager Messages -->
     <string name="building_prompt">构建提示词...</string>
@@ -1139,4 +1172,25 @@
     <string name="toast_tts_generation_failed">语音生成失败</string>
     <string name="toast_tts_model_load_failed">TTS模型加载失败</string>
     <string name="toast_tts_model_not_supported">当前模型不支持原生TTS，请选择Omni模型或使用外部TTS</string>
+    
+    <!-- Fragment Titles -->
+    <string name="title_log_view">日志查看</string>
+    <string name="title_model_download">模型下载</string>
+    
+    <!-- 知识库图谱查看器 -->
+    <string name="graph_viewer_title">知识库图谱查看器</string>
+    <string name="graph_viewer_kb_label">知识库名称</string>
+    <string name="graph_viewer_kb_hint">请选择知识库</string>
+    <string name="graph_viewer_top_n_label">显示数量</string>
+    <string name="graph_viewer_share">分享图谱</string>
+    <string name="graph_viewer_loading">加载图谱中...</string>
+    <string name="graph_viewer_no_kb_selected">请先选择知识库</string>
+    <string name="graph_viewer_empty">该知识库暂无数据</string>
+    <string name="graph_viewer_load_error">加载图谱失败: %s</string>
+    <string name="graph_viewer_share_title">分享知识库图谱</string>
+    <string name="graph_viewer_share_subject">知识库图谱：%s</string>
+    <string name="graph_viewer_export_success">图谱已导出</string>
+    <string name="graph_viewer_view_mode">查看模式</string>
+    <string name="graph_viewer_mode_markdown">Markdown</string>
+    <string name="graph_viewer_mode_graph">图形</string>
 </resources>

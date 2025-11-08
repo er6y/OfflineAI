@@ -208,8 +208,27 @@ public class EmbeddingHandler {
         mCurrentModelName = extractModelName(configFile.getParentFile());
         mCurrentMemoryMode = memoryMode;
         
+        // Reset stop flag after successful model loading
+        // This is critical: if we called stopInference() during mode change (Line 136),
+        // we need to reset the flag so subsequent computeEmbedding() calls can proceed
+        mShouldStop.set(false);
+        
         LogManager.logI(TAG, "MNN embedding loaded successfully - Model: " + mCurrentModelName + 
             ", Dimension: " + mEmbeddingDimension + ", Memory Mode: " + memoryMode.getValue());
+        
+        // CRITICAL: Warm-up call to initialize MNN internal state
+        // First embedding call can take 2+ minutes due to lazy initialization
+        // This prevents timeout on actual first use
+        LogManager.logI(TAG, "[WARMUP] Starting warm-up embedding call...");
+        long warmupStart = System.currentTimeMillis();
+        try {
+            float[] warmupResult = MnnInference.computeEmbedding(mNativeHandle, "warm up");
+            long warmupTime = System.currentTimeMillis() - warmupStart;
+            LogManager.logI(TAG, "[WARMUP] Warm-up completed in " + warmupTime + "ms, result=" + 
+                (warmupResult != null ? warmupResult.length : "null"));
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[WARMUP] Warm-up failed (non-critical): " + e.getMessage());
+        }
         
         LogManager.logI(TAG, "[LOCK] Releasing loadModel lock (success) - thread=" + Thread.currentThread().getName());
         return true;
@@ -255,6 +274,8 @@ public class EmbeddingHandler {
      * @throws Exception if computation fails
      */
     public synchronized float[] computeEmbedding(String text) throws Exception {
+        LogManager.logI(TAG, "[LOCK] >>> Entered synchronized computeEmbedding - Thread: " + Thread.currentThread().getName() + ", ID: " + Thread.currentThread().getId());
+        
         // CRITICAL: Check thread interruption first (from Future.cancel(true))
         if (Thread.currentThread().isInterrupted()) {
             LogManager.logI(TAG, "Embedding thread interrupted, clearing interrupt flag and aborting");
@@ -289,7 +310,10 @@ public class EmbeddingHandler {
             
             // Compute embedding (this is a blocking call)
             // If stop requested during this, it will complete naturally
+            LogManager.logI(TAG, "[EMBED_JAVA] >>> Calling MnnInference.computeEmbedding, handle=" + mNativeHandle + ", textLen=" + text.length());
+            LogManager.logI(TAG, "[EMBED_JAVA] >>> Thread: " + Thread.currentThread().getName() + ", ID: " + Thread.currentThread().getId());
             float[] result = MnnInference.computeEmbedding(mNativeHandle, text);
+            LogManager.logI(TAG, "[EMBED_JAVA] <<< MnnInference.computeEmbedding returned, result=" + (result != null ? result.length : "null"));
             
             if (result == null) {
                 throw new Exception("Failed to compute embedding - native method returned null");
@@ -320,8 +344,12 @@ public class EmbeddingHandler {
             LogManager.logD(TAG, "Embedding computed in " + duration + "ms, " +
                 "text length: " + text.length() + ", vector size: " + result.length);
             
+            LogManager.logI(TAG, "[LOCK] <<< Exiting synchronized computeEmbedding (success) - Thread: " + Thread.currentThread().getName());
             return result;
             
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[LOCK] <<< Exiting synchronized computeEmbedding (exception) - Thread: " + Thread.currentThread().getName(), e);
+            throw e;
         } finally {
             mIsInUse.set(false);
         }
@@ -530,7 +558,7 @@ public class EmbeddingHandler {
      */
     public static void checkAndLoadEmbeddingModel(
             Context context,
-            SQLiteVectorDatabaseHandler vectorDb,
+            KnowledgeGraphDatabase vectorDb,
             java.util.function.Consumer<String> callback,
             ModelSelectedCallback modelSelectedCallback) {
         

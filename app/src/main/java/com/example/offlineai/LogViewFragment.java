@@ -350,7 +350,7 @@ public class LogViewFragment extends Fragment {
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
         
-        // 添加菜单提供者
+        // Setup menu provider for back button and menu items
         requireActivity().addMenuProvider(new MenuProvider() {
             @Override
             public void onCreateMenu(@NonNull Menu menu, @NonNull MenuInflater menuInflater) {
@@ -359,6 +359,29 @@ public class LogViewFragment extends Fragment {
 
             @Override
             public boolean onMenuItemSelected(@NonNull MenuItem menuItem) {
+                if (menuItem.getItemId() == android.R.id.home) {
+                    // CRITICAL: Check if fragment is still attached before accessing Activity
+                    if (!isAdded() || getActivity() == null) {
+                        android.util.Log.w("LogViewFragment", "[MENU] Fragment not attached, ignoring back button");
+                        return true;
+                    }
+                    
+                    // CRITICAL: Restore main UI BEFORE popBackStack (Fragment will be detached after pop)
+                    androidx.appcompat.app.ActionBar actionBar = ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar();
+                    if (actionBar != null) {
+                        actionBar.setDisplayHomeAsUpEnabled(false);
+                        actionBar.setTitle(R.string.app_name);
+                    }
+                    getActivity().findViewById(R.id.container).setVisibility(android.view.View.GONE);
+                    getActivity().findViewById(R.id.viewPager).setVisibility(android.view.View.VISIBLE);
+                    
+                    // Now clear all fragments from back stack
+                    androidx.fragment.app.FragmentManager fm = getActivity().getSupportFragmentManager();
+                    while (fm.getBackStackEntryCount() > 0) {
+                        fm.popBackStackImmediate();
+                    }
+                    return true;
+                }
                 return handleMenuItemSelected(menuItem);
             }
         }, getViewLifecycleOwner(), Lifecycle.State.RESUMED);
@@ -399,12 +422,6 @@ public class LogViewFragment extends Fragment {
         } else if (id == R.id.action_share_log) {
             // 分享日志
             shareLog();
-            return true;
-        } else if (id == R.id.action_close) {
-            // 关闭页面 - 使用Navigation组件
-            if (getActivity() != null) {
-                requireActivity().getOnBackPressedDispatcher().onBackPressed();
-            }
             return true;
         }
         
@@ -504,8 +521,19 @@ public class LogViewFragment extends Fragment {
     @Override
     public void onResume() {
         super.onResume();
+        // Show back button and set title in ActionBar
+        if (getActivity() != null && ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar() != null) {
+            ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setDisplayHomeAsUpEnabled(true);
+            ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setTitle(R.string.title_log_view);
+        }
         // 在页面恢复时重新应用字体大小，以便在设置页面修改后能够立即生效
         applyGlobalTextSize();
+    }
+    
+    @Override
+    public void onPause() {
+        super.onPause();
+        // Title restoration is handled in MenuProvider to avoid multiple calls
     }
 }
 

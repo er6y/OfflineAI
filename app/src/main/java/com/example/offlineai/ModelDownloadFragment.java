@@ -207,6 +207,63 @@ public class ModelDownloadFragment extends Fragment {
         return view;
     }
     
+    @Override
+    public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
+        super.onViewCreated(view, savedInstanceState);
+        
+        // Setup menu provider for back button (new API)
+        requireActivity().addMenuProvider(new MenuProvider() {
+            @Override
+            public void onCreateMenu(@NonNull Menu menu, @NonNull MenuInflater menuInflater) {
+                // No additional menu items needed
+            }
+            
+            @Override
+            public boolean onMenuItemSelected(@NonNull MenuItem menuItem) {
+                if (menuItem.getItemId() == android.R.id.home) {
+                    // CRITICAL: Check if fragment is still attached before accessing Activity
+                    if (!isAdded() || getActivity() == null) {
+                        android.util.Log.w("ModelDownloadFragment", "[MENU] Fragment not attached, ignoring back button");
+                        return true;
+                    }
+                    
+                    // CRITICAL: Restore main UI BEFORE popBackStack (Fragment will be detached after pop)
+                    androidx.appcompat.app.ActionBar actionBar = ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar();
+                    if (actionBar != null) {
+                        actionBar.setDisplayHomeAsUpEnabled(false);
+                        actionBar.setTitle(R.string.app_name);
+                    }
+                    getActivity().findViewById(R.id.container).setVisibility(android.view.View.GONE);
+                    getActivity().findViewById(R.id.viewPager).setVisibility(android.view.View.VISIBLE);
+                    
+                    // Now clear all fragments from back stack
+                    androidx.fragment.app.FragmentManager fm = getActivity().getSupportFragmentManager();
+                    while (fm.getBackStackEntryCount() > 0) {
+                        fm.popBackStackImmediate();
+                    }
+                    return true;
+                }
+                return false;
+            }
+        }, getViewLifecycleOwner(), Lifecycle.State.RESUMED);
+    }
+    
+    @Override
+    public void onResume() {
+        super.onResume();
+        // Show back button and set title in ActionBar
+        if (getActivity() != null && ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar() != null) {
+            ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setDisplayHomeAsUpEnabled(true);
+            ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setTitle(R.string.title_model_download);
+        }
+    }
+    
+    @Override
+    public void onPause() {
+        super.onPause();
+        // Title restoration is handled in MenuProvider to avoid multiple calls
+    }
+    
     private void initViews(View view) {
         containerEmbeddingModels = view.findViewById(R.id.containerEmbeddingModels);
         containerRerankerModels = view.findViewById(R.id.containerRerankerModels);
@@ -236,27 +293,6 @@ public class ModelDownloadFragment extends Fragment {
     }
     
     private void setupListeners() {
-        // 添加MenuProvider来处理菜单
-        requireActivity().addMenuProvider(new MenuProvider() {
-            @Override
-            public void onCreateMenu(@NonNull Menu menu, @NonNull MenuInflater menuInflater) {
-                menuInflater.inflate(R.menu.model_download_menu, menu);
-            }
-            
-            @Override
-            public boolean onMenuItemSelected(@NonNull MenuItem menuItem) {
-                int id = menuItem.getItemId();
-                
-                if (id == R.id.action_close_download) {
-                    // Close download page - Use Navigation component's back operation
-                    requireActivity().getOnBackPressedDispatcher().onBackPressed();
-                    return true;
-                }
-                
-                return false;
-            }
-        }, getViewLifecycleOwner(), Lifecycle.State.RESUMED);
-        
         buttonDownload.setOnClickListener(v -> {
             if (isDownloading) {
                 stopDownload();

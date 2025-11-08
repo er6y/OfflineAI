@@ -72,12 +72,13 @@ dependencies {
     implementation project(':libs:mnn-lib')
 }
 
-// CRITICAL: Force mnn-lib to build before mnn-tts-jni native compilation
+// ========== Native build dependency (simplified to avoid circular dependency) ==========
 afterEvaluate {
-    tasks.matching { it.name.startsWith('configureCMake') }.all {
-        dependsOn ':libs:mnn-lib:assembleRelease'
-    }
-    tasks.matching { it.name.startsWith('buildCMake') }.all {
-        dependsOn ':libs:mnn-lib:assembleRelease'
+    tasks.matching { 
+        it.name.contains("externalNativeBuild") || 
+        it.name.contains("configureCMake") || 
+        it.name.contains("buildCMake")
+    }.all { ttsTask ->
+        ttsTask.mustRunAfter(":libs:mnn-lib:assembleRelease")
     }
 }

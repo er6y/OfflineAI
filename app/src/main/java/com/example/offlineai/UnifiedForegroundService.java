@@ -17,6 +17,7 @@ import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -98,6 +99,11 @@ public class UnifiedForegroundService extends Service {
         
         // 添加向量化完成回调
         default void onVectorizationComplete(int vectorCount) {
+            // 默认空实现
+        }
+
+        // 统一的日志行回调（用于UI进度框）
+        default void onLogLine(String message) {
             // 默认空实现
         }
         
@@ -494,6 +500,39 @@ public class UnifiedForegroundService extends Service {
         // 2. Initialize progress manager
         progressManager = ProgressManager.getInstance();
         progressManager.reset();
+
+        // 2.1 Initialize build configuration snapshot for UI display
+        int chunkSize = ConfigManager.getChunkSize(this);
+        int chunkOverlap = ConfigManager.getInt(this, ConfigManager.KEY_OVERLAP_SIZE, ConfigManager.DEFAULT_OVERLAP_SIZE);
+        String dictPath = ConfigManager.getString(this, ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, null);
+        String dictFileName = "";
+        try {
+            String valueNone = getString(R.string.common_none);
+            if (dictPath != null && !dictPath.isEmpty() && !valueNone.equals(dictPath)) {
+                dictFileName = new File(dictPath).getName();
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to resolve dictionary file name", e);
+        }
+        progressManager.setBuildConfig(knowledgeBaseName, embeddingModel, rerankerModel, dictFileName, chunkSize, chunkOverlap);
+
+        // 2.2 Emit initial configuration lines to UI (if callback already attached)
+        if (progressCallback != null) {
+            try {
+                String kbLine = "Knowledge base: " + knowledgeBaseName;
+                String embedLine = "Embedding model: " + embeddingModel;
+                String rerankLine = "Reranker model: " + (rerankerModel == null || rerankerModel.isEmpty() ? "None" : rerankerModel);
+                String chunkLine = "Chunk size: " + chunkSize + ", overlap: " + chunkOverlap;
+                String dictLine = "Dictionary (configured): " + (dictFileName.isEmpty() ? "None" : dictFileName);
+                progressCallback.onLogLine(kbLine);
+                progressCallback.onLogLine(embedLine);
+                progressCallback.onLogLine(rerankLine);
+                progressCallback.onLogLine(chunkLine);
+                progressCallback.onLogLine(dictLine);
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to emit build configuration lines", e);
+            }
+        }
         
         // 3. Set progress callback
         textChunkProcessor.setProgressCallback(new TextChunkProcessor.ProgressCallback() {
@@ -520,9 +559,7 @@ public class UnifiedForegroundService extends Service {
                 // Calculate overall progress (50-100%)
                 int progress = 50 + (int) (percentage / 2);
                 
-                // Update progress with localized status
-                //String status = StateDisplayManager.getProcessingStatusDisplayText(getApplicationContext(), 
-                //    AppConstants.PROCESSING_STATUS_GENERATING_VECTORS) + " (" + processedChunks + "/" + totalChunks + ")";
+                // Update numeric progress only; textual status will be delivered via onLogLine
                 updateProgress(progress, null);
                 
                 LogManager.logD(TAG, "Vectorization progress: " + processedChunks + "/" + totalChunks + " (" + percentage + "%)");
@@ -533,13 +570,13 @@ public class UnifiedForegroundService extends Service {
                 // Initialize vectorization in progress manager
                 progressManager.initVectorization(totalChunks);
                 
-                // Update progress with localized status
+                // Log a human-readable line for debugging; UI uses the consolidated message from TextChunkProcessor
                 String status = StateDisplayManager.getProcessingStatusDisplayText(getApplicationContext(), 
                     AppConstants.PROCESSING_STATUS_TEXT_EXTRACTION_COMPLETE) + ", " + 
                     getString(R.string.text_extraction_complete_chunks, totalChunks)+ "..." + getString(R.string.common_generating);
-                
                 LogManager.logD(TAG, "Text extraction completed, total chunks: " + totalChunks + ". Starting vectorization...");
-                updateProgress(50, status);
+                // Only update numeric progress
+                updateProgress(50, null);
             }
             
             @Override
@@ -547,26 +584,52 @@ public class UnifiedForegroundService extends Service {
                 // Mark completion in progress manager
                 progressManager.markCompleted();
                 
-                // Update progress with localized status
+                // Log and send a human-readable line via onLogLine
                 String status = StateDisplayManager.getProcessingStatusDisplayText(getApplicationContext(), 
                     AppConstants.PROCESSING_STATUS_VECTORIZATION_COMPLETE) + ", " + 
                     getString(R.string.vectorization_complete_vectors, vectorCount);
-                
                 LogManager.logD(TAG, "Vectorization completed, total vectors: " + vectorCount);
-                updateProgress(100, status);
+                if (progressCallback != null) {
+                    progressCallback.onLogLine(status);
+                }
+                // Only update numeric progress
+                updateProgress(100, null);
+            }
+            
+            @Override
+            public void onGraphBuildingProgress(int processedChunks, int totalChunks, float percentage) {
+                // Update progress for graph building
+                progressManager.updateVectorizationProgress(processedChunks, totalChunks, percentage);
+                progressManager.markGraphBuilding();
+                String status = "Building knowledge graph: " + processedChunks + "/" + totalChunks + 
+                    " (" + String.format("%.1f%%", percentage) + ")";
+                LogManager.logD(TAG, status);
+                if (progressCallback != null) {
+                    progressCallback.onLogLine(status);
+                }
+                // Keep numeric progress at 100% as this is post-vectorization
+                updateProgress(100, null);
             }
             
             @Override
             public void onError(String errorMessage) {
                 // 处理错误
                 LogManager.logE(TAG, "错误: " + errorMessage);
-                updateProgress(0, getString(R.string.error_message, errorMessage));
+                String uiMessage = getString(R.string.error_message, errorMessage);
+                // Send error text via onLogLine only; numeric progress resets to 0 without status text
+                if (progressCallback != null) {
+                    progressCallback.onLogLine(uiMessage);
+                }
+                updateProgress(0, null);
             }
             
             @Override
             public void onLog(String message) {
                 // 记录日志
                 LogManager.logD(TAG, message);
+                if (progressCallback != null) {
+                    progressCallback.onLogLine(message);
+                }
             }
         });
         
@@ -585,8 +648,8 @@ public class UnifiedForegroundService extends Service {
                 embeddingModel,
                 rerankerModel,
                 selectedFiles,
-                ConfigManager.getChunkSize(this),
-                ConfigManager.getInt(this, ConfigManager.KEY_OVERLAP_SIZE, ConfigManager.DEFAULT_OVERLAP_SIZE)
+                chunkSize,
+                chunkOverlap
             );
             
             // 4. 返回结果

@@ -9,6 +9,12 @@
         app:showAsAction="never" />
         
     <item
+        android:id="@+id/action_graph_viewer"
+        android:title="@string/menu_graph_viewer"
+        android:orderInCategory="105"
+        app:showAsAction="never" />
+        
+    <item
         android:id="@+id/action_chat_history"
         android:title="@string/menu_chat_history"
         android:orderInCategory="110"
@@ -36,6 +42,12 @@
         android:id="@+id/action_view_log"
         android:title="@string/menu_view_log"
         android:orderInCategory="175"
+        app:showAsAction="never" />
+
+    <item
+        android:id="@+id/action_text_editor"
+        android:title="@string/menu_text_editor"
+        android:orderInCategory="176"
         app:showAsAction="never" />
         
     <item

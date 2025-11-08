@@ -383,6 +383,121 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     /**
+     * NER-specific inference without conversation history
+     * Optimized for entity extraction with deterministic output
+     * @param prompt NER prompt (already contains extraction instructions + text)
+     * @param callback Streaming callback
+     */
+    public void inferenceNER(String prompt, LocalLlmHandler.StreamingCallback callback) {
+        if (!isInitialized.get()) {
+            LogManager.logW(TAG, "[NER] Handler not initialized");
+            if (callback != null) {
+                callback.onError("Model not initialized");
+            }
+            return;
+        }
+        
+        // CRITICAL FIX: Remove isGenerating check to allow concurrent NER tasks to queue
+        // MNN doesn't support parallel inference, but tasks should queue instead of being rejected
+        // The actual serialization happens in the executor (single thread pool)
+        LogManager.logD(TAG, "[NER] Task submitted to queue (will wait if another NER is running)");
+        
+        try {
+            // Don't set isGenerating here - let tasks queue naturally
+            
+            // NER-specific parameters (hardcoded for deterministic output)
+            final int maxNewTokens = 2048;    // Long enough for JSON output
+            
+            LogManager.logI(TAG, "[NER] Starting inference: temp=0.0, topK=1, maxTokens=2048");
+            LogManager.logI(TAG, "[NER] Prompt length: " + prompt.length() + " chars");
+            
+            // Disable thinking mode for NER
+            try {
+                MnnInference.updateConfig(llmSessionHandle, "{\"jinja\":{\"context\":{\"enable_thinking\":false}}}");
+                LogManager.logI(TAG, "[THINKING] Thinking mode disabled");
+            } catch (Exception e) {
+                LogManager.logW(TAG, "[THINKING] Failed to disable thinking mode: " + e.getMessage());
+            }
+            
+            // Set max_new_tokens
+            try {
+                MnnInference.updateConfig(llmSessionHandle, "{\"max_new_tokens\":" + maxNewTokens + "}");
+                LogManager.logI(TAG, "[INFERENCE] max_new_tokens set to " + maxNewTokens);
+            } catch (Exception e) {
+                LogManager.logW(TAG, "[INFERENCE] Failed to set max_new_tokens: " + e.getMessage());
+            }
+            
+            // Build empty history with only current user message
+            List<android.util.Pair<String, String>> emptyHistory = new ArrayList<>();
+            emptyHistory.add(new android.util.Pair<>("user", prompt));
+            
+            // NER-specific stop flag (independent from global shouldStop)
+            // This prevents NER from being stopped by other tasks (e.g. embedding completion)
+            final AtomicBoolean nerShouldStop = new AtomicBoolean(false);
+            LogManager.logI(TAG, "[NER] Using independent stop flag for NER task");
+            
+            // Submit to executor
+            executorService.submit(() -> {
+                try {
+                    long startTime = System.currentTimeMillis();
+                    
+                    // Call inferenceWithHistory with empty history (no conversation context)
+                    LogManager.logI(TAG, "[NER] Calling inferenceWithHistory with empty history (independent stop)");
+                    Map<String, Long> stats = MnnInference.inferenceWithHistory(
+                        llmSessionHandle,
+                        emptyHistory,
+                        new MnnInference.InferenceCallback() {
+                            private final StringBuilder fullResponse = new StringBuilder();
+                            
+                            @Override
+                            public boolean onToken(String token) {
+                                fullResponse.append(token);
+                                if (callback != null) {
+                                    callback.onToken(token);
+                                }
+                                // Use NER-specific stop flag, not global shouldStop
+                                // Return true to stop, false to continue (per InferenceCallback contract)
+                                return nerShouldStop.get();
+                            }
+                            
+                            @Override
+                            public void onComplete(Map<String, Long> stats) {
+                                long elapsedMs = System.currentTimeMillis() - startTime;
+                                LogManager.logI(TAG, "[NER] Inference complete: " + elapsedMs + "ms, responseLen=" + fullResponse.length());
+                                
+                                if (callback != null) {
+                                    callback.onComplete(fullResponse.toString());
+                                }
+                            }
+                            
+                            @Override
+                            public void onError(String error) {
+                                LogManager.logE(TAG, "[NER] Inference error: " + error);
+                                if (callback != null) {
+                                    callback.onError(error);
+                                }
+                            }
+                        }
+                    );
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[NER] Inference failed", e);
+                    if (callback != null) {
+                        callback.onError("NER inference failed: " + e.getMessage());
+                    }
+                }
+                // Don't reset isGenerating - not used anymore for NER
+            });
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[NER] Failed to start inference", e);
+            // Don't reset isGenerating - not used anymore for NER
+            if (callback != null) {
+                callback.onError("Failed to start NER inference: " + e.getMessage());
+            }
+        }
+    }
+    
+    /**
      * Multimodal inference with audio support
      * @param prompt Text prompt
      * @param audioPaths Audio file paths

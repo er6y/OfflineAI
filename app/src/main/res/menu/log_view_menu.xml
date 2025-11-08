@@ -29,10 +29,4 @@
         android:id="@+id/action_copy"
         android:title="@string/common_copy"
         app:showAsAction="never" />
-        
-    <item
-        android:id="@+id/action_close"
-        android:title="@string/common_close"
-        android:icon="@android:drawable/ic_menu_close_clear_cancel"
-        app:showAsAction="always" />
 </menu>

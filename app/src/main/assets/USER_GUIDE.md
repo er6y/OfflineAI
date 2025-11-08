@@ -6,106 +6,19 @@
 
 OfflineAI 是一款离线优先的安卓 AI 应用，秉持“网络离线，思维常在”的产品理念，强调在设备本地完成模型推理与知识处理，确保隐私与可用性。
 
-OfflineAI 的核心能力包括：本地对话、私有知识管理（含检索增强生成 RAG）、知识笔记与多模态推理。RAG 是本应用的重要功能之一，但并非唯一重点；本指南将以离线使用体验为中心阐述，RAG 原理与用法作为专题章节进行说明。
+OfflineAI 的核心能力包括：本地对话、私有知识管理（含检索增强生成 RAG 和知识图谱）、知识笔记与多模态推理。本指南将先介绍软件的主要功能，然后在专题章节中详细阐述 RAG 知识库系统的原理与用法。
 
 OfflineAI is an offline-first Android AI application. Guided by the motto "When the net is gone, the mind stays on.", it focuses on completing model inference and knowledge processing locally on-device to ensure privacy and availability.
 
-Core capabilities include local conversation, private knowledge management (with RAG), knowledge notes, and multimodal inference. RAG is a major capability but not the only focus; this guide centers on offline experience and presents RAG as a dedicated topic.
+Core capabilities include local conversation, private knowledge management (with RAG and Knowledge Graph), knowledge notes, and multimodal inference. This guide first introduces the main features, then presents RAG knowledge base system in detail as a dedicated topic.
 
-## 1. RAG 基本原理介绍 / RAG Basic Principles
+## 1. OfflineAI 软件介绍 / Software Introduction
 
-RAG（检索增强生成 / Retrieval-Augmented Generation）是一种结合了检索系统和生成式AI的技术框架，能够让大语言模型(LLM)基于特定知识回答问题，提高回答的准确性和可靠性。
+OfflineAI 是一款离线优先的安卓 AI 应用，允许用户在设备本地构建私有知识、进行自然语言对话并管理知识笔记，无需依赖云服务。应用支持多种文档格式，使用嵌入模型进行向量化，并通过本地数据库进行高效检索。
 
-RAG is a technical framework that combines retrieval systems with generative AI, enabling Large Language Models (LLM) to answer questions based on specific knowledge, improving accuracy and reliability.
+OfflineAI is an Android offline-first AI application that allows users to build private knowledge bases, conduct natural language conversations, and manage notes locally on their devices without relying on cloud services. The app supports multiple document formats, uses embedding models for vectorization, and performs efficient retrieval through local databases.
 
-### RAG 工作流程 / RAG Workflow
-
-```text
-Knowledge Vector Database Construction:
-┌------------------┐     ┌-------------------┐     ┌-------------------┐
-│                  │     │                   │     │  Text Vectorize   │
-│  User Documents  │ --> │   Text Chunking   │ --> │  Tokenize &       │
-│                  │     │ (Size/Overlap)    │     │  Embed & Normalize│
-└------------------┘     └-------------------┘     └-------------------┘
-                                                            │           
-RAG Q&A Process:                                            v           
-┌------------------┐     ┌-------------------┐     ┌-------------------┐
-│                  │     │  Text Vectorize   │     │                   │
-│  User Question   │ --> │  Tokenize &       │ --> │ Vector Database   │
-│                  │     │  Embed & Normalize│     │    Retrieval      │
-└------------------┘     └-------------------┘     └-------------------┘
-                                                            │           
-                                                            v           
-┌------------------┐     ┌-------------------┐     ┌-------------------┐
-│                  │     │                   │     │                   │
-│ Generate Answer  │ <-- │ Large Language    │ <-- │ Build Context     │
-│                  │     │ Model (LLM)       │     │                   │
-└------------------┘     └-------------------┘     └-------------------┘                     
-```
-
-### RAG 核心步骤 / RAG Core Steps
-
-1. **知识库构建 / Knowledge Base Construction**：
-   - 导入文档（PDF、Word、文本等） / Import documents (PDF, Word, text, etc.)
-   - 文本分块处理 / Text chunking processing
-   - 使用嵌入模型将文本块转换为向量 / Convert text chunks to vectors using embedding models
-   - 存储文本及其向量到向量数据库 / Store text and vectors in vector database
-
-2. **问答交互 / Q&A Interaction**：
-   - 用户提出问题 / User asks questions
-   - 问题向量化 / Question vectorization
-   - 在向量数据库中检索相似文本块 / Retrieve similar text chunks from vector database
-   - 将检索结果与问题一起发送给大语言模型 / Send retrieval results with question to LLM
-   - 大语言模型生成基于知识库的回答 / LLM generates knowledge-based answers
-
-3. **优势 / Advantages**：
-   - 回答基于特定知识，减少"幻觉" / Answers based on specific knowledge, reducing "hallucinations"
-   - 无需重新训练模型即可更新知识 / Update knowledge without retraining models
-   - 保持私密性，数据不离开本地设备 / Maintain privacy, data stays on local device
-
-### 文本分块策略 / Text Chunking Strategy
-
-#### 1. 暴力分块方法 / Brute Force Chunking
-- **定义 / Definition**：将文档按固定长度(如500字符)简单切分 / Simply split documents by fixed length (e.g., 500 characters)
-- **优势 / Advantages**：
-  - 实现简单，计算成本低 / Simple implementation, low computational cost
-  - 适合内容结构简单的文档 / Suitable for documents with simple content structure
-- **缺陷 / Disadvantages**：
-  - 容易切断语义连贯性 / Easy to break semantic coherence
-  - 检索结果可能包含无关内容 / Retrieval results may contain irrelevant content
-  - 对LLM归纳能力要求高 / High requirements for LLM summarization ability
-
-#### 2. 检索结果分析 / Retrieval Result Analysis
-- **有用信息 / Useful Information**：与问题直接相关的文本片段 / Text segments directly related to the question
-- **噪声信息 / Noise Information**：
-  - 同一文本块中不相关内容 / Irrelevant content in the same text chunk
-  - 格式标记、页眉页脚等 / Format markers, headers, footers, etc.
-- **对LLM的要求 / Requirements for LLM**：
-  - 需要从混杂内容中提取关键信息 / Need to extract key information from mixed content
-  - 必须识别并忽略无关内容 / Must identify and ignore irrelevant content
-  - 需保持原始语义的准确性 / Need to maintain accuracy of original semantics
-
-#### 3. 推荐分块策略 / Recommended Chunking Strategies
-| Strategy / 策略            | Use Case / 使用场景             | Example Params / 示例参数    | Advantages / 优势        |
-|----------------------------|--------------------------------|-----------------------------|--------------------------|
-| Fixed Length / 固定长度     | Tech Docs/Code / 技术文档/代码  | 500 chars, 100              | Simple & Fast / 简单快速  |
-| Semantic Chunk / 语义分块   | Narrative Content / 叙述内容    |   By Paragraph / 按段落      | Keep Semantic / 保持语义 |
-| Hierarchical / 层次化       | Structured Docs / 结构化文档    | Title+Content / 标题+内容    | Keep Context / 保持上下文 |
-| Dynamic Chunk / 动态分块    | Mixed Content / 混合内容        | Content Analysis / 内容分析  | Adaptive Best / 自适应最优|
-
-**最佳实践建议 / Best Practice Recommendations**：
-1. 技术文档 / Technical Documents：500-1000字符分块，20%重叠 / 500-1000 character chunks, 20% overlap
-2. 叙述文本 / Narrative Text：按自然段落分块 / Chunk by natural paragraphs
-3. 混合内容 / Mixed Content：先按结构分块，再对长块二次分块 / Structure-based chunking first, then secondary chunking for long blocks
-4. 添加元数据标记块类型和关键字段 / Add metadata to mark chunk types and key fields
-
-## 2. OfflineAI 软件介绍 / Software Introduction
-
-OfflineAI 是一款离线优先的安卓 AI 应用，允许用户在设备本地构建私有知识、进行自然语言对话并管理知识笔记，无需依赖云服务。RAG 是本应用的重要能力之一，但不是唯一重点。应用支持多种文档格式，使用嵌入模型进行向量化，并通过本地数据库进行高效检索。
-
-OfflineAI is an Android offline-first AI application that allows users to build private knowledge bases, conduct natural language conversations, and manage notes locally on their devices without relying on cloud services. RAG is one of the major capabilities, not the only focus. The app supports multiple document formats, uses embedding models for vectorization, and performs efficient retrieval through local databases.
-
-### 主要特点 / Key Features
+### 1.1 主要特点 / Key Features
 
 - **完全本地化 / Fully Local**：所有处理和存储都在设备本地进行，保护数据隐私 / All processing and storage are performed locally on the device, protecting data privacy
 - **多格式支持 / Multi-format Support**：支持PDF、Word、Excel、PPT、文本等多种文档格式 / Supports PDF, Word, Excel, PPT, text and other document formats
@@ -115,10 +28,9 @@ OfflineAI is an Android offline-first AI application that allows users to build 
 - **知识笔记 / Knowledge Notes**：支持创建和管理知识笔记，方便整理和扩充知识库 / Supports creating and managing knowledge notes for easy organization and expansion of knowledge base
 - **灵活配置 / Flexible Configuration**：支持自定义嵌入模型、分块大小、API设置等 / Supports custom embedding models, chunk sizes, API settings, etc.
 - **性能优化 / Performance Optimization**：优化内存使用和处理速度，支持大文件处理 / Optimized memory usage and processing speed, supports large file processing
+- **知识图谱RAG / Knowledge Graph RAG**：结合向量检索和知识图谱，提供更精准的知识问答能力 / Combines vector retrieval and knowledge graph for more accurate knowledge Q&A
 
-## 3. 使用说明 / User Instructions
-
-### 3.1 主界面导航 / Main Interface Navigation
+### 1.2 主界面导航 / Main Interface Navigation
 
 OfflineAI 应用包含三个主要页面，通过底部导航栏进行切换：
 
@@ -128,9 +40,11 @@ The OfflineAI app contains three main pages, accessible through the bottom navig
 - **构建知识库 / Build Knowledge Base**：创建和更新知识库 / Create and update knowledge bases
 - **知识笔记 / Knowledge Notes**：创建和管理知识笔记 / Create and manage knowledge notes
 
-### 3.2 问答页面（支持RAG） / Q&A Page (with RAG)
+---
 
-#### 界面元素说明 / Interface Elements
+## 2. 问答页面 / Q&A Page
+
+### 2.1 界面元素说明 / Interface Elements
 
 - **API URL下拉框 / API URL Dropdown**：选择或输入LLM服务的API地址 / Select or input LLM service API address
 - **API密钥输入框 / API Key Input**：输入API密钥 / Enter API key
@@ -150,7 +64,7 @@ The OfflineAI app contains three main pages, accessible through the bottom navig
   - 例如：近似深度5，重排数量可设置为10-15 / Example: approximate depth 5, rerank count can be set to 10-15
   - 启用重排会增加处理时间，但能显著提高检索质量 / Enabling reranking increases processing time but significantly improves retrieval quality
 
-#### 操作说明 / Operation Instructions
+### 2.2 基础对话功能 / Basic Conversation
 
 1. **API设置 / API Setup**：
    - 在API URL下拉框中选择预设的API地址或输入自定义地址 / Select preset API address from dropdown or input custom address
@@ -186,7 +100,7 @@ The OfflineAI app contains three main pages, accessible through the bottom navig
    - 可以通过长按回答文本进行复制或转为笔记 / Can long-press answer text to copy or convert to notes
    - 点击停止按钮可以中断生成过程 / Click stop button to interrupt generation process
 
-#### 多模态推理 / Multimodal Inference
+### 2.3 多模态推理 / Multimodal Inference
 
 OfflineAI 支持多模态模型（Vision-Language Models, VLM），可以在本地进行图像理解和视觉问答。
 
@@ -246,7 +160,7 @@ OfflineAI supports multimodal models (Vision-Language Models, VLM) for local ima
 - ⚠️ 不同模型的图像输入尺寸和预处理方式可能不同 / Different models may have different image input sizes and preprocessing methods
 - ⚠️ 多模态推理比纯文本推理消耗更多资源 / Multimodal inference consumes more resources than text-only inference
 
-#### AI绘图（Diffusion）/ AI Image Generation (Diffusion)
+### 2.4 AI绘图（Diffusion）/ AI Image Generation (Diffusion)
 
 OfflineAI 支持 Stable Diffusion 文本生成图像（Text-to-Image），可以在本地设备上进行AI绘图创作，无需云端服务。
 
@@ -326,65 +240,11 @@ OfflineAI supports Stable Diffusion text-to-image generation for AI art creation
 - ⚠️ **生成质量**：受模型版本、提示词质量和生成参数影响 / Generation quality affected by model version, prompt quality and generation parameters
 - ⚠️ **版权与伦理**：请遵守当地法律法规，不要生成违法或不当内容 / Please comply with local laws, do not generate illegal or inappropriate content
 
-### 3.3 构建知识库页面 / Build Knowledge Base Page
+---
 
-#### 界面元素说明 / Interface Elements
+## 3. 知识笔记页面 / Knowledge Notes Page
 
-- **知识库名称下拉框 / Knowledge Base Name Dropdown**：选择或创建知识库 / Select or create knowledge base
-- **嵌入模型下拉框 / Embedding Model Dropdown**：选择用于生成文本向量的模型 / Select model for generating text vectors
-- **重排模型下拉框 / Rerank Model Dropdown**：选择用于重新排序检索结果的模型（可选） / Select model for reordering retrieval results (optional)
-  - 重排模型能够提高检索结果的相关性 / Rerank models can improve relevance of retrieval results
-  - 如果不需要重排功能，可以选择"无" / If reranking is not needed, select "None"
-  - 建议选择与嵌入模型匹配的重排模型 / Recommend choosing rerank model that matches embedding model
-- **文件列表显示区域 / File List Display Area**：显示已选择的文件 / Display selected files
-- **进度显示区域 / Progress Display Area**：显示处理进度 / Display processing progress
-- **浏览文件按钮 / Browse Files Button**：选择要添加到知识库的文件 / Select files to add to knowledge base
-- **创建知识库按钮 / Create Knowledge Base Button**：开始处理文件并构建知识库 / Start processing files and building knowledge base
-
-#### JSON文件特殊处理
-1. **自动识别格式**：
-   - Alpaca格式（instruction/input/output）
-   - DPO格式（prompt/chosen）
-   - 对话格式（conversations/messages）
-
-2. **处理规则**：
-   - 最小文本块大小：使用设置中配置的值（默认50字符）
-   - 大文件(>1MB)自动分片
-   - 保留语义完整性
-
-3. **示例**：
-   ```json
-   // Alpaca格式
-   {"instruction":"解释AI","output":"人工智能是..."}
-   
-   // DPO格式
-   {"prompt":"机器学习定义","chosen":"机器学习是..."}
-   ```
-
-#### 操作说明 / Operation Instructions
-
-1. **选择知识库 / Select Knowledge Base**：
-   - 在知识库下拉框中选择现有知识库或输入新名称创建 / Select existing knowledge base from dropdown or input new name to create
-   - 新知识库会自动创建对应的存储目录 / New knowledge base will automatically create corresponding storage directory
-
-2. **选择模型 / Select Models**：
-   - 选择嵌入模型（必选） / Select embedding model (required)
-   - 选择重排模型（可选，建议启用以提高检索质量） / Select rerank model (optional, recommended to enable for better retrieval quality)
-
-3. **添加文档 / Add Documents**：
-   - 点击"浏览文件"按钮选择文档 / Click "Browse Files" button to select documents
-   - 支持多种格式：PDF、TXT、DOCX、MD等 / Supports multiple formats: PDF, TXT, DOCX, MD, etc.
-   - 可以一次选择多个文件 / Can select multiple files at once
-
-4. **开始构建 / Start Building**：
-   - 点击"创建知识库"按钮开始处理 / Click "Create Knowledge Base" button to start processing
-   - 系统会显示处理进度 / System will display processing progress
-   - 处理完成后知识库即可用于问答 / After processing is complete, knowledge base is ready for Q&A
-   - 建议把程序留在前台不要手动熄屏。程序在构建的时候会防止自动锁屏。 / Recommend keeping the app in foreground and not manually turning off screen. The app prevents auto-lock during building.
-
-### 3.4 知识笔记页面 / Knowledge Notes Page
-
-#### 界面元素说明 / Interface Elements
+### 3.1 界面元素说明 / Interface Elements
 
 - **知识库下拉框 / Knowledge Base Dropdown**：选择要添加笔记的知识库 / Select knowledge base to add notes to
 - **标题输入框 / Title Input**：输入笔记标题 / Enter note title
@@ -395,7 +255,7 @@ OfflineAI supports Stable Diffusion text-to-image generation for AI art creation
   - 成功后会显示向量数据库项目数量变化（如"项目数：100 → 101"表示新增1条） / After success, shows vector database item count change (e.g., "Items: 100 → 101" indicates 1 new item added)
   - 失败时会显示错误信息 / Shows error message on failure
 
-#### 操作说明 / Operation Instructions
+### 3.2 操作说明 / Operation Instructions
 
 1. 选择知识库 / Select knowledge base
 2. 输入笔记标题和内容 / Enter note title and content
@@ -403,120 +263,187 @@ OfflineAI supports Stable Diffusion text-to-image generation for AI art creation
 4. 处理完成后会显示成功信息 / Success message will be displayed after processing
 5. 也可以从RAG问答页面通过长按回答文本，选择"转笔记"功能快速创建笔记 / Can also quickly create notes from RAG Q&A page by long-pressing answer text and selecting "Convert to Note" function
 
-### 3.5 设置页面 / Settings Page
+---
 
-#### 界面元素说明 / Interface Elements
+## 4. 设置页面 / Settings Page
 
-1. **目录设置 / Directory Settings**
-   - **数据根目录 / Data Root Directory**：设置应用数据的统一存储根目录（默认：`/sdcard/Download/OfflineAIData`）/ Set unified root directory for app data storage (default: `/sdcard/Download/OfflineAIData`)
-   - **自动子目录结构 / Automatic Subdirectory Structure**：应用会在根目录下自动创建以下子目录 / App automatically creates the following subdirectories under root:
-     - `models/` - 本地LLM模型存储目录 / Local LLM models storage
-     - `embeddings/` - 嵌入模型存储目录 / Embedding models storage
-     - `rerankers/` - 重排模型存储目录 / Rerank models storage
-     - `knowledge_bases/` - 知识库存储目录 / Knowledge bases storage
-     - `chathistory/` - 聊天历史存储目录 / Chat history storage
-   - **配置简化 / Configuration Simplification**：只需设置一个根目录，所有数据自动组织管理 / Only need to set one root directory, all data automatically organized
+### 4.1 目录设置 / Directory Settings
 
-2. **文本分块设置 / Text Chunking Settings**
-   - 分块大小：设置文本分块的大小（默认1000字符） / Chunk Size: Set text chunk size (default 1000 characters)
-   - 重叠大小：设置文本分块的重叠大小（默认200字符） / Overlap Size: Set text chunk overlap size (default 200 characters)
-   - 最小分块限制：设置文本分块的最小长度（默认50字符） / Minimum Chunk Limit: Set minimum length for text chunks (default 50 characters)
-   - JSON训练集分块优化：特殊处理JSON格式的训练数据集 / JSON Training Set Chunk Optimization: Special processing for JSON format training datasets
+- **数据根目录 / Data Root Directory**：设置应用数据的统一存储根目录（默认：`/sdcard/Download/OfflineAIData`）/ Set unified root directory for app data storage (default: `/sdcard/Download/OfflineAIData`)
+- **自动子目录结构 / Automatic Subdirectory Structure**：应用会在根目录下自动创建以下子目录 / App automatically creates the following subdirectories under root:
+  - `models/` - 本地LLM模型存储目录 / Local LLM models storage
+  - `embeddings/` - 嵌入模型存储目录 / Embedding models storage
+  - `rerankers/` - 重排模型存储目录 / Rerank models storage
+  - `knowledge_bases/` - 知识库存储目录 / Knowledge bases storage
+  - `chathistory/` - 聊天历史存储目录 / Chat history storage
+  - `dictionary/` - 自定义词典存储目录 / Custom dictionary storage
+- **配置简化 / Configuration Simplification**：只需设置一个根目录，所有数据自动组织管理 / Only need to set one root directory, all data automatically organized
 
-3. **LLM推理设置 / LLM Inference Settings**
-   - 最大序列长度：设置模型处理的最大序列长度 / Max Sequence Length: Set maximum sequence length for model processing
-   - 推理线程数：设置推理时使用的CPU线程数 / Inference Threads: Set number of CPU threads used during inference
-   - 最大输出Token数：限制模型单次输出的最大Token数量 / Max Output Tokens: Limit maximum number of tokens in single model output
-   - 手动温度：控制输出的随机性（0.0-2.0，值越高越随机） / Manual Temperature: Control output randomness (0.0-2.0, higher values more random)
-   - 手动Top-P：核采样参数（0.0-1.0，控制候选词范围） / Manual Top-P: Nucleus sampling parameter (0.0-1.0, controls candidate word range)
-   - 手动Top-K：限制每步采样的候选词数量 / Manual Top-K: Limit number of candidate words per sampling step
-   - 手动重复惩罚：减少重复内容的生成（1.0-2.0） / Manual Repetition Penalty: Reduce repetitive content generation (1.0-2.0)
-   - 优先手动参数：启用时使用手动设置的参数而非模型默认参数 / Prioritize Manual Parameters: Use manually set parameters instead of model defaults when enabled
+### 4.2 文本分块设置 / Text Chunking Settings
 
-4. **Diffusion生成设置 / Diffusion Generation Settings**
-   - **去噪步数 / Denoising Steps**：控制图像生成的质量和时间（10-50步）/ Controls image generation quality and time (10-50 steps)
-     - 10-15步：快速预览，质量较低 / Quick preview, lower quality
-     - 15-20步：标准质量，推荐 / Standard quality, recommended
-     - 20-30步：高质量，耗时更长 / High quality, longer time
-     - 30-50步：最高质量，显著增加生成时间 / Highest quality, significantly increases generation time
-   - **随机种子 / Random Seed**：控制图像生成的随机性 / Controls image generation randomness
-     - 使用随机种子：每次生成不同的图像（默认）/ Use random seed: generates different images each time (default)
-     - 固定种子值：输入特定数值可复现相同的图像 / Fixed seed value: input specific number to reproduce same image
-   - **内存模式 / Memory Mode**：根据设备内存选择合适的生成模式 / Choose appropriate generation mode based on device memory
-     - 省内存模式：适合4GB内存设备，速度较慢 / Memory Saving: suitable for 4GB RAM devices, slower speed
-     - 平衡模式：适合6GB内存设备，平衡速度和质量（推荐）/ Balance: suitable for 6GB RAM devices, balanced speed and quality (recommended)
-     - 充足内存模式：适合8GB+设备，速度最快 / Enough Memory: suitable for 8GB+ devices, fastest speed
+- **分块大小 / Chunk Size**：设置文本分块的大小（默认1000字符）/ Set text chunk size (default 1000 characters)
+- **重叠大小 / Overlap Size**：设置文本分块的重叠大小（默认200字符）/ Set text chunk overlap size (default 200 characters)
+- **最小分块限制 / Minimum Chunk Limit**：设置文本分块的最小长度（默认50字符）/ Set minimum length for text chunks (default 50 characters)
+- **JSON训练集分块优化 / JSON Training Set Chunk Optimization**：特殊处理JSON格式的训练数据集 / Special processing for JSON format training datasets
 
-5. **GPU后端设置 / GPU Backend Settings**
-   - **后端选择 / Backend Selection**：选择推理使用的计算后端 / Select computational backend for inference
-     - **CPU**：纯CPU推理，兼容性最好但速度较慢 / Pure CPU inference, best compatibility but slower speed
-     - **OpenCL**：GPU加速，适合大多数安卓设备，速度快 / GPU acceleration, suitable for most Android devices, fast speed
-     - **Vulkan**：高性能GPU加速，部分设备支持，速度最快 / High-performance GPU acceleration, some devices support, fastest speed
-     - **NNAPI**：Android神经网络API，部分设备支持 / Android Neural Networks API, some devices support
-   - **后端兼容性说明 / Backend Compatibility Notes**：
-     - ⚠️ 不是所有设备都支持所有后端 / Not all devices support all backends
-     - ⚠️ 如果选择的后端不支持，可能导致应用崩溃 / If selected backend is not supported, app may crash
-     - ⚠️ 建议先使用CPU后端测试，确认模型正常工作后再尝试GPU / Recommend testing with CPU backend first, then try GPU after confirming model works
-     - ⚠️ GPU后端失败时会在日志中显示错误信息 / GPU backend failures will show error messages in logs
-   - **后端推荐 / Backend Recommendations**：
-     - 骁龙8系列：推荐OpenCL或Vulkan / Snapdragon 8 series: recommend OpenCL or Vulkan
-     - 骁龙7系列：推荐OpenCL / Snapdragon 7 series: recommend OpenCL
-     - 联发科天玑：推荐OpenCL / MediaTek Dimensity: recommend OpenCL
-     - 老旧设备：建议使用CPU / Older devices: recommend CPU
+### 4.3 LLM推理设置 / LLM Inference Settings
 
-6. **全局设置 / Global Settings**
-   - 调试模式：启用详细日志输出 / Debug Mode: Enable detailed log output
-   - 字体大小：调整应用中文本的显示大小 / Font Size: Adjust text display size in the application
+- **最大序列长度 / Max Sequence Length**：设置模型处理的最大序列长度 / Set maximum sequence length for model processing
+- **推理线程数 / Inference Threads**：设置推理时使用的CPU线程数 / Set number of CPU threads used during inference
+- **最大输出Token数 / Max Output Tokens**：限制模型单次输出的最大Token数量 / Limit maximum number of tokens in single model output
+- **手动温度 / Manual Temperature**：控制输出的随机性（0.0-2.0，值越高越随机）/ Control output randomness (0.0-2.0, higher values more random)
+- **手动Top-P / Manual Top-P**：核采样参数（0.0-1.0，控制候选词范围）/ Nucleus sampling parameter (0.0-1.0, controls candidate word range)
+- **手动Top-K / Manual Top-K**：限制每步采样的候选词数量 / Limit number of candidate words per sampling step
+- **手动重复惩罚 / Manual Repetition Penalty**：减少重复内容的生成（1.0-2.0）/ Reduce repetitive content generation (1.0-2.0)
+- **优先手动参数 / Prioritize Manual Parameters**：启用时使用手动设置的参数而非模型默认参数 / Use manually set parameters instead of model defaults when enabled
 
-#### 操作说明 / Operation Instructions
+### 4.4 Diffusion生成设置 / Diffusion Generation Settings
+
+- **去噪步数 / Denoising Steps**：控制图像生成的质量和时间（10-50步）/ Controls image generation quality and time (10-50 steps)
+  - 10-15步：快速预览，质量较低 / Quick preview, lower quality
+  - 15-20步：标准质量，推荐 / Standard quality, recommended
+  - 20-30步：高质量，耗时更长 / High quality, longer time
+  - 30-50步：最高质量，显著增加生成时间 / Highest quality, significantly increases generation time
+- **随机种子 / Random Seed**：控制图像生成的随机性 / Controls image generation randomness
+  - 使用随机种子：每次生成不同的图像（默认）/ Use random seed: generates different images each time (default)
+  - 固定种子值：输入特定数值可复现相同的图像 / Fixed seed value: input specific number to reproduce same image
+- **内存模式 / Memory Mode**：根据设备内存选择合适的生成模式 / Choose appropriate generation mode based on device memory
+  - 省内存模式：适合4GB内存设备，速度较慢 / Memory Saving: suitable for 4GB RAM devices, slower speed
+  - 平衡模式：适合6GB内存设备，平衡速度和质量（推荐）/ Balance: suitable for 6GB RAM devices, balanced speed and quality (recommended)
+  - 充足内存模式：适合8GB+设备，速度最快 / Enough Memory: suitable for 8GB+ devices, fastest speed
+
+### 4.5 GPU后端设置 / GPU Backend Settings
+
+- **后端选择 / Backend Selection**：选择推理使用的计算后端 / Select computational backend for inference
+  - **CPU**：纯CPU推理，兼容性最好但速度较慢 / Pure CPU inference, best compatibility but slower speed
+  - **OpenCL**：GPU加速，适合大多数安卓设备，速度快 / GPU acceleration, suitable for most Android devices, fast speed
+  - **Vulkan**：高性能GPU加速，部分设备支持，速度最快 / High-performance GPU acceleration, some devices support, fastest speed
+  - **NNAPI**：Android神经网络API，部分设备支持 / Android Neural Networks API, some devices support
+- **后端兼容性说明 / Backend Compatibility Notes**：
+  - ⚠️ 不是所有设备都支持所有后端 / Not all devices support all backends
+  - ⚠️ 如果选择的后端不支持，可能导致应用崩溃 / If selected backend is not supported, app may crash
+  - ⚠️ 建议先使用CPU后端测试，确认模型正常工作后再尝试GPU / Recommend testing with CPU backend first, then try GPU after confirming model works
+  - ⚠️ GPU后端失败时会在日志中显示错误信息 / GPU backend failures will show error messages in logs
+- **后端推荐 / Backend Recommendations**：
+  - 骁龙8系列：推荐OpenCL或Vulkan / Snapdragon 8 series: recommend OpenCL or Vulkan
+  - 骁龙7系列：推荐OpenCL / Snapdragon 7 series: recommend OpenCL
+  - 联发科天玑：推荐OpenCL / MediaTek Dimensity: recommend OpenCL
+  - 老旧设备：建议使用CPU / Older devices: recommend CPU
+
+### 4.6 知识图谱RAG设置 / Knowledge Graph RAG Settings
+
+- **自定义词典选择 / Custom Dictionary Selection**：选择领域专用词典文件 / Select domain-specific dictionary file
+  - 词典放置在 `数据根目录/dictionary/` 目录 / Dictionaries are placed in `Data Root/dictionary/` directory
+  - 支持JSON格式的HanLP自定义词典 / Supports JSON format HanLP custom dictionaries
+  - 词典格式详见第6.6节 / Dictionary format details in Section 6.6
+
+- **Graph RAG 工作原理（简要）/ How Graph RAG Works (Brief)**
+  - 问题发送后，系统首先使用 HanLP 对用户问题做实体识别，并从向量检索结果的前若干个文本块中提取实体，组合成“种子实体集合”。 / After you send a question, the app uses HanLP to extract entities from the query and from the top vector search chunks, combining them into a "seed entity set".
+  - 系统会自动过滤一些通用、高频、语义不强的词（如“测试/进行/实现/使用/数据/系统”等），避免它们在图谱中放大噪声。 / The app automatically filters generic, high-frequency and low-informative words (e.g. "测试/test", "进行/perform", "实现/implement", "使用/use", "数据/data", "系统/system") to avoid amplifying noise in the graph.
+  - 每次查询最多只保留有限数量的种子实体（系统内部上限约为 32 个），防止图扩展过宽导致性能问题。 / Each query keeps at most a limited number of seed entities (internal limit ~32) to prevent graph expansion from becoming too wide and hurting performance.
+  - 基于种子实体，图谱会向外扩展一跳，找到与这些实体强关联的其他实体，并通过这些实体反查更多相关文本块。 / Based on the seed entities, the knowledge graph expands one hop to find strongly related entities and retrieves more related chunks through those entities.
+  - 最终系统会综合三类信息给每个文本块打分：向量相似度、图谱中的实体共现权重、与种子实体的重叠数量，并进行归一化后加权融合，排序靠前的文本块将作为模型上下文。 / In the end, the app scores each chunk using three signals: vector similarity, graph-based entity co-occurrence weights, and overlap with seed entities. These signals are normalized and fused with preset weights, and top-ranked chunks are used as context for the LLM.
+
+- **实体置信度阈值 / Entity Confidence Threshold**：过滤低置信度实体（默认 0.7）/ Filter low-confidence entities (default 0.7)
+  - 范围：0.5 - 1.0 / Range: 0.5 - 1.0
+  - 值越高，识别越精确但可能遗漏实体 / Higher values mean more precise recognition but may miss some entities
+  - 值越低，召回更多实体但可能引入噪声 / Lower values recall more entities but may introduce more noise
+
+- **图扩展最小边权重 / Graph Min Edge Weight**
+  - 控制图谱中“共现关系”的最低权重，权重大表示在多个文本块中共同出现。/ Controls the minimum weight of co-occurrence edges in the graph; larger weights mean entities co-occur in more chunks.
+  - 建议范围：1-4。值越高，保留的关系越“强”，扩展实体会更少。/ Recommended range: 1-4. Higher values keep only stronger relations and fewer expanded entities.
+
+- **图扩展最大实体数 / Graph Max Expand Entities**
+  - 控制每次查询中最多可以从图谱扩展多少个新实体。/ Controls how many new entities can be added from the graph in each query.
+  - 范围：10-100。建议在 20-60 之间，根据设备性能和知识库规模调整。/ Range: 10-100. Recommended 20-60 depending on device performance and KB size.
+
+- **图扩展最大 Chunk 数 / Graph Max Expand Chunks**
+  - 限制图扩展阶段最多可以增加多少个候选文本块参与打分。/ Limits how many additional chunks graph expansion can contribute to scoring.
+  - 范围：10-100。值越大，召回更充分，但排序和融合成本也更高。/ Range: 10-100. Larger values recall more but increase sorting and fusion cost.
+
+- **Graph RAG 融合权重预设 / Graph RAG Fusion Presets**
+  - 向量优先：更依赖向量相似度，图谱只做轻量加成。/ Vector-first: rely more on vector similarity, graph gives a small boost.
+  - 平衡：向量、图谱和实体重叠相对平衡。/ Balanced: vectors, graph and entity overlap are relatively balanced.
+  - 图谱增强：更强调图谱关系，对结构化/实体密集型知识库更有利。/ Graph-enhanced: emphasizes graph relations, useful for structured or entity-dense KBs.
+
+- **推荐设置：在线大模型 / Recommended Settings: Online Large LLMs**
+  - 场景：使用云端大模型（如 GPT、通义千问云端版等），模型本身能力强，Graph RAG 主要用来补充召回。/ Scenario: using powerful cloud LLMs (e.g. GPT-style APIs); Graph RAG mainly supplements recall.
+  - 建议：
+    - 图扩展最小边权重 / Graph Min Edge Weight：2-3
+    - 图扩展最大实体数 / Graph Max Expand Entities：20-40
+    - 图扩展最大 Chunk 数 / Graph Max Expand Chunks：20-40
+    - 实体置信度阈值 / Entity Confidence Threshold：0.7-0.8
+    - 融合预设 / Fusion Preset：向量优先或平衡（Vector-first or Balanced）
+  - 思路：让“向量检索 + 重排”保持主导，图谱提供少量额外证据，避免图谱噪声对强大模型产生过多干扰。/ Idea: keep "vector retrieval + rerank" dominant, use graph as a light additional signal to avoid noisy graph signals disturbing strong LLMs.
+
+- **推荐设置：本地小模型 / Recommended Settings: Local Small LLMs**
+  - 场景：使用 0.6B-4B 的本地小模型（如 Qwen3-0.6B / 4B 等），模型对上下文质量更敏感。/ Scenario: using 0.6B-4B local LLMs (e.g. Qwen3-0.6B/4B) where model quality is more sensitive to context.
+  - 建议：
+    - 图扩展最小边权重 / Graph Min Edge Weight：2
+    - 图扩展最大实体数 / Graph Max Expand Entities：40-60
+    - 图扩展最大 Chunk 数 / Graph Max Expand Chunks：20-40
+    - 实体置信度阈值 / Entity Confidence Threshold：0.6-0.7
+    - 融合预设 / Fusion Preset：平衡或图谱增强（Balanced or Graph-enhanced）
+  - 思路：适度放宽实体召回并加大图谱权重，让知识图谱帮助小模型更好地“对齐”到与问题相关的块；同时建议将“检索数量”下拉（search depth）设置在 4-6 之间，该数值也会限制最终送入 LLM 的文本块数量，避免本地小模型一次接收过多上下文。/ Idea: relax entity recall and increase graph weight so that the knowledge graph helps small models better focus on relevant chunks; at the same time, set the "retrieval count" (search depth dropdown) to around 4-6, which also limits how many chunks are finally sent to the LLM to avoid overloading small local models.
+
+### 4.7 全局设置 / Global Settings
+
+- **调试模式 / Debug Mode**：启用详细日志输出 / Enable detailed log output
+- **字体大小 / Font Size**：调整应用中文本的显示大小 / Adjust text display size in the application
+
+### 4.8 操作说明 / Operation Instructions
 
 1. 从主菜单点击"设置"进入设置页面 / Click "Settings" from main menu to enter settings page
 2. 调整各项设置 / Adjust various settings
 3. 设置会自动保存 / Settings are automatically saved
 4. 返回主界面时，设置会立即生效 / Settings take effect immediately when returning to main interface
 
-### 3.6 菜单功能 / Menu Functions
+---
+
+## 5. 菜单功能 / Menu Functions
 
 OfflineAI 应用在右上角提供了菜单选项：
 
 The OfflineAI app provides menu options in the top-right corner:
 
 - **设置 / Settings**：打开设置页面，配置应用参数 / Open settings page to configure application parameters
-### 默认模型下载
+
+### 5.1 默认模型下载 / Default Model Download
 
 提供常用模型的快速下载功能，简化模型获取和配置过程：
 
-#### 功能特点
-- **模型选择**：提供预设的推荐模型列表，包括嵌入模型、重排模型和LLM模型
-- **断点续传**：支持下载中断后继续下载，避免重复下载
-- **自动配置**：下载完成后自动配置模型路径到相应设置中
-- **进度显示**：实时显示下载进度、速度和剩余时间
-- **存储管理**：自动检查存储空间，避免因空间不足导致下载失败
+Provides quick download functionality for commonly used models, simplifying model acquisition and configuration:
+
+#### 功能特点 / Features
+
+- **模型选择 / Model Selection**：提供预设的推荐模型列表，包括嵌入模型、重排模型和LLM模型 / Provides preset recommended model list, including embedding models, rerank models and LLM models
+- **断点续传 / Resume Download**：支持下载中断后继续下载，避免重复下载 / Supports resuming downloads after interruption, avoiding duplicate downloads
+- **自动配置 / Auto Configuration**：下载完成后自动配置模型路径到相应设置中 / Automatically configures model paths to corresponding settings after download completion
+- **进度显示 / Progress Display**：实时显示下载进度、速度和剩余时间 / Real-time display of download progress, speed and remaining time
+- **存储管理 / Storage Management**：自动检查存储空间，避免因空间不足导致下载失败 / Automatically checks storage space to avoid download failures due to insufficient space
 
 #### 推荐模型列表 / Recommended Model List
+
 **嵌入模型 / Embedding Models**
-- **bge-small-zh-v1.5**：中文优化的小型嵌入模型，适合移动设备 / Chinese-optimized small embedding model, suitable for mobile devices
-- **bge-base-zh-v1.5**：中文优化的基础嵌入模型，平衡性能和效果 / Chinese-optimized basic embedding model, balanced performance and effectiveness
-- **text2vec-base-chinese**：通用中文嵌入模型 / General Chinese embedding model
+- **Qwen3-Embedding-0.6B-MNN-int4**：RAG嵌入式向量生成，0.6B参数，INT4量化 / RAG embedding vector generation, 0.6B parameters, INT4 quantized
 
 **重排模型 / Rerank Models**
-- **bge-reranker-base**：基础重排模型，适合大多数场景 / Basic rerank model, suitable for most scenarios
-- **bge-reranker-large**：大型重排模型，效果更好但速度较慢 / Large rerank model, better results but slower speed
+- **Qwen3-Reranker-0.6B-MNN-int4**：RAG召回结果重排增强准确性，0.6B参数，INT4量化 / RAG recall results re-ranking for enhanced accuracy, 0.6B parameters, INT4 quantized
 
 **LLM模型 / LLM Models**
-- **Qwen2-0.5B-Instruct**：0.5B参数的轻量级模型，适合学习研究 / 0.5B parameter lightweight model, suitable for learning and research
-- **Qwen2-1.5B-Instruct**：1.5B参数的小型模型，性能和速度平衡 / 1.5B parameter small model, balanced performance and speed
-- **TinyLlama-1.1B**：1.1B参数的英文模型，运行速度快 / 1.1B parameter English model, fast running speed
+- **Qwen3-0.6B-MNN-int4**：Qwen3 Text2Text，0.6B参数，INT4量化 / Qwen3 Text2Text, 0.6B parameters, INT4 quantized
+- **Qwen3-4B-Thinking-2507-MNN-int4**：Qwen3 Text2Text，4B参数，适合本地RAG / Qwen3 Text2Text, 4B parameters, suitable for local RAG
 
 **多模态模型 / Multimodal Models**
-- **LLaVA（GGUF 小尺寸变体）**：图像-文本理解，建议选择小模型以适配移动设备 / Vision-language understanding; choose small variants for mobile
-- **Qwen-VL（GGUF）**：中文多模态能力较强，注意内存占用 / Strong CN multimodal ability; watch memory usage
-- **InternVL（GGUF）**：多场景图像理解，需根据设备性能选择 / Broad image understanding; choose based on device capability
+- **Qwen3-VL-4B-Thinking-MNN-int4**：Qwen3 VL 4B Thinking，图像-文本理解 / Qwen3 VL 4B Thinking, vision-language understanding
+- **Qwen3-VL-4B-Instruct-MNN-int4**：Qwen3 VL 4B Instruct，图像-文本理解 / Qwen3 VL 4B Instruct, vision-language understanding
 
 **注意事项 / Notes**：
+- 所有模型均为MNN格式，INT4量化，适合移动设备 / All models are in MNN format, INT4 quantized, suitable for mobile devices
 - 多模态模型需要MNN框架支持视觉特性编译 / Multimodal models require MNN framework compiled with vision features
 - 模型文件通常较大（1-5GB），下载前请确保存储空间充足 / Model files are usually large (1-5GB), ensure sufficient storage before downloading
 - 首次加载多模态模型可能需要较长时间 / First-time loading of multimodal models may take longer
+- 完整模型列表请查看应用内"默认模型下载"功能 / For complete model list, check "Default Model Download" in the app
 
 #### 使用建议
 - **首次使用**：建议先下载一个嵌入模型和一个小型LLM模型
@@ -566,7 +493,8 @@ bge-reranker-base|https://modelscope.cn/models/AI-ModelScope/bge-reranker-base|c
 - 配置文件（config.json）必须包含模型所需的所有参数 / Config file (config.json) must contain all required parameters
 - 编辑文件时注意保持格式一致，避免解析错误 / Maintain consistent format when editing to avoid parsing errors
 - 建议先在小模型上测试，确认格式正确后再添加大模型 / Recommend testing with small models first before adding large models
-### Language/语言切换 / Language Switching
+
+### 5.2 Language/语言切换 / Language Switching
 
 提供中英文界面切换功能，满足不同用户的语言需求：
 Provides Chinese-English interface switching functionality to meet different users' language needs:
@@ -589,7 +517,8 @@ Provides Chinese-English interface switching functionality to meet different use
 - **对话框 / Dialog Boxes**：确认对话框、错误提示、信息提示 / Confirmation dialogs, error prompts, information prompts
 - **设置页面 / Settings Page**：所有设置项的标题和说明 / All setting item titles and descriptions
 - **帮助文档 / Help Documentation**：用户指南和帮助信息 / User guides and help information
-### 4.4 其他菜单功能 / Other Menu Functions
+
+### 5.3 其他菜单功能 / Other Menu Functions
 
 - **关于 / About**：显示应用版本信息 / Display application version information
 - **查看日志 / View Logs**：打开日志查看页面，查看应用运行日志 / Open log viewing page to view application runtime logs
@@ -599,79 +528,780 @@ Provides Chinese-English interface switching functionality to meet different use
 - **帮助 / Help**：打开本使用说明 / Open this user guide
 - **退出 / Exit**：关闭应用 / Close application
 
-### 3.7 日志查看页面 / Log Viewing Page
+---
+
+## 6. RAG 知识库系统（专题章节）/ RAG Knowledge Base System
+
+本章详细介绍 RAG（检索增强生成）知识库系统的原理、使用方法和高级功能，包括知识图谱RAG和自定义词典生成。
+
+This chapter provides detailed information about the RAG (Retrieval-Augmented Generation) knowledge base system, including principles, usage methods, and advanced features such as Knowledge Graph RAG and custom dictionary generation.
+
+### 6.1 RAG 基本原理 / RAG Basic Principles
+
+RAG（检索增强生成 / Retrieval-Augmented Generation）是一种结合了检索系统和生成式AI的技术框架，能够让大语言模型(LLM)基于特定知识回答问题，提高回答的准确性和可靠性。
+
+RAG is a technical framework that combines retrieval systems with generative AI, enabling Large Language Models (LLM) to answer questions based on specific knowledge, improving accuracy and reliability.
+
+#### RAG 工作流程 / RAG Workflow
+
+```text
+Knowledge Vector Database Construction:
+┌------------------┐     ┌-------------------┐     ┌-------------------┐
+│                  │     │                   │     │  Text Vectorize   │
+│  User Documents  │ --> │   Text Chunking   │ --> │  Tokenize &       │
+│                  │     │ (Size/Overlap)    │     │  Embed & Normalize│
+└------------------┘     └-------------------┘     └-------------------┘
+                                                            │           
+RAG Q&A Process:                                            v           
+┌------------------┐     ┌-------------------┐     ┌-------------------┐
+│                  │     │  Text Vectorize   │     │                   │
+│  User Question   │ --> │  Tokenize &       │ --> │ Vector Database   │
+│                  │     │  Embed & Normalize│     │    Retrieval      │
+└------------------┘     └-------------------┘     └-------------------┘
+                                                            │           
+                                                            v           
+┌------------------┐     ┌-------------------┐     ┌-------------------┐
+│                  │     │                   │     │                   │
+│ Generate Answer  │ <-- │ Large Language    │ <-- │ Build Context     │
+│                  │     │ Model (LLM)       │     │                   │
+└------------------┘     └-------------------┘     └-------------------┘                     
+```
+
+#### RAG 核心步骤 / RAG Core Steps
+
+1. **知识库构建 / Knowledge Base Construction**：
+   - 导入文档（PDF、Word、文本等） / Import documents (PDF, Word, text, etc.)
+   - 文本分块处理 / Text chunking processing
+   - 使用嵌入模型将文本块转换为向量 / Convert text chunks to vectors using embedding models
+   - 存储文本及其向量到向量数据库 / Store text and vectors in vector database
+
+2. **问答交互 / Q&A Interaction**：
+   - 用户提出问题 / User asks questions
+   - 问题向量化 / Question vectorization
+   - 在向量数据库中检索相似文本块 / Retrieve similar text chunks from vector database
+   - 将检索结果与问题一起发送给大语言模型 / Send retrieval results with question to LLM
+   - 大语言模型生成基于知识库的回答 / LLM generates knowledge-based answers
+
+3. **优势 / Advantages**：
+   - 回答基于特定知识，减少"幻觉" / Answers based on specific knowledge, reducing "hallucinations"
+   - 无需重新训练模型即可更新知识 / Update knowledge without retraining models
+   - 保持私密性，数据不离开本地设备 / Maintain privacy, data stays on local device
+
+### 6.2 文本分块策略 / Text Chunking Strategy
+
+#### 1. 暴力分块方法 / Brute Force Chunking
+
+- **定义 / Definition**：将文档按固定长度(如500字符)简单切分 / Simply split documents by fixed length (e.g., 500 characters)
+- **优势 / Advantages**：
+  - 实现简单，计算成本低 / Simple implementation, low computational cost
+  - 适合内容结构简单的文档 / Suitable for documents with simple content structure
+- **缺陷 / Disadvantages**：
+  - 容易切断语义连贯性 / Easy to break semantic coherence
+  - 检索结果可能包含无关内容 / Retrieval results may contain irrelevant content
+  - 对LLM归纳能力要求高 / High requirements for LLM summarization ability
+
+#### 2. 检索结果分析 / Retrieval Result Analysis
+
+- **有用信息 / Useful Information**：与问题直接相关的文本片段 / Text segments directly related to the question
+- **噪声信息 / Noise Information**：
+  - 同一文本块中不相关内容 / Irrelevant content in the same text chunk
+  - 格式标记、页眉页脚等 / Format markers, headers, footers, etc.
+- **对LLM的要求 / Requirements for LLM**：
+  - 需要从混杂内容中提取关键信息 / Need to extract key information from mixed content
+  - 必须识别并忽略无关内容 / Must identify and ignore irrelevant content
+  - 需保持原始语义的准确性 / Need to maintain accuracy of original semantics
+
+#### 3. 推荐分块策略 / Recommended Chunking Strategies
+
+| Strategy / 策略            | Use Case / 使用场景             | Example Params / 示例参数    | Advantages / 优势        |
+|----------------------------|--------------------------------|-----------------------------|--------------------------|
+| Fixed Length / 固定长度     | Tech Docs/Code / 技术文档/代码  | 500 chars, 100              | Simple & Fast / 简单快速  |
+| Semantic Chunk / 语义分块   | Narrative Content / 叙述内容    | By Paragraph / 按段落        | Keep Semantic / 保持语义 |
+| Hierarchical / 层次化       | Structured Docs / 结构化文档    | Title+Content / 标题+内容    | Keep Context / 保持上下文 |
+| Dynamic Chunk / 动态分块    | Mixed Content / 混合内容        | Content Analysis / 内容分析  | Adaptive Best / 自适应最优|
+
+**最佳实践建议 / Best Practice Recommendations**：
+
+1. **技术文档 / Technical Documents**：500-1000字符分块，20%重叠 / 500-1000 character chunks, 20% overlap
+2. **叙述文本 / Narrative Text**：按自然段落分块 / Chunk by natural paragraphs
+3. **混合内容 / Mixed Content**：先按结构分块，再对长块二次分块 / Structure-based chunking first, then secondary chunking for long blocks
+4. **添加元数据 / Add Metadata**：标记块类型和关键字段 / Mark chunk types and key fields
+
+**预设分块选项 / Preset Chunking Options**（可在设置中配置）：
+
+- 4000/800（大块/大重叠，适合复杂文档）/ Large chunks/Large overlap, suitable for complex documents
+- 2000/400（中大块/中重叠）/ Medium-large chunks/Medium overlap
+- 1000/200（默认，平衡选项）/ Default, balanced option
+- 500/100（小块/小重叠，适合简单文档）/ Small chunks/Small overlap, suitable for simple documents
+- 100/20（微块/微重叠，适合精确检索）/ Micro chunks/Micro overlap, suitable for precise retrieval
+
+### 6.3 构建知识库 / Build Knowledge Base
 
 #### 界面元素说明 / Interface Elements
 
-- **日志显示区域 / Log Display Area**：显示应用运行日志 / Display application runtime logs
-- **清空日志按钮 / Clear Log Button**：清除当前日志 / Clear current logs
-- **刷新按钮 / Refresh Button**：刷新日志内容 / Refresh log content
-- **返回按钮 / Back Button**：返回主界面 / Return to main interface
+- **知识库名称下拉框 / Knowledge Base Name Dropdown**：选择或创建知识库 / Select or create knowledge base
+- **嵌入模型下拉框 / Embedding Model Dropdown**：选择用于生成文本向量的模型 / Select model for generating text vectors
+- **重排模型下拉框 / Rerank Model Dropdown**：选择用于重新排序检索结果的模型（可选） / Select model for reordering retrieval results (optional)
+  - 重排模型能够提高检索结果的相关性 / Rerank models can improve relevance of retrieval results
+  - 如果不需要重排功能，可以选择"无" / If reranking is not needed, select "None"
+  - 建议选择与嵌入模型匹配的重排模型 / Recommend choosing rerank model that matches embedding model
+- **文件列表显示区域 / File List Display Area**：显示已选择的文件 / Display selected files
+- **进度显示区域 / Progress Display Area**：显示处理进度 / Display processing progress
+- **浏览文件按钮 / Browse Files Button**：选择要添加到知识库的文件 / Select files to add to knowledge base
+- **创建知识库按钮 / Create Knowledge Base Button**：开始处理文件并构建知识库 / Start processing files and building knowledge base
 
-#### 日志菜单选项 / Log Menu Options
+#### JSON文件特殊处理 / Special Processing for JSON Files
 
-- **清空日志 / Clear Logs**：清除所有日志 / Clear all logs
-- **日志分享功能 / Log Sharing Function**：
-  - 支持导出完整日志文件(.log格式) / Support exporting complete log files (.log format)
-  - 可通过系统分享菜单发送到微信等社交平台 / Can send to WeChat and other social platforms through system share menu
-  - 可选择分享全部日志或仅选中日志 / Can choose to share all logs or only selected logs
-  - 分享时会自动附加设备型号和系统版本信息，便于故障定位 / Automatically attach device model and system version information when sharing for troubleshooting
+1. **自动识别格式 / Automatic Format Recognition**：
+   - Alpaca格式（instruction/input/output）/ Alpaca format (instruction/input/output)
+   - DPO格式（prompt/chosen）/ DPO format (prompt/chosen)
+   - 对话格式（conversations/messages）/ Conversation format (conversations/messages)
 
-## 4. 高级功能 / Advanced Features
+2. **处理规则 / Processing Rules**：
+   - 最小文本块大小：使用设置中配置的值（默认50字符）/ Minimum chunk size: use value configured in settings (default 50 characters)
+   - 大文件(>1MB)自动分片 / Large files (>1MB) automatically chunked
+   - 保留语义完整性 / Preserve semantic integrity
 
-### 4.1 重排模型功能 / Rerank Model Function
+3. **示例 / Examples**：
+   ```json
+   // Alpaca格式
+   {"instruction":"解释AI","output":"人工智能是..."}
+   
+   // DPO格式
+   {"prompt":"机器学习定义","chosen":"机器学习是..."}
+   ```
+
+#### 操作说明 / Operation Instructions
+
+1. **选择知识库 / Select Knowledge Base**：
+   - 在知识库下拉框中选择现有知识库或输入新名称创建 / Select existing knowledge base from dropdown or input new name to create
+   - 新知识库会自动创建对应的存储目录 / New knowledge base will automatically create corresponding storage directory
+
+2. **选择模型 / Select Models**：
+   - 选择嵌入模型（必选） / Select embedding model (required)
+   - 选择重排模型（可选，建议启用以提高检索质量） / Select rerank model (optional, recommended to enable for better retrieval quality)
+
+3. **添加文档 / Add Documents**：
+   - 点击"浏览文件"按钮选择文档 / Click "Browse Files" button to select documents
+   - 支持多种格式：PDF、TXT、DOCX、MD等 / Supports multiple formats: PDF, TXT, DOCX, MD, etc.
+   - 可以一次选择多个文件 / Can select multiple files at once
+
+4. **开始构建 / Start Building**：
+   - 点击"创建知识库"按钮开始处理 / Click "Create Knowledge Base" button to start processing
+   - 系统会显示处理进度 / System will display processing progress
+   - 处理完成后知识库即可用于问答 / After processing is complete, knowledge base is ready for Q&A
+   - 建议把程序留在前台不要手动熄屏。程序在构建的时候会防止自动锁屏。 / Recommend keeping the app in foreground and not manually turning off screen. The app prevents auto-lock during building.
+
+### 6.4 RAG 问答使用 / RAG Q&A Usage
+
+#### 知识库选择 / Knowledge Base Selection
+
+在问答页面的知识库下拉框中选择要查询的知识库。确保知识库已经构建完成。
+
+Select the knowledge base to query from the dropdown on the Q&A page. Ensure the knowledge base has been built.
+
+#### 参数设置 / Parameter Settings
+
+**近似深度 / Approximate Depth**：
+- 控制向量数据库检索后提交给模型的文本块数量 / Controls the number of text chunks submitted to the model after vector database retrieval
+- 值越大，提交的上下文越多，回答可能更准确但速度更慢、消耗更多token / Larger values provide more context, potentially more accurate answers but slower speed and more token consumption
+- 值越小，响应更快但可能遗漏相关信息 / Smaller values provide faster response but may miss relevant information
+- 建议根据需求平衡：一般问答3-5，精确检索可设8-10 / Recommended balance based on needs: 3-5 for general Q&A, 8-10 for precise retrieval
+
+**重排数量 / Rerank Count**：
+- 控制使用重排模型对检索结果进行重新排序的文本块数量 / Controls the number of text chunks for reranking model to reorder retrieval results
+- 重排模型能够更准确地评估文本块与问题的相关性 / Rerank models can more accurately evaluate the relevance between text chunks and questions
+- 通常设置为近似深度的2-3倍，然后从中选择最相关的文本块 / Usually set to 2-3 times the approximate depth, then select the most relevant text chunks
+- 例如：近似深度5，重排数量可设置为10-15 / Example: approximate depth 5, rerank count can be set to 10-15
+- 启用重排会增加处理时间，但能显著提高检索质量 / Enabling reranking increases processing time but significantly improves retrieval quality
+
+#### 重排模型功能 / Rerank Model Function
 
 重排模型（Reranker）是一种专门用于重新排序检索结果的模型，能够更准确地评估文本块与查询问题的相关性。
 
 Rerank models are specialized models for reordering retrieval results, capable of more accurately evaluating the relevance between text chunks and query questions.
 
-#### 工作原理 / Working Principle
+**工作原理 / Working Principle**：
 1. **初步检索 / Initial Retrieval**：嵌入模型先进行向量相似度检索 / Embedding model first performs vector similarity retrieval
 2. **重新排序 / Reordering**：重排模型对检索结果进行精确的相关性评分 / Rerank model performs precise relevance scoring on retrieval results
 3. **结果优化 / Result Optimization**：选择评分最高的文本块作为最终结果 / Select text chunks with highest scores as final results
 
-#### 使用建议 / Usage Recommendations
+**使用建议 / Usage Recommendations**：
 - **适用场景 / Applicable Scenarios**：复杂查询、多义词查询、需要高精度检索的场景 / Complex queries, ambiguous word queries, scenarios requiring high-precision retrieval
 - **性能影响 / Performance Impact**：会增加处理时间，但显著提高检索质量 / Increases processing time but significantly improves retrieval quality
 - **参数设置 / Parameter Settings**：重排数量建议设置为近似深度的2-3倍 / Rerank count recommended to be set to 2-3 times the approximate depth
 
-### 4.2 模型使用跟踪 / Model Usage Tracking
+#### 使用技巧 / Usage Tips
 
-OfflineAI 实现了模型使用跟踪机制，防止模型过早卸载，确保模型在需要时保持加载状态。当应用检测到模型不再使用时，会自动释放资源，优化内存使用。
+1. **精确提问**：问题越具体，检索结果越准确 / More specific questions lead to more accurate retrieval results
+2. **调整参数**：根据问题复杂度调整近似深度和重排数量 / Adjust approximate depth and rerank count based on question complexity
+3. **多轮对话**：可以基于上一轮回答继续追问 / Can ask follow-up questions based on previous answers
+4. **文本转笔记**：长按有用的回答文本，选择"转笔记"快速保存到知识库 / Long-press useful answer text, select "Convert to Note" to quickly save to knowledge base
 
-OfflineAI implements a model usage tracking mechanism to prevent premature model unloading and ensure models remain loaded when needed. When the application detects that a model is no longer in use, it automatically releases resources to optimize memory usage.
+---
 
-### 4.3 文本转笔记 / Text to Notes
+### 6.5 知识图谱 RAG / Knowledge Graph RAG
 
-在RAG问答页面，可以通过长按选择AI回答文本，然后悬浮菜单选择"转笔记"，将有用的回答内容快速保存到知识库中。
+知识图谱RAG是在传统向量检索基础上，结合实体识别和关系抽取，构建结构化知识图谱，提供更精准的知识问答能力。
 
-On the RAG Q&A page, you can long-press to select AI response text, then choose "Convert to Notes" from the floating menu to quickly save useful response content to the knowledge base.
+Knowledge Graph RAG builds on traditional vector retrieval by combining entity recognition and relationship extraction to construct structured knowledge graphs, providing more accurate knowledge Q&A capabilities.
 
-### 4.4 模型选择记忆 / Model Selection Memory
+#### 6.5.1 图谱原理简介 / Graph Principles
 
-应用支持"记住选择"功能，当选择嵌入模型时，可以选择将此选择保存到知识库元数据中，避免每次都需要重新选择模型。
+**什么是知识图谱 / What is Knowledge Graph**
 
-The application supports a "Remember Selection" feature. When selecting an embedding model, you can choose to save this selection to the knowledge base metadata, avoiding the need to reselect the model each time.
+知识图谱是一种语义网络，以"实体-关系-实体"的三元组结构组织知识。例如：
+- (STAR1200, 是, 固态硬盘控制器)
+- (STAR1200, 制造商, 忆芯科技)
+- (STAR1200, 支持接口, PCIe 4.0)
 
-### 4.5 分块大小选择 / Chunk Size Selection
+Knowledge Graph is a semantic network that organizes knowledge in "entity-relation-entity" triple structures. Examples:
+- (STAR1200, is, SSD Controller)
+- (STAR1200, manufacturer, STARBLAZE)
+- (STAR1200, supports, PCIe 4.0)
 
-在设置中可以配置文本分块和重叠大小，提供多种预设选项：
-- 4000/800（大块/大重叠，适合复杂文档）
-- 2000/400（中大块/中重叠）
-- 1000/200（默认，平衡选项）
-- 500/100（小块/小重叠，适合简单文档）
-- 100/20（微块/微重叠，适合精确检索）
+**为什么需要图谱 / Why Knowledge Graph**
 
-Text chunking and overlap sizes can be configured in settings, with multiple preset options available:
-- 4000/800 (Large chunks/Large overlap, suitable for complex documents)
-- 2000/400 (Medium-large chunks/Medium overlap)
-- 1000/200 (Default, balanced option)
-- 500/100 (Small chunks/Small overlap, suitable for simple documents)
-- 100/20 (Micro chunks/Micro overlap, suitable for precise retrieval)
+- **向量检索**：找到语义相似的文本块 / **Vector retrieval**: Finds semantically similar text chunks
+- **知识图谱**：找到相关的实体和关系 / **Knowledge graph**: Finds related entities and relationships
+- **结合优势**：向量召回 + 图谱扩展 = 更全面的上下文 / **Combined advantages**: Vector recall + graph expansion = more comprehensive context
 
-## 5. 故障排除 / Troubleshooting
+#### 6.5.2 实体识别与关系抽取 / Entity Recognition and Relation Extraction
 
-### 5.1 常见问题 / Common Issues
+**实体识别（NER）/ Named Entity Recognition**
+
+从文本中识别并分类命名实体：
+- 人名 / Person names
+- 地名 / Location names
+- 机构名 / Organization names
+- 专业术语 / Technical terms
+- 产品型号 / Product models
+
+Identify and classify named entities from text.
+
+**关系抽取 / Relation Extraction**
+
+识别实体之间的关系：
+- 共现关系：同一文本块中出现的实体 / Co-occurrence: entities appearing in the same text chunk
+- 引用关系：文档之间的引用 / Citation: references between documents
+- 层次关系：上下位关系 / Hierarchy: hypernym-hyponym relationships
+- 因果关系：原因和结果 / Causality: cause and effect
+
+#### 6.5.3 HanLP NER 引擎 / HanLP NER Engine
+
+OfflineAI 使用 HanLP 进行中文实体识别，支持以下词性标注：
+
+OfflineAI uses HanLP for Chinese entity recognition, supporting the following part-of-speech tags:
+
+| 标注 / Tag | 名称 / Name | 说明 / Description | 示例 / Examples |
+|------|------|------|------|
+| `gi` | 机构团体 / Organization | 技术概念、算法、框架 / Technical concepts, algorithms, frameworks | 深度学习, Transformer, 神经网络 |
+| `ntc` | 公司名 / Company | 品牌、产品线 / Brands, product lines | OpenAI, Google, 微软 |
+| `nrf` | 音译人名 / Transliterated | 外来技术术语 / Foreign technical terms | BERT, ResNet, YOLO |
+| `ns` | 地名 / Location | 地理位置 / Geographic locations | 硅谷, 深圳, Silicon Valley |
+| `n` | 一般名词 / Noun | 技术名词 / Technical nouns | 控制器, 固态硬盘, 处理器 |
+| `nz` | 其他专名 / Proper Noun | 型号、标准 / Model numbers, standards | PCIe, NVMe, USB 3.0 |
+
+**自定义词典 / Custom Dictionary**
+
+支持领域专用词典，提高识别准确率：
+- JSON格式，包含词条、词性、频率、别名 / JSON format with word, nature, frequency, aliases
+- 放置在 `数据根目录/dictionary/` 目录 / Place in `Data Root/dictionary/` directory
+- 在设置中选择词典文件 / Select dictionary file in settings
+- 构建知识库时自动加载 / Automatically loaded when building knowledge base
+
+**置信度过滤 / Confidence Filtering**
+
+可设置实体置信度阈值（默认0.5），过滤低置信度实体。
+
+Can set entity confidence threshold (default 0.5) to filter low-confidence entities.
+
+#### 6.5.4 图谱构建流程 / Graph Construction Process
+
+```
+文档导入 → 文本分块 → 向量化存储
+                ↓
+         实体识别（HanLP NER）
+                ↓
+         实体去重与归一化
+                ↓
+         关系抽取（共现关系）
+                ↓
+         图谱存储（SQLite）
+```
+
+**详细步骤 / Detailed Steps**：
+
+1. **文档处理 / Document Processing**
+   - 导入PDF、Word等文档 / Import PDF, Word and other documents
+   - 按设定大小分块 / Chunk by configured size
+   - 生成向量并存储 / Generate vectors and store
+
+2. **实体识别 / Entity Recognition**
+   - 使用HanLP对每个文本块进行NER / Use HanLP to perform NER on each text chunk
+   - 识别人名、地名、机构名、专业术语等 / Identify person names, locations, organizations, technical terms, etc.
+   - 记录实体类型和置信度 / Record entity type and confidence
+
+3. **实体归一化 / Entity Normalization**
+   - 合并相同实体的不同表述 / Merge different expressions of the same entity
+   - 例如："SSD" 和 "固态硬盘" 归一化为同一实体 / Example: "SSD" and "固态硬盘" normalized to the same entity
+   - 使用自定义词典的别名信息 / Use alias information from custom dictionary
+
+4. **关系抽取 / Relation Extraction**
+   - 提取共现关系：同一文本块中的实体 / Extract co-occurrence: entities in the same text chunk
+   - 计算共现频率作为关系强度 / Calculate co-occurrence frequency as relationship strength
+   - 构建实体-实体边 / Build entity-entity edges
+
+5. **图谱存储 / Graph Storage**
+   - 实体表：存储实体ID、名称、类型、置信度 / Entity table: stores entity ID, name, type, confidence
+   - 关系表：存储实体对、关系类型、强度 / Relationship table: stores entity pairs, relationship type, strength
+   - 文档表：存储文档与实体的关联 / Document table: stores document-entity associations
+
+#### 6.5.5 图谱查询增强 / Graph-Enhanced Query
+
+**查询流程 / Query Process**：
+
+1. **用户提问 / User Question** - 输入自然语言问题 / Input natural language question
+2. **向量检索 / Vector Retrieval** - 问题向量化，检索相似文本块（Top-K）/ Vectorize question, retrieve similar text chunks (Top-K)
+3. **实体提取 / Entity Extraction** - 从检索结果中提取实体，识别问题中的关键实体 / Extract entities from retrieval results, identify key entities in question
+4. **图谱扩展 / Graph Expansion** - 查找相关实体（1-2跳），获取实体的关联文档，补充上下文信息 / Find related entities (1-2 hops), get associated documents, supplement context
+5. **上下文合并 / Context Merging** - 合并向量检索结果和图谱扩展结果，去重并排序，发送给LLM生成回答 / Merge vector retrieval and graph expansion results, deduplicate and sort, send to LLM
+
+**优势 / Advantages**：
+
+- **发现隐含关联**：找到向量检索可能遗漏的相关信息 / Discover implicit associations: find relevant information that vector retrieval might miss
+- **补充缺失信息**：通过关系链补充完整上下文 / Supplement missing information: complete context through relationship chains
+- **提供结构化知识**：实体和关系提供更清晰的知识结构 / Provide structured knowledge: entities and relationships provide clearer knowledge structure
+- **提高准确性**：减少因上下文不完整导致的错误 / Improve accuracy: reduce errors caused by incomplete context
+
+#### 6.5.6 参数说明 / Parameter Description
+
+在设置页面（第4.6节）可配置知识图谱RAG参数：
+
+Configure Knowledge Graph RAG parameters in settings page (Section 4.6):
+
+**自定义词典路径 / Custom Dictionary Path**
+- 选择领域专用词典文件 / Select domain-specific dictionary file
+- 支持多个词典文件 / Supports multiple dictionary files
+- 词典格式详见第6.6节 / Dictionary format details in Section 6.6
+
+**实体置信度阈值 / Entity Confidence Threshold**
+- 范围：0.0 - 1.0 / Range: 0.0 - 1.0
+- 默认：0.5 / Default: 0.5
+- 说明：过滤低置信度实体，提高精确度 / Description: filter low-confidence entities, improve precision
+
+**图谱扩展深度 / Graph Expansion Depth**
+- 范围：0 - 3 层 / Range: 0 - 3 hops
+- 默认：1 层 / Default: 1 hop
+- 说明：控制关系扩展的层数，层数越多上下文越丰富但可能引入噪声 / Description: control relationship expansion depth, more hops provide richer context but may introduce noise
+
+**使用建议 / Usage Recommendations**：
+
+1. **专业领域**：使用自定义词典，提高实体识别准确率 / Professional domains: use custom dictionary to improve entity recognition accuracy
+2. **通用场景**：使用默认配置即可 / General scenarios: default configuration is sufficient
+3. **精确查询**：提高置信度阈值（0.7-0.8）/ Precise queries: increase confidence threshold (0.7-0.8)
+4. **探索性查询**：增加扩展深度（2-3层）/ Exploratory queries: increase expansion depth (2-3 hops)
+
+### 6.6 自定义词典生成指南 / Custom Dictionary Generation Guide
+
+本节说明如何使用大语言模型（LLM）自动生成领域专用词典，提高HanLP实体识别的准确率。
+
+This section explains how to use Large Language Models (LLM) to automatically generate domain-specific dictionaries to improve HanLP entity recognition accuracy.
+
+#### 6.6.1 词典格式说明 / Dictionary Format
+
+**文件结构 / File Structure**：
+
+```json
+{
+  "entries": [
+    {
+      "word": "主要术语",
+      "nature": "gi",
+      "frequency": 10000,
+      "aliases": ["别名1", "Alias1", "缩写"]
+    }
+  ]
+}
+```
+
+**字段说明 / Field Description**：
+
+- **word**：主要术语（最规范的形式）/ Main term (most canonical form)
+- **nature**：HanLP词性标注（见6.5.3节表格）/ HanLP part-of-speech tag (see table in Section 6.5.3)
+- **frequency**：词频（影响识别优先级）/ Frequency (affects recognition priority)
+  - 10000: 核心术语，出现20+次 / Core terms, appears 20+ times
+  - 9000: 常见术语，出现10-19次 / Common terms, appears 10-19 times
+  - 8000: 中等术语，出现5-9次 / Moderate terms, appears 5-9 times
+  - 5000: 罕见但重要，出现1-4次 / Rare but important, appears 1-4 times
+- **aliases**：别名列表（缩写、全称、中英文等）/ Alias list (abbreviations, full names, Chinese/English, etc.)
+
+**文件位置 / File Location**：
+
+- **内置示例**：`app/src/main/assets/example_terms.json` / Built-in example: bundled with app
+- **运行时复制**：自动复制到 `数据根目录/dictionary/example_terms.json` / Runtime copy: automatically copied to `Data Root/dictionary/example_terms.json`
+- **自定义词典**：放置在 `数据根目录/dictionary/*.json` / Custom dictionaries: place in `Data Root/dictionary/*.json`
+
+#### 6.6.2 使用LLM生成词典 / Using LLM to Generate Dictionary
+
+**步骤 / Steps**：
+
+1. **准备文本语料 / Prepare Text Corpus**
+   - 收集领域专用文档：技术规范、产品手册、研究论文、内部文档、行业报告 / Collect domain-specific documents: technical specifications, product manuals, research papers, internal docs, industry reports
+
+2. **复制提示词模板 / Copy Prompt Template**
+   - 使用下面的LLM提示词模板 / Use the LLM prompt template below
+
+3. **提供语料给LLM / Provide Corpus to LLM**
+   - 将文本语料粘贴到提示词后 / Paste text corpus after the prompt
+   - 要求LLM生成词典条目 / Ask LLM to generate dictionary entries
+
+4. **追加生成的条目 / Append Generated Entries**
+   - 复制LLM输出 / Copy LLM output
+   - 追加到JSON文件的 `entries` 数组中 / Append to the `entries` array in JSON file
+   - 注意在第一个新条目前添加逗号 / Note: add comma before first new entry
+
+5. **在应用中使用 / Use in App**
+   - 保存文件到 `数据根目录/dictionary/your_domain.json` / Save file to `Data Root/dictionary/your_domain.json`
+   - 打开应用 → 设置 → 知识图谱RAG → 自定义词典 / Open app → Settings → Knowledge Graph RAG → Custom Dictionary
+   - 选择词典文件 / Select dictionary file
+   - 构建知识库以应用 / Build knowledge base to apply
+
+#### 6.6.3 LLM提示词模板 / LLM Prompt Template
+
+**中文版提示词 / Chinese Prompt**
+
+```
+请分析以下文本语料，提取领域专用术语，创建HanLP词典条目（JSON格式）。遵循以下规则：
+
+⚠️ 重要说明：请直接生成一个**完整可用的 HanLP 外挂词典 JSON 文件**，保存为 `.json` 后即可在应用中直接使用，无需再手工拼接或包装。
+最终输出必须是一个顶层 JSON 对象，至少包含字段：`version`、`domain`、`description`、`entries`（其中 `entries` 为条目数组）。
+
+1. 识别规则：
+   - 提取名词、技术术语、产品名称、公司名称、缩写
+   - 关注领域专用词汇（非通用词）
+   - 包含中英文术语
+   - 识别术语变体和别名
+
+2. 频率分析：
+   - 统计术语在语料中的出现次数
+   - **参考频率分配**（可根据实际语料规模调整）：
+     * 10000: 非常常见，核心领域术语（出现20+次）
+     * 9000:  常见术语（出现10-19次）
+     * 8000:  中等术语（出现5-9次）
+     * 5000:  罕见但重要（出现1-4次）
+   - 💬 如果语料较小，可适当降低阈值；语料较大，可提高阈值
+   - 频率越高 = 识别优先级越高
+
+3. 词性标注（基于 HanLP/北大标注集）：
+   
+   💡 **提示**：使用 HanLP 词性标注体系。**以下仅为常见示例，不限于此列表**：
+   
+   - **"n"** : 名词（通用技术术语、设备、组件）
+     * 示例 - 硬件: "处理器", "显卡", "内存", "主板", "散热器", "电源"
+     * 示例 - 软件: "操作系统", "驱动程序", "固件", "应用程序"
+     * 示例 - 概念: "带宽", "延迟", "吞吐量", "缓存", "接口"
+     * 💬 根据您的领域，可包含任何通用技术名词
+   
+   - **"nz"** : 其他专名（型号、标准、协议、版本号）
+     * 示例 - 标准: "PCIe 4.0", "USB 3.2", "HDMI 2.1", "Wi-Fi 6"
+     * 示例 - 型号: "RTX 4090", "i9-13900K", "DDR5-6400"
+     * 示例 - 协议: "TCP/IP", "HTTP/2", "NVMe", "SATA"
+     * 💬 适用于任何带版本号、型号的专有名称
+   
+   - **"gi"** : 机构团体（技术概念、算法、框架、架构）
+     * 示例 - AI/ML: "深度学习", "卷积神经网络", "Transformer", "注意力机制"
+     * 示例 - 架构: "微服务", "RESTful", "MVC", "分布式系统"
+     * 示例 - 算法: "梯度下降", "反向传播", "强化学习"
+     * 💬 适用于抽象技术概念、方法论、理论框架
+   
+   - **"ntc"** : 公司名、品牌、产品线
+     * 示例 - 公司: "NVIDIA", "Intel", "AMD", "微软", "谷歌"
+     * 示例 - 品牌: "GeForce", "Radeon", "Core", "Ryzen"
+     * 示例 - 产品: "Windows", "Linux", "Android", "iOS"
+     * 💬 适用于任何商业实体、品牌、产品系列
+   
+   - **"nrf"** : 音译词（外来技术术语、缩写词）
+     * 示例 - 模型: "BERT", "GPT", "ResNet", "YOLO", "ViT"
+     * 示例 - 技术: "Docker", "Kubernetes", "TensorFlow", "PyTorch"
+     * 示例 - 缩写: "API", "SDK", "IDE", "GUI", "CLI"
+     * 💬 适用于英文缩写、音译外来词、技术品牌名
+   
+   - **"ns"** : 地名（地理位置、区域）
+     * 示例: "硅谷", "深圳", "北京", "上海", "美国", "中国"
+     * 💬 适用于任何地理位置、国家、城市、区域
+   
+   📌 **灵活使用建议**：
+   - ⚠️ 以上仅为参考示例，实际使用时根据您的语料灵活选择
+   - 如果不确定，优先使用 "n"（通用名词）或 "nz"（专名）
+   - 技术概念/算法倾向 "gi"，具体产品/型号倾向 "nz"
+   - 英文缩写词可用 "nrf"，中文技术词用 "n" 或 "gi"
+   - 可参考 HanLP 官方文档获取完整标注集
+
+4. 别名处理：
+   - 列出所有变体：缩写、全称、中英文等价词
+   - **参考示例**（不限于此）: 
+     * ["SSD", "固态硬盘", "Solid State Drive"]
+     * ["AI", "人工智能", "Artificial Intelligence"]
+     * ["ML", "机器学习", "Machine Learning"]
+     * ["GPU", "显卡", "图形处理器", "Graphics Processing Unit"]
+     * ["RAM", "内存", "随机存取存储器"]
+   - 💬 根据语料中的实际用法，灵活添加别名
+   - 包含常见拼写错误、简写、俗称、行业黑话
+   - 保持最规范/官方形式作为 "word"
+
+5. 输出格式：
+   生成此JSON结构的条目：
+   {
+     "word": "主要术语",
+     "nature": "gi",
+     "frequency": 10000,
+     "aliases": ["别名1", "Alias1", "缩写"]
+   }
+
+6. 质量要求：
+   - 优先技术术语而非通用词
+   - 确保 "word" 是最规范/官方形式
+   - 别名简洁但全面（最多3-5个变体）
+   - 验证JSON语法（逗号、括号、引号）
+   - 去除重复条目
+   - 按频率排序（最高在前）
+
+7. 输出要求：
+   - 输出一个**完整的 JSON 对象**，顶层至少包含 `version`、`domain`、`description`、`entries` 四个字段（可根据语料填写具体内容）
+   - 只输出 JSON，本身必须是一个合法的 JSON 文件内容；如需要，可以使用 ```json 代码块包裹
+   - 确保 JSON 语法完全正确（没有尾部逗号、缺失引号等），保存为 `.json` 后即可作为自定义词典直接使用
+
+📄 我的文本语料：
+[在此粘贴您的领域专用文本 - 技术文档、手册、报告等]
+
+🎯 预期输出格式（完整可用 JSON 文件示例）：
+{
+  "version": "1.0",
+  "domain": "固态硬盘控制器",
+  "description": "SSD 控制器技术文档专用术语词典",
+  "entries": [
+    {
+      "word": "术语1",
+      "nature": "gi",
+      "frequency": 10000,
+      "aliases": ["别名1", "Alias1"]
+    },
+    {
+      "word": "术语2",
+      "nature": "ntc",
+      "frequency": 9000,
+      "aliases": ["别名2"]
+    }
+  ]
+}
+```
+
+**英文版提示词 / English Prompt**
+
+```
+Please analyze the following text corpus and extract domain-specific terms to create HanLP dictionary entries in JSON format. Follow these rules:
+
+IMPORTANT NOTE: Please output a **single complete JSON object** whose top-level fields include at least `version`, `domain`, `description`, and `entries` (fill values based on the corpus).
+The final output MUST be a valid JSON file content; you may wrap it in a ```json code block if needed.
+
+1. IDENTIFICATION:
+   - Extract nouns, technical terms, product names, company names, abbreviations
+   - Focus on domain-specific vocabulary (not common words)
+   - Include both Chinese and English terms
+   - Identify term variants and aliases
+
+2. FREQUENCY ANALYSIS:
+   - Count term occurrences in the corpus
+   - **Reference frequency assignment** (adjust based on corpus size):
+     * 10000: Very common, core domain terms (appears 20+ times)
+     * 9000:  Common terms (appears 10-19 times)
+     * 8000:  Moderate terms (appears 5-9 times)
+     * 5000:  Rare but important (appears 1-4 times)
+   - 💬 For small corpus, lower thresholds; for large corpus, raise thresholds
+   - Higher frequency = higher priority for recognition
+
+3. NATURE (Part-of-Speech Tags - Based on HanLP/PKU Tagset):
+   
+   💡 **Note**: Use HanLP POS tagging system. **Examples below are NOT exhaustive**:
+   
+   - **"n"** : Nouns (general technical terms, devices, components)
+     * Examples - Hardware: "processor", "GPU", "memory", "motherboard", "cooler"
+     * Examples - Software: "operating system", "driver", "firmware", "application"
+     * Examples - Concepts: "bandwidth", "latency", "throughput", "cache", "interface"
+     * 💬 Applies to any general technical nouns in your domain
+   
+   - **"nz"** : Proper nouns (model numbers, standards, protocols, versions)
+     * Examples - Standards: "PCIe 4.0", "USB 3.2", "HDMI 2.1", "Wi-Fi 6"
+     * Examples - Models: "RTX 4090", "i9-13900K", "DDR5-6400"
+     * Examples - Protocols: "TCP/IP", "HTTP/2", "NVMe", "SATA"
+     * 💬 Applies to any proper names with version/model numbers
+   
+   - **"gi"** : Organizations (technical concepts, algorithms, frameworks, architectures)
+     * Examples - AI/ML: "deep learning", "CNN", "Transformer", "attention mechanism"
+     * Examples - Architecture: "microservices", "RESTful", "MVC", "distributed system"
+     * Examples - Algorithms: "gradient descent", "backpropagation", "reinforcement learning"
+     * 💬 Applies to abstract concepts, methodologies, theoretical frameworks
+   
+   - **"ntc"** : Company names, brands, product lines
+     * Examples - Companies: "NVIDIA", "Intel", "AMD", "Microsoft", "Google"
+     * Examples - Brands: "GeForce", "Radeon", "Core", "Ryzen"
+     * Examples - Products: "Windows", "Linux", "Android", "iOS"
+     * 💬 Applies to any commercial entities, brands, product series
+   
+   - **"nrf"** : Transliterated terms (foreign technical terms, acronyms)
+     * Examples - Models: "BERT", "GPT", "ResNet", "YOLO", "ViT"
+     * Examples - Tech: "Docker", "Kubernetes", "TensorFlow", "PyTorch"
+     * Examples - Acronyms: "API", "SDK", "IDE", "GUI", "CLI"
+     * 💬 Applies to English acronyms, transliterated words, tech brand names
+   
+   - **"ns"** : Place names (geographic locations, regions)
+     * Examples: "Silicon Valley", "Shenzhen", "Beijing", "Shanghai", "USA", "China"
+     * 💬 Applies to any geographic locations, countries, cities, regions
+   
+   📌 **Flexible Usage Tips**:
+   - ⚠️ Above are reference examples only; adapt to your corpus flexibly
+   - When uncertain, prefer "n" (general noun) or "nz" (proper noun)
+   - Technical concepts/algorithms → "gi", specific products/models → "nz"
+   - English acronyms → "nrf", Chinese technical terms → "n" or "gi"
+   - Refer to HanLP official docs for complete tagset
+
+4. ALIASES:
+   - List all variants: abbreviations, full names, Chinese/English equivalents
+   - **Reference examples** (not limited to these): 
+     * ["SSD", "固态硬盘", "Solid State Drive"]
+     * ["AI", "人工智能", "Artificial Intelligence"]
+     * ["ML", "机器学习", "Machine Learning"]
+     * ["GPU", "显卡", "Graphics Processing Unit"]
+     * ["RAM", "内存", "Random Access Memory"]
+   - 💬 Add aliases flexibly based on actual usage in your corpus
+   - Include common misspellings, abbreviations, colloquialisms, jargon
+   - Keep the most canonical/official form as "word"
+
+5. OUTPUT FORMAT:
+   Generate entries in this exact JSON structure:
+   {
+     "word": "Main Term",
+     "nature": "gi",
+     "frequency": 10000,
+     "aliases": ["Alias1", "Abbr"]
+   }
+
+6. QUALITY GUIDELINES:
+   - Prioritize technical terms over common words
+   - Ensure "word" is the most canonical/official form
+   - Keep aliases concise but comprehensive (3-5 variants max)
+   - Validate JSON syntax (commas, brackets, quotes)
+   - Remove duplicates across entries
+   - Sort by frequency (highest first)
+
+7. OUTPUT REQUIREMENTS:
+   - Output a **single complete JSON object** whose top-level fields include at least `version`, `domain`, `description`, and `entries` (fill values based on the corpus)
+   - Do NOT output any explanatory text outside the JSON; you may wrap it in a ```json code block if needed
+   - Ensure the JSON syntax is fully valid (no trailing commas, missing quotes, etc.), so the output can be saved as a `.json` file and used directly as a custom dictionary
+
+📄 MY TEXT CORPUS:
+[Paste your domain-specific text here - technical docs, manuals, reports, etc.]
+
+  🎯 EXPECTED OUTPUT FORMAT (complete JSON file example):
+{
+  "version": "1.0",
+  "domain": "SSD Controller",
+  "description": "Dictionary for SSD controller technical documents",
+  "entries": [
+    {
+      "word": "Term1",
+      "nature": "gi",
+      "frequency": 10000,
+      "aliases": ["Alias1", "Abbr1"]
+    },
+    {
+      "word": "Term2",
+      "nature": "ntc",
+      "frequency": 9000,
+      "aliases": ["Alias2"]
+    }
+  ]
+}
+```
+
+#### 6.6.4 示例工作流程 / Example Workflow
+
+**输入 / Input**：SSD控制器技术文档（50页STAR1200规格书）/ SSD Controller Technical Documents (50 pages of STAR1200 specifications)
+
+**LLM提取术语 / LLM Extracts Terms**：
+- 产品名称 / Product names: "STAR1200", "STAR1000P", "STAR2008"
+- 技术术语 / Technical terms: "固态硬盘", "闪存控制器", "PCIe", "NVMe"
+- 公司名称 / Company names: "忆芯科技", "STARBLAZE"
+- 概念 / Concepts: "SPOR", "低功耗", "硬件加密"
+
+**LLM生成条目 / LLM Generates Entries**：
+
+```json
+{
+  "word": "STAR1200",
+  "nature": "nz",
+  "frequency": 10000,
+  "aliases": ["STAR1200CI", "STAR1200E", "星辰1200"]
+},
+{
+  "word": "固态硬盘",
+  "nature": "n",
+  "frequency": 10000,
+  "aliases": ["SSD", "Solid State Drive", "固态盘"]
+},
+{
+  "word": "忆芯科技",
+  "nature": "ntc",
+  "frequency": 9000,
+  "aliases": ["STARBLAZE", "Yixin Technology"]
+}
+```
+
+**用户操作 / User Actions**：
+1. 复制生成的条目 / Copy the generated entries
+2. 打开 `example_terms.json` 或创建新文件 / Open `example_terms.json` or create new file
+3. 追加条目到 `entries` 数组（在第一个新条目前加逗号）/ Append entries to the `entries` array (add comma before first new entry)
+4. 保存为 `数据根目录/dictionary/ssd_terms.json` / Save as `Data Root/dictionary/ssd_terms.json`
+5. 在应用设置中选择 / Select in app settings
+6. 构建知识库 / Build knowledge base
+
+#### 6.6.5 技术注意事项 / Technical Notes
+
+**文件编码 / File Encoding**：
+- **必须**使用UTF-8编码（中文字符必需）/ **MUST** be UTF-8 (required for Chinese characters)
+- 使用UTF-8无BOM / Use UTF-8 without BOM
+- 保存前验证JSON语法 / Validate JSON syntax before saving
+
+**词典加载 / Dictionary Loading**：
+- HanLP在构建知识库时加载词典 / HanLP loads the dictionary when building knowledge base
+- 更改在下次知识库构建时生效 / Changes take effect on next knowledge base build
+- 可以使用多个词典（在设置中选择）/ Multiple dictionaries can be used (select in settings)
+
+**性能考虑 / Performance**：
+- 大型词典（1000+条目）可能略微降低NER速度 / Larger dictionaries (1000+ entries) may slightly slow down NER
+- 优先质量而非数量 / Prioritize quality over quantity
+- 移除通用/常见词以提高精确度 / Remove generic/common words to improve precision
+
+**验证方法 / Validation**：
+1. 用示例文档构建小型知识库 / Build a small knowledge base with sample documents
+2. 检查知识图谱中的NER结果 / Check NER results in the knowledge graph
+3. 验证实体是否正确识别 / Verify entities are correctly recognized
+4. 根据需要调整频率/词性 / Adjust frequency/nature if needed
+
+**常见错误 / Common Mistakes**：
+1. **JSON中使用注释**：JSON不支持注释，使用本markdown文件代替 / Using comments in JSON: JSON does not support comments, use this markdown file instead
+2. **错误编码**：必须是UTF-8，不是GBK或其他编码 / Wrong encoding: Must be UTF-8, not GBK or other encodings
+3. **尾部逗号**：移除最后一个条目后的尾部逗号 / Trailing commas: Remove trailing comma after last entry
+4. **重复条目**：检查 "word" 和 "aliases" 中的重复 / Duplicate entries: Check for duplicates across "word" and "aliases"
+5. **通用词**：避免"系统"、"方法"、"技术"等过于通用的词 / Generic words: Avoid common words like "系统", "方法", "技术" (too generic)
+6. **错误词性标注**：概念用"gi"，公司用"ntc"，型号用"nz" / Wrong nature tags: Use "gi" for concepts, "ntc" for companies, "nz" for model numbers
+
+---
+
+## 7. 故障排除 / Troubleshooting
+
+### 7.1 常见问题 / Common Issues
 
 **问题：无法连接到API服务 / Issue: Cannot connect to API service**
 - 检查网络连接是否正常 / Check if network connection is normal
@@ -764,7 +1394,7 @@ Text chunking and overlap sizes can be configured in settings, with multiple pre
     - 确认模型文件完整（text_encoder.mnn、unet.mnn、vae_decoder.mnn）/ Confirm model files are complete
     - 重新下载损坏的模型文件 / Re-download corrupted model files
 
-### 5.2 日志分析 / Log Analysis
+### 7.2 日志分析 / Log Analysis
 
 当遇到问题时，可以通过查看日志来诊断：
 

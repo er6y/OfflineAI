@@ -4,9 +4,12 @@ import android.util.Log;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
+import java.nio.charset.StandardCharsets;
 
 /**
  * 文件工具类，提供文件读写操作
@@ -26,7 +29,8 @@ public class FileUtil {
         }
 
         StringBuilder content = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 content.append(line).append("\n");
@@ -60,8 +64,10 @@ public class FileUtil {
             }
         }
 
-        try (FileWriter writer = new FileWriter(file)) {
-            writer.write(content);
+        try (OutputStreamWriter writer = new OutputStreamWriter(
+                new FileOutputStream(file), StandardCharsets.UTF_8)) {
+            writer.write(content != null ? content : "");
+            writer.flush();
             return true;
         } catch (IOException e) {
             LogManager.logE(TAG, "写入文件失败: " + file.getAbsolutePath(), e);

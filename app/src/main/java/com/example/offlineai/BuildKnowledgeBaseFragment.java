@@ -51,13 +51,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import com.example.offlineai.ConfigManager;
 import com.example.offlineai.EmbeddingHandler;
 import com.example.offlineai.ProgressManager;
-import com.example.offlineai.SQLiteVectorDatabaseHandler;
+// Removed: import com.example.offlineai.SQLiteVectorDatabaseHandler; - Now using KnowledgeGraphDatabase directly
 import com.example.offlineai.SettingsFragment;
 import com.example.offlineai.TextChunkProcessor.ProgressCallback;
 import com.example.offlineai.Utils;
 import com.example.offlineai.AppConstants;
 import com.example.offlineai.StateDisplayManager;
 
+@SuppressWarnings("deprecation")
 public class BuildKnowledgeBaseFragment extends Fragment {
 
     private static final String TAG = "OfflineAI_Build";
@@ -134,6 +135,10 @@ public class BuildKnowledgeBaseFragment extends Fragment {
     }
     
     private ProcessingStage currentStage = ProcessingStage.IDLE;
+
+    // Compact vectorization progress line state
+    private final StringBuilder vectorizationProgressLine = new StringBuilder();
+    private boolean hasVectorizationProgressLine = false;
     
     // 跟踪电池优化状态
     private boolean batteryOptimizationDisabled = false;
@@ -169,19 +174,19 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                         ProgressManager progressManager = ProgressManager.getInstance();
                         ProgressManager.ProgressData progressData = progressManager.getCurrentProgress();
                         
-                        // 确保startTime已初始化
+                        // 确保startTime已初始化（用于计时器控制）
                         if (startTime <= 0 && progressData.currentStage != ProgressManager.ProcessingStage.IDLE) {
                             startTime = System.currentTimeMillis();
                             isProcessing = true;
                         }
                         
-                        // 根据ProgressManager的数据更新内部变量
+                        // 根据ProgressManager的数据更新内部变量（仅用于日志记录）
                         switch (progressData.currentStage) {
                             case TEXT_EXTRACTION:
                                 currentStage = ProcessingStage.TEXT_EXTRACTION;
                                 processedFilesCount = progressData.processedFiles;
                                 totalFiles = progressData.totalFiles;
-                                LogManager.logD(TAG, "文本提取进度: " + processedFilesCount + "/" + totalFiles + " " + formatElapsedTime());
+                                LogManager.logD(TAG, "文本提取进度: " + processedFilesCount + "/" + totalFiles);
                                 break;
                                 
                             case VECTORIZATION:
@@ -189,7 +194,15 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                                 processedChunks = progressData.processedChunks;
                                 totalChunks = progressData.totalChunks;
                                 vectorizationPercentage = progressData.vectorizationPercentage;
-                                LogManager.logD(TAG, "向量化进度: " + processedChunks + "/" + totalChunks + " (" + vectorizationPercentage + "%) " + formatElapsedTime());
+                                LogManager.logD(TAG, "向量化进度: " + processedChunks + "/" + totalChunks + " (" + vectorizationPercentage + "%)");
+                                break;
+
+                            case GRAPH_BUILDING:
+                                currentStage = ProcessingStage.VECTORIZATION;
+                                processedChunks = progressData.processedChunks;
+                                totalChunks = progressData.totalChunks;
+                                vectorizationPercentage = progressData.vectorizationPercentage;
+                                LogManager.logD(TAG, "图谱构建进度: " + processedChunks + "/" + totalChunks + " (" + vectorizationPercentage + "%)");
                                 break;
                                 
                             case COMPLETED:
@@ -197,7 +210,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                                 processedChunks = progressData.totalChunks;
                                 totalChunks = progressData.totalChunks;
                                 vectorizationPercentage = 100;
-                                LogManager.logD(TAG, "处理完成 " + formatElapsedTime());
+                                LogManager.logD(TAG, "处理完成");
                                 break;
                                 
                             default:
@@ -205,13 +218,43 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                                 break;
                         }
                         
-                        // 更新UI显示
-                        if (status != null) {
-                            updateProgressUI(progress, status);
-                        } else {
-                            updateProgressLabel();
-                        }
+                        // onProgressUpdate 现在只用于数值进度，UI 文本统一通过 onLogLine 渲染
+                        // 因此这里仅更新进度标签
+                        updateProgressLabel();
                     });
+                }
+
+                @Override
+                public void onLogLine(String message) {
+                    if (message == null || message.isEmpty()) {
+                        return;
+                    }
+                    // Handle compact vectorization progress rendering on a single line
+                    if (message.startsWith("Starting unified processing: ")) {
+                        resetVectorizationProgressLine();
+                        appendToProgress(message);
+                        return;
+                    }
+
+                    if (".".equals(message)) {
+                        updateVectorizationProgressLine(".");
+                        return;
+                    }
+
+                    if (message.startsWith("Vectorization progress: ")) {
+                        updateVectorizationProgressLine(message);
+                        return;
+                    }
+
+                    if (message.startsWith("Unified processing completed: ")) {
+                        // Finalize current vectorization line then append completion message
+                        resetVectorizationProgressLine();
+                        appendToProgress(message);
+                        return;
+                    }
+
+                    // Default: append message as normal log line
+                    appendToProgress(message);
                 }
                 
                 @Override
@@ -356,6 +399,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                 LogManager.logD(TAG, "未选择重排模型");
             }
         });
+        
         
         // 加载词嵌入模型
         loadEmbeddingModels();
@@ -896,6 +940,16 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         isTaskCancelledAtomic.set(false);
         currentStage = ProcessingStage.IDLE;
         
+        // Reset all stop flags at the beginning of knowledge base building
+        // This ensures previous stop states don't affect the current build
+        try {
+            EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(requireContext());
+            embeddingHandler.resetStopFlag();
+            LogManager.logI(TAG, "[BUILD] Reset embedding stop flag at user action");
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[BUILD] Failed to reset embedding stop flag", e);
+        }
+        
         // 更改按钮文本
         buttonCreateKnowledgeBase.setText(StateDisplayManager.getButtonDisplayText(requireContext(), AppConstants.BUTTON_TEXT_CANCEL));
         
@@ -911,8 +965,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         int minChunkSize = ConfigManager.getInt(requireContext(), ConfigManager.KEY_MIN_CHUNK_SIZE, ConfigManager.DEFAULT_MIN_CHUNK_SIZE);
         
         // 清空进度显示
-        textViewProgress.setText(StateDisplayManager.getProcessingStatusDisplayText(requireContext(), AppConstants.PROCESSING_STATUS_PREPARING) + "\n" +
-                getString(R.string.chunk_size_info, chunkSize, chunkOverlap, minChunkSize));
+        textViewProgress.setText("");
         
         // 保存最后选择的知识库名称
         ConfigManager.setString(requireContext(), ConfigManager.KEY_LAST_SELECTED_KB, knowledgeBaseName);
@@ -935,11 +988,12 @@ public class BuildKnowledgeBaseFragment extends Fragment {
             int modelDimension = model.getEmbeddingDimension();
             LogManager.logD(TAG, "当前模型向量维度: " + modelDimension);
             
-            // 检查知识库是否已存在
-            File vectorDbFile = new File(knowledgeBaseDir, "vectorstore.db");
-            if (!overwrite && vectorDbFile.exists()) {
+            // 检查知识库是否已存在（统一使用 knowledge_graph.db）
+            File graphDbFile = new File(knowledgeBaseDir, "knowledge_graph.db");
+            if (!overwrite && graphDbFile.exists()) {
                 // 检查现有知识库的向量维度和模型
-                SQLiteVectorDatabaseHandler existingDb = new SQLiteVectorDatabaseHandler(knowledgeBaseDir, embeddingModel);
+                String dbPath = graphDbFile.getAbsolutePath();
+                KnowledgeGraphDatabase existingDb = new KnowledgeGraphDatabase(requireContext(), dbPath, embeddingModel);
                 int existingDimension = existingDb.getMetadata().getEmbeddingDimension();
                 String existingModel = existingDb.getMetadata().getModeldir();
                 existingDb.close();
@@ -976,15 +1030,31 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                         })
                         .show();
                 }
-            } else if (overwrite && vectorDbFile.exists()) {
+            } else if (overwrite && graphDbFile.exists()) {
                 // 在覆盖模式下，删除现有数据库文件
                 LogManager.logD(TAG, "覆盖模式: 删除现有数据库文件");
-                vectorDbFile.delete();
+                graphDbFile.delete();
                 
                 // 删除元数据文件
                 File metadataFile = new File(knowledgeBaseDir, "metadata.json");
                 if (metadataFile.exists()) {
                     metadataFile.delete();
+                }
+
+                // Delete knowledge graph database auxiliary files to avoid locked state caused by previous interrupted build
+                File graphDbWal = new File(knowledgeBaseDir, "knowledge_graph.db-wal");
+                if (graphDbWal.exists()) {
+                    graphDbWal.delete();
+                }
+                File graphDbShm = new File(knowledgeBaseDir, "knowledge_graph.db-shm");
+                if (graphDbShm.exists()) {
+                    graphDbShm.delete();
+                }
+
+                // Optional cleanup: delete legacy vectorstore.db if it still exists
+                File legacyVectorDbFile = new File(knowledgeBaseDir, "vectorstore.db");
+                if (legacyVectorDbFile.exists()) {
+                    legacyVectorDbFile.delete();
                 }
                 
                 textViewProgress.append("\n" + StateDisplayManager.getProcessingStatusDisplayText(requireContext(), AppConstants.PROCESSING_STATUS_OVERWRITE_DELETED));
@@ -1076,8 +1146,8 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                                                 getString(R.string.progress_text_extraction_keyword) + " (%d/%d): %s", 
                                                 processedFiles, totalFiles, currentFile);
                             
-                            // 更新进度UI，文本提取阶段进度条显示为0
-                            updateProgressUI(0, progressInfo);
+                            // 直接将进度信息作为日志追加到进度框
+                            appendToProgress(progressInfo);
                         });
                     }
                     
@@ -1130,6 +1200,16 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                     }
                     
                     @Override
+                    public void onGraphBuildingProgress(int processedChunks, int totalChunks, float percentage) {
+                        mainHandler.post(() -> {
+                            String progressInfo = String.format(Locale.getDefault(), 
+                                "Building knowledge graph: %d/%d (%.1f%%)", 
+                                processedChunks, totalChunks, percentage);
+                            appendToProgress(progressInfo);
+                        });
+                    }
+                    
+                    @Override
                     public void onError(String errorMessage) {
                         // Handle error
                         LogManager.logE(TAG, "Error: " + errorMessage);
@@ -1143,15 +1223,8 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                         // Log message
                         LogManager.logD(TAG, message);
                         mainHandler.post(() -> {
-                            // Check if this is vectorization progress info
-                            String vectorizationProgress = getString(R.string.status_vectorization_progress);
-                            if (message != null && message.startsWith(vectorizationProgress)) {
-                                // Use specialized method to handle vectorization progress
-                                appendVectorizationProgress(message);
-                            } else {
-                                // Append other log messages normally
-                                appendToProgress(message);
-                            }
+                            // Append all log messages uniformly to progress text
+                            appendToProgress(message);
                         });
                     }
                 });
@@ -1294,37 +1367,11 @@ public class BuildKnowledgeBaseFragment extends Fragment {
     }
     
     /**
-     * 更新进度UI
+     * 更新进度UI（保留接口，目前仅用于触发进度标签刷新）
      */
     private void updateProgressUI(int progress, String status) {
-        if (textViewProgress != null && status != null) {
-            // 追加日志而不是替换，确保日志连续
-            String currentText = textViewProgress.getText().toString();
-            
-            // 追加新消息
-            if (currentText.isEmpty()) {
-                textViewProgress.setText(status);
-            } else {
-                textViewProgress.append("\n" + status);
-                
-                // 滚动到底部
-                if (textViewProgress.getLayout() != null) {
-                    try {
-                        final int scrollAmount = textViewProgress.getLayout().getLineTop(textViewProgress.getLineCount()) - textViewProgress.getHeight();
-                        if (scrollAmount > 0) {
-                            textViewProgress.scrollTo(0, scrollAmount);
-                        } else {
-                            textViewProgress.scrollTo(0, 0);
-                        }
-                    } catch (Exception e) {
-                        // 如果滚动失败，至少确保文本被添加
-                        LogManager.logE(TAG, "滚动到底部失败", e);
-                    }
-                }
-            }
-        }
-        
-        // 更新进度标签
+        // 数值通道已经通过 ProgressManager 统一管理，这里不再根据 status 更新文本
+        // 仅刷新进度标签，文本日志统一由 onLogLine -> appendToProgress 处理
         updateProgressLabel();
     }
     
@@ -1332,49 +1379,63 @@ public class BuildKnowledgeBaseFragment extends Fragment {
      * 更新进度标签
      */
     private void updateProgressLabel() {
-        if (textViewProgressLabel != null) {
-            // 检查startTime，避免在初始化之前更新
-            if (startTime <= 0) {
-                return;
+        if (textViewProgressLabel == null) {
+            return;
+        }
+
+        // 获取ProgressManager的数据
+        ProgressManager progressManager = ProgressManager.getInstance();
+        ProgressManager.ProgressData progressData = progressManager.getCurrentProgress();
+
+        // 如果还没有开始构建，则不更新
+        if (progressData.startTimeMs <= 0L) {
+            return;
+        }
+
+        long elapsedMs = progressData.elapsedMs;
+        long etaMs = progressData.etaMs;
+        String elapsedText = formatTime(elapsedMs);
+        String etaText = etaMs >= 0L ? formatTime(etaMs) : "N/A";
+
+        String progressText;
+
+        switch (progressData.currentStage) {
+            case TEXT_EXTRACTION: {
+                int displayTotalFiles = progressData.totalFiles > 0 ? progressData.totalFiles : 1;
+                float filePct = progressData.getFileProgressPercentage();
+                progressText = String.format(Locale.getDefault(),
+                        "[files: %d/%d] %.1f%% | elapsed %s | ETA %s",
+                        progressData.processedFiles, displayTotalFiles, filePct,
+                        elapsedText, etaText);
+                break;
             }
-            
-            // 获取ProgressManager的数据
-            ProgressManager progressManager = ProgressManager.getInstance();
-            ProgressManager.ProgressData progressData = progressManager.getCurrentProgress();
-            
-            String progressText;
-            
-            // 根据当前阶段显示不同的进度格式
-            switch (progressData.currentStage) {
-                case TEXT_EXTRACTION:
-                    // 文本提取阶段：显示 [已经提取文件计数]/[总计数] + 构建时间
-                    // 确保分母不为0，避免显示0/0
-                    int displayTotal = progressData.totalFiles > 0 ? progressData.totalFiles : 1;
-                    progressText = String.format(Locale.getDefault(), "[%d/%d] %s", 
-                            progressData.processedFiles, displayTotal, formatElapsedTime());
-                    break;
-                    
-                case VECTORIZATION:
-                case COMPLETED:
-                    // 向量化阶段：显示已处理块数/总块数、百分比和构建时间，保留一位小数
-                    progressText = String.format(Locale.getDefault(), "[%d/%d] %.1f%% %s", 
-                            progressData.processedChunks, progressData.totalChunks, 
-                            progressData.vectorizationPercentage, formatElapsedTime());
-                    break;
-                    
-                default:
-                    // 其他阶段
-                    progressText = "0% 完成";
-                    break;
+
+            case VECTORIZATION:
+            case GRAPH_BUILDING:
+            case COMPLETED: {
+                int displayTotalChunks = progressData.totalChunks > 0 ? progressData.totalChunks : 1;
+                float vecPct = progressData.getVectorizationProgressPercentage();
+                progressText = String.format(Locale.getDefault(),
+                        "[chunks: %d/%d] %.1f%% | elapsed %s | ETA %s",
+                        progressData.processedChunks, displayTotalChunks, vecPct,
+                        elapsedText, etaText);
+                break;
             }
-            
-            textViewProgressLabel.setText(progressText);
-            
-            // 添加详细日志，记录进度状态
-            if (LogManager.logIsLoggable(TAG, LogManager.LOG_LEVEL_DEBUG)) {
-                LogManager.logD(TAG, "Update progress label - Stage: " + progressData.currentStage + ", File progress: " + progressData.processedFiles + "/" + progressData.totalFiles + 
-                      ", 向量化进度: " + progressData.processedChunks + "/" + progressData.totalChunks + " (" + progressData.vectorizationPercentage + "%)");
-            }
+
+            default:
+                progressText = String.format(Locale.getDefault(),
+                        "0/0 0.0%% | elapsed %s | ETA %s", elapsedText, etaText);
+                break;
+        }
+
+        textViewProgressLabel.setText(progressText);
+
+        if (LogManager.logIsLoggable(TAG, LogManager.LOG_LEVEL_DEBUG)) {
+            LogManager.logD(TAG, "Update progress label - Stage: " + progressData.currentStage +
+                    ", File progress: " + progressData.processedFiles + "/" + progressData.totalFiles +
+                    ", Vectorization: " + progressData.processedChunks + "/" + progressData.totalChunks +
+                    " (" + progressData.vectorizationPercentage + "%)" +
+                    ", Elapsed: " + elapsedText + ", ETA: " + etaText);
         }
     }
     
@@ -1420,64 +1481,118 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                     textViewProgress.setText(message);
                 } else {
                     textViewProgress.append("\n" + message);
-                    
-                    // 滚动TextView到底部
-                    if (textViewProgress.getLayout() != null) {
-                        try {
-                            final int scrollAmount = textViewProgress.getLayout().getLineTop(textViewProgress.getLineCount()) - textViewProgress.getHeight();
-                            if (scrollAmount > 0) {
-                                textViewProgress.scrollTo(0, scrollAmount);
-                            } else {
-                                textViewProgress.scrollTo(0, 0);
-                            }
-                        } catch (Exception e) {
-                            // 如果滚动失败，至少确保文本被添加
-                            LogManager.logE(TAG, "滚动到底部失败", e);
-                        }
-                    }
                 }
+
+                // Always keep progress view scrolled to bottom
+                scrollProgressToBottom();
             }
         });
     }
     
-    /**
-     * 向进度框中追加向量化进度信息
-     * 格式为：向量化进度..........10%..........20%...
-     * 每个点代表一个处理完成的文本块
-     * @param message 向量化进度信息
-     */
-    private void appendVectorizationProgress(String message) {
+    // Reset compact vectorization progress line state
+    private void resetVectorizationProgressLine() {
         mainHandler.post(() -> {
-            if (textViewProgress != null) {
-                // 检查当前文本是否已经包含"向量化进度"
-                String currentText = textViewProgress.getText().toString();
-                
-                // 如果当前文本为空，则直接设置
-                if (currentText.isEmpty()) {
-                    //textViewProgress.setText(message);
-                } else {
-                    // 其他情况，总是追加新行
-                    //textViewProgress.append("\n" + message);
-                }
-                
-                // 滚动TextView到底部
-                if (textViewProgress.getLayout() != null) {
-                    try {
-                        final int scrollAmount = textViewProgress.getLayout().getLineTop(textViewProgress.getLineCount()) - textViewProgress.getHeight();
-                        if (scrollAmount > 0) {
-                            textViewProgress.scrollTo(0, scrollAmount);
-                        } else {
-                            textViewProgress.scrollTo(0, 0);
+            vectorizationProgressLine.setLength(0);
+            hasVectorizationProgressLine = false;
+        });
+    }
+
+    // Update compact vectorization progress line with either a dot or a percentage label
+    private void updateVectorizationProgressLine(String token) {
+        mainHandler.post(() -> {
+            // 检查Fragment是否仍然附加到Context，避免崩溃
+            if (!isAdded() || getContext() == null) {
+                LogManager.logD(TAG, "Fragment detached, skip vectorization progress update");
+                return;
+            }
+            if (textViewProgress == null) {
+                return;
+            }
+
+            // Append token to local buffer
+            if (".".equals(token)) {
+                // One dot per processed chunk
+                vectorizationProgressLine.append('.');
+            } else if (token.startsWith("Vectorization progress: ")) {
+                // Extract compact percentage label, e.g. "10%" from
+                // "Vectorization progress: 10% (x/y)"
+                String percentLabel = null;
+                try {
+                    int colonIndex = token.indexOf(':');
+                    if (colonIndex >= 0 && colonIndex + 1 < token.length()) {
+                        String tail = token.substring(colonIndex + 1).trim();
+                        int percentIndex = tail.indexOf('%');
+                        if (percentIndex > 0) {
+                            percentLabel = tail.substring(0, percentIndex + 1).trim();
                         }
-                    } catch (Exception e) {
-                        // 如果滚动失败，至少确保文本被添加
-                        LogManager.logE(TAG, "滚动到底部失败", e);
                     }
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "Failed to parse vectorization progress percentage: " + e.getMessage(), e);
                 }
+
+                if (percentLabel != null && !percentLabel.isEmpty()) {
+                    vectorizationProgressLine.append(percentLabel);
+                }
+            }
+
+            String line = vectorizationProgressLine.toString();
+            String currentText = textViewProgress.getText().toString();
+
+            if (!hasVectorizationProgressLine) {
+                // First time: append a new line at the end
+                hasVectorizationProgressLine = true;
+                if (currentText.isEmpty()) {
+                    textViewProgress.setText(line);
+                } else {
+                    textViewProgress.setText(currentText + "\n" + line);
+                }
+            } else {
+                // Replace the last line with updated compact progress line
+                int lastNewLine = currentText.lastIndexOf('\n');
+                String baseText;
+                if (lastNewLine >= 0) {
+                    baseText = currentText.substring(0, lastNewLine);
+                } else {
+                    baseText = "";
+                }
+                if (baseText.isEmpty()) {
+                    textViewProgress.setText(line);
+                } else {
+                    textViewProgress.setText(baseText + "\n" + line);
+                }
+            }
+
+            // Always keep progress view scrolled to bottom
+            scrollProgressToBottom();
+        });
+    }
+
+    // Helper to keep progress TextView scrolled to the bottom after content changes
+    private void scrollProgressToBottom() {
+        if (textViewProgress == null) {
+            return;
+        }
+        textViewProgress.post(() -> {
+            if (!isAdded() || getContext() == null) {
+                LogManager.logD(TAG, "Fragment detached, skip scrolling progress view");
+                return;
+            }
+            if (textViewProgress.getLayout() == null) {
+                return;
+            }
+            try {
+                final int scrollAmount = textViewProgress.getLayout().getLineTop(textViewProgress.getLineCount()) - textViewProgress.getHeight();
+                if (scrollAmount > 0) {
+                    textViewProgress.scrollTo(0, scrollAmount);
+                } else {
+                    textViewProgress.scrollTo(0, 0);
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to scroll progress view to bottom", e);
             }
         });
     }
-    
+
     /**
      * 启用或禁用屏幕常亮
      * @param enable 是否启用屏幕常亮
@@ -1512,6 +1627,9 @@ public class BuildKnowledgeBaseFragment extends Fragment {
             float fontSize = ConfigManager.getGlobalTextSize(requireContext());
             textViewFileList.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize);
             textViewProgress.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize);
+            if (textViewProgressLabel != null) {
+                textViewProgressLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize);
+            }
             LogManager.logD(TAG, "已应用全局字体大小: " + fontSize + "sp");
         }
     }

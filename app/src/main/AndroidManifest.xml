@@ -93,13 +93,6 @@
             </intent-filter>
         </activity>
         
-        <!-- 历史对话Activity -->
-        <activity
-            android:name=".ChatHistoryActivity"
-            android:exported="false"
-            android:theme="@style/Theme.OfflineAI.NoActionBar"
-            android:parentActivityName=".MainActivity" />
-        
         <!-- 知识库构建服务 -->
         <service
             android:name=".KnowledgeBaseService"

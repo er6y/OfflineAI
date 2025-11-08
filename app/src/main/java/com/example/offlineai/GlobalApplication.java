@@ -46,6 +46,54 @@ public class GlobalApplication extends Application {
         } catch (Exception e) {
             Log.e(TAG, "❌ Failed to register custom CPU operators: " + e.getMessage(), e);
         }
+        
+        // Initialize example dictionary
+        initializeExampleDictionary();
+    }
+    
+    /**
+     * Copy example dictionary from assets to data directory if not exists
+     */
+    private void initializeExampleDictionary() {
+        try {
+            String dataRootPath = ConfigManager.getString(this, ConfigManager.KEY_DATA_ROOT_PATH, "");
+            if (dataRootPath.isEmpty()) {
+                Log.d(TAG, "Data root path not set, skip dictionary initialization");
+                return;
+            }
+            
+            java.io.File dictDir = new java.io.File(dataRootPath, "dictionary");
+            java.io.File targetFile = new java.io.File(dictDir, "example_terms.json");
+            
+            if (targetFile.exists()) {
+                Log.d(TAG, "Example dictionary already exists: " + targetFile.getAbsolutePath());
+                return;
+            }
+            
+            // Create dictionary directory
+            if (!dictDir.exists()) {
+                if (dictDir.mkdirs()) {
+                    Log.i(TAG, "Created dictionary directory: " + dictDir.getAbsolutePath());
+                } else {
+                    Log.e(TAG, "Failed to create dictionary directory: " + dictDir.getAbsolutePath());
+                    return;
+                }
+            }
+            
+            // Copy from assets
+            try (java.io.InputStream is = getAssets().open("example_terms.json");
+                 java.io.FileOutputStream fos = new java.io.FileOutputStream(targetFile)) {
+                byte[] buffer = new byte[8192];
+                int length;
+                while ((length = is.read(buffer)) > 0) {
+                    fos.write(buffer, 0, length);
+                }
+                Log.i(TAG, "✅ Example dictionary copied to: " + targetFile.getAbsolutePath());
+            }
+            
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to initialize example dictionary: " + e.getMessage(), e);
+        }
     }
     
     @Override

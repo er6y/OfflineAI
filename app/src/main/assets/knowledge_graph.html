@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+    <title>Knowledge Graph Report</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 12px;
+            font-family: -apple-system, BlinkMacSystemFont, "Roboto", "Helvetica", "Arial", sans-serif;
+            background-color: #fafafa;
+            color: #222;
+        }
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin: 12px 0 8px;
+        }
+        .sub-title {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 4px;
+        }
+        .meta {
+            font-size: 13px;
+            color: #555;
+            line-height: 1.4;
+        }
+        .meta span {
+            display: inline-block;
+            margin-right: 12px;
+            margin-bottom: 4px;
+        }
+        #graph-container {
+            margin-top: 8px;
+            border-radius: 8px;
+            background-color: #fff;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+            padding: 8px;
+        }
+        #graph {
+            width: 100%;
+            height: 280px;
+        }
+        #node-detail {
+            margin-top: 12px;
+            padding: 8px 10px;
+            border-radius: 8px;
+            background-color: #fff;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+            font-size: 13px;
+        }
+        #node-detail-title {
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+        #node-detail-body {
+            font-size: 13px;
+            color: #444;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        th, td {
+            padding: 4px 6px;
+            border: 1px solid #e0e0e0;
+            text-align: left;
+            word-break: break-all;
+        }
+        th {
+            background-color: #f3f3f3;
+            font-weight: 600;
+        }
+        .table-wrapper {
+            margin-top: 12px;
+            background-color: #fff;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+            padding: 8px;
+        }
+        #entity-chart-container {
+            margin-top: 8px;
+            border-radius: 8px;
+            background-color: #fff;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+            padding: 8px;
+        }
+        #entity-chart {
+            width: 100%;
+            height: 160px;
+        }
+    </style>
+    <!-- Offline chart engine (local ECharts-compatible implementation) -->
+    <script src="echarts.min.js"></script>
+</head>
+<body>
+<div id="root">
+    <div id="header">
+        <div class="section-title" id="kb-title">📊 知识库图谱 / Knowledge Graph</div>
+        <div class="meta" id="kb-meta"></div>
+    </div>
+
+    <div id="entity-chart-container">
+        <div class="sub-title">📈 高频实体分布 / Top Entities by Frequency</div>
+        <div id="entity-chart"></div>
+    </div>
+
+    <div id="graph-container">
+        <div class="sub-title">🔗 核心关系网络 / Core Relation Network（点击节点查看详情 / Tap node for details）</div>
+        <div id="graph"></div>
+    </div>
+
+    <div id="node-detail">
+        <div id="node-detail-title">节点详情 / Node Detail</div>
+        <div id="node-detail-body">请点击上方图中的一个节点（Tap a node above），查看与其相关的核心关系。</div>
+    </div>
+
+    <div class="table-wrapper">
+        <div class="sub-title">📊 核心关系 TOP 列表 / Core Relations TOP List</div>
+        <div id="relations-table"></div>
+    </div>
+</div>
+
+<script>
+    var graphChart = null;
+    var entityChart = null;
+    var lastPayload = null;
+
+    function ensureChart() {
+        if (!graphChart) {
+            var dom = document.getElementById('graph');
+            if (!dom || !window.echarts || !echarts.init) {
+                return null;
+            }
+            graphChart = echarts.init(dom, null, {renderer: 'canvas'});
+        }
+        return graphChart;
+    }
+
+    function ensureEntityChart() {
+        if (!entityChart) {
+            var dom = document.getElementById('entity-chart');
+            if (!dom || !window.echarts || !echarts.init) {
+                return null;
+            }
+            entityChart = echarts.init(dom, null, {renderer: 'canvas'});
+        }
+        return entityChart;
+    }
+
+    function renderGraph(payload) {
+        try {
+            if (typeof payload === 'string') {
+                payload = JSON.parse(payload);
+            }
+        } catch (e) {
+            console.log('[GRAPH_HTML] parse payload failed', e);
+            return;
+        }
+
+        console.log('[GRAPH_HTML] renderGraph called with payload keys:', Object.keys(payload || {}));
+
+        lastPayload = payload;
+
+        var kbName = payload.kbName || '';
+        var topN = payload.topN || 0;
+        var stats = payload.stats || {};
+        var nodes = payload.nodes || [];
+        var edges = payload.edges || [];
+        var relations = payload.relations || [];
+
+        console.log('[GRAPH_HTML] kbName=' + kbName +
+            ', topN=' + topN +
+            ', chunks=' + (stats.totalChunks || 0) +
+            ', entities=' + (stats.totalEntities || 0) +
+            ', edges=' + (stats.totalEdges || 0) +
+            ', nodesArraySize=' + nodes.length +
+            ', edgesArraySize=' + edges.length +
+            ', relationsArraySize=' + relations.length);
+
+        document.getElementById('kb-title').textContent = '📊 知识库图谱 / Knowledge Graph：' + kbName;
+
+        var metaHtml = '';
+        metaHtml += '<span>文档块数 / Chunks：' + (stats.totalChunks || 0) + '</span>';
+        metaHtml += '<span>实体总数 / Entities：' + (stats.totalEntities || 0) + '</span>';
+        metaHtml += '<span>关系总数 / Relations：' + (stats.totalEdges || 0) + '</span>';
+        metaHtml += '<span>TOP N：' + (topN || 0) + '</span>';
+        document.getElementById('kb-meta').innerHTML = metaHtml;
+
+        var chart = ensureChart();
+        if (!chart) {
+            console.log('[GRAPH_HTML] ensureChart() returned null, graph will not be drawn');
+        }
+        renderEntityChart(nodes);
+
+        var maxDegree = 0;
+        nodes.forEach(function (n) {
+            if (n.degree && n.degree > maxDegree) {
+                maxDegree = n.degree;
+            }
+        });
+        if (maxDegree <= 0) {
+            maxDegree = 1;
+        }
+
+        var seriesNodes = nodes.map(function (n) {
+            var base = 10;
+            var extra = 20 * (n.degree || 0) / maxDegree;
+            return {
+                id: n.id,
+                name: n.name,
+                value: n.frequency || 0,
+                degree: n.degree || 0,
+                symbolSize: base + extra,
+                label: {
+                    show: true,
+                    fontSize: 10
+                }
+            };
+        });
+
+        var seriesLinks = edges.map(function (e) {
+            return {
+                source: e.source,
+                target: e.target,
+                value: e.weight,
+                lineStyle: {
+                    width: 1 + Math.log(1 + (e.weight || 1))
+                }
+            };
+        });
+
+        var option = {
+            tooltip: {
+                formatter: function (params) {
+                    if (params.dataType === 'node') {
+                        var n = params.data;
+                        return '<b>' + (n.name || '') + '</b><br/>频次：' + (n.value || 0) + '<br/>连接度：' + (n.degree || 0);
+                    } else if (params.dataType === 'edge') {
+                        var d = params.data;
+                        return (d.source || '') + ' — ' + (d.target || '') + '<br/>次数：' + (d.value || 0);
+                    }
+                    return '';
+                }
+            },
+            series: [{
+                type: 'graph',
+                layout: 'force',
+                data: seriesNodes,
+                links: seriesLinks,
+                roam: true,
+                focusNodeAdjacency: true,
+                selectedMode: 'single',
+                label: {
+                    position: 'right'
+                },
+                force: {
+                    repulsion: 160,
+                    edgeLength: [40, 160]
+                },
+                lineStyle: {
+                    color: '#999',
+                    opacity: 0.8
+                },
+                emphasis: {
+                    focus: 'adjacency',
+                    lineStyle: {
+                        width: 2.5
+                    },
+                    itemStyle: {
+                        shadowBlur: 12,
+                        shadowColor: 'rgba(0, 0, 0, 0.3)'
+                    }
+                },
+                blur: {
+                    lineStyle: {
+                        opacity: 0.1
+                    },
+                    itemStyle: {
+                        opacity: 0.3
+                    }
+                }
+            }]
+        };
+
+        if (chart && chart.setOption) {
+            chart.setOption(option);
+        }
+
+        if (chart && chart.off && chart.on) {
+            chart.off('click');
+            chart.on('click', function (params) {
+                if (params.dataType === 'node') {
+                    if (chart.dispatchAction) {
+                        chart.dispatchAction({
+                            type: 'unfocusNodeAdjacency'
+                        });
+                        chart.dispatchAction({
+                            type: 'focusNodeAdjacency',
+                            seriesIndex: 0,
+                            dataIndex: params.dataIndex
+                        });
+                    }
+                    onNodeSelected(params.data.id || params.data.name);
+                }
+            });
+        }
+
+        renderRelationsTable(relations);
+        resetNodeDetail();
+    }
+
+    function resetNodeDetail() {
+        var titleEl = document.getElementById('node-detail-title');
+        var bodyEl = document.getElementById('node-detail-body');
+        titleEl.textContent = '节点详情 / Node Detail';
+        bodyEl.textContent = '请点击上方图中的一个节点（Tap a node above），查看与其相关的核心关系。';
+    }
+
+    function onNodeSelected(nodeId) {
+        if (!lastPayload || !nodeId) {
+            return;
+        }
+        var relations = lastPayload.relations || [];
+        var related = relations.filter(function (r) {
+            return r.a === nodeId || r.b === nodeId;
+        });
+
+        var titleEl = document.getElementById('node-detail-title');
+        var bodyEl = document.getElementById('node-detail-body');
+
+        titleEl.textContent = '节点 / Node：' + nodeId;
+
+        if (related.length === 0) {
+            bodyEl.textContent = '没有找到与该节点相关的核心关系（TOP N 范围内）。/ No core relations found within TOP N.';
+            return;
+        }
+
+        var degree = related.length;
+        var strongest = related[0];
+        for (var i = 1; i < related.length; i++) {
+            if ((related[i].count || 0) > (strongest.count || 0)) {
+                strongest = related[i];
+            }
+        }
+
+        var html = '';
+        html += '<div>连接度 / Degree：' + degree + '</div>';
+        html += '<div>最强关系 / Strongest Relation：' + strongest.a + ' — ' + strongest.b + '（' + strongest.count + ' 次 / times）</div>';
+        html += '<div style="margin-top:6px;">相关关系 / Related Relations：</div>';
+        html += '<table><thead><tr><th>实体A / Entity A</th><th>实体B / Entity B</th><th>次数 / Count</th></tr></thead><tbody>';
+        related.slice(0, 20).forEach(function (r) {
+            html += '<tr><td>' + r.a + '</td><td>' + r.b + '</td><td>' + r.count + '</td></tr>';
+        });
+        html += '</tbody></table>';
+
+        bodyEl.innerHTML = html;
+    }
+
+    function renderRelationsTable(relations) {
+        var container = document.getElementById('relations-table');
+        if (!relations || relations.length === 0) {
+            container.innerHTML = '<div class="meta">暂无核心关系数据。/ No core relation data.</div>';
+            return;
+        }
+
+        var html = '<table><thead><tr><th>实体A / Entity A</th><th>实体B / Entity B</th><th>次数 / Count</th></tr></thead><tbody>';
+        relations.forEach(function (r) {
+            html += '<tr><td>' + r.a + '</td><td>' + r.b + '</td><td>' + r.count + '</td></tr>';
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    }
+
+    function renderEntityChart(nodes) {
+        var chart = ensureEntityChart();
+        if (!chart || !chart.setOption) {
+            return;
+        }
+        if (!nodes || !nodes.length) {
+            chart.setOption({ series: [] });
+            return;
+        }
+
+        var sorted = nodes.slice().sort(function (a, b) {
+            return (b.frequency || 0) - (a.frequency || 0);
+        }).slice(0, 20);
+
+        var names = sorted.map(function (n) { return n.name || n.id || ''; });
+        var values = sorted.map(function (n) { return n.frequency || 0; });
+
+        var option = {
+            grid: {
+                left: 40,
+                right: 10,
+                top: 20,
+                bottom: 40
+            },
+            xAxis: {
+                type: 'category',
+                data: names,
+                axisLabel: {
+                    interval: 0,
+                    rotate: 45,
+                    fontSize: 9
+                }
+            },
+            yAxis: {
+                type: 'value'
+            },
+            series: [{
+                type: 'line',
+                data: values,
+                smooth: true,
+                symbolSize: 4
+            }]
+        };
+
+        chart.setOption(option);
+    }
+
+    window.renderGraph = renderGraph;
+</script>
+</body>
+</html>

@@ -11,6 +11,8 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
+import androidx.core.view.MenuProvider;
+import androidx.lifecycle.Lifecycle;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -42,14 +44,51 @@ public class HelpFragment extends Fragment {
         View view = inflater.inflate(R.layout.fragment_help, container, false);
         helpTextView = view.findViewById(R.id.helpTextView);
         
-        // 设置文本大小
-        float textSize = ConfigManager.getGlobalTextSize(requireContext());
-        helpTextView.setTextSize(textSize);
-        
         // 加载帮助文档
         loadHelpDocument();
         
         return view;
+    }
+    
+    @Override
+    public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
+        super.onViewCreated(view, savedInstanceState);
+        
+        // Setup menu provider for close button (new API)
+        requireActivity().addMenuProvider(new MenuProvider() {
+            @Override
+            public void onCreateMenu(@NonNull android.view.Menu menu, @NonNull android.view.MenuInflater menuInflater) {
+                // No additional menu items needed
+            }
+            
+            @Override
+            public boolean onMenuItemSelected(@NonNull android.view.MenuItem menuItem) {
+                if (menuItem.getItemId() == android.R.id.home) {
+                    // CRITICAL: Check if fragment is still attached before accessing Activity
+                    if (!isAdded() || getActivity() == null) {
+                        android.util.Log.w("HelpFragment", "[MENU] Fragment not attached, ignoring back button");
+                        return true;
+                    }
+                    
+                    // CRITICAL: Restore main UI BEFORE popBackStack (Fragment will be detached after pop)
+                    androidx.appcompat.app.ActionBar actionBar = ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar();
+                    if (actionBar != null) {
+                        actionBar.setDisplayHomeAsUpEnabled(false);
+                        actionBar.setTitle(R.string.app_name);
+                    }
+                    getActivity().findViewById(R.id.container).setVisibility(android.view.View.GONE);
+                    getActivity().findViewById(R.id.viewPager).setVisibility(android.view.View.VISIBLE);
+                    
+                    // Now clear all fragments from back stack
+                    androidx.fragment.app.FragmentManager fm = getActivity().getSupportFragmentManager();
+                    while (fm.getBackStackEntryCount() > 0) {
+                        fm.popBackStackImmediate();
+                    }
+                    return true;
+                }
+                return false;
+            }
+        }, getViewLifecycleOwner(), Lifecycle.State.RESUMED);
     }
 
     /**
@@ -107,14 +146,25 @@ public class HelpFragment extends Fragment {
     }
 
     /**
-     * 当Fragment可见时，应用保存的字体大小设置
+     * 当Fragment可见时，应用保存的字体大小设置和显示返回按钮
      */
     @Override
     public void onResume() {
         super.onResume();
+        // Show back button and set title in ActionBar
+        if (getActivity() != null && ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar() != null) {
+            ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setDisplayHomeAsUpEnabled(true);
+            ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setTitle(R.string.title_help);
+        }
         // 应用保存的字体大小设置
         float textSize = ConfigManager.getGlobalTextSize(requireContext());
         helpTextView.setTextSize(textSize);
+    }
+    
+    @Override
+    public void onPause() {
+        super.onPause();
+        // Title restoration is handled in MenuProvider to avoid multiple calls
     }
 }
 

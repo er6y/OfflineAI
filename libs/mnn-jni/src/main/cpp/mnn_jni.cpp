@@ -12,6 +12,8 @@
 #include <unistd.h>  // for chdir, getcwd
 #include <cerrno>    // for errno
 #include <sys/stat.h> // for stat
+#include <sys/types.h> // for gettid
+#include <sys/syscall.h> // for syscall
 #include "llm/llm.hpp"
 #include "llm/reranker.hpp"
 #include "diffusion/diffusion.hpp"
@@ -2048,6 +2050,61 @@ public:
     
     bool load() {
         try {
+            // Parse memory mode and thread_num from config_json
+            MNN::BackendConfig::MemoryMode memoryMode = MNN::BackendConfig::Memory_High;
+            std::string memoryStr = "high";
+            int threadNum = 4;  // Default: 4 threads (same as LLM default)
+            
+            if (!config_json_.empty()) {
+                // Simple JSON parsing for "memory":"xxx"
+                size_t memPos = config_json_.find("\"memory\"");
+                if (memPos != std::string::npos) {
+                    size_t valueStart = config_json_.find("\"", memPos + 9);
+                    size_t valueEnd = config_json_.find("\"", valueStart + 1);
+                    if (valueStart != std::string::npos && valueEnd != std::string::npos) {
+                        memoryStr = config_json_.substr(valueStart + 1, valueEnd - valueStart - 1);
+                        if (memoryStr == "low") {
+                            memoryMode = MNN::BackendConfig::Memory_Low;
+                        } else if (memoryStr == "normal") {
+                            memoryMode = MNN::BackendConfig::Memory_Normal;
+                        } else {
+                            memoryMode = MNN::BackendConfig::Memory_High;
+                        }
+                    }
+                }
+                
+                // Parse thread_num from config_json
+                size_t threadPos = config_json_.find("\"thread_num\"");
+                if (threadPos != std::string::npos) {
+                    size_t colonPos = config_json_.find(":", threadPos);
+                    if (colonPos != std::string::npos) {
+                        size_t numStart = colonPos + 1;
+                        // Skip whitespace
+                        while (numStart < config_json_.length() && std::isspace(config_json_[numStart])) {
+                            numStart++;
+                        }
+                        size_t numEnd = numStart;
+                        while (numEnd < config_json_.length() && std::isdigit(config_json_[numEnd])) {
+                            numEnd++;
+                        }
+                        if (numEnd > numStart) {
+                            std::string numStr = config_json_.substr(numStart, numEnd - numStart);
+                            threadNum = std::stoi(numStr);
+                            LOGI("[EMBEDDING] Parsed thread_num from config: %d", threadNum);
+                        }
+                    }
+                }
+            }
+            
+            // Create independent Executor for Embedding
+            MNN::BackendConfig bConfig;
+            bConfig.precision = MNN::BackendConfig::Precision_Normal;
+            bConfig.power = MNN::BackendConfig::Power_High;  // High power for big cores
+            bConfig.memory = memoryMode;
+            executor_ = MNN::Express::Executor::newExecutor(MNN_FORWARD_CPU, bConfig, threadNum);
+            MNN::Express::ExecutorScope scope(executor_);
+            LOGI("[EMBEDDING] ✅ Created independent Executor (CPU, %d threads, high power, memory=%s)", threadNum, memoryStr.c_str());
+            
             // Create Embedding instance from model directory
             std::string config_path = model_dir_ + "/config.json";
             LOGI("[EMBEDDING] Creating from config: %s", config_path.c_str());
@@ -2081,6 +2138,7 @@ public:
 private:
     std::string model_dir_;
     std::string config_json_;
+    std::shared_ptr<MNN::Express::Executor> executor_;  // Independent executor
     Embedding* embedding_ = nullptr;
 };
 
@@ -2178,12 +2236,17 @@ Java_com_offlineai_mnn_MnnInference_computeEmbedding(
         }
         
         // Call MNN embedding API
+        LOGI("[EMBEDDING] >>> Calling MNN txt_embedding() for %zu chars...", text_str.length());
+        LOGI("[EMBEDDING] >>> Thread ID: %d, Session ptr: %p", gettid(), (void*)embedding);
+        LOGI("[EMBEDDING] >>> About to enter MNN txt_embedding()...");
+        
         auto embed_start = std::chrono::high_resolution_clock::now();
         auto result = embedding->txt_embedding(text_str);
         auto embed_end = std::chrono::high_resolution_clock::now();
         auto embed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(embed_end - embed_start).count();
         
-        LOGI("[EMBEDDING] MNN txt_embedding() took %lld ms", (long long)embed_ms);
+        LOGI("[EMBEDDING] <<< MNN txt_embedding() returned, took %lld ms", (long long)embed_ms);
+        LOGI("[EMBEDDING] <<< Thread ID: %d completed", gettid());
         
         // Extract float array from VARP
         auto extract_start = std::chrono::high_resolution_clock::now();
@@ -2376,6 +2439,15 @@ public:
     
     bool load() {
         try {
+            // Create independent Executor for Reranker (2 threads, high power)
+            MNN::BackendConfig bConfig;
+            bConfig.precision = MNN::BackendConfig::Precision_Normal;
+            bConfig.power = MNN::BackendConfig::Power_High;  // High power for big cores
+            bConfig.memory = MNN::BackendConfig::Memory_Low;
+            executor_ = MNN::Express::Executor::newExecutor(MNN_FORWARD_CPU, bConfig, 2);  // 2 threads for small model
+            MNN::Express::ExecutorScope scope(executor_);
+            LOGI("[RERANKER] ✅ Created independent Executor (CPU, 2 threads, high power)");
+            
             // Create config path
             std::string config_path = model_dir_ + "/config.json";
             LOGI("[RERANKER] Creating from config: %s", config_path.c_str());
@@ -2436,6 +2508,7 @@ public:
 private:
     std::string model_dir_;
     std::string config_json_;
+    std::shared_ptr<MNN::Express::Executor> executor_;  // Independent executor
     std::unique_ptr<RerankerBase> reranker_;
 };
 
@@ -2705,6 +2778,290 @@ Java_com_offlineai_mnn_MnnInference_releaseReranker(
         LOGI("Reranker session released: %lld", (long long)handle);
     } else {
         LOGW("Reranker handle not found: %lld", (long long)handle);
+    }
+}
+
+// ========== NER (Named Entity Recognition) JNI Implementation ==========
+
+/**
+ * NER Session Wrapper - Uses LLM for entity extraction
+ * Optimized for short, structured outputs (entity lists)
+ */
+class MnnNerSession {
+public:
+    MnnNerSession(const std::string& model_dir, const std::string& config_json)
+        : model_dir_(model_dir), config_json_(config_json) {
+        LOGI("[NER] Creating session: %s", model_dir.c_str());
+    }
+    
+    ~MnnNerSession() {
+        LOGI("[NER] Destroying session");
+        llm_.reset();
+        executor_.reset();
+    }
+    
+    bool load() {
+        try {
+            // Create independent Executor for NER (2 threads, high power)
+            MNN::BackendConfig bConfig;
+            bConfig.precision = MNN::BackendConfig::Precision_Normal;
+            bConfig.power = MNN::BackendConfig::Power_High;  // High power for big cores
+            bConfig.memory = MNN::BackendConfig::Memory_Normal;
+            executor_ = MNN::Express::Executor::newExecutor(MNN_FORWARD_CPU, bConfig, 2);  // 2 threads for small model
+            MNN::Express::ExecutorScope scope(executor_);
+            LOGI("[NER] ✅ Created independent Executor (CPU, 2 threads, high power)");
+            
+            // Build NER-optimized config and save to file
+            std::string ner_config = buildNerConfig();
+            LOGI("[NER] Config: %s", ner_config.c_str());
+            
+            // Save config to temporary file
+            std::string config_path = model_dir_ + "/config.json";
+            
+            // Create LLM instance from config file
+            llm_.reset(Llm::createLLM(config_path));
+            if (!llm_) {
+                LOGE("[NER] Failed to create LLM instance");
+                return false;
+            }
+            
+            // Apply runtime config after creation
+            llm_->set_config(ner_config);
+            
+            // CRITICAL: Load model to initialize tokenizer and weights
+            LOGI("[NER] Loading model...");
+            llm_->load();
+            
+            LOGI("[NER] LLM instance created and loaded successfully");
+            return true;
+            
+        } catch (const std::exception& e) {
+            LOGE("[NER] Exception during load: %s", e.what());
+            return false;
+        }
+    }
+    
+    /**
+     * Extract entities from text using system prompt + user text
+     * System prompt is cached after first use for efficiency
+     */
+    std::string extractEntities(const std::string& system_prompt, const std::string& text) {
+        if (!llm_) {
+            LOGE("[NER] LLM not initialized");
+            return "";
+        }
+        
+        try {
+            MNN::Express::ExecutorScope scope(executor_);
+            
+            // CRITICAL: Reset history for each independent extraction
+            // MNN LLM maintains internal history, clear it for independent tasks
+            llm_->reset();
+            LOGI("[NER] ✅ History reset for independent extraction");
+            
+            // Build full prompt: system_prompt + user_text
+            std::string full_prompt = system_prompt + "\n\n" + text;
+            LOGI("[NER] Processing text: %zu chars (system: %zu, user: %zu)", 
+                 full_prompt.length(), system_prompt.length(), text.length());
+            
+            // Tokenize full prompt (system + user)
+            auto full_tokens = llm_->tokenizer_encode(full_prompt);
+            LOGI("[NER] Full prompt tokenized: %zu tokens", full_tokens.size());
+            
+            // Generate response
+            std::string response;
+            std::ostringstream oss;
+            
+            auto start_time = std::chrono::high_resolution_clock::now();
+            LOGI("[NER] Starting response generation (max_new_tokens from config)...");
+            
+            // Generate with full prompt (system + user)
+            llm_->response(full_tokens, &oss, nullptr, -1);  // max_new_tokens from config
+            
+            auto end_time = std::chrono::high_resolution_clock::now();
+            auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+            
+            response = oss.str();
+            
+            LOGI("[NER] ✅ Extraction completed in %lld ms, response length: %zu chars", 
+                 (long long)duration_ms, response.length());
+            
+            // Log response content for debugging
+            if (response.empty()) {
+                LOGW("[NER] WARNING: Empty response generated!");
+            } else {
+                LOGI("[NER] Response preview (first 300 chars): [%s]", 
+                     response.substr(0, std::min(size_t(300), response.length())).c_str());
+                if (response.length() > 300) {
+                    LOGI("[NER] Response preview (last 100 chars): [%s]", 
+                         response.substr(response.length() - 100).c_str());
+                }
+            }
+            
+            return response;
+            
+        } catch (const std::exception& e) {
+            LOGE("[NER] Extraction failed: %s", e.what());
+            return "";
+        }
+    }
+    
+    Llm* get() { return llm_.get(); }
+    
+private:
+    /**
+     * Build NER-optimized config (hardcoded parameters)
+     */
+    std::string buildNerConfig() {
+        nlohmann::json config;
+        
+        // Parse user-provided runtime config (memory, power, precision, thread_num)
+        if (!config_json_.empty()) {
+            try {
+                config = nlohmann::json::parse(config_json_);
+            } catch (...) {
+                LOGW("[NER] Failed to parse runtime config, using defaults");
+            }
+        }
+        
+        // NER-optimized parameters (hardcoded)
+        config["max_new_tokens"] = 128;       // Short output for entity lists (64-128 tokens)
+        config["temperature"] = 0.1;          // Low temperature for deterministic output
+        config["top_p"] = 0.9;                // Nucleus sampling
+        config["top_k"] = 40;                 // Top-k sampling
+        
+        // CRITICAL: Disable Qwen3 thinking mode (Jinja template context)
+        // Reference: LocalLLMMNNHandler.java Line 881-894
+        // Format: {"jinja":{"context":{"enable_thinking":false}}}
+        config["jinja"]["context"]["enable_thinking"] = false;
+        
+        return config.dump();
+    }
+    
+    std::string model_dir_;
+    std::string config_json_;
+    std::shared_ptr<MNN::Express::Executor> executor_;  // Independent executor
+    std::unique_ptr<Llm> llm_;
+};
+
+// Global NER sessions map
+static std::map<jlong, std::unique_ptr<MnnNerSession>> g_ner_sessions;
+static std::mutex g_ner_sessions_mutex;
+static jlong g_next_ner_session_handle = 1;
+
+/**
+ * Create NER session
+ * Java signature: public static native long createNerWithConfig(String modelDir, String runtimeConfig);
+ */
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_offlineai_mnn_MnnInference_createNerWithConfig(
+    JNIEnv* env, jclass clazz, jstring modelDir, jstring runtimeConfig) {
+    
+    const char* model_dir_cstr = env->GetStringUTFChars(modelDir, nullptr);
+    std::string model_dir_str(model_dir_cstr);
+    env->ReleaseStringUTFChars(modelDir, model_dir_cstr);
+    
+    std::string config_json;
+    if (runtimeConfig) {
+        const char* config_cstr = env->GetStringUTFChars(runtimeConfig, nullptr);
+        config_json = std::string(config_cstr);
+        env->ReleaseStringUTFChars(runtimeConfig, config_cstr);
+    }
+    
+    try {
+        LOGI("[NER] Creating session from: %s", model_dir_str.c_str());
+        if (!config_json.empty()) {
+            LOGI("[NER] Runtime config: %s", config_json.c_str());
+        }
+        
+        auto start_time = std::chrono::high_resolution_clock::now();
+        
+        // Create session
+        auto session = std::make_unique<MnnNerSession>(model_dir_str, config_json);
+        
+        // Load model
+        if (!session->load()) {
+            LOGE("[NER] Session load failed");
+            return 0;
+        }
+        
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+        
+        LOGI("[NER] ✓ Session created - load time: %lld ms", (long long)duration_ms);
+        
+        // Store session
+        std::lock_guard<std::mutex> lock(g_ner_sessions_mutex);
+        jlong handle = g_next_ner_session_handle++;
+        g_ner_sessions[handle] = std::move(session);
+        
+        return handle;
+        
+    } catch (const std::exception& e) {
+        LOGE("[NER] Exception: %s", e.what());
+        return 0;
+    }
+}
+
+/**
+ * Extract entities from text
+ * Java signature: public static native String extractEntities(long nerHandle, String systemPrompt, String text);
+ */
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_offlineai_mnn_MnnInference_extractEntities(
+    JNIEnv* env, jclass clazz, jlong handle, jstring systemPrompt, jstring text) {
+    
+    // Get session from map
+    std::lock_guard<std::mutex> lock(g_ner_sessions_mutex);
+    auto it = g_ner_sessions.find(handle);
+    if (it == g_ner_sessions.end()) {
+        LOGE("[NER] Invalid handle: %lld", (long long)handle);
+        return env->NewStringUTF("");
+    }
+    
+    auto* session = it->second.get();
+    if (!session) {
+        LOGE("[NER] Session is null");
+        return env->NewStringUTF("");
+    }
+    
+    // Convert Java strings to C++
+    const char* system_cstr = env->GetStringUTFChars(systemPrompt, nullptr);
+    const char* text_cstr = env->GetStringUTFChars(text, nullptr);
+    
+    std::string system_str(system_cstr);
+    std::string text_str(text_cstr);
+    
+    env->ReleaseStringUTFChars(systemPrompt, system_cstr);
+    env->ReleaseStringUTFChars(text, text_cstr);
+    
+    try {
+        // Extract entities
+        std::string result = session->extractEntities(system_str, text_str);
+        
+        return env->NewStringUTF(result.c_str());
+        
+    } catch (const std::exception& e) {
+        LOGE("[NER] Exception: %s", e.what());
+        return env->NewStringUTF("");
+    }
+}
+
+/**
+ * Release NER session
+ * Java signature: public static native void releaseNer(long nerHandle);
+ */
+extern "C" JNIEXPORT void JNICALL
+Java_com_offlineai_mnn_MnnInference_releaseNer(
+    JNIEnv* env, jclass clazz, jlong handle) {
+    
+    std::lock_guard<std::mutex> lock(g_ner_sessions_mutex);
+    auto it = g_ner_sessions.find(handle);
+    if (it != g_ner_sessions.end()) {
+        g_ner_sessions.erase(it);
+        LOGI("[NER] Session released: %lld", (long long)handle);
+    } else {
+        LOGW("[NER] Handle not found: %lld", (long long)handle);
     }
 }
 

@@ -121,12 +121,13 @@ dependencies {
     androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
 }
 
-// CRITICAL: Force mnn-lib to build before sherpa-mnn-jni native compilation
+// ========== Native build dependency (simplified to avoid circular dependency) ==========
 afterEvaluate {
-    tasks.matching { it.name.startsWith('configureCMake') }.all {
-        dependsOn ':libs:mnn-lib:assembleRelease'
-    }
-    tasks.matching { it.name.startsWith('buildCMake') }.all {
-        dependsOn ':libs:mnn-lib:assembleRelease'
+    tasks.matching { 
+        it.name.contains("externalNativeBuild") || 
+        it.name.contains("configureCMake") || 
+        it.name.contains("buildCMake")
+    }.all { sherpaTask ->
+        sherpaTask.mustRunAfter(":libs:mnn-lib:assembleRelease")
     }
 }

@@ -51,9 +51,12 @@ import com.example.offlineai.ConfigManager; // 添加 ConfigManager 的导入
 import com.example.offlineai.EmbeddingHandler; // 导入 EmbeddingHandler
 import com.example.offlineai.StateDisplayManager;
 import com.example.offlineai.AppConstants;
-import com.example.offlineai.SQLiteVectorDatabaseHandler; // 导入 SQLiteVectorDatabaseHandler
+// Removed: import com.example.offlineai.SQLiteVectorDatabaseHandler; - Now using KnowledgeGraphDatabase directly
 import com.example.offlineai.TextChunkProcessor; // 导入文本处理器
+import com.example.offlineai.HanLpNerHandler;
+import com.example.offlineai.GraphStopwordsMatcher;
 
+// Removed @SuppressWarnings("deprecation") - No longer using deprecated APIs
 public class KnowledgeNoteFragment extends Fragment {
     private static final String TAG = "KnowledgeNoteFragment";
     
@@ -301,11 +304,13 @@ public class KnowledgeNoteFragment extends Fragment {
                 
                 // 优先从SQLite数据库中获取嵌入模型信息
                 String embeddingModelPath = null;
-                SQLiteVectorDatabaseHandler vectorDb = null;
+                KnowledgeGraphDatabase vectorDb = null;
                 try {
-                    vectorDb = new SQLiteVectorDatabaseHandler(knowledgeBaseDir, "unknown");
-                    if (vectorDb.loadDatabase()) {
-                        SQLiteVectorDatabaseHandler.DatabaseMetadata metadata = vectorDb.getMetadata();
+                    String dbPath = knowledgeBaseDir.getAbsolutePath() + "/knowledge_graph.db";
+                    vectorDb = new KnowledgeGraphDatabase(requireContext(), dbPath, "unknown");
+                    // KnowledgeGraphDatabase is auto-loaded on construction
+                    {
+                        KnowledgeGraphDatabase.DatabaseMetadata metadata = vectorDb.getMetadata();
                         if (metadata != null) {
                             String embeddingModel = metadata.getModeldir();
                             LogManager.logD(TAG, "从SQLite数据库中读取到嵌入模型目录: " + embeddingModel);
@@ -316,7 +321,7 @@ public class KnowledgeNoteFragment extends Fragment {
                             final AtomicBoolean modelFoundRef = new AtomicBoolean(false);
                             
                             // 创建一个副本以在lambda表达式中使用
-                            final SQLiteVectorDatabaseHandler finalVectorDb = vectorDb;
+                            final KnowledgeGraphDatabase finalVectorDb = vectorDb;
                             
                             requireActivity().runOnUiThread(() -> {
                                 EmbeddingHandler.checkAndLoadEmbeddingModel(
@@ -473,20 +478,14 @@ public class KnowledgeNoteFragment extends Fragment {
                 
                 updateProgress(getString(R.string.embedding_model_loaded_success, embeddingHandler.getEmbeddingModel()));
                 
-                // 使用SQLiteVectorDatabaseHandler添加笔记
+                // 使用 KnowledgeGraphDatabase 添加笔记
                 updateProgress(getString(R.string.adding_note_to_kb));
-                SQLiteVectorDatabaseHandler noteVectorDb = new SQLiteVectorDatabaseHandler(knowledgeBaseDir, "note");
+                String dbPath = knowledgeBaseDir.getAbsolutePath() + "/knowledge_graph.db";
+                // Plan B: Use selected knowledge base name as collection so notes share the same graph
+                KnowledgeGraphDatabase noteVectorDb = new KnowledgeGraphDatabase(requireContext(), dbPath, selectedKnowledgeBase);
                 
                 try {
-                    // 加载数据库
-                    if (!noteVectorDb.loadDatabase()) {
-                        updateProgress(getString(R.string.error_load_sqlite_db));
-                        enableAddButton();
-                        
-                        // MNN embedding handler manages model lifecycle automatically
-                        
-                        return;
-                    }
+                    // KnowledgeGraphDatabase is auto-loaded on construction, no need to call loadDatabase()
                     
                     // Note: Knowledge base notes are structured data and should NOT be chunked
                     // Each note is an independent entity with title + content
@@ -534,11 +533,139 @@ public class KnowledgeNoteFragment extends Fragment {
                     
                     // Add complete note to database (store full text with title)
                     updateProgress(getString(R.string.saving_to_database));
-                    boolean success = noteVectorDb.addChunk(fullText, title, contentEmbedding);
-                    
-                    // 保存数据库
+                    long docId = noteVectorDb.addChunk(fullText, title, contentEmbedding, "");
+                    boolean success = docId >= 0;
+                    // KnowledgeGraphDatabase auto-saves, no need to call saveDatabase()
+
+                    // Integrate NER + graph building so notes participate in Knowledge Graph RAG
                     if (success) {
-                        success = noteVectorDb.saveDatabase();
+                        HanLpNerHandler nerHandler = null;
+                        try {
+                            String dictPath = ConfigManager.getString(requireContext(), ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, null);
+                            String valueNoneGraph = requireContext().getString(R.string.common_none);
+                            String customDictPath = null;
+                            if (dictPath != null && !dictPath.isEmpty() && !valueNoneGraph.equals(dictPath)) {
+                                customDictPath = dictPath;
+                            }
+
+                            nerHandler = new HanLpNerHandler(customDictPath);
+
+                            // Report dictionary status for note processing
+                            if (customDictPath == null) {
+                                String msg = "Dictionary: None";
+                                LogManager.logI(TAG, "[NOTE] " + msg);
+                                updateProgress(msg);
+                            } else {
+                                String dictFileName = new java.io.File(customDictPath).getName();
+                                if (nerHandler.isDictionaryLoaded()) {
+                                    int wordCount = nerHandler.getLoadedWordCount();
+                                    String msg = "Dictionary: " + dictFileName + " (loaded " + wordCount + " words)";
+                                    LogManager.logI(TAG, "[NOTE] " + msg);
+                                    updateProgress(msg);
+                                } else {
+                                    String baseMsg = "Dictionary: " + dictFileName;
+                                    LogManager.logI(TAG, "[NOTE] " + baseMsg);
+                                    updateProgress(baseMsg);
+                                    String dictError = nerHandler.getDictionaryErrorMessage();
+                                    if (dictError != null && !dictError.isEmpty()) {
+                                        String errMsg = "Dictionary load error: " + dictError;
+                                        LogManager.logE(TAG, "[NOTE] " + errMsg);
+                                        updateProgress(errMsg);
+                                    }
+                                }
+                            }
+                            HanLpNerHandler.NerResult nerResult = nerHandler.extractEntities(fullText);
+                            if (nerResult != null && nerResult.isSuccess()) {
+                                List<HanLpNerHandler.NerResult.Entity> entities = nerResult.getEntities();
+                                if (entities != null && !entities.isEmpty()) {
+                                    String stopwordsPath = ConfigManager.getGraphStopwordsPath(requireContext());
+                                    GraphStopwordsMatcher stopwordsMatcher = null;
+                                    if (stopwordsPath != null && !stopwordsPath.isEmpty()) {
+                                        try {
+                                            stopwordsMatcher = GraphStopwordsMatcher.loadFromFile(stopwordsPath);
+                                        } catch (Exception e) {
+                                            LogManager.logE(TAG, "[NOTE_STOPWORDS] Failed to load graph stopwords file: " + stopwordsPath, e);
+                                        }
+                                    }
+
+                                    if (stopwordsMatcher != null) {
+                                        List<HanLpNerHandler.NerResult.Entity> filteredEntities = new ArrayList<>();
+                                        int filteredCount = 0;
+                                        for (HanLpNerHandler.NerResult.Entity entity : entities) {
+                                            if (stopwordsMatcher.matches(entity.text)) {
+                                                filteredCount++;
+                                            } else {
+                                                filteredEntities.add(entity);
+                                            }
+                                        }
+                                        if (filteredCount > 0) {
+                                            String msg = String.format("[NOTE_STOPWORDS] Filtered %d entities by stopwords (original=%d, remaining=%d)",
+                                                    filteredCount, entities.size(), filteredEntities.size());
+                                            LogManager.logD(TAG, msg);
+                                            updateProgress(msg);
+                                        }
+                                        entities = filteredEntities;
+                                    }
+
+                                    if (!entities.isEmpty()) {
+                                        long entitiesStartTime = System.currentTimeMillis();
+
+                                        List<Long> entityIds = new ArrayList<>();
+                                        for (HanLpNerHandler.NerResult.Entity entity : entities) {
+                                            long entityId = noteVectorDb.addEntity(entity.text, entity.type, entity.confidence);
+                                            if (entityId > 0) {
+                                                entityIds.add(entityId);
+                                                noteVectorDb.linkChunkToEntity(docId, entity.text, entity.type, entity.confidence);
+                                            }
+                                        }
+
+                                        // Build co-occurrence edges between entities in this note
+                                        if (entityIds.size() > 1) {
+                                            for (int j = 0; j < entityIds.size(); j++) {
+                                                for (int k = j + 1; k < entityIds.size(); k++) {
+                                                    long fromId = entityIds.get(j);
+                                                    long toId = entityIds.get(k);
+                                                    // Add bidirectional edges with weight 1.0
+                                                    noteVectorDb.addEdge(fromId, toId, 1.0f);
+                                                    noteVectorDb.addEdge(toId, fromId, 1.0f);
+                                                }
+                                            }
+                                        }
+
+                                        long entitiesTime = System.currentTimeMillis() - entitiesStartTime;
+                                        LogManager.logD(TAG, String.format("[NOTE_GRAPH] docId=%d: entities=%d, time=%dms", docId, entityIds.size(), entitiesTime));
+                                    } else {
+                                        LogManager.logD(TAG, "[NOTE_GRAPH] No entities extracted for this note (after stopwords filtering)");
+                                    }
+                                } else {
+                                    LogManager.logD(TAG, "[NOTE_GRAPH] No entities extracted for this note (NER returned empty)");
+                                }
+                            } else {
+                                LogManager.logW(TAG, "[NOTE_GRAPH] NER failed for note (no result or error state)");
+                            }
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[NOTE_GRAPH] Error while building note graph: " + e.getMessage(), e);
+                        } finally {
+                            if (nerHandler != null) {
+                                try {
+                                    nerHandler.release();
+                                } catch (Exception e) {
+                                    LogManager.logE(TAG, "[NOTE_GRAPH] Failed to release HanLpNerHandler: " + e.getMessage(), e);
+                                }
+                            }
+                        }
+                    }
+
+                    int hubThreshold = ConfigManager.getGraphHubThreshold(requireContext());
+                    if (hubThreshold > 0) {
+                        try {
+                            int removed = noteVectorDb.applyHubThreshold(hubThreshold);
+                            String hubMsg = String.format("[NOTE_HUB_FILTER] Applied hub threshold=%d, removed hub entities=%d", hubThreshold, removed);
+                            LogManager.logD(TAG, hubMsg);
+                            updateProgress(hubMsg);
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[NOTE_HUB_FILTER] Failed to apply hub threshold: " + e.getMessage(), e);
+                        }
                     }
                     
                     // 获取添加后的文本块数量
@@ -665,34 +792,22 @@ public class KnowledgeNoteFragment extends Fragment {
         try {
             LogManager.logD(TAG, "更新知识库元数据中的模型信息: " + embeddingModelPath);
             
-            // 使用 SQLiteVectorDatabaseHandler 更新元数据
-            SQLiteVectorDatabaseHandler vectorDb = null;
+            // 使用 KnowledgeGraphDatabase 更新元数据
+            KnowledgeGraphDatabase vectorDb = null;
             try {
-                // 创建SQLite向量数据库处理器
-                LogManager.logI(TAG, "开始创建SQLite向量数据库处理器，知识库目录: " + knowledgeBaseDir.getAbsolutePath());
+                String dbPath = knowledgeBaseDir.getAbsolutePath() + "/knowledge_graph.db";
+                vectorDb = new KnowledgeGraphDatabase(requireContext(), dbPath, "note");
                 
-                vectorDb = new SQLiteVectorDatabaseHandler(knowledgeBaseDir, "note");
-                LogManager.logI(TAG, "正在加载SQLite向量数据库...");
-                
-                if (vectorDb.loadDatabase()) {
-                    // 更新嵌入模型路径
-                    vectorDb.updateEmbeddingModel(embeddingModelPath);
-                    LogManager.logD(TAG, "成功更新元数据");
-                    updateProgress(getString(R.string.progress_kb_metadata_updated));
-                } else {
-                    LogManager.logE(TAG, "加载SQLite向量数据库失败");
-                    updateProgress(getString(R.string.warning_sqlite_load_failed));
-                    
-                    // 尝试创建新的元数据
-                    vectorDb.updateEmbeddingModel(embeddingModelPath);
-                    LogManager.logD(TAG, "创建了新的数据库元数据");
-                    updateProgress(getString(R.string.progress_new_db_metadata_created));
-                }
+                // Update metadata
+                KnowledgeGraphDatabase.DatabaseMetadata metadata = vectorDb.getMetadata();
+                metadata.setModeldir(embeddingModelPath);
+                vectorDb.updateMetadata(metadata);
+                LogManager.logD(TAG, "成功更新元数据");
+                updateProgress(getString(R.string.progress_kb_metadata_updated));
             } catch (Exception e) {
-                LogManager.logE(TAG, "使用 SQLiteVectorDatabaseHandler 更新元数据失败", e);
+                LogManager.logE(TAG, "使用 KnowledgeGraphDatabase 更新元数据失败", e);
                 updateProgress(getString(R.string.warning_update_db_metadata_failed, e.getMessage()));
             } finally {
-                // 确保关闭数据库
                 if (vectorDb != null) {
                     try {
                         vectorDb.close();
@@ -846,10 +961,16 @@ public class KnowledgeNoteFragment extends Fragment {
      * 应用全局字体大小设置
      */
     private void applyGlobalTextSize() {
+        float fontSize = ConfigManager.getGlobalTextSize(requireContext());
         if (editTextContent != null) {
-            float fontSize = ConfigManager.getGlobalTextSize(requireContext());
             editTextContent.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize);
-            LogManager.logD(TAG, "已应用全局字体大小: " + fontSize + "sp");
         }
+        if (editTextTitle != null) {
+            editTextTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize);
+        }
+        if (textViewProgress != null) {
+            textViewProgress.setTextSize(TypedValue.COMPLEX_UNIT_SP, fontSize);
+        }
+        LogManager.logD(TAG, "已应用全局字体大小: " + fontSize + "sp");
     }
 }

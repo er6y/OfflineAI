@@ -74,7 +74,9 @@ import com.example.offlineai.StateDisplayManager;
 import com.example.offlineai.adapter.StateAwareSpinnerAdapter;
 import com.example.offlineai.MediaThumbnailAdapter;
 import com.example.offlineai.EmbeddingHandler;
-import com.example.offlineai.SQLiteVectorDatabaseHandler;
+import com.example.offlineai.HanLpNerHandler;
+import com.example.offlineai.GraphStopwordsMatcher;
+// Removed: import com.example.offlineai.SQLiteVectorDatabaseHandler; - Now using KnowledgeGraphDatabase directly
 import com.example.offlineai.ConfigManager;
 import com.example.offlineai.chat.model.ChatDataItem;
 import com.example.offlineai.chat.chatlist.ChatRecyclerViewAdapter;
@@ -109,8 +111,10 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -124,6 +128,7 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
+@SuppressWarnings("deprecation")
 public class RagQaFragment extends Fragment {
 
     private static final String TAG = "OfflineAI_RagQa"; // Add TAG for log printing
@@ -190,6 +195,8 @@ public class RagQaFragment extends Fragment {
     private Markwon markwon;
     private final StringBuilder answerBuilder = new StringBuilder();
     private final StringBuilder debugBuilder = new StringBuilder();
+    private HanLpNerHandler graphNerHandler;
+    private String graphNerDictPath;
 
     private final AtomicBoolean isSending = new AtomicBoolean(false); // Track the state of the send/stop button with atomic operations
     private final AtomicBoolean isTtsGenerating = new AtomicBoolean(false); // Track TTS generation state
@@ -259,9 +266,21 @@ public class RagQaFragment extends Fragment {
     private List<String> relevantDocuments;
     private String similarityInfo;
 
+    private static class GraphRagCandidate {
+        KnowledgeGraphDatabase.SearchResult result;
+        float vectorScore;
+        float graphScore;
+        float finalScore;
+        int entityOverlap;
+    }
+
+    // Graph RAG limits for seed entities to avoid explosion
+    private static final int GRAPH_RAG_MAX_SEED_ENTITIES = 32;
+
     @Nullable
     @Override
     public View onCreateView(@NonNull LayoutInflater inflater, @Nullable ViewGroup container, @Nullable Bundle savedInstanceState) {
+        LogManager.logD(TAG, "[LIFECYCLE_DEBUG] === onCreateView() called ===");
         View view = inflater.inflate(R.layout.fragment_rag_qa, container, false);
         
         // Initialize UI elements
@@ -283,8 +302,11 @@ public class RagQaFragment extends Fragment {
         recyclerViewChat = view.findViewById(R.id.recyclerViewChat); // Initialize chat RecyclerView
         
         // Initialize chat RecyclerView and adapter
+        LogManager.logD(TAG, "[LIFECYCLE_DEBUG] Creating new ChatRecyclerViewAdapter, chatMessages.size=" + chatMessages.size());
         chatAdapter = new ChatRecyclerViewAdapter(requireContext());
+        LogManager.logD(TAG, "[LIFECYCLE_DEBUG] New chatAdapter created: " + chatAdapter);
         chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
+        LogManager.logD(TAG, "[LIFECYCLE_DEBUG] chatAdapter.getItemCount() after init: " + chatAdapter.getItemCount());
         
         // Set transfer to note callback
         chatAdapter.setOnTransferToNoteCallback(text -> {
@@ -1884,13 +1906,21 @@ public class RagQaFragment extends Fragment {
         // ============================================
         // Initialize TtsAdapter (if System/External TTS enabled)
         // ============================================
-        String ttsModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_TTS_MODEL, "无");
+        String ttsModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_TTS_MODEL,
+                getString(R.string.settings_tts_model_none));
         boolean isLocalModel = AppConstants.ApiUrl.LOCAL.equals(apiUrl);
         String nativeTtsName = getString(R.string.settings_tts_model_native_omni);
         boolean isOmniNativeTts = nativeTtsName.equals(ttsModel);
+        String noneOption = getString(R.string.settings_tts_model_none);
+        String commonNone = getString(R.string.common_none);
+        boolean isTtsNoneOrEmpty = (ttsModel == null
+                || ttsModel.trim().isEmpty()
+                || noneOption.equals(ttsModel)
+                || commonNone.equals(ttsModel)
+                || "None".equalsIgnoreCase(ttsModel));
         
-        // Enable TtsAdapter for System/External TTS (not Omni Native)
-        if (!"无".equals(ttsModel) && !isOmniNativeTts) {
+        // Enable TtsAdapter for System/External TTS (not Omni Native, not None)
+        if (!isTtsNoneOrEmpty && !isOmniNativeTts) {
             try {
                 String chatFolderPath = ConfigManager.getString(requireContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
                 boolean autoPlay = ConfigManager.getTtsAutoPlay(requireContext());
@@ -2268,17 +2298,17 @@ public class RagQaFragment extends Fragment {
                 return relevantDocs;
             }
 
-            // Check SQLite database file
-            File vectorDbFile = new File(knowledgeBaseDir, "vectorstore.db");
-            if (!vectorDbFile.exists()) {
-                String errorMsg = "Error: SQLite vector database file does not exist: " + vectorDbFile.getAbsolutePath();
+            // Check SQLite database file (unified knowledge graph database)
+            File graphDbFile = new File(knowledgeBaseDir, "knowledge_graph.db");
+            if (!graphDbFile.exists()) {
+                String errorMsg = "Error: SQLite knowledge graph database file does not exist: " + graphDbFile.getAbsolutePath();
                 LogManager.logE(TAG, errorMsg);
                 updateProgressOnUiThread(errorMsg);
                 return relevantDocs;
             } else {
-                String fileInfo = "SQLite database file exists: " + vectorDbFile.getAbsolutePath() +
-                    ", size: " + (vectorDbFile.length() / 1024) + "KB, " +
-                    "readable: " + vectorDbFile.canRead();
+                String fileInfo = "SQLite database file exists: " + graphDbFile.getAbsolutePath() +
+                    ", size: " + (graphDbFile.length() / 1024) + "KB, " +
+                    "readable: " + graphDbFile.canRead();
                 LogManager.logI(TAG, fileInfo);
             }
 
@@ -2337,30 +2367,21 @@ public class RagQaFragment extends Fragment {
             // Query vector database
             // Declare vectorDb variable outside try block so it can be accessed in catch block
             // Declare as final for use in lambda expressions
-            final SQLiteVectorDatabaseHandler[] vectorDbRef = new SQLiteVectorDatabaseHandler[1];
+            final KnowledgeGraphDatabase[] vectorDbRef = new KnowledgeGraphDatabase[1];
             try {
                 // Create SQLite vector database handler
                 LogManager.logI(TAG, "Starting to create SQLite vector database handler, knowledge base directory: " + knowledgeBaseDir.getAbsolutePath());
                 
                 try {
-                    vectorDbRef[0] = new SQLiteVectorDatabaseHandler(knowledgeBaseDir, "unknown");
-                    //updateProgressOnUiThread("Loading SQLite vector database...");
-
-                    // Load vector database
-                    //LogManager.logI(TAG, "Starting to load SQLite vector database...");
-                    
-                    if (!vectorDbRef[0].loadDatabase()) {
-                        String errorMsg = "Error: Failed to load SQLite vector database";
-                        LogManager.logE(TAG, errorMsg);
-                        updateProgressOnUiThread(errorMsg);
-                        return relevantDocs;
-                    }
+                    String dbPath = knowledgeBaseDir.getAbsolutePath() + "/knowledge_graph.db";
+                    vectorDbRef[0] = new KnowledgeGraphDatabase(requireContext(), dbPath, knowledgeBase);
+                    // KnowledgeGraphDatabase is auto-loaded on construction, no need to call loadDatabase()
                 } catch (Exception e) {
                     String errorMsg = "Error occurred while creating or loading SQLite vector database: " + e.getMessage();
                     LogManager.logE(TAG, errorMsg, e);
                     updateProgressOnUiThread(errorMsg);
                     if (vectorDbRef[0] != null) {
-                        vectorDbRef[0].closeDatabase();
+                        vectorDbRef[0].close();
                     }
                     return relevantDocs;
                 }
@@ -2443,7 +2464,7 @@ public class RagQaFragment extends Fragment {
                             LogManager.logE(TAG, "No available model files found in embedding model directory");
                             updateProgressOnUiThread("Error: No available model files found in embedding model directory");
                             // Close database connection
-                            vectorDbRef[0].closeDatabase();
+                            vectorDbRef[0].close();
                             return relevantDocs; // Return early as no models are available
                         }
                     }
@@ -2510,7 +2531,7 @@ public class RagQaFragment extends Fragment {
                 
                 // Close database connection
                 if (vectorDbRef[0] != null) {
-                    vectorDbRef[0].closeDatabase();
+                    vectorDbRef[0].close();
                     LogManager.logD(TAG, "Closed database connection in exception case");
                 }
                 
@@ -3569,7 +3590,7 @@ public class RagQaFragment extends Fragment {
 
     
     // Load model and process query
-    private void loadModelAndProcessQuery(String foundModelPath, String query, SQLiteVectorDatabaseHandler vectorDb) throws InterruptedException {
+    private void loadModelAndProcessQuery(String foundModelPath, String query, KnowledgeGraphDatabase vectorDb) throws InterruptedException {
         try {
             // Debug section already opened in executeRagQuery, just continue outputting
             
@@ -3690,7 +3711,7 @@ public class RagQaFragment extends Fragment {
                 int retrievalCount = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
                 
                 // Search similar text blocks
-                List<SQLiteVectorDatabaseHandler.SearchResult> searchResults = vectorDb.searchSimilar(queryVector, retrievalCount);
+                List<KnowledgeGraphDatabase.SearchResult> searchResults = vectorDb.searchSimilar(queryVector, retrievalCount);
                 
                 // Check global stop flag
                 if (userRequestedStop) {
@@ -3721,39 +3742,35 @@ public class RagQaFragment extends Fragment {
                     return;
                 }
                 
-                // Check if reranking is needed
-                int rerankCount = ConfigManager.getRerankCount(requireContext());
-                String rerankerModelPath = getRerankerModelPath(vectorDb);
-                
-                if (rerankCount > 0 && rerankerModelPath != null && !rerankerModelPath.isEmpty()) {
-                    // Use reranker model
-                    LogManager.logI(TAG, "Using reranker model with rerank count: " + rerankCount);
-                    updateChatMessage("\n[RAG] Using reranker model to optimize results...");
-                    try {
-                        LogManager.logI(TAG, "[DEBUG] About to call processWithReranker - query.len=" + userQuery.length() + ", results=" + searchResults.size() + ", path=" + rerankerModelPath + ", vectorDb=" + (vectorDb != null ? "not_null" : "null"));
-                        processWithReranker(userQuery, searchResults, rerankerModelPath, vectorDb);
-                        LogManager.logI(TAG, "[DEBUG] processWithReranker returned successfully");
-                    } catch (InterruptedException ie) {
-                        LogManager.logI(TAG, "Reranker process interrupted: " + ie.getMessage());
-                        // Re-throw to stop the entire flow
-                        throw ie;
-                    }
+                boolean graphRagEnabled = ConfigManager.isGraphRagEnabled(requireContext());
+                if (graphRagEnabled) {
+                    updateChatMessage("\n[RAG] Graph RAG mode enabled, combining vector and graph results...");
+                    processGraphRagResults(userQuery, searchResults, vectorDb, retrievalCount);
                 } else {
-                    // Do not use reranking, directly process vector search results
-                    if (rerankCount == 0) {
-                        LogManager.logI(TAG, "Rerank count is 0, skipping reranking and using vector search results directly");
-                        updateChatMessage("\n[RAG] Bypassed reranker (rerank count = 0)");
+                    int rerankCount = ConfigManager.getRerankCount(requireContext());
+                    String rerankerModelPath = getRerankerModelPath(vectorDb);
+
+                    if (rerankCount > 0 && rerankerModelPath != null && !rerankerModelPath.isEmpty()) {
+                        LogManager.logI(TAG, "Using reranker model with rerank count: " + rerankCount);
+                        updateChatMessage("\n[RAG] Using reranker model to optimize results...");
+                        try {
+                            LogManager.logI(TAG, "[DEBUG] About to call processWithReranker - query.len=" + userQuery.length() + ", results=" + searchResults.size() + ", path=" + rerankerModelPath + ", vectorDb=" + (vectorDb != null ? "not_null" : "null"));
+                            processWithReranker(userQuery, searchResults, rerankerModelPath, vectorDb);
+                            LogManager.logI(TAG, "[DEBUG] processWithReranker returned successfully");
+                        } catch (InterruptedException ie) {
+                            LogManager.logI(TAG, "Reranker process interrupted: " + ie.getMessage());
+                            throw ie;
+                        }
                     } else {
-                        LogManager.logD(TAG, "No reranker model configured, using vector search results");
-                        updateChatMessage("\n[RAG] Bypassed reranker (no model configured)");
+                        if (rerankCount == 0) {
+                            LogManager.logI(TAG, "Rerank count is 0, skipping reranking and using vector search results directly");
+                            updateChatMessage("\n[RAG] Bypassed reranker (rerank count = 0)");
+                        } else {
+                            LogManager.logD(TAG, "No reranker model configured, using vector search results");
+                            updateChatMessage("\n[RAG] Bypassed reranker (no model configured)");
+                        }
+                        processVectorSearchResults(searchResults);
                     }
-                    processVectorSearchResults(searchResults);
-                    
-                    // Debug section will be closed in callLLMApi, not here
-                    
-                    // [Fix] No longer call continueRagQueryAfterReranking to avoid duplicate LLM API calls
-                    // executeRagQuery method will wait for relevantDocuments to be set and then call callLLMApi itself
-                    // continueRagQueryAfterReranking();
                 }
 
                 // MNN embedding handler manages model lifecycle automatically
@@ -3815,7 +3832,7 @@ public class RagQaFragment extends Fragment {
     /**
      * Get reranker model path
      */
-    private String getRerankerModelPath(SQLiteVectorDatabaseHandler vectorDb) {
+    private String getRerankerModelPath(KnowledgeGraphDatabase vectorDb) {
         try {
             // Get reranker model directory from database metadata
             String rerankerDir = vectorDb.getMetadata().getRerankerdir();
@@ -3857,8 +3874,8 @@ public class RagQaFragment extends Fragment {
     /**
      * Process search results using reranker model
      */
-    private void processWithReranker(String query, List<SQLiteVectorDatabaseHandler.SearchResult> searchResults, 
-                                   String rerankerModelPath, SQLiteVectorDatabaseHandler vectorDb) throws InterruptedException, Exception {
+    private void processWithReranker(String query, List<KnowledgeGraphDatabase.SearchResult> searchResults, 
+                                   String rerankerModelPath, KnowledgeGraphDatabase vectorDb) throws InterruptedException, Exception {
         LogManager.logI(TAG, "[DEBUG] processWithReranker ENTERED - query.len=" + (query != null ? query.length() : "null"));
         try {
             LogManager.logI(TAG, "[DEBUG] Step 1: Checking stop flags");
@@ -3921,8 +3938,8 @@ public class RagQaFragment extends Fragment {
             
             // Extract document text
             List<String> documents = new ArrayList<>();
-            for (SQLiteVectorDatabaseHandler.SearchResult result : searchResults) {
-                documents.add(result.text);
+            for (KnowledgeGraphDatabase.SearchResult result : searchResults) {
+                documents.add(result.content);
             }
             
             // Calculate topK value
@@ -3991,10 +4008,403 @@ public class RagQaFragment extends Fragment {
         }
     }
     
+    private synchronized HanLpNerHandler getOrCreateGraphNerHandler() {
+        String dictPath = ConfigManager.getString(requireContext(), ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, null);
+        String valueNone = getString(R.string.common_none);
+        String normalizedPath = null;
+        if (dictPath != null && !dictPath.isEmpty() && !valueNone.equals(dictPath)) {
+            normalizedPath = dictPath;
+        }
+        if (graphNerHandler != null) {
+            boolean samePath = (graphNerDictPath == null && normalizedPath == null)
+                    || (graphNerDictPath != null && graphNerDictPath.equals(normalizedPath));
+            if (samePath) {
+                return graphNerHandler;
+            }
+            graphNerHandler.release();
+            graphNerHandler = null;
+            graphNerDictPath = null;
+        }
+        graphNerHandler = new HanLpNerHandler(normalizedPath);
+        graphNerDictPath = normalizedPath;
+
+        if (normalizedPath == null || normalizedPath.isEmpty()) {
+            String msg = "Dictionary: None";
+            LogManager.logI(TAG, "[GRAPH_RAG] " + msg);
+            updateProgressOnUiThread(msg);
+        } else {
+            String dictFileName = new File(normalizedPath).getName();
+            if (graphNerHandler.isDictionaryLoaded()) {
+                int wordCount = graphNerHandler.getLoadedWordCount();
+                String msg = "Dictionary: " + dictFileName + " (loaded " + wordCount + " words)";
+                LogManager.logI(TAG, "[GRAPH_RAG] " + msg);
+                updateProgressOnUiThread(msg);
+            } else {
+                String baseMsg = "Dictionary: " + dictFileName;
+                LogManager.logI(TAG, "[GRAPH_RAG] " + baseMsg);
+                updateProgressOnUiThread(baseMsg);
+                String err = graphNerHandler.getDictionaryErrorMessage();
+                if (err != null && !err.isEmpty()) {
+                    String errMsg = "Dictionary load error: " + err;
+                    LogManager.logE(TAG, "[GRAPH_RAG] " + errMsg);
+                    updateProgressOnUiThread(errMsg);
+                }
+            }
+        }
+
+        return graphNerHandler;
+    }
+
+    private List<HanLpNerHandler.NerResult.Entity> extractQueryEntities(String userQuery) {
+        List<HanLpNerHandler.NerResult.Entity> entities = new ArrayList<>();
+        if (userQuery == null || userQuery.trim().isEmpty()) {
+            return entities;
+        }
+        try {
+            HanLpNerHandler handler = getOrCreateGraphNerHandler();
+            if (handler == null) {
+                return entities;
+            }
+            HanLpNerHandler.NerResult nerResult = handler.extractEntities(userQuery);
+            if (nerResult != null && nerResult.isSuccess()) {
+                entities = nerResult.getEntities();
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[GRAPH_RAG] Query NER failed: " + e.getMessage(), e);
+        }
+        return entities;
+    }
+
+    private String normalizeEntityText(String text) {
+        if (text == null) {
+            return null;
+        }
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        return trimmed;
+    }
+
+    private void processGraphRagResults(String userQuery, List<KnowledgeGraphDatabase.SearchResult> searchResults,
+                                        KnowledgeGraphDatabase vectorDb, int retrievalCount) {
+        if (userRequestedStop || isTaskCancelled) {
+            LogManager.logI(TAG, "Task stopped/cancelled, aborting processGraphRagResults");
+            updateProgressOnUiThread("Operation stopped by user");
+            return;
+        }
+        if (searchResults == null || searchResults.isEmpty()) {
+            processVectorSearchResults(searchResults);
+            return;
+        }
+        try {
+            // Load stopwords matcher for query-time cleaning
+            String stopwordsPath = ConfigManager.getGraphStopwordsPath(requireContext());
+            GraphStopwordsMatcher stopwordsMatcher = null;
+            if (stopwordsPath != null && !stopwordsPath.isEmpty()) {
+                try {
+                    stopwordsMatcher = GraphStopwordsMatcher.loadFromFile(stopwordsPath);
+                    LogManager.logD(TAG, "[GRAPH_RAG][STOPWORDS] Loaded stopwords for query-time cleaning");
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[GRAPH_RAG][STOPWORDS] Failed to load stopwords file: " + stopwordsPath, e);
+                }
+            }
+
+            // Load hub entities for query-time hub filtering (read-only)
+            int hubThreshold = ConfigManager.getGraphHubThreshold(requireContext());
+            Set<String> hubEntities = vectorDb.getHubEntities(hubThreshold);
+            if (!hubEntities.isEmpty()) {
+                LogManager.logD(TAG, "[GRAPH_RAG][HUB_QUERY] Query-time hub set size=" + hubEntities.size());
+            }
+
+            List<HanLpNerHandler.NerResult.Entity> queryEntities = extractQueryEntities(userQuery);
+            float confidenceThreshold = ConfigManager.getGraphEntityConfidenceThreshold(requireContext());
+            Set<String> queryEntityTexts = new HashSet<>();
+            List<String> seedOrder = new ArrayList<>();
+            for (HanLpNerHandler.NerResult.Entity e : queryEntities) {
+                if (e == null) continue;
+                String normalized = normalizeEntityText(e.text);
+                if (normalized == null) continue;
+                if (e.confidence < confidenceThreshold) continue;
+                if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) continue;
+                if (hubEntities.contains(normalized)) continue;
+                if (!queryEntityTexts.contains(normalized)) {
+                    queryEntityTexts.add(normalized);
+                    seedOrder.add(normalized);
+                }
+            }
+
+            List<Long> topChunkIds = new ArrayList<>();
+            int maxEntitySource = Math.min(5, searchResults.size());
+            for (int i = 0; i < maxEntitySource; i++) {
+                topChunkIds.add(searchResults.get(i).id);
+            }
+            Map<Long, List<String>> entitiesForTopChunks = vectorDb.getEntitiesForChunks(topChunkIds);
+            for (List<String> list : entitiesForTopChunks.values()) {
+                if (list == null) continue;
+                for (String t : list) {
+                    String normalized = normalizeEntityText(t);
+                    if (normalized == null) continue;
+                    if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) continue;
+                    if (hubEntities.contains(normalized)) continue;
+                    if (!queryEntityTexts.contains(normalized)) {
+                        queryEntityTexts.add(normalized);
+                        seedOrder.add(normalized);
+                    }
+                }
+            }
+
+            if (userRequestedStop || isTaskCancelled) {
+                LogManager.logI(TAG, "Task stopped/cancelled after seed collection");
+                updateProgressOnUiThread("Operation stopped by user");
+                return;
+            }
+
+            Set<String> seedEntities = new HashSet<>();
+            for (String text : seedOrder) {
+                seedEntities.add(text);
+                if (seedEntities.size() >= GRAPH_RAG_MAX_SEED_ENTITIES) {
+                    break;
+                }
+            }
+
+            if (seedEntities.isEmpty()) {
+                LogManager.logI(TAG, "[GRAPH_RAG] No valid seed entities after filtering, fallback to vector-only results");
+                processVectorSearchResults(searchResults);
+                return;
+            }
+
+            // Use final seed set for overlap calculation as well
+            queryEntityTexts.clear();
+            queryEntityTexts.addAll(seedEntities);
+            int minEdgeWeight = ConfigManager.getGraphMinEdgeWeight(requireContext());
+            int maxExpandEntities = ConfigManager.getGraphMaxExpandEntities(requireContext());
+            List<KnowledgeGraphDatabase.ConnectedEntity> connectedEntities = vectorDb.getConnectedEntities(seedEntities, minEdgeWeight, maxExpandEntities);
+            Map<String, Integer> graphWeightMap = new HashMap<>();
+            for (KnowledgeGraphDatabase.ConnectedEntity ce : connectedEntities) {
+                if (ce == null || ce.entityText == null) {
+                    continue;
+                }
+                String normalized = normalizeEntityText(ce.entityText);
+                if (normalized == null) {
+                    continue;
+                }
+                if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) {
+                    continue;
+                }
+                if (hubEntities.contains(normalized)) {
+                    continue;
+                }
+                Integer existing = graphWeightMap.get(normalized);
+                if (existing == null || ce.weight > existing) {
+                    graphWeightMap.put(normalized, ce.weight);
+                }
+            }
+
+            Set<String> allEntityTexts = new HashSet<>(seedEntities);
+            for (KnowledgeGraphDatabase.ConnectedEntity ce : connectedEntities) {
+                if (ce == null || ce.entityText == null) {
+                    continue;
+                }
+                String normalized = normalizeEntityText(ce.entityText);
+                if (normalized == null) {
+                    continue;
+                }
+                if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) {
+                    continue;
+                }
+                if (hubEntities.contains(normalized)) {
+                    continue;
+                }
+                allEntityTexts.add(normalized);
+            }
+
+            List<String> entityTextList = new ArrayList<>(allEntityTexts);
+            List<Long> graphChunkIds = vectorDb.getChunkIdsByEntities(entityTextList);
+
+            int maxExpandChunks = ConfigManager.getGraphMaxExpandChunks(requireContext());
+            if (maxExpandChunks > 0 && graphChunkIds.size() > maxExpandChunks) {
+                graphChunkIds = graphChunkIds.subList(0, maxExpandChunks);
+            }
+
+            List<KnowledgeGraphDatabase.SearchResult> graphChunks = vectorDb.getChunksByIds(graphChunkIds);
+
+            if (userRequestedStop || isTaskCancelled) {
+                LogManager.logI(TAG, "Task stopped/cancelled after graph expansion");
+                updateProgressOnUiThread("Operation stopped by user");
+                return;
+            }
+
+            Map<Long, GraphRagCandidate> candidateMap = new HashMap<>();
+            for (KnowledgeGraphDatabase.SearchResult r : searchResults) {
+                GraphRagCandidate c = new GraphRagCandidate();
+                c.result = r;
+                c.vectorScore = r.similarity;
+                c.graphScore = 0.0f;
+                c.finalScore = r.similarity;
+                c.entityOverlap = 0;
+                candidateMap.put(r.id, c);
+            }
+            for (KnowledgeGraphDatabase.SearchResult r : graphChunks) {
+                if (!candidateMap.containsKey(r.id)) {
+                    GraphRagCandidate c = new GraphRagCandidate();
+                    c.result = r;
+                    c.vectorScore = r.similarity;
+                    c.graphScore = 0.0f;
+                    c.finalScore = r.similarity;
+                    c.entityOverlap = 0;
+                    candidateMap.put(r.id, c);
+                }
+            }
+
+            List<Long> allChunkIds = new ArrayList<>(candidateMap.keySet());
+            Map<Long, List<String>> entitiesForAll = vectorDb.getEntitiesForChunks(allChunkIds);
+
+            float alpha;
+            float beta;
+            float gamma;
+            int preset = ConfigManager.getGraphRagWeightPreset(requireContext());
+            switch (preset) {
+                case 0: // 向量优先
+                    alpha = 0.9f;
+                    beta = 0.1f;
+                    gamma = 0.0f;
+                    break;
+                case 2: // 图谱增强
+                    alpha = 0.4f;
+                    beta = 0.4f;
+                    gamma = 0.2f;
+                    break;
+                case 1:
+                default: // 平衡
+                    alpha = 0.7f;
+                    beta = 0.2f;
+                    gamma = 0.1f;
+                    break;
+            }
+
+            List<GraphRagCandidate> candidates = new ArrayList<>();
+            float vecMin = Float.MAX_VALUE;
+            float vecMax = -Float.MAX_VALUE;
+            float graphMin = Float.MAX_VALUE;
+            float graphMax = -Float.MAX_VALUE;
+            int overlapMin = Integer.MAX_VALUE;
+            int overlapMax = Integer.MIN_VALUE;
+
+            // First pass: compute raw graph and overlap scores and collect min/max ranges
+            for (Map.Entry<Long, GraphRagCandidate> entry : candidateMap.entrySet()) {
+                Long chunkId = entry.getKey();
+                GraphRagCandidate c = entry.getValue();
+                List<String> ents = entitiesForAll.get(chunkId);
+                if (ents != null) {
+                    int overlap = 0;
+                    float gScore = 0.0f;
+                    for (String t : ents) {
+                        String normalized = normalizeEntityText(t);
+                        if (normalized == null) {
+                            continue;
+                        }
+                        if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) {
+                            continue;
+                        }
+                        if (hubEntities.contains(normalized)) {
+                            continue;
+                        }
+                        if (queryEntityTexts.contains(normalized)) {
+                            overlap++;
+                        }
+                        Integer w = graphWeightMap.get(normalized);
+                        if (w != null) {
+                            gScore += w;
+                        }
+                    }
+                    c.entityOverlap = overlap;
+                    if (gScore < 0.0f) {
+                        gScore = 0.0f;
+                    }
+                    // Compress graph score to reduce dominance
+                    c.graphScore = (float) Math.log1p(gScore);
+                } else {
+                    c.entityOverlap = 0;
+                    c.graphScore = 0.0f;
+                }
+
+                if (c.vectorScore < vecMin) vecMin = c.vectorScore;
+                if (c.vectorScore > vecMax) vecMax = c.vectorScore;
+                if (c.graphScore < graphMin) graphMin = c.graphScore;
+                if (c.graphScore > graphMax) graphMax = c.graphScore;
+                if (c.entityOverlap < overlapMin) overlapMin = c.entityOverlap;
+                if (c.entityOverlap > overlapMax) overlapMax = c.entityOverlap;
+
+                candidates.add(c);
+            }
+
+            // Second pass: normalize scores and compute final fused score
+            for (GraphRagCandidate c : candidates) {
+                float vecNorm = 0.0f;
+                if (vecMax > vecMin) {
+                    vecNorm = (c.vectorScore - vecMin) / (vecMax - vecMin);
+                } else if (vecMax > 0.0f) {
+                    vecNorm = 1.0f;
+                }
+
+                float graphNorm = 0.0f;
+                if (graphMax > graphMin) {
+                    graphNorm = (c.graphScore - graphMin) / (graphMax - graphMin);
+                } else if (graphMax > 0.0f) {
+                    graphNorm = 1.0f;
+                }
+
+                float overlapNorm = 0.0f;
+                if (overlapMax > overlapMin) {
+                    overlapNorm = (float) (c.entityOverlap - overlapMin) / (float) (overlapMax - overlapMin);
+                } else if (overlapMax > 0) {
+                    overlapNorm = 1.0f;
+                }
+
+                c.finalScore = alpha * vecNorm + beta * graphNorm + gamma * overlapNorm;
+            }
+
+            candidates.sort((a, b) -> Float.compare(b.finalScore, a.finalScore));
+            int limit = Math.min(retrievalCount, candidates.size());
+            List<String> relevantDocs = new ArrayList<>();
+            StringBuilder scoreDebug = new StringBuilder("\n[RAG][Graph] Fused candidates (top " + limit + "):\n");
+            StringBuilder similarityInfoBuilder = new StringBuilder();
+            for (int i = 0; i < limit; i++) {
+                GraphRagCandidate c = candidates.get(i);
+                relevantDocs.add(c.result.content);
+                scoreDebug.append("#").append(i + 1)
+                        .append(" vec=").append(String.format("%.3f", c.vectorScore))
+                        .append(" graph=").append(String.format("%.3f", c.graphScore))
+                        .append(" overlap=").append(c.entityOverlap)
+                        .append(" final=").append(String.format("%.3f", c.finalScore))
+                        .append("\n");
+                similarityInfoBuilder.append(String.format("%.3f", c.finalScore));
+                if (i < limit - 1) {
+                    similarityInfoBuilder.append(", ");
+                }
+            }
+
+            updateChatMessage(scoreDebug.toString());
+            LogManager.logI(TAG, "[GRAPH_RAG] Fused scores: " + similarityInfoBuilder.toString());
+
+            synchronized (this) {
+                this.similarityInfo = "GraphRAG final scores: " + similarityInfoBuilder.toString();
+                this.relevantDocuments = relevantDocs;
+            }
+
+            LogManager.logD(TAG, "Graph RAG fused results processing completed, document count: " + relevantDocs.size());
+
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to process Graph RAG results: " + e.getMessage(), e);
+            updateProgressOnUiThread("Failed to process Graph RAG results: " + e.getMessage());
+        }
+    }
+
     /**
      * Process vector search results (without reranking)
      */
-    private void processVectorSearchResults(List<SQLiteVectorDatabaseHandler.SearchResult> searchResults) {
+    private void processVectorSearchResults(List<KnowledgeGraphDatabase.SearchResult> searchResults) {
         // CRITICAL: Check stop flag before processing
         if (userRequestedStop || isTaskCancelled) {
             LogManager.logI(TAG, "Task stopped/cancelled, aborting processVectorSearchResults");
@@ -4008,11 +4418,11 @@ public class RagQaFragment extends Fragment {
             StringBuilder similarityInfoBuilder = new StringBuilder();
             
             for (int i = 0; i < searchResults.size(); i++) {
-                SQLiteVectorDatabaseHandler.SearchResult result = searchResults.get(i);
-                relevantDocs.add(result.text);
+                KnowledgeGraphDatabase.SearchResult result = searchResults.get(i);
+                relevantDocs.add(result.content);
                 
                 // Log detailed information
-                String resultInfo = "Similarity: " + result.similarity + ", Text: " + result.text.substring(0, Math.min(50, result.text.length())) + "...";
+                String resultInfo = "Similarity: " + result.similarity + ", Text: " + result.content.substring(0, Math.min(50, result.content.length())) + "...";
                 LogManager.logD(TAG, resultInfo);
 
 
@@ -4102,7 +4512,7 @@ public class RagQaFragment extends Fragment {
     }
     
     // Show model selection dialog
-    private void selectModelAndContinueQuery(String originalModel, List<String> availableModels, String knowledgeBase, String embeddingModelPath, SQLiteVectorDatabaseHandler vectorDb) {
+    private void selectModelAndContinueQuery(String originalModel, List<String> availableModels, String knowledgeBase, String embeddingModelPath, KnowledgeGraphDatabase vectorDb) {
         // Ensure running on UI thread
         if (Looper.myLooper() != Looper.getMainLooper()) {
             // If not on UI thread, switch to UI thread
@@ -4193,7 +4603,7 @@ public class RagQaFragment extends Fragment {
     }
     
     // Continue executing RAG query task
-    private void continueQueryWithSelectedModel(String selectedModel, String knowledgeBase, String embeddingModelPath, SQLiteVectorDatabaseHandler vectorDb) {
+    private void continueQueryWithSelectedModel(String selectedModel, String knowledgeBase, String embeddingModelPath, KnowledgeGraphDatabase vectorDb) {
         // Get embedding model path
         String foundModelPath = null;
         boolean modelFound = false;
@@ -4212,8 +4622,9 @@ public class RagQaFragment extends Fragment {
                         modelFound = true;
                         
                         // Update metadata modeldir to empty string (indicating use of root directory)
-                        vectorDb.getMetadata().setModeldir("");
-                        vectorDb.saveDatabase();
+                        KnowledgeGraphDatabase.DatabaseMetadata metadata = vectorDb.getMetadata();
+                        metadata.setModeldir("");
+                        vectorDb.updateMetadata(metadata);
                         LogManager.logD(TAG, "Updated metadata, modeldir set to empty (using root directory)");
                         break;
                     }
@@ -4233,8 +4644,9 @@ public class RagQaFragment extends Fragment {
                             modelFound = true;
                             
                             // Update metadata modeldir to selected directory
-                            vectorDb.getMetadata().setModeldir(selectedModel);
-                            vectorDb.saveDatabase();
+                            KnowledgeGraphDatabase.DatabaseMetadata metadata = vectorDb.getMetadata();
+                            metadata.setModeldir(selectedModel);
+                            vectorDb.updateMetadata(metadata);
                             LogManager.logD(TAG, "Updated metadata, modeldir set to: " + selectedModel);
                             break;
                         }
@@ -4330,17 +4742,17 @@ public class RagQaFragment extends Fragment {
             int retrievalCount = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
             
             // Search similar text blocks
-            List<SQLiteVectorDatabaseHandler.SearchResult> searchResults = vectorDb.searchSimilar(queryVector, retrievalCount);
+            List<KnowledgeGraphDatabase.SearchResult> searchResults = vectorDb.searchSimilar(queryVector, retrievalCount);
             
             // Extract relevant documents
             List<String> relevantDocs = new ArrayList<>();
             StringBuilder similarityInfoBuilder = new StringBuilder("Found similar text blocks:\n");
             for (int i = 0; i < searchResults.size(); i++) {
-                SQLiteVectorDatabaseHandler.SearchResult result = searchResults.get(i);
-                relevantDocs.add(result.text);
+                KnowledgeGraphDatabase.SearchResult result = searchResults.get(i);
+                relevantDocs.add(result.content);
                 
                 // Record detailed information to log
-                String resultInfo = "Similarity: " + result.similarity + ", text: " + result.text.substring(0, Math.min(50, result.text.length())) + "...";
+                String resultInfo = "Similarity: " + result.similarity + ", text: " + result.content.substring(0, Math.min(50, result.content.length())) + "...";
                 LogManager.logD(TAG, resultInfo);
 
                 // Add to progress display - only show match number and similarity value, not text content
@@ -4402,28 +4814,23 @@ public class RagQaFragment extends Fragment {
             File knowledgeBaseDir = new File(knowledgeBasePath, knowledgeBase);
             
             // Update database metadata
-            SQLiteVectorDatabaseHandler vectorDb = null;
+            KnowledgeGraphDatabase vectorDb = null;
             try {
-                vectorDb = new SQLiteVectorDatabaseHandler(knowledgeBaseDir, "unknown");
-                if (vectorDb.loadDatabase()) {
-                    // Get selected model file name
-                    String selectedModelName = new File(selectedModel).getName();
-                    
-                    // Update model information in database metadata
-                    if (vectorDb.updateEmbeddingModel(selectedModelName)) {
-                        LogManager.logD(TAG, "Updated model information in database metadata: " + selectedModelName);
-                        
-                        // Save database
-                        if (vectorDb.saveDatabase()) {
-                            LogManager.logD(TAG, "Saved database metadata");
-                        } else {
-                            LogManager.logE(TAG, "Failed to save database metadata");
-                        }
-                    } else {
-                        LogManager.logE(TAG, "Failed to update model information in database metadata");
-                    }
+                String dbPath = knowledgeBaseDir.getAbsolutePath() + "/knowledge_graph.db";
+                vectorDb = new KnowledgeGraphDatabase(requireContext(), dbPath, "unknown");
+                // KnowledgeGraphDatabase is auto-loaded on construction
+                
+                // Get selected model file name
+                String selectedModelName = new File(selectedModel).getName();
+                
+                // Update model information in database metadata
+                KnowledgeGraphDatabase.DatabaseMetadata metadata = vectorDb.getMetadata();
+                metadata.setModeldir(selectedModelName);
+                if (vectorDb.updateMetadata(metadata)) {
+                    LogManager.logD(TAG, "Updated model information in database metadata: " + selectedModelName);
+                    LogManager.logD(TAG, "Saved database metadata");
                 } else {
-                    LogManager.logE(TAG, "Failed to load database");
+                    LogManager.logE(TAG, "Failed to update model information in database metadata");
                 }
             } catch (Exception e) {
                 LogManager.logE(TAG, "Failed to update database metadata", e);
@@ -4590,6 +4997,13 @@ public class RagQaFragment extends Fragment {
     @Override
     public void onResume() {
         super.onResume();
+        LogManager.logD(TAG, "[LIFECYCLE_DEBUG] === onResume() called ===");
+        LogManager.logD(TAG, "[LIFECYCLE_DEBUG] chatAdapter: " + chatAdapter);
+        LogManager.logD(TAG, "[LIFECYCLE_DEBUG] recyclerViewChat: " + recyclerViewChat);
+        if (recyclerViewChat != null) {
+            LogManager.logD(TAG, "[LIFECYCLE_DEBUG] recyclerViewChat.getAdapter(): " + recyclerViewChat.getAdapter());
+        }
+        
         // Re-apply font size when page resumes, so it takes effect immediately after modification in settings page
         applyGlobalTextSize();
         
@@ -5615,11 +6029,18 @@ public class RagQaFragment extends Fragment {
     /**
      * Load chat history from markdown file
      * Anti-foolproof mechanism: If folder doesn't exist, silently maintain empty chat UI
+     * PUBLIC: Called by ChatHistoryFragment when switching conversations
      */
-    private void loadChatHistory() {
+    public void loadChatHistory() {
         try {
             String currentFolder = ConfigManager.getString(getContext(), 
                 ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            
+            LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] === loadChatHistory() called ===");
+            LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] currentFolder: " + currentFolder);
+            LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] chatMessages.size() before: " + chatMessages.size());
+            LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] chatAdapter == null: " + (chatAdapter == null));
+            LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] recyclerViewChat == null: " + (recyclerViewChat == null));
             
             if (currentFolder.isEmpty()) {
                 LogManager.logD(TAG, "[CHAT_HISTORY] No previous chat history to load");
@@ -5637,20 +6058,32 @@ public class RagQaFragment extends Fragment {
             
             // Try to load conversation
             List<ChatDataItem> history = ChatHistoryManager.loadConversation(getContext(), currentFolder);
+            LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] history loaded: " + (history != null ? history.size() : "null") + " items");
+            
             if (history != null && !history.isEmpty()) {
                 chatMessages.clear();
                 chatMessages.addAll(history);
+                LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] chatMessages.size() after addAll: " + chatMessages.size());
+                
                 if (chatAdapter != null) {
+                    LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] Calling chatAdapter.updateModelNameAndItems()");
                     chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
+                    LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] chatAdapter.getItemCount(): " + chatAdapter.getItemCount());
+                } else {
+                    LogManager.logE(TAG, "[CHAT_HISTORY_DEBUG] ❌ chatAdapter is NULL! Cannot update UI!");
                 }
+                
                 LogManager.logI(TAG, "[CHAT_HISTORY] Loaded " + history.size() + " messages from history");
                 
                 // Auto-scroll to bottom after loading history
                 if (recyclerViewChat != null) {
+                    LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] RecyclerView adapter: " + recyclerViewChat.getAdapter());
                     recyclerViewChat.post(() -> {
                         recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
                         LogManager.logD(TAG, "[CHAT_HISTORY] Auto-scrolled to bottom");
                     });
+                } else {
+                    LogManager.logE(TAG, "[CHAT_HISTORY_DEBUG] ❌ recyclerViewChat is NULL!");
                 }
                 // Successfully loaded, no toast needed (silent load for better UX)
             } else {
@@ -6801,6 +7234,12 @@ private static class UserInput {
         if (ttsAdapter != null) {
             ttsAdapter.release();
             LogManager.logI(TAG, "[TTS] TtsAdapter released");
+        }
+        if (graphNerHandler != null) {
+            graphNerHandler.release();
+            graphNerHandler = null;
+            graphNerDictPath = null;
+            LogManager.logI(TAG, "[GRAPH_RAG] HanLpNerHandler released");
         }
         
         // Release auto-play MediaPlayer

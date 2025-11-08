@@ -456,29 +456,20 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         int id = item.getItemId();
         
         if (id == R.id.action_settings) {
-            // 打开设置界面
-            viewPager.setVisibility(View.GONE);
-            findViewById(R.id.container).setVisibility(View.VISIBLE);
-            
-            FragmentTransaction transaction = getSupportFragmentManager().beginTransaction();
-            transaction.replace(R.id.container, new SettingsFragment());
-            transaction.addToBackStack("settings");
-            transaction.commit();
+            // Open settings as a top-level menu fragment
+            openMenuFragment(new SettingsFragment(), "settings");
+            return true;
+        } else if (id == R.id.action_graph_viewer) {
+            // Open knowledge graph viewer as a top-level menu fragment
+            openMenuFragment(new KnowledgeGraphViewerFragment(), "graph_viewer");
             return true;
         } else if (id == R.id.action_chat_history) {
-            // 打开历史对话界面
-            Intent intent = new Intent(this, ChatHistoryActivity.class);
-            startActivity(intent);
+            // Open chat history as a top-level menu fragment
+            openMenuFragment(new ChatHistoryFragment(), "chat_history");
             return true;
         } else if (id == R.id.action_default_model_download) {
-            // 打开默认模型下载界面
-            viewPager.setVisibility(View.GONE);
-            findViewById(R.id.container).setVisibility(View.VISIBLE);
-            
-            FragmentTransaction transaction = getSupportFragmentManager().beginTransaction();
-            transaction.replace(R.id.container, new ModelDownloadFragment());
-            transaction.addToBackStack("model_download");
-            transaction.commit();
+            // Open default model download as a top-level menu fragment
+            openMenuFragment(new ModelDownloadFragment(), "model_download");
             return true;
         } else if (id == R.id.action_exit) {
             // 退出应用
@@ -489,24 +480,16 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
             showAboutDialog();
             return true;
         } else if (id == R.id.action_help) {
-            // 打开帮助界面
-            viewPager.setVisibility(View.GONE);
-            findViewById(R.id.container).setVisibility(View.VISIBLE);
-            
-            FragmentTransaction transaction = getSupportFragmentManager().beginTransaction();
-            transaction.replace(R.id.container, new HelpFragment());
-            transaction.addToBackStack("help");
-            transaction.commit();
+            // Open help as a top-level menu fragment
+            openMenuFragment(new HelpFragment(), "help");
             return true;
         } else if (id == R.id.action_view_log) {
-            // 打开日志查看界面
-            viewPager.setVisibility(View.GONE);
-            findViewById(R.id.container).setVisibility(View.VISIBLE);
-            
-            FragmentTransaction transaction = getSupportFragmentManager().beginTransaction();
-            transaction.replace(R.id.container, new LogViewFragment());
-            transaction.addToBackStack("log_view");
-            transaction.commit();
+            // Open log viewer as a top-level menu fragment
+            openMenuFragment(new LogViewFragment(), "log_view");
+            return true;
+        } else if (id == R.id.action_text_editor) {
+            // Open text editor as a top-level menu fragment
+            openMenuFragment(new TextEditorFragment(), "text_editor");
             return true;
         } else if (id == R.id.action_switch_language) {
             // 切换语言设置
@@ -530,7 +513,20 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         return super.onOptionsItemSelected(item);
     }
     
+    private void openMenuFragment(Fragment fragment, String backStackTag) {
+        // Hide main ViewPager and show the single container for menu fragments
+        viewPager.setVisibility(View.GONE);
+        findViewById(R.id.container).setVisibility(View.VISIBLE);
 
+        // Ensure flat navigation: clear any existing menu fragment from the back stack
+        androidx.fragment.app.FragmentManager fm = getSupportFragmentManager();
+        fm.popBackStack(null, androidx.fragment.app.FragmentManager.POP_BACK_STACK_INCLUSIVE);
+
+        FragmentTransaction transaction = fm.beginTransaction();
+        transaction.replace(R.id.container, fragment);
+        transaction.addToBackStack(backStackTag);
+        transaction.commit();
+    }
     
     private void showAboutDialog() {
         // 组合完整的版本信息

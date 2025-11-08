@@ -667,3 +667,8 @@
 -assumenosideeffects class org.apache.pdfbox.rendering.TilingPaintFactory {
     public static java.awt.Paint create(...);
 }
+
+# ===== HanLP NER =====
+# 保持 HanLP 所有类和方法不混淆
+-keep class com.hankcs.hanlp.** { *; }
+-dontwarn com.hankcs.hanlp.**
