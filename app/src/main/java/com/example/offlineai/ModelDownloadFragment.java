@@ -295,13 +295,49 @@ public class ModelDownloadFragment extends Fragment {
     private void setupListeners() {
         buttonDownload.setOnClickListener(v -> {
             if (isDownloading) {
-                stopDownload();
+                LogManager.logI(TAG, "[DOWNLOAD] User requested to interrupt download");
+                showCancelOperationConfirmDialog(() -> {
+                    LogManager.logI(TAG, "[DOWNLOAD] User confirmed to interrupt download");
+                    stopDownload();
+                });
             } else {
                 startDownload();
             }
         });
     }
     
+    /**
+     * Show a unified confirm dialog before cancelling current operation.
+     */
+    private void showCancelOperationConfirmDialog(final Runnable onConfirm) {
+        if (!isAdded() || getContext() == null) {
+            LogManager.logW(TAG, "[DIALOG] Fragment not attached, skip cancel operation dialog");
+            if (onConfirm != null) {
+                onConfirm.run();
+            }
+            return;
+        }
+
+        String title = getString(R.string.dialog_title_confirm_interrupt);
+        String message = getString(R.string.dialog_message_cancel_current_operation);
+        String positiveText = getString(R.string.common_confirm);
+        String negativeText = getString(R.string.common_cancel);
+
+        new AlertDialog.Builder(getContext())
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton(positiveText, (dialog, which) -> {
+                if (onConfirm != null) {
+                    onConfirm.run();
+                }
+            })
+            .setNegativeButton(negativeText, (dialog, which) -> {
+                // User cancelled the dialog, do nothing
+                LogManager.logD(TAG, "[DIALOG] User cancelled stop operation dialog");
+            })
+            .show();
+    }
+
     private void startDownload() {
         List<String> selectedModels = getSelectedModels();
         if (selectedModels.isEmpty()) {

@@ -268,6 +268,7 @@
     <string name="dialog_message_current_model">Current model:</string>
     <string name="dialog_message_mismatch_warning">Model mismatch, continue anyway?</string>
     <string name="dialog_message_confirm_interrupt">Are you sure you want to interrupt the current knowledge base creation process? Processed data will be retained.</string>
+    <string name="dialog_message_cancel_current_operation">Cancel current operation?</string>
     <string name="dialog_message_kb_exists">Knowledge base "%1$s" already exists. How would you like to proceed?</string>
     <string name="dialog_title_need_full_file_access">Full File Access Required</string>
     <string name="dialog_message_need_full_file_access">OfflineAI requires full file access to function properly. Please grant permission on the next settings page. This permission will not be requested again after granting.</string>

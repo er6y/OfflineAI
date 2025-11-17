@@ -340,12 +340,12 @@ public class BuildKnowledgeBaseFragment extends Fragment {
             if (isProcessing) {
                 // 显示确认对话框
                 new AlertDialog.Builder(requireContext())
-                    .setTitle(stateDisplayManager.getDialogDisplay(AppConstants.DIALOG_TITLE_CONFIRM_INTERRUPT))
-                    .setMessage(stateDisplayManager.getDialogDisplay(AppConstants.DIALOG_MESSAGE_CONFIRM_INTERRUPT))
-                    .setPositiveButton(stateDisplayManager.getButtonDisplay(AppConstants.BUTTON_TEXT_OK), (dialog, which) -> {
+                    .setTitle(getString(R.string.dialog_title_confirm_interrupt))
+                    .setMessage(getString(R.string.dialog_message_cancel_current_operation))
+                    .setPositiveButton(getString(R.string.common_confirm), (dialog, which) -> {
                         cancelProcessing();
                     })
-                    .setNegativeButton(stateDisplayManager.getButtonDisplay(AppConstants.BUTTON_TEXT_CANCEL), null)
+                    .setNegativeButton(getString(R.string.common_cancel), null)
                     .show();
             } else {
                 createKnowledgeBase();

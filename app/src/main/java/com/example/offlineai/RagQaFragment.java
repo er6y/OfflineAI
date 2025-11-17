@@ -1248,11 +1248,46 @@ public class RagQaFragment extends Fragment {
         }
     }
 
+    /**
+     * Show a unified confirm dialog before cancelling current operation.
+     */
+    private void showCancelOperationConfirmDialog(final Runnable onConfirm) {
+        if (!isAdded() || getContext() == null) {
+            LogManager.logW(TAG, "[DIALOG] Fragment not attached, skip cancel operation dialog");
+            if (onConfirm != null) {
+                onConfirm.run();
+            }
+            return;
+        }
+
+        String title = getString(R.string.dialog_title_confirm_interrupt);
+        String message = getString(R.string.dialog_message_cancel_current_operation);
+        String positiveText = getString(R.string.common_confirm);
+        String negativeText = getString(R.string.common_cancel);
+
+        new AlertDialog.Builder(requireContext())
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton(positiveText, (dialog, which) -> {
+                if (onConfirm != null) {
+                    onConfirm.run();
+                }
+            })
+            .setNegativeButton(negativeText, (dialog, which) -> {
+                // User cancelled the dialog, do nothing
+                LogManager.logD(TAG, "[DIALOG] User cancelled stop operation dialog");
+            })
+            .show();
+    }
+
     private void handleSendStopClick() {
-        // Check if TTS is generating - allow stopping TTS
+        // Check if TTS is generating - show confirm dialog before stopping TTS
         if (isTtsGenerating.get()) {
             LogManager.logI(TAG, "[TTS] User requested stop during TTS generation");
-            stopTtsGeneration();
+            showCancelOperationConfirmDialog(() -> {
+                LogManager.logI(TAG, "[TTS] User confirmed stop during TTS generation");
+                stopTtsGeneration();
+            });
             return;
         }
         
@@ -1537,113 +1572,123 @@ public class RagQaFragment extends Fragment {
             }
             LogManager.logI(TAG, "[EXECUTOR] After submit - ragTaskFuture=" + (ragTaskFuture == null ? "null" : "not_null") + ", isDone=" + (ragTaskFuture != null && ragTaskFuture.isDone()) + ", isCancelled=" + (ragTaskFuture != null && ragTaskFuture.isCancelled()));
 
-        } else if (isSending.compareAndSet(true, false)) {
-            // --- Stop sending --- 
-            // restore battery optimization settings
-            if (batteryOptimizationDisabled) {
-                if (getActivity() instanceof MainActivity) {
-                    ((MainActivity) getActivity()).restoreBatteryOptimization();
-                    batteryOptimizationDisabled = false;
-                    LogManager.logD(TAG, "Restored battery optimization settings on task cancellation");
+        } else if (isSending.get()) {
+            // Already sending - show confirm dialog before stopping
+            LogManager.logD(TAG, "[STOP][CLICK] User clicked stop button while sending, showing confirm dialog");
+            showCancelOperationConfirmDialog(() -> {
+                // Use atomic operation to check and set sending state, prevent concurrent stop calls
+                if (!isSending.compareAndSet(true, false)) {
+                    LogManager.logD(TAG, "[STOP] Stop confirmed but isSending is already false, skip stop flow");
+                    return;
                 }
-            }
 
-            // disable keep screen on
-            if (isKeepScreenOn) {
-                enableKeepScreenOn(false);
-                LogManager.logD(TAG, "Disabled keep screen on on task cancellation");
-            }
-            // --- Stop sending --- 
-            LogManager.logD(TAG, "User clicked stop button");
-            LogManager.logI(TAG, "[STOP][CLICK] Enter stop flow - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
-            LogManager.logD(TAG, "Current state - isSending: " + isSending.get() + ", isTaskRunning: " + isTaskRunning + ", isTaskCancelled: " + isTaskCancelled);
-            
-            // Set global stop flag and task cancellation flag
-            globalStopFlag = true;
-            isTaskCancelled = true;
-            
-            // Set static stop flag for cross-module communication
-            userRequestedStop = true;
-            LogManager.logI(TAG, "[STOP] Global stop requested - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isTaskRunning=" + isTaskRunning + ", ragFuture=" + (ragTaskFuture==null?"null":(ragTaskFuture.isDone()?"done":"not_done")));
-            
-            LogManager.logD(TAG, "Set global stop flag and task cancellation flag to true");
-            
-            // Stop all components: tokenizer, embedding, reranker, local LLM
-            LogManager.logD(TAG, "Starting to stop all components...");
-            
-            // 1. Stop local LLM inference
-            String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
-            String currentApiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrlDisplay);
-            LogManager.logD(TAG, "Current API URL: " + currentApiUrl);
-            
-            if (AppConstants.ApiUrl.LOCAL.equals(currentApiUrl)) {
+                // --- Stop sending --- 
+                // restore battery optimization settings
+                if (batteryOptimizationDisabled) {
+                    if (getActivity() instanceof MainActivity) {
+                        ((MainActivity) getActivity()).restoreBatteryOptimization();
+                        batteryOptimizationDisabled = false;
+                        LogManager.logD(TAG, "Restored battery optimization settings on task cancellation");
+                    }
+                }
+
+                // disable keep screen on
+                if (isKeepScreenOn) {
+                    enableKeepScreenOn(false);
+                    LogManager.logD(TAG, "Disabled keep screen on on task cancellation");
+                }
+                // --- Stop sending --- 
+                LogManager.logD(TAG, "User clicked stop button");
+                LogManager.logI(TAG, "[STOP][CLICK] Enter stop flow - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
+                LogManager.logD(TAG, "Current state - isSending: " + isSending.get() + ", isTaskRunning: " + isTaskRunning + ", isTaskCancelled: " + isTaskCancelled);
+                
+                // Set global stop flag and task cancellation flag
+                globalStopFlag = true;
+                isTaskCancelled = true;
+                
+                // Set static stop flag for cross-module communication
+                userRequestedStop = true;
+                LogManager.logI(TAG, "[STOP] Global stop requested - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isTaskRunning=" + isTaskRunning + ", ragFuture=" + (ragTaskFuture==null?"null":(ragTaskFuture.isDone()?"done":"not_done")));
+                
+                LogManager.logD(TAG, "Set global stop flag and task cancellation flag to true");
+                
+                // Stop all components: tokenizer, embedding, reranker, local LLM
+                LogManager.logD(TAG, "Starting to stop all components...");
+                
+                // 1. Stop local LLM inference
+                String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
+                String currentApiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrlDisplay);
+                LogManager.logD(TAG, "Current API URL: " + currentApiUrl);
+                
+                if (AppConstants.ApiUrl.LOCAL.equals(currentApiUrl)) {
+                    try {
+                        LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(requireContext());
+                        LogManager.logD(TAG, "Preparing to call local LLM stop method");
+                        localAdapter.stopGeneration();
+                        LogManager.logI(TAG, "✓ Successfully called local LLM stop method");
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "✗ Error calling local LLM stop method", e);
+                    }
+                } else {
+                    LogManager.logD(TAG, "Non-local model, skipping local LLM stop call");
+                }
+                
+                // 2. Stop Embedding model (if in use)
                 try {
-                    LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(requireContext());
-                    LogManager.logD(TAG, "Preparing to call local LLM stop method");
-                    localAdapter.stopGeneration();
-                    LogManager.logI(TAG, "✓ Successfully called local LLM stop method");
+                    EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(getContext());
+                    if (embeddingHandler != null) {
+                        embeddingHandler.stopInference();
+                        LogManager.logI(TAG, "✓ Embedding model stop signal sent");
+                    } else {
+                        LogManager.logD(TAG, "Embedding handler is null");
+                    }
                 } catch (Exception e) {
-                    LogManager.logE(TAG, "✗ Error calling local LLM stop method", e);
+                    LogManager.logE(TAG, "✗ Error stopping embedding model", e);
                 }
-            } else {
-                LogManager.logD(TAG, "Non-local model, skipping local LLM stop call");
-            }
-            
-            // 2. Stop Embedding model (if in use)
-            try {
-                EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(getContext());
-                if (embeddingHandler != null) {
-                    embeddingHandler.stopInference();
-                    LogManager.logI(TAG, "✓ Embedding model stop signal sent");
+                
+                // 3. Stop Reranker model (if in use)
+                try {
+                    RerankerHandler rerankerHandler = RerankerHandler.getInstance(getContext());
+                    if (rerankerHandler != null) {
+                        rerankerHandler.stopInference();
+                        LogManager.logI(TAG, "✓ Reranker model stop signal sent");
+                    } else {
+                        LogManager.logD(TAG, "Reranker handler is null");
+                    }
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "✗ Error stopping reranker model", e);
+                }
+                
+                // MNN models have built-in tokenizers, no external tokenizer to stop
+                LogManager.logI(TAG, "✓ MNN tokenizers are managed internally");
+                
+                LogManager.logI(TAG, "All component stop signals have been sent");
+                
+                // CRITICAL FIX: Use cancel(false) instead of cancel(true) for graceful stop
+                // cancel(true) calls Thread.interrupt() which is abrupt interruption
+                // cancel(false) only sets flag, lets native call finish naturally, then checks mShouldStop
+                // This follows LLM's graceful stop pattern: set flag → wait for natural checkpoint → stop
+                if (ragTaskFuture != null && !ragTaskFuture.isDone()) {
+                    boolean cancelResult = ragTaskFuture.cancel(false);  // ✅ false = no interrupt
+                    LogManager.logI(TAG, "Requested graceful cancellation for RAG task Future (no thread interrupt), result=" + cancelResult);
                 } else {
-                    LogManager.logD(TAG, "Embedding handler is null");
+                    LogManager.logD(TAG, "No active RAG task Future to cancel");
                 }
-            } catch (Exception e) {
-                LogManager.logE(TAG, "✗ Error stopping embedding model", e);
-            }
-            
-            // 3. Stop Reranker model (if in use)
-            try {
-                RerankerHandler rerankerHandler = RerankerHandler.getInstance(getContext());
-                if (rerankerHandler != null) {
-                    rerankerHandler.stopInference();
-                    LogManager.logI(TAG, "✓ Reranker model stop signal sent");
-                } else {
-                    LogManager.logD(TAG, "Reranker handler is null");
+                
+                // FIX: Stop loading animation immediately when user confirms stop
+                if (!chatMessages.isEmpty()) {
+                    ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
+                    if (lastMsg.getType() == ChatViewHolders.ASSISTANT && lastMsg.getLoading()) {
+                        lastMsg.setLoading(false);
+                        chatAdapter.notifyItemChanged(chatMessages.size() - 1);
+                        LogManager.logD(TAG, "Stopped loading animation for AI message");
+                    }
                 }
-            } catch (Exception e) {
-                LogManager.logE(TAG, "✗ Error stopping reranker model", e);
-            }
-            
-            // MNN models have built-in tokenizers, no external tokenizer to stop
-            LogManager.logI(TAG, "✓ MNN tokenizers are managed internally");
-            
-            LogManager.logI(TAG, "All component stop signals have been sent");
-            
-            // CRITICAL FIX: Use cancel(false) instead of cancel(true) for graceful stop
-            // cancel(true) calls Thread.interrupt() which is abrupt interruption
-            // cancel(false) only sets flag, lets native call finish naturally, then checks mShouldStop
-            // This follows LLM's graceful stop pattern: set flag → wait for natural checkpoint → stop
-            if (ragTaskFuture != null && !ragTaskFuture.isDone()) {
-                boolean cancelResult = ragTaskFuture.cancel(false);  // ✅ false = no interrupt
-                LogManager.logI(TAG, "Requested graceful cancellation for RAG task Future (no thread interrupt), result=" + cancelResult);
-            } else {
-                LogManager.logD(TAG, "No active RAG task Future to cancel");
-            }
-            
-            // FIX: Stop loading animation immediately when user clicks stop
-            if (!chatMessages.isEmpty()) {
-                ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
-                if (lastMsg.getType() == ChatViewHolders.ASSISTANT && lastMsg.getLoading()) {
-                    lastMsg.setLoading(false);
-                    chatAdapter.notifyItemChanged(chatMessages.size() - 1);
-                    LogManager.logD(TAG, "Stopped loading animation for AI message");
-                }
-            }
-            
-            Toast.makeText(requireContext(), getString(R.string.toast_request_stopped), Toast.LENGTH_SHORT).show();
-            appendToResponse("\n" + getString(R.string.toast_request_stopped) + "。");
-            LogManager.logD(TAG, "Stop processing initiated");
+                
+                Toast.makeText(requireContext(), getString(R.string.toast_request_stopped), Toast.LENGTH_SHORT).show();
+                appendToResponse("\n" + getString(R.string.toast_request_stopped) + "。");
+                LogManager.logD(TAG, "Stop processing initiated");
+            });
         } else {
             // Prevent duplicate clicks
             LogManager.logD(TAG, "Button click ignored - operation already in progress or completed");

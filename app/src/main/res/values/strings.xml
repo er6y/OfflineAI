@@ -264,6 +264,7 @@
     <string name="dialog_message_current_model">当前模型：</string>
     <string name="dialog_message_mismatch_warning">模型不匹配，是否继续？</string>
     <string name="dialog_message_confirm_interrupt">确定要中断当前知识库创建过程吗？已处理的数据将被保留。</string>
+    <string name="dialog_message_cancel_current_operation">取消当前操作？</string>
     <string name="dialog_message_kb_exists">知识库 "%1$s" 已存在，您想要如何处理？</string>
     <string name="dialog_title_need_full_file_access">需要完全文件访问权限</string>
     <string name="dialog_message_need_full_file_access">OfflineAI需要完全的文件访问权限才能正常工作。请在接下来的设置页面中授予权限，授予后将不再请求此权限。</string>

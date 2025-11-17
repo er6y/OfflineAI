@@ -96,6 +96,8 @@ public class KnowledgeNoteFragment extends Fragment {
     private Spinner spinnerKnowledgeBase;
     private Button buttonAddToKnowledgeBase;
     private ExecutorService executorService;
+    private volatile boolean isProcessing = false;
+    private volatile boolean isCancelled = false;
     private List<String> knowledgeBaseNames = new ArrayList<>();
     private Handler mainHandler = new Handler(Looper.getMainLooper()); // 主线程Handler
     private StateDisplayManager stateDisplayManager;
@@ -132,7 +134,18 @@ public class KnowledgeNoteFragment extends Fragment {
         loadKnowledgeBaseNames();
         
         // 设置添加到知识库按钮的点击事件
-        buttonAddToKnowledgeBase.setOnClickListener(v -> addToKnowledgeBase());
+        buttonAddToKnowledgeBase.setOnClickListener(v -> {
+            if (isProcessing) {
+                LogManager.logD(TAG, "[NOTE] User clicked cancel while processing, showing confirmation dialog");
+                showCancelOperationConfirmDialog(() -> {
+                    LogManager.logI(TAG, "[NOTE] User confirmed cancel during note processing");
+                    isCancelled = true;
+                    updateProgress(getString(R.string.dialog_message_cancel_current_operation));
+                });
+            } else {
+                addToKnowledgeBase();
+            }
+        });
         
         // 应用全局字体大小
         applyGlobalTextSize();
@@ -286,13 +299,21 @@ public class KnowledgeNoteFragment extends Fragment {
         
         // 显示进度
         textViewProgress.setText(getString(R.string.processing_status) + "\n");
-        
-        // 禁用按钮，防止重复点击
-        buttonAddToKnowledgeBase.setEnabled(false);
+
+        // 标记为处理中，并更新按钮为“取消”
+        isProcessing = true;
+        isCancelled = false;
+        buttonAddToKnowledgeBase.setEnabled(true);
+        buttonAddToKnowledgeBase.setText(getString(R.string.common_cancel));
         
         // 在后台线程中处理
         executorService.execute(() -> {
             try {
+                if (isCancelled) {
+                    updateProgress(getString(R.string.processing_status_task_interrupted));
+                    enableAddButton();
+                    return;
+                }
                 // 获取知识库目录
                 String knowledgeBasePath = ConfigManager.getKnowledgeBasePath(requireContext());
                 File knowledgeBaseDir = new File(knowledgeBasePath, selectedKnowledgeBase);
@@ -458,6 +479,12 @@ public class KnowledgeNoteFragment extends Fragment {
                 updateProgress(getString(R.string.found_embedding_model, embeddingModelPath));
             updateProgress(getString(R.string.loading_model_wait));
                 
+                if (isCancelled) {
+                    updateProgress(getString(R.string.processing_status_task_interrupted));
+                    enableAddButton();
+                    return;
+                }
+
                 // 使用EmbeddingHandler加载模型
                 EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(requireContext());
                 
@@ -473,6 +500,12 @@ public class KnowledgeNoteFragment extends Fragment {
                     return;
                 }
                 
+                if (isCancelled) {
+                    updateProgress(getString(R.string.processing_status_task_interrupted));
+                    enableAddButton();
+                    return;
+                }
+
                 // MNN embedding has built-in tokenizer
                 updateProgress("Using MNN built-in tokenizer");
                 
@@ -494,6 +527,12 @@ public class KnowledgeNoteFragment extends Fragment {
                     
                     // Notes are always processed as complete entities (no chunking)
                     
+                    if (isCancelled) {
+                        updateProgress(getString(R.string.processing_status_task_interrupted));
+                        enableAddButton();
+                        return;
+                    }
+
                     // Generate embedding vector for complete note (title + content)
                     updateProgress(getString(R.string.generating_embedding_vector));
                     float[] contentEmbedding = embeddingHandler.computeEmbedding(fullText);
@@ -527,6 +566,12 @@ public class KnowledgeNoteFragment extends Fragment {
                     String vectorDebugInfo = "Content vector generated, dimension: " + contentEmbedding.length;
                     updateProgress(vectorDebugInfo);
                     
+                    if (isCancelled) {
+                        updateProgress(getString(R.string.processing_status_task_interrupted));
+                        enableAddButton();
+                        return;
+                    }
+
                     // 获取添加前的文本块数量
                     int beforeChunkCount = noteVectorDb.getChunkCount();
                     updateProgress(getString(R.string.progress_db_chunk_count_before, beforeChunkCount));
@@ -536,6 +581,12 @@ public class KnowledgeNoteFragment extends Fragment {
                     long docId = noteVectorDb.addChunk(fullText, title, contentEmbedding, "");
                     boolean success = docId >= 0;
                     // KnowledgeGraphDatabase auto-saves, no need to call saveDatabase()
+
+                    if (isCancelled) {
+                        updateProgress(getString(R.string.processing_status_task_interrupted));
+                        enableAddButton();
+                        return;
+                    }
 
                     // Integrate NER + graph building so notes participate in Knowledge Graph RAG
                     if (success) {
@@ -656,6 +707,12 @@ public class KnowledgeNoteFragment extends Fragment {
                         }
                     }
 
+                    if (isCancelled) {
+                        updateProgress(getString(R.string.processing_status_task_interrupted));
+                        enableAddButton();
+                        return;
+                    }
+
                     int hubThreshold = ConfigManager.getGraphHubThreshold(requireContext());
                     if (hubThreshold > 0) {
                         try {
@@ -709,8 +766,43 @@ public class KnowledgeNoteFragment extends Fragment {
     // 启用添加按钮
     private void enableAddButton() {
         requireActivity().runOnUiThread(() -> {
+            isProcessing = false;
+            isCancelled = false;
             buttonAddToKnowledgeBase.setEnabled(true);
+            buttonAddToKnowledgeBase.setText(getString(R.string.button_add_to_knowledge_base));
         });
+    }
+
+    /**
+     * Show a unified confirm dialog before cancelling current operation.
+     */
+    private void showCancelOperationConfirmDialog(final Runnable onConfirm) {
+        if (!isAdded() || getContext() == null) {
+            LogManager.logW(TAG, "[DIALOG] Fragment not attached, skip cancel operation dialog");
+            if (onConfirm != null) {
+                onConfirm.run();
+            }
+            return;
+        }
+
+        String title = getString(R.string.dialog_title_confirm_interrupt);
+        String message = getString(R.string.dialog_message_cancel_current_operation);
+        String positiveText = getString(R.string.common_confirm);
+        String negativeText = getString(R.string.common_cancel);
+
+        new AlertDialog.Builder(requireContext())
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton(positiveText, (dialog, which) -> {
+                if (onConfirm != null) {
+                    onConfirm.run();
+                }
+            })
+            .setNegativeButton(negativeText, (dialog, which) -> {
+                // User cancelled the dialog, do nothing
+                LogManager.logD(TAG, "[DIALOG] User cancelled stop operation dialog");
+            })
+            .show();
     }
     
     // 更新进度显示
