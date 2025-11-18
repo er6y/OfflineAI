@@ -113,6 +113,8 @@ public class ConfigManager {
     public static final String KEY_MAX_SEQUENCE_LENGTH = "maxSequenceLength"; // 最大序列长度
     public static final String KEY_NO_THINKING = "no_thinking"; // 是否禁用思考模式
     public static final String KEY_THREADS = "threads"; // ONNX推理线程数
+    public static final String KEY_EMBEDDING_CONCURRENCY = "embedding_concurrency"; // Embedding session concurrency for knowledge base building
+    public static final String KEY_EMBEDDING_THREADS = "embedding_threads"; // MNN threads per embedding session for knowledge base building
     // KEY_IMAGE_ENCODING_THREADS已移除（MNN不支持独立配置）
     public static final String KEY_MAX_NEW_TOKENS = "max_new_tokens"; // 最大输出token数
     public static final String KEY_HISTORY_ROUNDS = "history_rounds"; // 对话历史轮数（滑窗机制，0-20）
@@ -210,6 +212,8 @@ public class ConfigManager {
     public static final int DEFAULT_MAX_SEQUENCE_LENGTH = 4096;
     public static final boolean DEFAULT_NO_THINKING = false;
     public static final int DEFAULT_THREADS = 4;
+    public static final int DEFAULT_EMBEDDING_CONCURRENCY = 2; // Parallel embedding sessions (KB build), clamped to 1-4
+    public static final int DEFAULT_EMBEDDING_THREADS = 1; // MNN threads per embedding session (KB build), range 1-4
     // DEFAULT_IMAGE_ENCODING_THREADS已移除（MNN不支持独立配置）
     public static final int DEFAULT_MAX_NEW_TOKENS = 512; // 最大输出token数默认值
     
@@ -1444,6 +1448,56 @@ public class ConfigManager {
      */
     public static void setThreads(Context context, int threads) {
         setInt(context, KEY_THREADS, threads);
+    }
+    
+    /**
+     * Get embedding concurrency for knowledge base building.
+     * @param context Android context
+     * @return number of parallel embedding sessions
+     */
+    public static int getEmbeddingConcurrency(Context context) {
+        int value = getInt(context, KEY_EMBEDDING_CONCURRENCY, DEFAULT_EMBEDDING_CONCURRENCY);
+        if (value < 1) {
+            value = 1;
+        }
+        if (value > 4) {
+            value = 4;
+        }
+        return value;
+    }
+    
+    /**
+     * Set embedding concurrency for knowledge base building.
+     * @param context Android context
+     * @param concurrency number of parallel embedding sessions
+     */
+    public static void setEmbeddingConcurrency(Context context, int concurrency) {
+        setInt(context, KEY_EMBEDDING_CONCURRENCY, concurrency);
+    }
+    
+    /**
+     * Get MNN threads per embedding session for knowledge base building.
+     * @param context Android context
+     * @return thread count per embedding session (1-4)
+     */
+    public static int getEmbeddingThreads(Context context) {
+        int value = getInt(context, KEY_EMBEDDING_THREADS, DEFAULT_EMBEDDING_THREADS);
+        if (value < 1) {
+            value = 1;
+        }
+        if (value > 4) {
+            value = 4;
+        }
+        return value;
+    }
+    
+    /**
+     * Set MNN threads per embedding session for knowledge base building.
+     * @param context Android context
+     * @param threads thread count per embedding session
+     */
+    public static void setEmbeddingThreads(Context context, int threads) {
+        setInt(context, KEY_EMBEDDING_THREADS, threads);
     }
     
     // getImageEncodingThreads和setImageEncodingThreads方法已移除（MNN不支持独立配置）

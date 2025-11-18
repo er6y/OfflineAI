@@ -126,6 +126,72 @@
                 android:gravity="center"
                 android:layout_marginStart="0dp" />
         </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_embedding_concurrency"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarEmbeddingConcurrency"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="3"
+                android:progress="1" />
+
+            <TextView
+                android:id="@+id/textViewEmbeddingConcurrencyValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="2"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+        
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_embedding_threads"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarEmbeddingThreads"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="3"
+                android:progress="0" />
+
+            <TextView
+                android:id="@+id/textViewEmbeddingThreadsValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="1"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
         
         <!-- JSON训练集分块优化开关（移动到最小分块限制下面） -->
         <LinearLayout

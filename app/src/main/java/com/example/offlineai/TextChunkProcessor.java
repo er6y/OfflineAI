@@ -3,9 +3,13 @@ package com.example.offlineai;
 import android.content.Context;
 import android.net.Uri;
 import android.util.Log;
+import android.content.ContentValues;
+import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
 import com.example.offlineai.LogManager;
 import com.example.offlineai.KnowledgeGraphDatabase;
 import com.example.offlineai.HanLpNerHandler;
+import com.offlineai.mnn.MnnInference;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -17,7 +21,13 @@ import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Future;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -163,6 +173,9 @@ public class TextChunkProcessor {
         public List<HanLpNerHandler.NerResult.Entity> entities = new ArrayList<>();
         public long embeddingTime = 0;
         public long nerTime = 0;
+        public TextChunk chunk;
+        public int chunkIndex;
+        public long chunkStartTime = 0;
     }
     
     /**
@@ -691,7 +704,7 @@ public class TextChunkProcessor {
             String embeddingModelPath = ConfigManager.getEmbeddingModelPath(context) + File.separator + embeddingModel;
             LogManager.logD(TAG, "Using embedding model: " + embeddingModelPath);
             
-            // Use EmbeddingHandler to get model (LOW memory mode)
+            // Use EmbeddingHandler to load model (LOW memory mode) only for dimension probing
             EmbeddingHandler model = EmbeddingHandler.getInstance(context);
             if (!model.loadModel(embeddingModelPath, EmbeddingHandler.MemoryMode.LOW)) {
                 throw new Exception("Failed to load embedding model");
@@ -703,12 +716,22 @@ public class TextChunkProcessor {
             int embeddingDimension = model.getEmbeddingDimension();
             LogManager.logD(TAG, "Model embedding dimension: " + embeddingDimension);
             logMessage("Model embedding dimension: " + embeddingDimension);
+
+            // Release EmbeddingHandler model to avoid extra native session during knowledge base building
+            try {
+                model.releaseModel();
+                LogManager.logI(TAG, "[EMBEDDING_KB] Released EmbeddingHandler model after reading dimension");
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[EMBEDDING_KB] Failed to release EmbeddingHandler model", e);
+            }
             
             // MNN embedding has built-in tokenizer, no external tokenizer needed
             logMessage("Using MNN built-in tokenizer for consistent embedding generation");
             
             // Initialize knowledge graph database (unified storage for vectors + entities + graph)
             String graphDbPath = fullKnowledgeBasePath + File.separator + "knowledge_graph.db";
+            File graphDbFile = new File(graphDbPath);
+            boolean graphDbExistedBefore = graphDbFile.exists();
             KnowledgeGraphDatabase graphDB = new KnowledgeGraphDatabase(context, graphDbPath, knowledgeBaseName);
 
             // Load graph stopwords and hub threshold config
@@ -780,10 +803,102 @@ public class TextChunkProcessor {
             }
 
             LogManager.logD(TAG, "Starting unified knowledge base building (NER: " + (nerEnabled ? "ON" : "OFF") + ")");
-            
-            // Create ExecutorService for SERIAL chunk processing (single thread)
-            ExecutorService executorService = Executors.newFixedThreadPool(1);
-            LogManager.logI(TAG, "[EXECUTOR] Created single-thread executor for serial chunk processing");
+
+            // Initialize in-memory graph builder for entities/edges
+            final InMemoryGraphBuilder inMemoryGraphBuilder = new InMemoryGraphBuilder();
+            LogManager.logI(TAG, "[GRAPH_MEM] Initialized in-memory graph builder");
+
+            // If graph DB already exists (append mode), preload existing graph into memory
+            if (graphDbExistedBefore) {
+                try {
+                    LogManager.logI(TAG, "[GRAPH_MEM] Existing graph DB detected, loading graph into memory for incremental build");
+                    SQLiteDatabase preloadDb = graphDB.getReadableDatabase();
+                    inMemoryGraphBuilder.loadFromDatabase(preloadDb, knowledgeBaseName);
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[GRAPH_MEM] Failed to preload existing graph from DB: " + e.getMessage(), e);
+                }
+            } else {
+                LogManager.logI(TAG, "[GRAPH_MEM] No existing graph DB found, starting with empty in-memory graph");
+            }
+
+            // Determine embedding concurrency for knowledge base building
+            int embeddingConcurrency = ConfigManager.getEmbeddingConcurrency(context);
+            if (embeddingConcurrency < 1) {
+                embeddingConcurrency = 1;
+            }
+            if (embeddingConcurrency > 4) {
+                embeddingConcurrency = 4;
+            }
+            LogManager.logI(TAG, "[EMBEDDING_KB] Embedding concurrency: " + embeddingConcurrency + " sessions");
+
+            // Determine MNN threads per embedding session for knowledge base building
+            int embeddingThreads = ConfigManager.getEmbeddingThreads(context);
+            if (embeddingThreads < 1) {
+                embeddingThreads = 1;
+            }
+            if (embeddingThreads > 4) {
+                embeddingThreads = 4;
+            }
+            LogManager.logI(TAG, "[EMBEDDING_KB] Embedding threads per session: " + embeddingThreads);
+
+            // Build runtime config for embedding sessions
+            String backendPreference = SettingsFragment.getBackendPreference(context);
+            String mnnBackend;
+            switch (backendPreference) {
+                case "OPENCL":
+                    mnnBackend = "opencl";
+                    break;
+                case "VULKAN":
+                    mnnBackend = "vulkan";
+                    break;
+                case "NNAPI":
+                    mnnBackend = "npu"; // MNN uses "npu" for Android NNAPI
+                    break;
+                case "CPU":
+                default:
+                    mnnBackend = "cpu";
+                    break;
+            }
+            LogManager.logI(TAG, "[EMBEDDING_KB] Backend mapping: '" + backendPreference + "' -> '" + mnnBackend + "', thread_num=" + embeddingThreads);
+
+            final String runtimeConfig = new MnnInference.ConfigBuilder()
+                .backendType(mnnBackend)
+                .memory(EmbeddingHandler.MemoryMode.LOW.getValue())
+                .power("high")
+                .precision("low")
+                .threadNum(embeddingThreads)
+                .build();
+
+            LogManager.logD(TAG, "[EMBEDDING_KB] Built runtime config for knowledge base embedding sessions");
+
+            // Shared model directory for all embedding sessions
+            final String embeddingModelDir = embeddingModelPath;
+
+            // Track all embedding session handles for cleanup
+            final List<Long> embeddingHandles = Collections.synchronizedList(new ArrayList<>());
+
+            // Thread-local embedding session handle: one session per worker thread
+            final ThreadLocal<Long> embeddingHandleThreadLocal = new ThreadLocal<Long>() {
+                @Override
+                protected Long initialValue() {
+                    long handle = 0L;
+                    try {
+                        LogManager.logI(TAG, "[EMBEDDING_KB] Creating embedding session for worker thread...");
+                        handle = MnnInference.createEmbeddingWithConfig(embeddingModelDir, runtimeConfig);
+                        LogManager.logI(TAG, "[EMBEDDING_KB] Created embedding session handle=" + handle);
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[EMBEDDING_KB] Failed to create embedding session for worker thread", e);
+                    }
+                    if (handle != 0L) {
+                        embeddingHandles.add(handle);
+                    }
+                    return handle;
+                }
+            };
+
+            // Create ExecutorService for embedding concurrency
+            ExecutorService executorService = Executors.newFixedThreadPool(embeddingConcurrency);
+            LogManager.logI(TAG, "[EXECUTOR] Created embedding executor with concurrency=" + embeddingConcurrency);
             
             // Begin database transaction for batch insert
             graphDB.getWritableDatabase().beginTransaction();
@@ -791,188 +906,198 @@ public class TextChunkProcessor {
             try {
                 int totalChunks = chunks.size();
                 logMessage("Starting unified processing: " + totalChunks + " chunks" + (nerEnabled ? " with NER" : ""));
-                int lastLoggedPercent = -10;
+                int lastLoggedPercent = -5;
                 if (totalChunks > 0) {
-                    // Initial 0% milestone
+                    // Initial 0% milestone for vectorization progress
                     logMessage("Vectorization progress: 0% (0/" + totalChunks + ")");
                     lastLoggedPercent = 0;
                 }
-                
-                // Process each chunk: Embedding and NER serially in a single task
-                LogManager.logI(TAG, String.format("[LOOP] Starting chunk processing loop: %d chunks total", totalChunks));
+
+                // Process each chunk: embedding in parallel, NER + DB sequentially
+                LogManager.logI(TAG, String.format("[LOOP] Starting chunk processing loop with embedding concurrency=%d: %d chunks total", embeddingConcurrency, totalChunks));
+
+                List<Future<ChunkProcessResult>> pendingFutures = new ArrayList<>();
+                int processedChunks = 0;
+
+                outerLoop:
                 for (int i = 0; i < totalChunks; i++) {
                     LogManager.logD(TAG, String.format("[LOOP] ========== Iteration %d/%d START ==========", i + 1, totalChunks));
                     if (isTaskCancelled.get()) {
                         logMessage("Task cancelled");
-                        LogManager.logD(TAG, "Processing interrupted: cancelled at chunk " + i + "/" + totalChunks);
-                        break;  // Exit loop, finally block will handle cleanup
+                        LogManager.logD(TAG, "Processing interrupted: cancelled before submitting chunk " + (i + 1) + "/" + totalChunks);
+                        break;
                     }
-                    
+
                     TextChunk chunk = chunks.get(i);
                     LogManager.logI(TAG, String.format("[LOOP] Chunk %d/%d: source=%s, textLen=%d", i + 1, totalChunks, chunk.source, chunk.text.length()));
-                    
-                    try {
-                        long chunkStartTime = System.currentTimeMillis();
-                        
-                        // Step 1 & 2: Process Embedding and NER serially in a single task
-                        final String chunkText = chunk.text;
-                        final int chunkIndex = i + 1;  // Make final for lambda
-                        final boolean nerEnabledForChunk = nerEnabled && nerHandler != null;
-                        
-                        LogManager.logI(TAG, String.format("[SUBMIT] About to submit chunk %d task to executor...", chunkIndex));
-                        long submitTime = System.currentTimeMillis();
-                        
-                        // Submit a single task that does: embedding -> NER -> return results
-                        Future<ChunkProcessResult> chunkFuture = executorService.submit(() -> {
-                            LogManager.logI(TAG, String.format("[TASK %d] Task started in executor, Thread: %s", chunkIndex, Thread.currentThread().getName()));
-                            ChunkProcessResult result = new ChunkProcessResult();
-                            
-                            // 1. Embedding (串行执行)
-                            long embeddingStart = System.currentTimeMillis();
-                            LogManager.logD(TAG, String.format("[CHUNK %d] Starting embedding...", chunkIndex));
+
+                    final TextChunk chunkForTask = chunk;
+                    final int chunkIndex = i + 1;
+
+                    LogManager.logI(TAG, String.format("[SUBMIT] About to submit chunk %d embedding task to executor...", chunkIndex));
+                    Future<ChunkProcessResult> future = executorService.submit(() -> {
+                        LogManager.logI(TAG, String.format("[TASK %d] Embedding task started in executor, Thread: %s", chunkIndex, Thread.currentThread().getName()));
+                        ChunkProcessResult result = new ChunkProcessResult();
+                        result.chunk = chunkForTask;
+                        result.chunkIndex = chunkIndex;
+                        result.chunkStartTime = System.currentTimeMillis();
+
+                        // Acquire or create thread-local embedding session
+                        long handle = embeddingHandleThreadLocal.get();
+                        if (handle == 0L) {
                             try {
-                                result.embedding = model.computeEmbedding(chunkText);
-                                result.embeddingTime = System.currentTimeMillis() - embeddingStart;
-                                LogManager.logI(TAG, String.format("[CHUNK %d] Embedding completed: %dms", chunkIndex, result.embeddingTime));
+                                LogManager.logI(TAG, "[EMBEDDING_KB] Thread-local handle is 0, retrying createEmbeddingWithConfig...");
+                                handle = MnnInference.createEmbeddingWithConfig(embeddingModelDir, runtimeConfig);
+                                if (handle != 0L) {
+                                    embeddingHandles.add(handle);
+                                    embeddingHandleThreadLocal.set(handle);
+                                    LogManager.logI(TAG, "[EMBEDDING_KB] Retried and created embedding session handle=" + handle);
+                                }
                             } catch (Exception e) {
-                                LogManager.logE(TAG, String.format("[CHUNK %d] Embedding failed: %s", chunkIndex, e.getMessage()), e);
-                                throw e;
+                                LogManager.logE(TAG, "[EMBEDDING_KB] Failed to create embedding session on retry", e);
                             }
-                            
-                            // 2. NER (串行执行，在embedding之后)
-                            if (nerEnabledForChunk) {
+                        }
+
+                        if (handle == 0L) {
+                            throw new IllegalStateException("Embedding session handle is 0");
+                        }
+
+                        long embeddingStart = System.currentTimeMillis();
+                        LogManager.logD(TAG, String.format("[CHUNK %d] Starting embedding in worker thread (handle=%d)...", chunkIndex, handle));
+                        float[] embedding = MnnInference.computeEmbedding(handle, chunkForTask.text);
+                        long embeddingTime = System.currentTimeMillis() - embeddingStart;
+                        result.embedding = embedding;
+                        result.embeddingTime = embeddingTime;
+                        LogManager.logI(TAG, String.format("[CHUNK %d] Embedding completed: %dms", chunkIndex, embeddingTime));
+
+                        return result;
+                    });
+
+                    pendingFutures.add(future);
+
+                    // If batch is full or this is the last chunk, process pending futures: NER + DB sequentially
+                    if (pendingFutures.size() >= embeddingConcurrency || i == totalChunks - 1) {
+                        for (Future<ChunkProcessResult> futureResult : pendingFutures) {
+                            if (isTaskCancelled.get()) {
+                                logMessage("Task cancelled");
+                                LogManager.logD(TAG, "Processing interrupted: cancelled during batch consumption");
+                                break outerLoop;
+                            }
+
+                            ChunkProcessResult result;
+                            try {
+                                result = futureResult.get();
+                            } catch (Exception e) {
+                                processedChunks++;
+                                logError("Failed to process chunk " + processedChunks + ": " + e.getMessage(), e);
+                                LogManager.logE(TAG, "[LOOP] Chunk embedding failed, continuing to next", e);
+                                continue;
+                            }
+
+                            processedChunks++;
+
+                            TextChunk processedChunk = result.chunk;
+                            int chunkIndexForLog = result.chunkIndex;
+                            float[] embedding = result.embedding;
+
+                            // NER on main thread (single-threaded)
+                            List<HanLpNerHandler.NerResult.Entity> entities = new ArrayList<>();
+                            long nerTime = 0L;
+                            if (nerEnabled && nerHandler != null) {
                                 long nerStart = System.currentTimeMillis();
-                                LogManager.logD(TAG, String.format("[CHUNK %d] Starting NER...", chunkIndex));
+                                LogManager.logD(TAG, String.format("[CHUNK %d] Starting NER...", chunkIndexForLog));
                                 try {
-                                    HanLpNerHandler.NerResult nerResult = nerHandler.extractEntities(chunkText);
-                                    result.nerTime = System.currentTimeMillis() - nerStart;
-                                    
+                                    HanLpNerHandler.NerResult nerResult = nerHandler.extractEntities(processedChunk.text);
+                                    nerTime = System.currentTimeMillis() - nerStart;
+                                    result.nerTime = nerTime;
+
                                     if (nerResult != null && nerResult.isSuccess()) {
-                                        result.entities = nerResult.getEntities();
-                                        LogManager.logI(TAG, String.format("[CHUNK %d] NER completed: %dms, entities=%d", 
-                                            chunkIndex, result.nerTime, result.entities.size()));
+                                        entities = nerResult.getEntities();
+                                        LogManager.logI(TAG, String.format("[CHUNK %d] NER completed: %dms, entities=%d",
+                                            chunkIndexForLog, nerTime, entities.size()));
                                     } else {
-                                        LogManager.logW(TAG, String.format("[CHUNK %d] NER failed", chunkIndex));
+                                        LogManager.logW(TAG, String.format("[CHUNK %d] NER failed", chunkIndexForLog));
                                     }
                                 } catch (Exception e) {
-                                    LogManager.logE(TAG, String.format("[CHUNK %d] NER error: %s", chunkIndex, e.getMessage()), e);
+                                    LogManager.logE(TAG, String.format("[CHUNK %d] NER error: %s", chunkIndexForLog, e.getMessage()), e);
                                     // NER failure is not fatal, continue with empty entities
                                 }
                             }
-                            
-                            LogManager.logI(TAG, String.format("[TASK %d] Task completed, returning result", chunkIndex));
-                            return result;
-                        });
-                        
-                        LogManager.logI(TAG, String.format("[SUBMIT] Chunk %d task submitted (took %dms), now waiting for completion...", chunkIndex, System.currentTimeMillis() - submitTime));
-                        
-                        // Wait for the entire chunk processing to complete (NO TIMEOUT - wait forever)
-                        ChunkProcessResult result = null;
-                        long getStartTime = System.currentTimeMillis();
-                        try {
-                            LogManager.logI(TAG, String.format("[GET] Calling future.get() for chunk %d (NO TIMEOUT - will wait forever)...", chunkIndex));
-                            result = chunkFuture.get();  // NO TIMEOUT - wait forever for debugging
-                            LogManager.logI(TAG, String.format("[GET] future.get() returned for chunk %d (waited %dms)", chunkIndex, System.currentTimeMillis() - getStartTime));
-                        } catch (Exception e) {
-                            LogManager.logE(TAG, String.format("Chunk %d processing error: %s", i + 1, e.getMessage()), e);
-                            throw e;
-                        }
-                        
-                        float[] embedding = result.embedding;
-                        List<HanLpNerHandler.NerResult.Entity> entities = result.entities;
-                        if (stopwordsMatcher != null && entities != null && !entities.isEmpty()) {
-                            List<HanLpNerHandler.NerResult.Entity> filteredEntities = new ArrayList<>();
-                            int filteredCount = 0;
-                            for (HanLpNerHandler.NerResult.Entity entity : entities) {
-                                if (stopwordsMatcher.matches(entity.text)) {
-                                    filteredCount++;
-                                } else {
-                                    filteredEntities.add(entity);
-                                }
-                            }
-                            if (filteredCount > 0) {
-                                LogManager.logD(TAG, String.format(
-                                        "[STOPWORDS] Chunk %d: filtered %d entities by stopwords (original=%d, remaining=%d)",
-                                        chunkIndex, filteredCount, entities.size(), filteredEntities.size()));
-                            }
-                            entities = filteredEntities;
-                        }
-                        long embeddingTime = result.embeddingTime;
-                        long nerTime = result.nerTime;
-                        long totalTime = System.currentTimeMillis() - chunkStartTime;
-                        
-                        // Step 3: Save to database (chunk + vector + entities)
-                        LogManager.logD(TAG, String.format("[DB] Chunk %d: Saving to database...", chunkIndex));
-                        long dbStartTime = System.currentTimeMillis();
-                        long docId = graphDB.addChunk(chunk.text, chunk.source, embedding, chunk.metadata.toString());
-                        long dbTime = System.currentTimeMillis() - dbStartTime;
-                        LogManager.logD(TAG, String.format("[DB] Chunk %d: Saved docId=%d (took %dms)", chunkIndex, docId, dbTime));
-                        
-                        if (!entities.isEmpty()) {
-                            LogManager.logD(TAG, String.format("[DB] Chunk %d: Saving %d entities and building relationships...", chunkIndex, entities.size()));
-                            long entitiesStartTime = System.currentTimeMillis();
-                            
-                            // Step 1: Add entities and collect entity IDs
-                            List<Long> entityIds = new ArrayList<>();
-                            for (HanLpNerHandler.NerResult.Entity entity : entities) {
-                                long entityId = graphDB.addEntity(entity.text, entity.type, entity.confidence);
-                                if (entityId > 0) {
-                                    entityIds.add(entityId);
-                                    // Link chunk to entity
-                                    graphDB.linkChunkToEntity(docId, entity.text, entity.type, entity.confidence);
-                                }
-                            }
-                            
-                            // Step 2: Build co-occurrence edges (entities in same chunk are related)
-                            if (entityIds.size() > 1) {
-                                for (int j = 0; j < entityIds.size(); j++) {
-                                    for (int k = j + 1; k < entityIds.size(); k++) {
-                                        long fromId = entityIds.get(j);
-                                        long toId = entityIds.get(k);
-                                        // Add bidirectional edges with weight 1.0
-                                        graphDB.addEdge(fromId, toId, 1.0f);
-                                        graphDB.addEdge(toId, fromId, 1.0f);
+
+                            // Stopwords filtering
+                            if (stopwordsMatcher != null && entities != null && !entities.isEmpty()) {
+                                List<HanLpNerHandler.NerResult.Entity> filteredEntities = new ArrayList<>();
+                                int filteredCount = 0;
+                                for (HanLpNerHandler.NerResult.Entity entity : entities) {
+                                    if (stopwordsMatcher.matches(entity.text)) {
+                                        filteredCount++;
+                                    } else {
+                                        filteredEntities.add(entity);
                                     }
                                 }
-                                LogManager.logD(TAG, String.format("[DB] Chunk %d: Built %d co-occurrence edges", 
-                                    chunkIndex, entityIds.size() * (entityIds.size() - 1)));
+                                if (filteredCount > 0) {
+                                    LogManager.logD(TAG, String.format(
+                                            "[STOPWORDS] Chunk %d: filtered %d entities by stopwords (original=%d, remaining=%d)",
+                                            chunkIndexForLog, filteredCount, entities.size(), filteredEntities.size()));
+                                }
+                                entities = filteredEntities;
                             }
-                            
-                            long entitiesTime = System.currentTimeMillis() - entitiesStartTime;
-                            LogManager.logD(TAG, String.format("[DB] Chunk %d: Entities and relationships saved (took %dms)", chunkIndex, entitiesTime));
-                        }
-                        
-                        LogManager.logI(TAG, String.format("[SUMMARY] Chunk %d/%d: total=%dms (embed=%dms, ner=%dms, db=%dms), entities=%d", 
-                            i + 1, totalChunks, totalTime, embeddingTime, nerTime, dbTime, entities.size()));
-                        
-                        // Update progress
-                        float percentage = (float) (i + 1) / totalChunks * 100;
-                        if (progressCallback != null) {
-                            progressCallback.onVectorizationProgress(i + 1, totalChunks, percentage);
-                        }
-                        if (notificationProgressCallback != null) {
-                            notificationProgressCallback.onNotificationProgressUpdate(i + 1, totalChunks, percentage);
+
+                            long dbStartTime = System.currentTimeMillis();
+                            LogManager.logD(TAG, String.format("[DB] Chunk %d: Saving document to database...", chunkIndexForLog));
+                            long docId = graphDB.addChunk(processedChunk.text, processedChunk.source, embedding, processedChunk.metadata.toString());
+                            long dbTime = System.currentTimeMillis() - dbStartTime;
+                            LogManager.logD(TAG, String.format("[DB] Chunk %d: Saved docId=%d (took %dms)", chunkIndexForLog, docId, dbTime));
+
+                            // Build graph structure in memory instead of writing entities/edges directly to SQLite
+                            long graphStartTime = System.currentTimeMillis();
+                            if (!entities.isEmpty()) {
+                                LogManager.logD(TAG, String.format(
+                                        "[GRAPH_MEM] Chunk %d: Adding %d entities and co-occurrence edges to in-memory graph...",
+                                        chunkIndexForLog, entities.size()));
+                            }
+                            // Always register the chunk for in-memory graph statistics (even if there are no entities)
+                            inMemoryGraphBuilder.addChunk(docId, entities);
+                            long graphTime = System.currentTimeMillis() - graphStartTime;
+                            LogManager.logD(TAG, String.format(
+                                    "[GRAPH_MEM] Chunk %d: In-memory graph updated (took %dms)",
+                                    chunkIndexForLog, graphTime));
+
+                            long totalTime = System.currentTimeMillis() - result.chunkStartTime;
+                            LogManager.logI(TAG, String.format("[SUMMARY] Chunk %d/%d: total=%dms (embed=%dms, ner=%dms, db=%dms), entities=%d",
+                                chunkIndexForLog, totalChunks, totalTime, result.embeddingTime, nerTime, dbTime, entities.size()));
+
+                            // Update progress based on completed chunks
+                            float percentage = (float) processedChunks / totalChunks * 100.0f;
+                            if (progressCallback != null) {
+                                progressCallback.onVectorizationProgress(processedChunks, totalChunks, percentage);
+                            }
+                            if (notificationProgressCallback != null) {
+                                notificationProgressCallback.onNotificationProgressUpdate(processedChunks, totalChunks, percentage);
+                            }
+
+                            // Milestone-based progress logs for UI (every 5%)
+                            int currentPercent = Math.round(percentage);
+                            int milestone = (currentPercent / 5) * 5;
+                            if (milestone < 0) {
+                                milestone = 0;
+                            } else if (milestone > 100) {
+                                milestone = 100;
+                            }
+                            if (milestone >= 0 && milestone <= 100 && milestone > lastLoggedPercent) {
+                                logMessage("Vectorization progress: " + milestone + "% (" + processedChunks + "/" + totalChunks + ")");
+                                lastLoggedPercent = milestone;
+                            }
+
+                            LogManager.logD(TAG, String.format("[LOOP] ========== Iteration %d/%d END ==========", chunkIndexForLog, totalChunks));
                         }
 
-                        // Dot-style and milestone progress logs for UI
-                        logMessage(".");
-                        int currentPercent = (int) percentage;
-                        int milestone = (currentPercent / 10) * 10;
-                        if (milestone >= 0 && milestone <= 100 && milestone > lastLoggedPercent) {
-                            logMessage("Vectorization progress: " + milestone + "% (" + (i + 1) + "/" + totalChunks + ")");
-                            lastLoggedPercent = milestone;
-                        }
-                        
-                    } catch (Exception e) {
-                        logError("Failed to process chunk " + (i + 1) + ": " + e.getMessage(), e);
-                        LogManager.logE(TAG, String.format("[LOOP] Chunk %d failed, continuing to next chunk", i + 1), e);
-                        // Continue processing next chunk
+                        pendingFutures.clear();
                     }
-                    
-                    LogManager.logD(TAG, String.format("[LOOP] ========== Iteration %d/%d END ==========", i + 1, totalChunks));
                 }
                 
                 LogManager.logI(TAG, "[LOOP] Chunk processing loop completed");
+                inMemoryGraphBuilder.logSummary();
                 
                 // Commit transaction if not cancelled
                 if (!isTaskCancelled.get()) {
@@ -1000,6 +1125,20 @@ public class TextChunkProcessor {
                     } catch (Exception e) {
                         LogManager.logE(TAG, "Error shutting down ExecutorService: " + e.getMessage(), e);
                         executorService.shutdownNow();
+                    }
+                }
+
+                // Release embedding sessions created for knowledge base building
+                if (embeddingHandles != null && !embeddingHandles.isEmpty()) {
+                    for (Long handle : embeddingHandles) {
+                        if (handle != null && handle != 0L) {
+                            try {
+                                MnnInference.releaseEmbedding(handle);
+                                LogManager.logD(TAG, "[EMBEDDING_KB] Released embedding session handle=" + handle);
+                            } catch (Exception e) {
+                                LogManager.logE(TAG, "[EMBEDDING_KB] Failed to release embedding session handle=" + handle, e);
+                            }
+                        }
                     }
                 }
                 
@@ -1033,29 +1172,60 @@ public class TextChunkProcessor {
                 }
             }
 
-            // After successful processing, persist metadata to database and metadata.json
+            // After successful processing, apply in-memory hub filtering and persist graph/metadata
             if (!isTaskCancelled.get()) {
-                // Apply hub threshold filter on completed graph if enabled
+                // Apply in-memory hub threshold filtering if enabled
                 if (hubThreshold > 0) {
-                    KnowledgeGraphDatabase hubDb = null;
-                    try {
-                        hubDb = new KnowledgeGraphDatabase(context, graphDbPath, knowledgeBaseName);
-                        int removed = hubDb.applyHubThreshold(hubThreshold);
-                        logMessage("Graph hub filter applied: threshold=" + hubThreshold + ", removed hub entities: " + removed);
-                    } catch (Exception e) {
-                        LogManager.logE(TAG, "[HUB_FILTER] Failed to apply hub threshold: " + e.getMessage(), e);
-                        logMessage("Warning: Failed to apply graph hub threshold: " + e.getMessage());
-                    } finally {
-                        if (hubDb != null) {
-                            try {
-                                hubDb.close();
-                            } catch (Exception e) {
-                                LogManager.logE(TAG, "[HUB_FILTER] Failed to close graph DB after hub filtering: " + e.getMessage(), e);
+                    InMemoryGraphBuilder.HubFilterProgressListener hubListener =
+                            new InMemoryGraphBuilder.HubFilterProgressListener() {
+                        @Override
+                        public void onHubFilteringStarted(int totalHubEntities) {
+                            if (totalHubEntities <= 0) {
+                                logMessage("Graph hub filtering started: no hub entities found for threshold=" + hubThreshold);
+                            } else {
+                                logMessage("Graph hub filtering started: threshold=" + hubThreshold +
+                                        ", candidate hub entities=" + totalHubEntities);
+                                if (progressCallback != null) {
+                                    // Report initial graph building progress (0%)
+                                    progressCallback.onGraphBuildingProgress(0, totalHubEntities, 0.0f);
+                                }
                             }
                         }
-                    }
+
+                        @Override
+                        public void onHubFilteringProgress(int processedHubEntities, int totalHubEntities) {
+                            if (progressCallback != null && totalHubEntities > 0) {
+                                float percentage = (float) processedHubEntities / (float) totalHubEntities * 100.0f;
+                                progressCallback.onGraphBuildingProgress(processedHubEntities, totalHubEntities, percentage);
+                            }
+                        }
+
+                        @Override
+                        public void onHubFilteringCompleted(int removedHubEntities, long durationMs) {
+                            logMessage("Graph hub filtering completed: removed hub entities=" + removedHubEntities +
+                                    ", time=" + durationMs + "ms");
+                        }
+                    };
+
+                    int removed = inMemoryGraphBuilder.applyHubFilter(hubThreshold, hubListener);
+                    logMessage("Graph hub filter applied (in-memory): threshold=" + hubThreshold + ", removed hub entities: " + removed);
                 } else {
                     LogManager.logD(TAG, "[HUB_FILTER] Hub threshold is disabled (<=0), skipping hub filtering");
+                }
+
+                // Flush final in-memory graph to SQLite
+                try {
+                    KnowledgeGraphDatabase flushDb = new KnowledgeGraphDatabase(context, graphDbPath, knowledgeBaseName);
+                    SQLiteDatabase writable = flushDb.getWritableDatabase();
+                    inMemoryGraphBuilder.flushToDatabase(writable, knowledgeBaseName);
+                    try {
+                        flushDb.close();
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[GRAPH_MEM] Failed to close graph DB after flush: " + e.getMessage(), e);
+                    }
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[GRAPH_MEM] Failed to flush in-memory graph to DB: " + e.getMessage(), e);
+                    logMessage("Warning: Failed to flush in-memory graph to DB: " + e.getMessage());
                 }
 
                 try {
@@ -1125,6 +1295,500 @@ public class TextChunkProcessor {
         LogManager.logE(TAG, message, e);
         if (progressCallback != null) {
             progressCallback.onError(message);
+        }
+    }
+
+    /**
+     * In-memory graph builder skeleton used to collect basic statistics
+     * during knowledge base building. This will be extended to support
+     * full in-memory hub filtering and bulk graph writes.
+     */
+    private static class InMemoryGraphBuilder {
+        private static class EntityKey {
+            final String text;
+            final String type;
+
+            EntityKey(String text, String type) {
+                this.text = text;
+                this.type = type;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) return true;
+                if (!(o instanceof EntityKey)) return false;
+                EntityKey that = (EntityKey) o;
+                return ((text == null && that.text == null) || (text != null && text.equals(that.text))) &&
+                    ((type == null && that.type == null) || (type != null && type.equals(that.type)));
+            }
+
+            @Override
+            public int hashCode() {
+                int result = (text != null ? text.hashCode() : 0);
+                result = 31 * result + (type != null ? type.hashCode() : 0);
+                return result;
+            }
+        }
+
+        private static class EntityStats {
+            String text;
+            String type;
+            String language;
+            int frequency;
+            float avgConfidence;
+            long firstSeen;
+            long lastSeen;
+        }
+
+        private static class ChunkEntityRef {
+            String text;
+            String type;
+            float confidence;
+        }
+
+        private static class EdgeKey {
+            final String from;
+            final String to;
+
+            EdgeKey(String from, String to) {
+                this.from = from;
+                this.to = to;
+            }
+
+            @Override
+            public boolean equals(Object o) {
+                if (this == o) return true;
+                if (!(o instanceof EdgeKey)) return false;
+                EdgeKey that = (EdgeKey) o;
+                return ((from == null && that.from == null) || (from != null && from.equals(that.from))) &&
+                    ((to == null && that.to == null) || (to != null && to.equals(that.to)));
+            }
+
+            @Override
+            public int hashCode() {
+                int result = (from != null ? from.hashCode() : 0);
+                result = 31 * result + (to != null ? to.hashCode() : 0);
+                return result;
+            }
+        }
+
+        private static class EdgeStats {
+            String from;
+            String to;
+            int weight;
+            Set<Long> chunkIds = new LinkedHashSet<>();
+        }
+
+        interface HubFilterProgressListener {
+            void onHubFilteringStarted(int totalHubEntities);
+            void onHubFilteringProgress(int processedHubEntities, int totalHubEntities);
+            void onHubFilteringCompleted(int removedHubEntities, long durationMs);
+        }
+
+        private final Map<EntityKey, EntityStats> entityMap = new HashMap<>();
+        private final Map<Long, List<ChunkEntityRef>> chunkEntityMap = new HashMap<>();
+        private final Map<EdgeKey, EdgeStats> edgeMap = new HashMap<>();
+
+        private int totalChunks;
+        private int totalEntities;
+        private long totalPotentialEdges;
+
+        void loadFromDatabase(SQLiteDatabase db, String collection) {
+            long startTime = System.currentTimeMillis();
+            int loadedEntities = 0;
+            int loadedChunkEntities = 0;
+            int loadedEdges = 0;
+            int distinctChunks = 0;
+
+            Cursor cursor = null;
+            try {
+                // Load entities
+                cursor = db.query("entities",
+                    new String[]{"entity_text", "entity_type", "language", "frequency", "avg_confidence", "first_seen", "last_seen"},
+                    "collection=?",
+                    new String[]{collection},
+                    null, null, null);
+                while (cursor.moveToNext()) {
+                    String text = cursor.getString(0);
+                    String type = cursor.getString(1);
+                    String language = cursor.getString(2);
+                    int frequency = cursor.getInt(3);
+                    float avgConf = cursor.getFloat(4);
+                    long firstSeen = cursor.getLong(5);
+                    long lastSeen = cursor.getLong(6);
+
+                    EntityKey key = new EntityKey(text, type);
+                    EntityStats stats = new EntityStats();
+                    stats.text = text;
+                    stats.type = type;
+                    stats.language = language;
+                    stats.frequency = frequency;
+                    stats.avgConfidence = avgConf;
+                    stats.firstSeen = firstSeen;
+                    stats.lastSeen = lastSeen;
+                    entityMap.put(key, stats);
+                    loadedEntities++;
+                }
+                cursor.close();
+                cursor = null;
+
+                // Load chunk-entity mappings
+                cursor = db.query("chunk_entities",
+                    new String[]{"chunk_id", "entity_text", "entity_type", "confidence"},
+                    null,
+                    null,
+                    null, null, null);
+                while (cursor.moveToNext()) {
+                    long chunkId = cursor.getLong(0);
+                    String text = cursor.getString(1);
+                    String type = cursor.getString(2);
+                    float conf = cursor.getFloat(3);
+
+                    List<ChunkEntityRef> list = chunkEntityMap.get(chunkId);
+                    if (list == null) {
+                        list = new ArrayList<>();
+                        chunkEntityMap.put(chunkId, list);
+                        distinctChunks++;
+                    }
+                    ChunkEntityRef ref = new ChunkEntityRef();
+                    ref.text = text;
+                    ref.type = type;
+                    ref.confidence = conf;
+                    list.add(ref);
+                    loadedChunkEntities++;
+                }
+                cursor.close();
+                cursor = null;
+
+                // Load edges
+                cursor = db.query("entity_edges",
+                    new String[]{"from_entity", "to_entity", "weight", "chunk_ids"},
+                    "collection=?",
+                    new String[]{collection},
+                    null, null, null);
+                while (cursor.moveToNext()) {
+                    String from = cursor.getString(0);
+                    String to = cursor.getString(1);
+                    int weight = cursor.getInt(2);
+                    String chunkIdsJson = cursor.getString(3);
+
+                    if (from == null || to == null) {
+                        continue;
+                    }
+
+                    EdgeKey key = makeEdgeKey(from, to);
+                    EdgeStats stats = edgeMap.get(key);
+                    if (stats == null) {
+                        stats = new EdgeStats();
+                        stats.from = key.from;
+                        stats.to = key.to;
+                        edgeMap.put(key, stats);
+                    }
+                    stats.weight += weight;
+
+                    if (chunkIdsJson != null && !chunkIdsJson.isEmpty()) {
+                        try {
+                            JSONArray arr = new JSONArray(chunkIdsJson);
+                            for (int i = 0; i < arr.length(); i++) {
+                                long cid = arr.getLong(i);
+                                stats.chunkIds.add(cid);
+                            }
+                        } catch (Exception ignore) {
+                        }
+                    }
+                    loadedEdges++;
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[GRAPH_MEM] Failed to load existing graph from DB: " + e.getMessage(), e);
+            } finally {
+                if (cursor != null) {
+                    cursor.close();
+                }
+            }
+
+            totalChunks += distinctChunks;
+            long duration = System.currentTimeMillis() - startTime;
+            LogManager.logI(TAG, String.format(
+                "[GRAPH_MEM] Loaded existing graph from DB: entities=%d, chunk_entities=%d, edges=%d, chunks=%d, time=%dms",
+                loadedEntities, loadedChunkEntities, loadedEdges, distinctChunks, duration));
+        }
+
+        void addChunk(long chunkId, List<HanLpNerHandler.NerResult.Entity> entities) {
+            totalChunks++;
+            int entityCount = (entities != null) ? entities.size() : 0;
+            totalEntities += entityCount;
+            if (entityCount > 1) {
+                totalPotentialEdges += (long) entityCount * (entityCount - 1) / 2L;
+            }
+
+            if (entities != null && !entities.isEmpty()) {
+                for (HanLpNerHandler.NerResult.Entity entity : entities) {
+                    if (entity == null || entity.text == null) {
+                        continue;
+                    }
+                    EntityKey key = new EntityKey(entity.text, entity.type);
+                    EntityStats stats = entityMap.get(key);
+                    long nowSec = System.currentTimeMillis() / 1000L;
+                    if (stats == null) {
+                        stats = new EntityStats();
+                        stats.text = entity.text;
+                        stats.type = entity.type;
+                        stats.language = "zh";
+                        stats.frequency = 1;
+                        stats.avgConfidence = entity.confidence;
+                        stats.firstSeen = nowSec;
+                        stats.lastSeen = nowSec;
+                        entityMap.put(key, stats);
+                    } else {
+                        int oldFreq = stats.frequency;
+                        int newFreq = oldFreq + 1;
+                        float newConf = (stats.avgConfidence * oldFreq + entity.confidence) / newFreq;
+                        stats.frequency = newFreq;
+                        stats.avgConfidence = newConf;
+                        stats.lastSeen = nowSec;
+                    }
+
+                    List<ChunkEntityRef> list = chunkEntityMap.get(chunkId);
+                    if (list == null) {
+                        list = new ArrayList<>();
+                        chunkEntityMap.put(chunkId, list);
+                    }
+                    ChunkEntityRef ref = new ChunkEntityRef();
+                    ref.text = entity.text;
+                    ref.type = entity.type;
+                    ref.confidence = entity.confidence;
+                    list.add(ref);
+                }
+
+                int n = entities.size();
+                for (int i = 0; i < n; i++) {
+                    HanLpNerHandler.NerResult.Entity e1 = entities.get(i);
+                    if (e1 == null || e1.text == null) {
+                        continue;
+                    }
+                    for (int j = i + 1; j < n; j++) {
+                        HanLpNerHandler.NerResult.Entity e2 = entities.get(j);
+                        if (e2 == null || e2.text == null) {
+                            continue;
+                        }
+                        EdgeKey key = makeEdgeKey(e1.text, e2.text);
+                        EdgeStats stats = edgeMap.get(key);
+                        if (stats == null) {
+                            stats = new EdgeStats();
+                            stats.from = key.from;
+                            stats.to = key.to;
+                            edgeMap.put(key, stats);
+                        }
+                        stats.weight += 1;
+                        stats.chunkIds.add(chunkId);
+                    }
+                }
+            }
+
+            LogManager.logD(TAG, String.format("[GRAPH_MEM] Added chunk to in-memory graph snapshot: chunkId=%d, entities=%d", chunkId, entityCount));
+        }
+
+        int applyHubFilter(int threshold, HubFilterProgressListener listener) {
+            if (threshold <= 0) {
+                LogManager.logD(TAG, String.format("[GRAPH_MEM] Hub threshold <= 0, skip in-memory hub filtering (threshold=%d)", threshold));
+                if (listener != null) {
+                    listener.onHubFilteringStarted(0);
+                    listener.onHubFilteringCompleted(0, 0L);
+                }
+                return 0;
+            }
+
+            long startTime = System.currentTimeMillis();
+
+            class HubStats {
+                Set<String> neighbors = new HashSet<>();
+                int totalWeight;
+            }
+
+            Map<String, HubStats> hubStatsMap = new HashMap<>();
+
+            for (EdgeStats edge : edgeMap.values()) {
+                if (edge.from == null || edge.to == null) {
+                    continue;
+                }
+                int w = edge.weight;
+
+                HubStats sFrom = hubStatsMap.get(edge.from);
+                if (sFrom == null) {
+                    sFrom = new HubStats();
+                    hubStatsMap.put(edge.from, sFrom);
+                }
+                sFrom.neighbors.add(edge.to);
+                sFrom.totalWeight += w;
+
+                HubStats sTo = hubStatsMap.get(edge.to);
+                if (sTo == null) {
+                    sTo = new HubStats();
+                    hubStatsMap.put(edge.to, sTo);
+                }
+                sTo.neighbors.add(edge.from);
+                sTo.totalWeight += w;
+            }
+
+            Set<String> hubEntities = new HashSet<>();
+            for (Map.Entry<String, HubStats> entry : hubStatsMap.entrySet()) {
+                String text = entry.getKey();
+                HubStats stats = entry.getValue();
+                int degree = stats.neighbors.size();
+                int totalWeight = stats.totalWeight;
+                if (degree >= threshold || totalWeight >= threshold) {
+                    hubEntities.add(text);
+                }
+            }
+
+            if (hubEntities.isEmpty()) {
+                LogManager.logD(TAG, String.format("[GRAPH_MEM] No hubs found for threshold=%d", threshold));
+                long duration = System.currentTimeMillis() - startTime;
+                if (listener != null) {
+                    listener.onHubFilteringStarted(0);
+                    listener.onHubFilteringCompleted(0, duration);
+                }
+                return 0;
+            }
+
+            int totalHubEntities = hubEntities.size();
+            if (listener != null) {
+                listener.onHubFilteringStarted(totalHubEntities);
+            }
+
+            int processed = 0;
+            for (String hubText : hubEntities) {
+                // Remove from entity map
+                entityMap.entrySet().removeIf(entry -> hubText.equals(entry.getKey().text));
+
+                // Remove from chunk-entity mappings
+                for (Map.Entry<Long, List<ChunkEntityRef>> entry : chunkEntityMap.entrySet()) {
+                    List<ChunkEntityRef> list = entry.getValue();
+                    if (list == null || list.isEmpty()) {
+                        continue;
+                    }
+                    List<ChunkEntityRef> toKeep = new ArrayList<>();
+                    for (ChunkEntityRef ref : list) {
+                        if (!hubText.equals(ref.text)) {
+                            toKeep.add(ref);
+                        }
+                    }
+                    entry.setValue(toKeep);
+                }
+
+                processed++;
+                if (listener != null) {
+                    listener.onHubFilteringProgress(processed, totalHubEntities);
+                }
+            }
+
+            // Remove edges involving hubs
+            edgeMap.entrySet().removeIf(entry -> hubEntities.contains(entry.getKey().from) || hubEntities.contains(entry.getKey().to));
+
+            long duration = System.currentTimeMillis() - startTime;
+            LogManager.logI(TAG, String.format(
+                "[GRAPH_MEM] Hub filtering completed: threshold=%d, hubs=%d, time=%dms",
+                threshold, totalHubEntities, duration));
+
+            if (listener != null) {
+                listener.onHubFilteringCompleted(totalHubEntities, duration);
+            }
+
+            return totalHubEntities;
+        }
+
+        void flushToDatabase(SQLiteDatabase db, String collection) {
+            long startTime = System.currentTimeMillis();
+            int entityRows = 0;
+            int chunkEntityRows = 0;
+            int edgeRows = 0;
+
+            db.beginTransaction();
+            try {
+                db.delete("entities", "collection=?", new String[]{collection});
+                db.delete("entity_edges", "collection=?", new String[]{collection});
+                db.delete("chunk_entities", null, null);
+
+                ContentValues values = new ContentValues();
+
+                for (EntityStats stats : entityMap.values()) {
+                    values.clear();
+                    values.put("collection", collection);
+                    values.put("entity_text", stats.text);
+                    values.put("entity_type", stats.type);
+                    values.put("language", stats.language != null ? stats.language : "zh");
+                    values.put("frequency", stats.frequency);
+                    values.put("avg_confidence", stats.avgConfidence);
+                    long nowSec = System.currentTimeMillis() / 1000L;
+                    values.put("first_seen", stats.firstSeen > 0 ? stats.firstSeen : nowSec);
+                    values.put("last_seen", stats.lastSeen > 0 ? stats.lastSeen : nowSec);
+                    db.insert("entities", null, values);
+                    entityRows++;
+                }
+
+                for (Map.Entry<Long, List<ChunkEntityRef>> entry : chunkEntityMap.entrySet()) {
+                    long chunkId = entry.getKey();
+                    List<ChunkEntityRef> list = entry.getValue();
+                    if (list == null || list.isEmpty()) {
+                        continue;
+                    }
+                    for (ChunkEntityRef ref : list) {
+                        values.clear();
+                        values.put("chunk_id", chunkId);
+                        values.put("entity_text", ref.text);
+                        values.put("entity_type", ref.type);
+                        values.put("confidence", ref.confidence);
+                        db.insertWithOnConflict("chunk_entities", null, values, SQLiteDatabase.CONFLICT_IGNORE);
+                        chunkEntityRows++;
+                    }
+                }
+
+                for (EdgeStats edge : edgeMap.values()) {
+                    values.clear();
+                    values.put("collection", collection);
+                    values.put("from_entity", edge.from);
+                    values.put("to_entity", edge.to);
+                    values.put("weight", edge.weight);
+                    JSONArray arr = new JSONArray();
+                    for (Long cid : edge.chunkIds) {
+                        arr.put(cid);
+                    }
+                    values.put("chunk_ids", arr.toString());
+                    values.put("updated_at", System.currentTimeMillis() / 1000L);
+                    db.insert("entity_edges", null, values);
+                    edgeRows++;
+                }
+
+                db.setTransactionSuccessful();
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[GRAPH_MEM] Failed to flush in-memory graph to SQLite: " + e.getMessage(), e);
+            } finally {
+                try {
+                    db.endTransaction();
+                } catch (Exception ignore) {
+                }
+            }
+
+            long duration = System.currentTimeMillis() - startTime;
+            LogManager.logI(TAG, String.format(
+                "[GRAPH_MEM] Flushed in-memory graph to SQLite: entities=%d, chunk_entities=%d, edges=%d, time=%dms",
+                entityRows, chunkEntityRows, edgeRows, duration));
+        }
+
+        void logSummary() {
+            LogManager.logI(TAG, String.format("[GRAPH_MEM] In-memory graph summary: chunks=%d, entities=%d, potential_edges=%d",
+                totalChunks, totalEntities, totalPotentialEdges));
+        }
+
+        private EdgeKey makeEdgeKey(String a, String b) {
+            if (a == null || b == null) {
+                return new EdgeKey(a, b);
+            }
+            if (a.compareTo(b) <= 0) {
+                return new EdgeKey(a, b);
+            } else {
+                return new EdgeKey(b, a);
+            }
         }
     }
     

@@ -139,6 +139,10 @@ public class BuildKnowledgeBaseFragment extends Fragment {
     // Compact vectorization progress line state
     private final StringBuilder vectorizationProgressLine = new StringBuilder();
     private boolean hasVectorizationProgressLine = false;
+    private int lastVectorizationProgressMilestone = -1;
+    private final StringBuilder graphProgressLine = new StringBuilder();
+    private boolean hasGraphProgressLine = false;
+    private int lastGraphProgressMilestone = -1;
     
     // 跟踪电池优化状态
     private boolean batteryOptimizationDisabled = false;
@@ -202,7 +206,6 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                                 processedChunks = progressData.processedChunks;
                                 totalChunks = progressData.totalChunks;
                                 vectorizationPercentage = progressData.vectorizationPercentage;
-                                LogManager.logD(TAG, "图谱构建进度: " + processedChunks + "/" + totalChunks + " (" + vectorizationPercentage + "%)");
                                 break;
                                 
                             case COMPLETED:
@@ -250,6 +253,17 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                         // Finalize current vectorization line then append completion message
                         resetVectorizationProgressLine();
                         appendToProgress(message);
+                        return;
+                    }
+
+                    if (message.startsWith("Graph hub filtering started: ")) {
+                        resetGraphProgressLine();
+                        appendToProgress(message);
+                        return;
+                    }
+
+                    if (message.startsWith("Building knowledge graph: ")) {
+                        updateGraphProgressLine(message);
                         return;
                     }
 
@@ -983,8 +997,9 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         String embeddingModelPath = ConfigManager.getEmbeddingModelPath(requireContext()) + File.separator + embeddingModel;
         
         try {
-            // 加载模型以获取维度信息
-            EmbeddingHandler model = EmbeddingHandler.getInstance(requireContext()).getModel(embeddingModelPath);
+            // 加载模型以获取维度信息（使用 NORMAL 内存模式，与批量构建保持一致）
+            EmbeddingHandler model = EmbeddingHandler.getInstance(requireContext()).getModel(
+                    embeddingModelPath, EmbeddingHandler.MemoryMode.NORMAL);
             int modelDimension = model.getEmbeddingDimension();
             LogManager.logD(TAG, "当前模型向量维度: " + modelDimension);
             
@@ -1397,27 +1412,36 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         String elapsedText = formatTime(elapsedMs);
         String etaText = etaMs >= 0L ? formatTime(etaMs) : "N/A";
 
+        float overallPct = progressData.getOverallProgressPercentage();
+
         String progressText;
 
         switch (progressData.currentStage) {
             case TEXT_EXTRACTION: {
                 int displayTotalFiles = progressData.totalFiles > 0 ? progressData.totalFiles : 1;
-                float filePct = progressData.getFileProgressPercentage();
                 progressText = String.format(Locale.getDefault(),
                         "[files: %d/%d] %.1f%% | elapsed %s | ETA %s",
-                        progressData.processedFiles, displayTotalFiles, filePct,
+                        progressData.processedFiles, displayTotalFiles, overallPct,
                         elapsedText, etaText);
                 break;
             }
 
-            case VECTORIZATION:
-            case GRAPH_BUILDING:
-            case COMPLETED: {
+            case VECTORIZATION: {
                 int displayTotalChunks = progressData.totalChunks > 0 ? progressData.totalChunks : 1;
-                float vecPct = progressData.getVectorizationProgressPercentage();
                 progressText = String.format(Locale.getDefault(),
                         "[chunks: %d/%d] %.1f%% | elapsed %s | ETA %s",
-                        progressData.processedChunks, displayTotalChunks, vecPct,
+                        progressData.processedChunks, displayTotalChunks, overallPct,
+                        elapsedText, etaText);
+                break;
+            }
+
+            case GRAPH_BUILDING:
+            case COMPLETED: {
+                int displayTotalHubs = progressData.hubTotal > 0 ? progressData.hubTotal : 1;
+                int processedHubs = progressData.hubProcessed;
+                progressText = String.format(Locale.getDefault(),
+                        "[hubs: %d/%d] %.1f%% | elapsed %s | ETA %s",
+                        processedHubs, displayTotalHubs, overallPct,
                         elapsedText, etaText);
                 break;
             }
@@ -1435,7 +1459,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                     ", File progress: " + progressData.processedFiles + "/" + progressData.totalFiles +
                     ", Vectorization: " + progressData.processedChunks + "/" + progressData.totalChunks +
                     " (" + progressData.vectorizationPercentage + "%)" +
-                    ", Elapsed: " + elapsedText + ", ETA: " + etaText);
+                    ", Overall: " + overallPct + "%, Elapsed: " + elapsedText + ", ETA: " + etaText);
         }
     }
     
@@ -1489,50 +1513,152 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         });
     }
     
+    private void resetGraphProgressLine() {
+        mainHandler.post(() -> {
+            graphProgressLine.setLength(0);
+            hasGraphProgressLine = false;
+            lastGraphProgressMilestone = -1;
+        });
+    }
+
     // Reset compact vectorization progress line state
     private void resetVectorizationProgressLine() {
         mainHandler.post(() -> {
             vectorizationProgressLine.setLength(0);
             hasVectorizationProgressLine = false;
+            lastVectorizationProgressMilestone = -1;
         });
     }
 
-    // Update compact vectorization progress line with either a dot or a percentage label
-    private void updateVectorizationProgressLine(String token) {
+    private void updateGraphProgressLine(String token) {
         mainHandler.post(() -> {
-            // 检查Fragment是否仍然附加到Context，避免崩溃
+            // Check fragment attachment to avoid crashes
             if (!isAdded() || getContext() == null) {
-                LogManager.logD(TAG, "Fragment detached, skip vectorization progress update");
+                LogManager.logD(TAG, "Fragment detached, skip graph progress update");
                 return;
             }
             if (textViewProgress == null) {
                 return;
             }
 
-            // Append token to local buffer
-            if (".".equals(token)) {
-                // One dot per processed chunk
-                vectorizationProgressLine.append('.');
-            } else if (token.startsWith("Vectorization progress: ")) {
-                // Extract compact percentage label, e.g. "10%" from
-                // "Vectorization progress: 10% (x/y)"
-                String percentLabel = null;
-                try {
-                    int colonIndex = token.indexOf(':');
-                    if (colonIndex >= 0 && colonIndex + 1 < token.length()) {
-                        String tail = token.substring(colonIndex + 1).trim();
-                        int percentIndex = tail.indexOf('%');
-                        if (percentIndex > 0) {
-                            percentLabel = tail.substring(0, percentIndex + 1).trim();
-                        }
+            Integer milestone = null;
+            try {
+                int openParen = token.indexOf('(');
+                int percentIndex = token.indexOf('%', openParen + 1);
+                if (openParen >= 0 && percentIndex > openParen) {
+                    String inner = token.substring(openParen + 1, percentIndex).trim();
+                    float pct = Float.parseFloat(inner);
+                    int m = ((int) pct / 5) * 5;
+                    if (m < 0) {
+                        m = 0;
                     }
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "Failed to parse vectorization progress percentage: " + e.getMessage(), e);
+                    if (m > 100) {
+                        m = 100;
+                    }
+                    milestone = m;
                 }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to parse graph progress percentage: " + e.getMessage(), e);
+            }
 
-                if (percentLabel != null && !percentLabel.isEmpty()) {
-                    vectorizationProgressLine.append(percentLabel);
+            if (milestone == null || milestone <= lastGraphProgressMilestone) {
+                return;
+            }
+            lastGraphProgressMilestone = milestone;
+
+            String percentLabel = milestone + "%";
+            if (graphProgressLine.length() == 0) {
+                graphProgressLine.append(percentLabel);
+            } else {
+                // Use a compact ".."/"..." pattern similar to vectorization dots
+                if (milestone == 10 || milestone == 50 || milestone == 60) {
+                    graphProgressLine.append("...");
+                } else {
+                    graphProgressLine.append("..");
                 }
+                graphProgressLine.append(percentLabel);
+            }
+
+            String line = graphProgressLine.toString();
+            String currentText = textViewProgress.getText().toString();
+
+            if (!hasGraphProgressLine) {
+                hasGraphProgressLine = true;
+                if (currentText.isEmpty()) {
+                    textViewProgress.setText(line);
+                } else {
+                    textViewProgress.setText(currentText + "\n" + line);
+                }
+            } else {
+                int lastNewLine = currentText.lastIndexOf('\n');
+                String baseText;
+                if (lastNewLine >= 0) {
+                    baseText = currentText.substring(0, lastNewLine);
+                } else {
+                    baseText = "";
+                }
+                if (baseText.isEmpty()) {
+                    textViewProgress.setText(line);
+                } else {
+                    textViewProgress.setText(baseText + "\n" + line);
+                }
+            }
+
+            // Always keep progress view scrolled to bottom
+            scrollProgressToBottom();
+        });
+    }
+
+    // Update compact vectorization progress line with milestone-based percentages (every 5%)
+    private void updateVectorizationProgressLine(String token) {
+        mainHandler.post(() -> {
+            // 检查Fragment是否仍然附加到Context，避免崩溃
+            if (!isAdded() || getContext() == null) {
+                LogManager.logD(TAG, "Fragment已分离，跳过向量化进度更新");
+                return;
+            }
+            if (textViewProgress == null) {
+                return;
+            }
+
+            // Ignore fine-grained dot tokens; we only render milestone percentages
+            if (".".equals(token)) {
+                return;
+            }
+
+            Integer milestone = null;
+            try {
+                if (token.startsWith("Vectorization progress: ")) {
+                    int colonIndex = token.indexOf(':');
+                    int percentIndex = token.indexOf('%', colonIndex + 1);
+                    if (colonIndex >= 0 && percentIndex > colonIndex) {
+                        String inner = token.substring(colonIndex + 1, percentIndex).trim();
+                        float pct = Float.parseFloat(inner);
+                        int m = ((int) pct / 5) * 5;
+                        if (m < 0) {
+                            m = 0;
+                        }
+                        if (m > 100) {
+                            m = 100;
+                        }
+                        milestone = m;
+                    }
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to parse vectorization progress percentage: " + e.getMessage(), e);
+            }
+
+            if (milestone == null || milestone <= lastVectorizationProgressMilestone) {
+                return;
+            }
+            lastVectorizationProgressMilestone = milestone;
+
+            String percentLabel = milestone + "%";
+            if (vectorizationProgressLine.length() == 0) {
+                vectorizationProgressLine.append(percentLabel);
+            } else {
+                vectorizationProgressLine.append("..");
+                vectorizationProgressLine.append(percentLabel);
             }
 
             String line = vectorizationProgressLine.toString();
@@ -1569,6 +1695,28 @@ public class BuildKnowledgeBaseFragment extends Fragment {
 
     // Helper to keep progress TextView scrolled to the bottom after content changes
     private void scrollProgressToBottom() {
+        if (!isAdded() || getContext() == null) {
+            LogManager.logD(TAG, "Fragment detached, skip scrolling progress view");
+            return;
+        }
+
+        View rootView = getView();
+        if (rootView == null) {
+            return;
+        }
+
+        android.widget.ScrollView scrollView = rootView.findViewById(R.id.scrollViewProgress);
+        if (scrollView != null) {
+            scrollView.post(() -> {
+                try {
+                    scrollView.fullScroll(android.view.View.FOCUS_DOWN);
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "Failed to scroll ScrollView progress view to bottom", e);
+                }
+            });
+            return;
+        }
+
         if (textViewProgress == null) {
             return;
         }

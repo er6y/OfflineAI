@@ -277,9 +277,9 @@ public class UnifiedForegroundService extends Service {
     }
     
     /**
-     * 更新文本提取通知进度
+     * 更新文本提取通知进度，数值进度使用 ProgressManager 提供的整体百分比。
      */
-    private void updateTextExtractionProgress(int processedFiles, int totalFiles, String currentFile) {
+    private void updateTextExtractionProgress(int processedFiles, int totalFiles, String currentFile, int overallProgress) {
         // 确保分母不为0，避免显示0/0
         int displayTotal = totalFiles > 0 ? totalFiles : 1;
         
@@ -287,11 +287,8 @@ public class UnifiedForegroundService extends Service {
         String status = String.format(getString(R.string.progress_text_extraction_keyword) + " (%d/%d): %s", 
                 processedFiles, displayTotal, currentFile);
         
-        // 为通知栏保留百分比进度
-        int progress = (int) ((float) processedFiles / displayTotal * 50); // 文本提取占总进度的50%
-        
         // 只更新通知，不触发UI回调
-        this.currentProgress = progress;
+        this.currentProgress = overallProgress;
         this.currentStatus = status;
         
         // 更新通知 - 已注释掉通知更新
@@ -299,10 +296,11 @@ public class UnifiedForegroundService extends Service {
         
         // 回调进度（确保UI显示正确格式）
         if (progressCallback != null) {
-            progressCallback.onProgressUpdate(progress, status);
+            progressCallback.onProgressUpdate(overallProgress, status);
         }
         
-        LogManager.logD(TAG, "通知文本提取进度更新: [" + processedFiles + "/" + displayTotal + "] " + currentFile);
+        LogManager.logD(TAG, "通知文本提取进度更新: [" + processedFiles + "/" + displayTotal + "] " + currentFile +
+                ", overall=" + overallProgress + "%");
     }
     
     /**
@@ -543,26 +541,33 @@ public class UnifiedForegroundService extends Service {
                     progressManager.initFileProcessing(totalFiles);
                 }
                 progressManager.updateFileProgress(processedFiles, currentFile);
-                
-                // Update notification progress
-                updateTextExtractionProgress(processedFiles, totalFiles, currentFile);
-                
+
+                // Derive overall progress from ProgressManager
+                ProgressManager.ProgressData progressData = progressManager.getCurrentProgress();
+                int overall = Math.round(progressData.getOverallProgressPercentage());
+
+                // Update notification/UI progress using unified overall percentage
+                updateTextExtractionProgress(processedFiles, totalFiles, currentFile, overall);
+
                 // Log progress
-                LogManager.logD(TAG, "Text extraction progress: " + processedFiles + "/" + totalFiles + ", current file: " + currentFile);
+                LogManager.logD(TAG, "Text extraction progress: " + processedFiles + "/" + totalFiles + ", current file: " + currentFile +
+                        ", overall=" + overall + "%");
             }
             
             @Override
             public void onVectorizationProgress(int processedChunks, int totalChunks, float percentage) {
                 // Update progress manager
                 progressManager.updateVectorizationProgress(processedChunks, totalChunks, percentage);
-                
-                // Calculate overall progress (50-100%)
-                int progress = 50 + (int) (percentage / 2);
-                
+
+                // Derive overall progress from ProgressManager (dominant 98% weight during vectorization)
+                ProgressManager.ProgressData progressData = progressManager.getCurrentProgress();
+                int overall = Math.round(progressData.getOverallProgressPercentage());
+
                 // Update numeric progress only; textual status will be delivered via onLogLine
-                updateProgress(progress, null);
-                
-                LogManager.logD(TAG, "Vectorization progress: " + processedChunks + "/" + totalChunks + " (" + percentage + "%)");
+                updateProgress(overall, null);
+
+                LogManager.logD(TAG, "Vectorization progress: " + processedChunks + "/" + totalChunks + " (" + percentage + "%)" +
+                        ", overall=" + overall + "%");
             }
             
             @Override
@@ -575,8 +580,10 @@ public class UnifiedForegroundService extends Service {
                     AppConstants.PROCESSING_STATUS_TEXT_EXTRACTION_COMPLETE) + ", " + 
                     getString(R.string.text_extraction_complete_chunks, totalChunks)+ "..." + getString(R.string.common_generating);
                 LogManager.logD(TAG, "Text extraction completed, total chunks: " + totalChunks + ". Starting vectorization...");
-                // Only update numeric progress
-                updateProgress(50, null);
+                // Update numeric progress using unified overall percentage
+                ProgressManager.ProgressData progressData = progressManager.getCurrentProgress();
+                int overall = Math.round(progressData.getOverallProgressPercentage());
+                updateProgress(overall, null);
             }
             
             @Override
@@ -592,23 +599,28 @@ public class UnifiedForegroundService extends Service {
                 if (progressCallback != null) {
                     progressCallback.onLogLine(status);
                 }
-                // Only update numeric progress
-                updateProgress(100, null);
+                // Update numeric progress using unified overall percentage
+                ProgressManager.ProgressData progressData = progressManager.getCurrentProgress();
+                int overall = Math.round(progressData.getOverallProgressPercentage());
+                updateProgress(overall, null);
             }
             
             @Override
             public void onGraphBuildingProgress(int processedChunks, int totalChunks, float percentage) {
-                // Update progress for graph building
-                progressManager.updateVectorizationProgress(processedChunks, totalChunks, percentage);
+                // Update progress for graph building (hub filtering / knowledge graph post-processing)
                 progressManager.markGraphBuilding();
-                String status = "Building knowledge graph: " + processedChunks + "/" + totalChunks + 
+                progressManager.updateHubFilteringProgress(processedChunks, totalChunks, percentage);
+
+                ProgressManager.ProgressData progressData = progressManager.getCurrentProgress();
+                int overall = Math.round(progressData.getOverallProgressPercentage());
+
+                String status = "Building knowledge graph: " + processedChunks + "/" + totalChunks +
                     " (" + String.format("%.1f%%", percentage) + ")";
-                LogManager.logD(TAG, status);
                 if (progressCallback != null) {
                     progressCallback.onLogLine(status);
                 }
-                // Keep numeric progress at 100% as this is post-vectorization
-                updateProgress(100, null);
+                // Use unified overall progress instead of hard-coded 100%
+                updateProgress(overall, null);
             }
             
             @Override
@@ -682,7 +694,9 @@ public class UnifiedForegroundService extends Service {
             progressCallback.onProgressUpdate(progress, status);
         }
         
-        LogManager.logD(TAG, "进度更新: " + progress + "%, " + status);
+        if (status != null) {
+            LogManager.logD(TAG, "进度更新: " + progress + "%, " + status);
+        }
     }
     
     /**

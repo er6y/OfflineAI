@@ -4412,12 +4412,12 @@ public class RagQaFragment extends Fragment {
 
             candidates.sort((a, b) -> Float.compare(b.finalScore, a.finalScore));
             int limit = Math.min(retrievalCount, candidates.size());
-            List<String> relevantDocs = new ArrayList<>();
+            List<String> fusedDocs = new ArrayList<>();
             StringBuilder scoreDebug = new StringBuilder("\n[RAG][Graph] Fused candidates (top " + limit + "):\n");
             StringBuilder similarityInfoBuilder = new StringBuilder();
             for (int i = 0; i < limit; i++) {
                 GraphRagCandidate c = candidates.get(i);
-                relevantDocs.add(c.result.content);
+                fusedDocs.add(c.result.content);
                 scoreDebug.append("#").append(i + 1)
                         .append(" vec=").append(String.format("%.3f", c.vectorScore))
                         .append(" graph=").append(String.format("%.3f", c.graphScore))
@@ -4433,12 +4433,33 @@ public class RagQaFragment extends Fragment {
             updateChatMessage(scoreDebug.toString());
             LogManager.logI(TAG, "[GRAPH_RAG] Fused scores: " + similarityInfoBuilder.toString());
 
-            synchronized (this) {
-                this.similarityInfo = "GraphRAG final scores: " + similarityInfoBuilder.toString();
-                this.relevantDocuments = relevantDocs;
+            // Build a SearchResult list in fused order so that we can reuse the existing reranker pipeline.
+            List<KnowledgeGraphDatabase.SearchResult> fusedResults = new ArrayList<>();
+            for (int i = 0; i < limit; i++) {
+                GraphRagCandidate c = candidates.get(i);
+                fusedResults.add(c.result);
             }
 
-            LogManager.logD(TAG, "Graph RAG fused results processing completed, document count: " + relevantDocs.size());
+            int rerankCount = ConfigManager.getRerankCount(requireContext());
+            String rerankerModelPath = getRerankerModelPath(vectorDb);
+
+            if (rerankCount > 0 && rerankerModelPath != null && !rerankerModelPath.isEmpty()) {
+                // Use reranker for Graph RAG as well: 0 = disabled, N > 0 = rerank and keep top N documents.
+                updateChatMessage("\n[RAG] Using reranker model to optimize Graph RAG results...");
+                try {
+                    processWithReranker(userQuery, fusedResults, rerankerModelPath, vectorDb);
+                } catch (InterruptedException ie) {
+                    LogManager.logI(TAG, "Graph RAG reranker process interrupted: " + ie.getMessage());
+                    throw ie;
+                }
+            } else {
+                // No reranker configured or rerank disabled: keep Graph RAG fused ranking directly.
+                synchronized (this) {
+                    this.similarityInfo = "GraphRAG final scores: " + similarityInfoBuilder.toString();
+                    this.relevantDocuments = fusedDocs;
+                }
+                LogManager.logD(TAG, "Graph RAG fused results processing completed without reranker, document count: " + fusedDocs.size());
+            }
 
         } catch (Exception e) {
             LogManager.logE(TAG, "Failed to process Graph RAG results: " + e.getMessage(), e);

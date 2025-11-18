@@ -35,8 +35,9 @@ public class EmbeddingHandler {
     
     // ========== Memory Mode Enum ==========
     public enum MemoryMode {
-        LOW("low"),      // Runtime dequantization, low memory, slower
-        HIGH("high");    // Pre-dequantization, high memory, faster
+        LOW("low"),       // Runtime dequantization, lowest memory, slowest
+        NORMAL("normal"), // Balanced memory usage, default for batch building
+        HIGH("high");     // Pre-dequantization, highest memory, fastest
         
         private final String value;
         
@@ -495,18 +496,40 @@ public class EmbeddingHandler {
     private String buildRuntimeConfig(MemoryMode memoryMode) {
         // Get thread count from settings
         int threads = ConfigManager.getThreads(mContext);
-        
+
+        // Resolve backend from global settings (same as LLM)
+        String backendPreference = SettingsFragment.getBackendPreference(mContext);
+        String mnnBackend;
+        switch (backendPreference) {
+            case "OPENCL":
+                mnnBackend = "opencl";
+                break;
+            case "VULKAN":
+                mnnBackend = "vulkan";
+                break;
+            case "NNAPI":
+                mnnBackend = "npu";  // MNN uses "npu" for Android NNAPI
+                break;
+            case "CPU":
+            default:
+                mnnBackend = "cpu";
+                break;
+        }
+
+        LogManager.logI(TAG, "Backend mapping for Embedding: '" + backendPreference + "' -> '" + mnnBackend + "'");
+
         // Use ConfigBuilder for type safety and consistency with LLM
         String configJson = new MnnInference.ConfigBuilder()
+            .backendType(mnnBackend)
             .memory(memoryMode.getValue())
             .power("high")
             .precision("low")
             .threadNum(threads)
             .build();
-        
-        LogManager.logD(TAG, "Built runtime config: memory=" + memoryMode.getValue() + 
+
+        LogManager.logD(TAG, "Built runtime config: backend=" + mnnBackend + ", memory=" + memoryMode.getValue() + 
             ", power=high, precision=low, threads=" + threads);
-        
+
         return configJson;
     }
     

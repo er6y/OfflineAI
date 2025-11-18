@@ -916,15 +916,31 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
     }
 
     /**
+     * Hub filtering progress listener.
+     * Used to report progress when applying hub threshold during graph post-processing.
+     */
+    public interface HubFilterProgressListener {
+        void onHubFilteringStarted(int totalHubEntities);
+        void onHubFilteringProgress(int processedHubEntities, int totalHubEntities);
+        void onHubFilteringCompleted(int removedHubEntities, long durationMs);
+    }
+
+    /**
      * Apply hub threshold filtering on entities.
      * Entities whose neighbor degree or total edge weight exceed the threshold
      * will be treated as hubs and removed together with their edges and chunk mappings.
      * @param threshold Hub threshold (0 or negative = disabled)
+     * @param listener Optional progress listener (may be null)
      * @return Number of hub entity texts removed
      */
-    public int applyHubThreshold(int threshold) {
+    public int applyHubThreshold(int threshold, HubFilterProgressListener listener) {
         if (threshold <= 0) {
             LogManager.logD(TAG, String.format("[HUB_FILTER] Threshold <= 0, skip hub filtering (threshold=%d)", threshold));
+            if (listener != null) {
+                // Notify listener that there is nothing to filter.
+                listener.onHubFilteringStarted(0);
+                listener.onHubFilteringCompleted(0, 0L);
+            }
             return 0;
         }
 
@@ -961,12 +977,22 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
 
             if (hubEntities.isEmpty()) {
                 LogManager.logD(TAG, String.format("[HUB_FILTER] No hubs found for threshold=%d", threshold));
+                if (listener != null) {
+                    listener.onHubFilteringStarted(0);
+                    listener.onHubFilteringCompleted(0, System.currentTimeMillis() - startTime);
+                }
                 return 0;
+            }
+
+            int totalHubEntities = hubEntities.size();
+            if (listener != null) {
+                listener.onHubFilteringStarted(totalHubEntities);
             }
 
             db.beginTransaction();
 
             // Remove hub entities and related edges/mappings
+            int processed = 0;
             for (String hub : hubEntities) {
                 // Delete from entities table (current collection only)
                 int entityRows = db.delete(TABLE_ENTITIES,
@@ -984,11 +1010,16 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
                     new String[]{collection, hub, hub});
 
                 hubCount++;
+                processed++;
 
                 if (hubCount <= 10) {
                     LogManager.logD(TAG, String.format(
                         "[HUB_FILTER] Removed hub '%s': entities=%d, chunk_entities=%d, edges=%d",
                         hub, entityRows, chunkEntityRows, edgeRows));
+                }
+
+                if (listener != null) {
+                    listener.onHubFilteringProgress(processed, totalHubEntities);
                 }
             }
 
@@ -998,6 +1029,10 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
             LogManager.logI(TAG, String.format(
                 "[HUB_FILTER] Completed: threshold=%d, hubs=%d, time=%dms",
                 threshold, hubCount, duration));
+
+            if (listener != null) {
+                listener.onHubFilteringCompleted(hubCount, duration);
+            }
 
         } catch (Exception e) {
             LogManager.logE(TAG, "[HUB_FILTER] Failed", e);
@@ -1012,6 +1047,13 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
         }
 
         return hubCount;
+    }
+
+    /**
+     * Convenience overload without progress listener.
+     */
+    public int applyHubThreshold(int threshold) {
+        return applyHubThreshold(threshold, null);
     }
     
     /**

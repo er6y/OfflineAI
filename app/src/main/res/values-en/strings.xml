@@ -851,6 +851,8 @@
     <string name="label_chunk_size">Chunk Size\n(100~4000):</string>
     <string name="label_overlap_size">Overlap Size\n(20~800):</string>
     <string name="label_min_chunk_size">Min Chunk Limit\n(10~100):</string>
+    <string name="label_embedding_concurrency">Embedding Concurrency\n(1~4):</string>
+    <string name="label_embedding_threads">Embedding Threads\n(1~4):</string>
     <string name="label_json_dataset_splitting">JSON Dataset Chunking Optimization</string>
     
     <!-- Knowledge Graph RAG Settings -->

@@ -166,13 +166,33 @@ flowchart TB
 - **入口与交互**：知识库选择器支持新建与切换，文件列表支持多选、清空、查看累计大小。需求：长任务中界面需保持可操作（查看日志、暂停），构建完成后要附带统计（向量条数、耗时）。设计：通过 ProgressManager 在 UI/前台通知/日志三处同步进度，构建完成后刷新知识库摘要。
 - **文档处理**：支持 PDF/Office/TXT/Markdown/JSON 等格式。需求：解析时保留文档结构（标题、表格、列表），对 JSON 特殊格式（instruction、对话等）需按语义拆分。设计：DocumentParser 针对不同格式采用专用解析器，输出结构化段落，后续由 TextChunkProcessor 处理。
 - **分块策略**：chunkSize/overlap/minChunkSize 可配置。需求：既要保证上下文连贯又要限制单块长度。设计：采用“自然段优先 + 长段二次切分”策略，重叠区用于保留衔接，Chunk 元数据记录来源段落与页码。
-- **向量化与重排**：现统一走 MNN Embedding/Reranker。需求：支持低内存模式与高性能模式切换，自动过滤异常向量。设计：EmbeddingHandler loadModel 时指定 memory mode，并在 computeEmbedding 后调用 VectorAnomalyHandler 校验；重排结果低于阈值时记录日志提醒。**主要 API**：`EmbeddingHandler.getModel()`、`computeEmbedding()`、`VectorAnomalyHandler.detectAndFix()`、`RerankerHandler.rerank()`。**关键数据结构**：`TextChunkProcessor.TextChunk`、`SQLiteVectorDatabaseHandler.SearchResult`。
+- **向量化与重排**：现统一走 MNN Embedding/Reranker。需求：支持低内存模式与高性能模式切换，自动过滤异常向量，并与 LLM 共用统一的后端选择（CPU/OpenCL/Vulkan/NNAPI）。设计：EmbeddingHandler loadModel 时指定 memory mode（`LOW` / `NORMAL` / `HIGH` 三档，对应 JNI 侧的 `"low"` / `"normal"` / `"high"`），并通过 `SettingsFragment.getBackendPreference()` 读取全局后端偏好，使用与 LocalLLMMNNHandler 相同的映射规则（`CPU`→`cpu`、`OPENCL`→`opencl`、`VULKAN`→`vulkan`、`NNAPI`→`npu`）设置 `backendType`；知识库构建默认使用 `NORMAL`，RAG 问答与知识库笔记默认使用 `LOW` 以降低常驻内存压力，并在 computeEmbedding 后调用 VectorAnomalyHandler 校验；RerankerHandler 同样在构建 runtime config 时从设置读取后端偏好，保证 Reranker 与 Embedding、LLM 使用一致的后端；重排结果低于阈值时记录日志提醒。**主要 API**：`EmbeddingHandler.getModel()`、`computeEmbedding()`、`VectorAnomalyHandler.detectAndFix()`、`RerankerHandler.rerank()`。**关键数据结构**：`TextChunkProcessor.TextChunk`、`SQLiteVectorDatabaseHandler.SearchResult`。
 - **数据落盘**：向量与原文统一存入 `KnowledgeGraphDatabase` 管理的 SQLite 文件（规范命名为 `knowledge_graph.db`），配套保存 `intermediate_chunks.json` 做断点续建，成功后清理临时文件。设计：`TextChunkProcessor` 在每阶段结束写入 checkpoint，失败时可回滚后续阶段。**主要 API**：`KnowledgeGraphDatabase.addChunk()`、`TextChunkProcessor.saveIntermediateChunks()`、`deleteIntermediateFile()`。**关键数据结构**：`intermediate_chunks.json`、`KnowledgeGraphDatabase.SearchResult`、SQLite 表。
 - **日志/诊断**：构建过程强制写入日志文件，包含解析、分块、向量化统计；UI 调试窗口实时输出当前文件、耗时、错误信息，便于查找格式或权限问题。
-- **进度与日志模型（2025-11-16 重构）**：统一使用 `ProgressManager` + `UnifiedForegroundService.ProgressCallback` 提供结构化进度与文本日志。设计：
-  - `ProgressManager` 作为单例，集中维护知识库构建的数值状态（处理文件/块、当前阶段、elapsed、ETA）以及构建配置快照（知识库名、Embedding/Reranker 模型、chunkSize/overlap、自定义词典文件名），对外暴露只读 `ProgressData` 作为 UI 唯一数据源。
-  - `UnifiedForegroundService` 负责驱动长任务，并通过 `TextChunkProcessor.ProgressCallback` 将底层进度写入 `ProgressManager`。`onProgressUpdate(int progress, String status)` 只承载数值进度（0–100），所有可读文本统一通过 `onLogLine(String message)` 回传到 UI，避免在 Service/Processor 层拼接 UI 文案或控制换行。
-  - `BuildKnowledgeBaseFragment` 仅消费结构化数据与日志：利用 `ProgressManager.getCurrentProgress()` 生成统一格式的进度标签（`[files/chunks: current/total] XX.X% | elapsed HH:MM:SS | ETA HH:MM:SS`），并在 `onLogLine` 中将所有日志行追加到进度 TextView（包括构建配置、文本提取进度、词典加载状态、向量化/图谱构建摘要），由 Fragment 独立管理滚动与全局字号。
+- **进度与日志模型（2025-11-16 重构 + Graph/HUB 扩展）**：统一使用 `ProgressManager` + `UnifiedForegroundService.ProgressCallback` 提供结构化进度与文本日志。设计：
+  - `ProgressManager` 作为单例，集中维护知识库构建的数值状态与配置快照：
+    - 三阶段进度：
+      1. 文本提取阶段（TEXT_EXTRACTION）：基于 `processedFiles/totalFiles` 计算文件级百分比；
+      2. 向量化 / 图构建阶段（VECTORIZATION/GRAPH_BUILDING）：基于 `processedChunks/totalChunks` 与 `vectorizationPercentage` 计算 chunk 级百分比；
+      3. Hub 过滤 / 元数据阶段：通过 `hubProcessed/hubTotal/hubFilteringPercentage` 跟踪已处理的 hub 实体数量，用于表示图后处理进度；
+    - 时间维度：`startTimeMs/elapsedMs/etaMs` 提供统一的耗时与 ETA 估计（文本提取阶段不计算 ETA，向量化/图构建/Hub 过滤阶段基于每 chunk 平均耗时估算）；
+    - 构建配置快照：知识库名、Embedding/Reranker 模型、chunkSize/overlap、自定义词典文件名等；
+    - 整体进度：对外暴露只读 `ProgressData`，其中 `getOverallProgressPercentage()` 使用固定权重计算整体百分比：
+      `overall = 1% * textExtraction + 98% * vectorization + 1% * hubFiltering`（其中各阶段进度归一化到 0–1，再按系数折算到 0–100），避免在 UI 层重复维护加权逻辑。
+  - `UnifiedForegroundService` 负责驱动长任务，并通过 `TextChunkProcessor.ProgressCallback` 将底层进度写入 `ProgressManager`：
+    - 文本提取、向量化、Hub 过滤（图构建）分别触发对应阶段的更新；
+    - 数值进度统一来自 `ProgressManager.getCurrentProgress().getOverallProgressPercentage()`，传入 `onProgressUpdate(int progress, String status)`，保持 0–100 的整体百分比，不再在 Service 内部硬编码 "0–50–100" 等阶段性比例；
+    - 所有可读文本统一通过 `onLogLine(String message)` 回传到 UI（包括构建配置、阶段切换、Hub 过滤统计等），避免在 Service/Processor 层拼接 UI 文案或控制换行。
+  - `BuildKnowledgeBaseFragment` 仅消费结构化数据与日志：
+    - 利用 `ProgressManager.getCurrentProgress()` 生成统一格式的进度标签，标签中的百分比字段直接使用 `getOverallProgressPercentage()` 提供的整体进度，不再单独展示各阶段（文件/向量化）的局部百分比：
+      - 文本提取阶段：`[files: current/total] YY.Y% | elapsed HH:MM:SS | ETA HH:MM:SS`；
+      - 向量化阶段：`[chunks: current/total] YY.Y% | elapsed HH:MM:SS | ETA HH:MM:SS`；
+      - 图构建 / Hub 过滤阶段：`[hubs: current/total] YY.Y% | elapsed HH:MM:SS | ETA HH:MM:SS`，其中 `current/total` 对应 `hubProcessed/hubTotal`；
+    - 在 `onLogLine` 中：
+      - 文本提取、配置、词典加载等仍按行追加；
+      - 向量化阶段将 `Vectorization progress: XX% (i/j)` 折叠为单行紧凑进度（每 5% 打点：`0%..5%..10%..15%..20%...95%..100%`），不再为每个 chunk 输出单独的点；
+      - 图谱构建 / Hub 过滤阶段将重复的 `Building knowledge graph: i/j (p%)` 折叠为单行紧凑进度，同样按 5% 里程碑更新（`0%..5%..10%...100%`），避免 UI 与日志窗口刷屏；
+    - Fragment 不再基于 `onProgressUpdate` 的整数进度重新推导百分比，而是完全信任 `ProgressManager.ProgressData` 作为唯一的数据来源，从而保证整体百分比在所有展示位置保持一致。
 
 ### 3.3 知识库笔记
 - **功能点**：手动创建、标题/正文编辑、转换聊天回复为笔记、标签/分类扩展位。

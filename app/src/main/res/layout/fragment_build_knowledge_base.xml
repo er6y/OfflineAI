@@ -128,36 +128,43 @@
         app:layout_constraintBottom_toBottomOf="@+id/textViewProgressLabelText"
         app:layout_constraintStart_toEndOf="@+id/textViewProgressLabelText" />
         
-    <!-- 处理进度文本框 - 修改为TextView -->
-    <TextView
-        android:id="@+id/textViewProgress"
+    <!-- Progress text box - wrap TextView in ScrollView to support reliable scrolling -->
+    <ScrollView
+        android:id="@+id/scrollViewProgress"
         android:layout_width="0dp"
         android:layout_height="0dp"
         android:layout_marginTop="8dp"
         android:layout_marginBottom="8dp"
-        android:background="#DDDDDD"
-        android:gravity="top|start"
-        android:padding="8dp"
-        android:scrollbars="vertical"
-        android:focusable="true"
-        android:clickable="true"
-        android:longClickable="true"
-        android:textIsSelectable="true"
-        android:text="@string/text_ready_to_create_kb"
-        android:textColor="#666666"
+        android:fillViewport="true"
         app:layout_constraintTop_toBottomOf="@+id/textViewProgressLabelText"
         app:layout_constraintBottom_toTopOf="@+id/textViewKnowledgeBaseNameLabel"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent" />
+        app:layout_constraintEnd_toEndOf="parent">
 
-    <!-- 知识库名称标签和下拉框 -->
+        <TextView
+            android:id="@+id/textViewProgress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#DDDDDD"
+            android:gravity="top|start"
+            android:padding="8dp"
+            android:focusable="true"
+            android:clickable="true"
+            android:longClickable="true"
+            android:textIsSelectable="true"
+            android:text="@string/text_ready_to_create_kb"
+            android:textColor="#666666" />
+
+    </ScrollView>
+
+    <!-- Knowledge base name label and dropdown -->
     <TextView
         android:id="@+id/textViewKnowledgeBaseNameLabel"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="@string/label_knowledge_base_name"
         android:layout_marginTop="16dp"
-        app:layout_constraintTop_toBottomOf="@+id/textViewProgress"
+        app:layout_constraintTop_toBottomOf="@+id/scrollViewProgress"
         app:layout_constraintStart_toStartOf="parent" />
 
     <Spinner

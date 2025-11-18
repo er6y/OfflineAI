@@ -11,7 +11,12 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class ProgressManager {
     private static final String TAG = "ProgressManager";
-    
+
+    // Stage weights for overall progress and ETA (percent of total expected time)
+    private static final float TEXT_STAGE_WEIGHT = 1.0f;
+    private static final float VECTOR_STAGE_WEIGHT = 97.0f;
+    private static final float HUB_STAGE_WEIGHT = 2.0f;
+
     // Singleton instance
     private static volatile ProgressManager instance;
     
@@ -21,6 +26,10 @@ public class ProgressManager {
     private final AtomicInteger processedChunks = new AtomicInteger(0);
     private final AtomicInteger totalChunks = new AtomicInteger(0);
     private final AtomicReference<Float> vectorizationPercentage = new AtomicReference<>(0.0f);
+    // Hub filtering progress (number of hub entities processed / total hub candidates)
+    private final AtomicInteger hubProcessed = new AtomicInteger(0);
+    private final AtomicInteger hubTotal = new AtomicInteger(0);
+    private final AtomicReference<Float> hubFilteringPercentage = new AtomicReference<>(0.0f);
     private final AtomicReference<ProcessingStage> currentStage = new AtomicReference<>(ProcessingStage.IDLE);
     private final AtomicReference<String> currentFileName = new AtomicReference<>("");
     private final AtomicLong startTimeMs = new AtomicLong(0L);
@@ -59,6 +68,9 @@ public class ProgressManager {
         public final int processedChunks;
         public final int totalChunks;
         public final float vectorizationPercentage;
+        public final int hubProcessed;
+        public final int hubTotal;
+        public final float hubFilteringPercentage;
         public final ProcessingStage currentStage;
         public final String currentFileName;
 
@@ -75,8 +87,11 @@ public class ProgressManager {
         public final int chunkSize;
         public final int overlapSize;
         
-        public ProgressData(int processedFiles, int totalFiles, int processedChunks,
-                            int totalChunks, float vectorizationPercentage,
+        public ProgressData(int processedFiles, int totalFiles,
+                            int processedChunks, int totalChunks,
+                            float vectorizationPercentage,
+                            int hubProcessed, int hubTotal,
+                            float hubFilteringPercentage,
                             ProcessingStage currentStage, String currentFileName,
                             long startTimeMs, long elapsedMs, long etaMs,
                             String knowledgeBaseName, String embeddingModelName,
@@ -87,6 +102,9 @@ public class ProgressManager {
             this.processedChunks = processedChunks;
             this.totalChunks = totalChunks;
             this.vectorizationPercentage = vectorizationPercentage;
+            this.hubProcessed = hubProcessed;
+            this.hubTotal = hubTotal;
+            this.hubFilteringPercentage = hubFilteringPercentage;
             this.currentStage = currentStage;
             this.currentFileName = currentFileName;
             this.startTimeMs = startTimeMs;
@@ -106,6 +124,41 @@ public class ProgressManager {
         
         public float getVectorizationProgressPercentage() {
             return vectorizationPercentage;
+        }
+        
+        public float getHubFilteringProgressPercentage() {
+            return hubFilteringPercentage;
+        }
+        
+        /**
+         * Get overall progress percentage based on three-stage weighting:
+         * 1% text extraction, 97% vectorization, 2% hub filtering/metadata.
+         */
+        public float getOverallProgressPercentage() {
+            // Completed stage always reports 100%
+            if (currentStage == ProcessingStage.COMPLETED) {
+                return 100.0f;
+            }
+
+            float textStage = 0.0f;
+            if (totalFiles > 0) {
+                textStage = (float) processedFiles / (float) totalFiles;
+            }
+
+            float vecStage = vectorizationPercentage / 100.0f;
+            float hubStage = hubFilteringPercentage / 100.0f;
+
+            // Overall = weighted sum of stage completion (weights sum to 100%)
+            float overall = textStage * TEXT_STAGE_WEIGHT +
+                            vecStage * VECTOR_STAGE_WEIGHT +
+                            hubStage * HUB_STAGE_WEIGHT;
+
+            if (overall < 0.0f) {
+                overall = 0.0f;
+            } else if (overall > 100.0f) {
+                overall = 100.0f;
+            }
+            return overall;
         }
         
         public boolean isProcessing() {
@@ -148,6 +201,9 @@ public class ProgressManager {
         processedChunks.set(0);
         totalChunks.set(0);
         vectorizationPercentage.set(0.0f);
+        hubProcessed.set(0);
+        hubTotal.set(0);
+        hubFilteringPercentage.set(0.0f);
         currentStage.set(ProcessingStage.IDLE);
         currentFileName.set("");
         startTimeMs.set(0L);
@@ -205,8 +261,8 @@ public class ProgressManager {
         // Use a dedicated start time for vectorization/graph building ETA calculation
         vectorizationStartTimeMs.set(now);
         lastUpdateTimeMs.set(now);
-        // Reset ETA at the beginning of vectorization; it will be calibrated once chunks are processed
-        etaMs.set(-1L);
+        // Estimate ETA immediately using completed text stage and configured stage weights
+        updateTimingAndEta();
         notifyProgressChanged();
         LogManager.logD(TAG, "Vectorization initialized with total chunks: " + totalChunkCount);
     }
@@ -238,14 +294,28 @@ public class ProgressManager {
      * Mark graph building stage.
      */
     public void markGraphBuilding() {
+        ProcessingStage previous = currentStage.getAndSet(ProcessingStage.GRAPH_BUILDING);
+        if (previous != ProcessingStage.GRAPH_BUILDING) {
+            long now = System.currentTimeMillis();
+            // Reset stage-specific start time for graph building ETA
+            vectorizationStartTimeMs.set(now);
+            etaMs.set(-1L);
+            updateTimingAndEta();
+            notifyProgressChanged();
+            LogManager.logD(TAG, "Processing stage switched to graph building");
+        }
+    }
+
+    /**
+     * Update hub filtering progress.
+     */
+    public void updateHubFilteringProgress(int processed, int total, float percentage) {
+        hubProcessed.set(processed);
+        hubTotal.set(total);
+        hubFilteringPercentage.set(percentage);
         currentStage.set(ProcessingStage.GRAPH_BUILDING);
-        long now = System.currentTimeMillis();
-        // Reset stage-specific start time for graph building ETA
-        vectorizationStartTimeMs.set(now);
-        etaMs.set(-1L);
         updateTimingAndEta();
         notifyProgressChanged();
-        LogManager.logD(TAG, "Processing stage switched to graph building");
     }
 
     /**
@@ -267,70 +337,87 @@ public class ProgressManager {
 
     /**
      * Internal helper to update elapsed time and ETA.
+     * Uses weighted stage completion (text/vectorization/hub) to estimate total time.
      */
     private void updateTimingAndEta() {
         long start = startTimeMs.get();
         if (start == 0L) {
             return;
         }
+
         long now = System.currentTimeMillis();
         lastUpdateTimeMs.set(now);
         long elapsed = now - start;
 
         ProcessingStage stage = currentStage.get();
 
-        // For text extraction stage we do not compute ETA to avoid misleading estimates
-        if (stage == ProcessingStage.TEXT_EXTRACTION) {
+        // For idle or error states, ETA is not applicable
+        if (stage == ProcessingStage.IDLE || stage == ProcessingStage.ERROR) {
             etaMs.set(-1L);
             return;
         }
 
-        // For vectorization / graph building, estimate ETA based on average time per processed chunk
-        if (stage == ProcessingStage.VECTORIZATION || stage == ProcessingStage.GRAPH_BUILDING) {
-            int total = totalChunks.get();
-            int processed = processedChunks.get();
-
-            // Guard against division by zero and invalid totals
-            if (processed <= 0 || total <= 0 || processed >= total) {
-                etaMs.set(-1L);
-                return;
-            }
-
-            long vecStart = vectorizationStartTimeMs.get();
-            long vecElapsed;
-            if (vecStart > 0L && now > vecStart) {
-                vecElapsed = now - vecStart;
-            } else {
-                // Fallback to global elapsed time if vectorization start is not initialized
-                vecElapsed = elapsed;
-            }
-
-            if (vecElapsed <= 0L) {
-                etaMs.set(-1L);
-                return;
-            }
-
-            long remainingChunks = total - processed;
-            if (remainingChunks <= 0L) {
-                etaMs.set(0L);
-                return;
-            }
-
-            double avgPerChunk = (double) vecElapsed / (double) processed;
-            long eta = (long) (avgPerChunk * (double) remainingChunks);
-            if (eta < 0L) {
-                eta = 0L;
-            }
-            etaMs.set(eta);
-            return;
-        }
-
-        // For completed or idle/error stages, ETA is not applicable
+        // Completed stage always reports ETA = 0
         if (stage == ProcessingStage.COMPLETED) {
             etaMs.set(0L);
-        } else {
-            etaMs.set(-1L);
+            return;
         }
+
+        if (elapsed <= 0L) {
+            etaMs.set(-1L);
+            return;
+        }
+
+        // Compute normalized stage completion values in [0,1]
+        int totalFileCount = totalFiles.get();
+        int processedFileCount = processedFiles.get();
+        float textStage = 0.0f;
+        if (totalFileCount > 0 && processedFileCount >= 0) {
+            textStage = (float) processedFileCount / (float) totalFileCount;
+            if (textStage < 0.0f) {
+                textStage = 0.0f;
+            } else if (textStage > 1.0f) {
+                textStage = 1.0f;
+            }
+        }
+
+        float vecStage = vectorizationPercentage.get() / 100.0f;
+        if (vecStage < 0.0f) {
+            vecStage = 0.0f;
+        } else if (vecStage > 1.0f) {
+            vecStage = 1.0f;
+        }
+
+        float hubStage = hubFilteringPercentage.get() / 100.0f;
+        if (hubStage < 0.0f) {
+            hubStage = 0.0f;
+        } else if (hubStage > 1.0f) {
+            hubStage = 1.0f;
+        }
+
+        // Weighted overall progress in [0,1]
+        float weightedProgress = (TEXT_STAGE_WEIGHT / 100.0f) * textStage +
+                                 (VECTOR_STAGE_WEIGHT / 100.0f) * vecStage +
+                                 (HUB_STAGE_WEIGHT / 100.0f) * hubStage;
+
+        // Avoid unstable estimates when progress is extremely small
+        if (weightedProgress <= 0.0f) {
+            etaMs.set(-1L);
+            return;
+        }
+
+        // Clamp progress slightly below 1.0 to avoid division blow-up near completion
+        float clampedProgress = weightedProgress;
+        if (clampedProgress > 0.99f) {
+            clampedProgress = 0.99f;
+        }
+
+        long totalEstimated = (long) (elapsed / clampedProgress);
+        long eta = totalEstimated - elapsed;
+        if (eta < 0L) {
+            eta = 0L;
+        }
+        etaMs.set(eta);
     }
     
     /**
@@ -346,6 +433,9 @@ public class ProgressManager {
             processedChunks.get(),
             totalChunks.get(),
             vectorizationPercentage.get(),
+            hubProcessed.get(),
+            hubTotal.get(),
+            hubFilteringPercentage.get(),
             currentStage.get(),
             currentFileName.get(),
             start,

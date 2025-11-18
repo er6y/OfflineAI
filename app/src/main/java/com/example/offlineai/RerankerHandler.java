@@ -474,15 +474,37 @@ public class RerankerHandler {
         // Get thread count from settings
         int threads = ConfigManager.getThreads(mContext);
         
+        // Resolve backend from global settings (same as LLM)
+        String backendPreference = SettingsFragment.getBackendPreference(mContext);
+        String mnnBackend;
+        switch (backendPreference) {
+            case "OPENCL":
+                mnnBackend = "opencl";
+                break;
+            case "VULKAN":
+                mnnBackend = "vulkan";
+                break;
+            case "NNAPI":
+                mnnBackend = "npu";  // MNN uses "npu" for Android NNAPI
+                break;
+            case "CPU":
+            default:
+                mnnBackend = "cpu";
+                break;
+        }
+
+        LogManager.logI(TAG, "Backend mapping for Reranker: '" + backendPreference + "' -> '" + mnnBackend + "'");
+
         // Use ConfigBuilder for type safety and consistency with LLM
         String configJson = new MnnInference.ConfigBuilder()
+            .backendType(mnnBackend)
             .memory("low")
             .power("high")
             .precision("low")
             .threadNum(threads)
             .build();
         
-        LogManager.logD(TAG, "Built runtime config: memory=low, power=high, precision=low, threads=" + threads);
+        LogManager.logD(TAG, "Built runtime config: backend=" + mnnBackend + ", memory=low, power=high, precision=low, threads=" + threads);
         
         return configJson;
     }

@@ -60,6 +60,10 @@ public class SettingsFragment extends Fragment {
     private TextView textViewOverlapSizeValue;
     private SeekBar seekBarMinChunkSize;
     private TextView textViewMinChunkSizeValue;
+    private SeekBar seekBarEmbeddingConcurrency;
+    private TextView textViewEmbeddingConcurrencyValue;
+    private SeekBar seekBarEmbeddingThreads;
+    private TextView textViewEmbeddingThreadsValue;
     
     // Knowledge Graph RAG UI组件
     private SeekBar seekBarGraphMinEdgeWeight;
@@ -188,6 +192,10 @@ public class SettingsFragment extends Fragment {
         textViewOverlapSizeValue = view.findViewById(R.id.textViewOverlapSizeValue);
         seekBarMinChunkSize = view.findViewById(R.id.seekBarMinChunkSize);
         textViewMinChunkSizeValue = view.findViewById(R.id.textViewMinChunkSizeValue);
+        seekBarEmbeddingConcurrency = view.findViewById(R.id.seekBarEmbeddingConcurrency);
+        textViewEmbeddingConcurrencyValue = view.findViewById(R.id.textViewEmbeddingConcurrencyValue);
+        seekBarEmbeddingThreads = view.findViewById(R.id.seekBarEmbeddingThreads);
+        textViewEmbeddingThreadsValue = view.findViewById(R.id.textViewEmbeddingThreadsValue);
         
         // Knowledge Graph RAG UI组件初始化
         seekBarGraphMinEdgeWeight = view.findViewById(R.id.seekBarGraphMinEdgeWeight);
@@ -541,6 +549,16 @@ public class SettingsFragment extends Fragment {
         textViewFontSizeValue.setTextSize(fontSize);
     }
     
+    private void updateEmbeddingConcurrencyText(int progress) {
+        int concurrency = progress + 1;
+        textViewEmbeddingConcurrencyValue.setText(String.format("%d", concurrency));
+    }
+    
+    private void updateEmbeddingThreadsText(int progress) {
+        int threads = progress + 1;
+        textViewEmbeddingThreadsValue.setText(String.format("%d", threads));
+    }
+    
     private void setupChunkSizeSeekBar() {
         seekBarChunkSize.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
@@ -588,6 +606,52 @@ public class SettingsFragment extends Fragment {
             public void onStopTrackingTouch(SeekBar seekBar) {
                 int size = (seekBar.getProgress() * 10) + 10;
                 ConfigManager.setMinChunkSize(requireContext(), size);
+            }
+        });
+        
+        seekBarEmbeddingConcurrency.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                // Update embedding concurrency value text
+                updateEmbeddingConcurrencyText(progress);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int concurrency = seekBar.getProgress() + 1; // 1-4
+                if (concurrency < 1) {
+                    concurrency = 1; // Clamp lower bound
+                }
+                if (concurrency > 4) {
+                    concurrency = 4; // Clamp upper bound
+                }
+                ConfigManager.setEmbeddingConcurrency(requireContext(), concurrency);
+            }
+        });
+
+        seekBarEmbeddingThreads.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                // Update embedding threads value text
+                updateEmbeddingThreadsText(progress);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int threads = seekBar.getProgress() + 1; // 1-4
+                if (threads < 1) {
+                    threads = 1; // Clamp lower bound
+                }
+                if (threads > 4) {
+                    threads = 4; // Clamp upper bound
+                }
+                ConfigManager.setEmbeddingThreads(requireContext(), threads);
             }
         });
         
@@ -1163,6 +1227,32 @@ public class SettingsFragment extends Fragment {
         minChunkProgress = Math.max(0, Math.min(minChunkProgress, seekBarMinChunkSize.getMax()));
         seekBarMinChunkSize.setProgress(minChunkProgress);
         updateMinChunkSizeText(minChunkProgress);
+        
+        // Embedding concurrency for knowledge base building
+        int embeddingConcurrency = ConfigManager.getEmbeddingConcurrency(ctx);
+        if (embeddingConcurrency < 1) {
+            embeddingConcurrency = 1; // Clamp lower bound
+        }
+        if (embeddingConcurrency > 4) {
+            embeddingConcurrency = 4; // Clamp upper bound
+        }
+        int embeddingConcurrencyProgress = embeddingConcurrency - 1;
+        embeddingConcurrencyProgress = Math.max(0, Math.min(embeddingConcurrencyProgress, seekBarEmbeddingConcurrency.getMax()));
+        seekBarEmbeddingConcurrency.setProgress(embeddingConcurrencyProgress);
+        updateEmbeddingConcurrencyText(embeddingConcurrencyProgress);
+
+        // Embedding threads per session for knowledge base building
+        int embeddingThreads = ConfigManager.getEmbeddingThreads(ctx);
+        if (embeddingThreads < 1) {
+            embeddingThreads = 1; // Clamp lower bound
+        }
+        if (embeddingThreads > 4) {
+            embeddingThreads = 4; // Clamp upper bound
+        }
+        int embeddingThreadsProgress = embeddingThreads - 1;
+        embeddingThreadsProgress = Math.max(0, Math.min(embeddingThreadsProgress, seekBarEmbeddingThreads.getMax()));
+        seekBarEmbeddingThreads.setProgress(embeddingThreadsProgress);
+        updateEmbeddingThreadsText(embeddingThreadsProgress);
         
         // Knowledge Graph RAG settings
         int graphMinEdgeWeight = ConfigManager.getGraphMinEdgeWeight(ctx);
