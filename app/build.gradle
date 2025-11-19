@@ -299,13 +299,63 @@ afterEvaluate {
             def buildTime = project.ext.buildTimeStamp
             def releaseApk = file('build/outputs/apk/release/app-release.apk')
             if (releaseApk.exists()) {
-                def targetName = "OfflineAI_release_${buildTime}.apk"
+                def outputDir = new File(project.rootDir, "offline-ai-apk")
+
+                if (!outputDir.exists()) {
+                    outputDir.mkdirs()
+                }
+
+                def targetName = "OfflineAI_release.apk"
                 copy {
                     from releaseApk
-                    into project.rootDir
+                    into outputDir
                     rename { targetName }
                 }
-                println "Release APK copied to: ${project.rootDir}/${targetName}"
+                println "Release APK copied to: ${new File(outputDir, targetName).absolutePath}"
+
+                def gitCommitId = ""
+                def gitCommitMessage = ""
+                try {
+                    def stdout1 = new java.io.ByteArrayOutputStream()
+                    project.exec {
+                        commandLine 'git', 'rev-parse', 'HEAD'
+                        standardOutput = stdout1
+                    }
+                    gitCommitId = stdout1.toString().trim()
+
+                    def stdout2 = new java.io.ByteArrayOutputStream()
+                    project.exec {
+                        commandLine 'git', 'log', '-1', '--pretty=%B'
+                        standardOutput = stdout2
+                    }
+                    gitCommitMessage = stdout2.toString("UTF-8").trim()
+                } catch (Exception e) {
+                    println "Warning: failed to obtain git commit info: ${e.message}"
+                }
+
+                def infoFile = new File(outputDir, "release_info.json")
+
+                // Build JSON string manually to keep Chinese characters as-is (UTF-8),
+                // while still escaping special characters correctly.
+                def escapeJson = { s ->
+                    if (s == null) return ""
+                    s.replace("\\", "\\\\")
+                     .replace("\"", "\\\"")
+                     .replace("\r", "\\r")
+                     .replace("\n", "\\n")
+                }
+
+                def json = """{
+  \"build_version\": \"${escapeJson(buildTime)}\",
+  \"git_commit_id\": \"${escapeJson(gitCommitId)}\",
+  \"git_commit_message\": \"${escapeJson(gitCommitMessage)}\"
+}
+"""
+
+                infoFile.withWriter('UTF-8') { writer ->
+                    writer.write(json)
+                }
+                println "Release info written to: ${infoFile.absolutePath}"
             }
         }
     }

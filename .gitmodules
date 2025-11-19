@@ -21,3 +21,6 @@
 	path = libs/mnn/apps/frameworks/sherpa-mnn/eigen
 	url = https://gitlab.com/libeigen/eigen.git
 	branch = 3.4.0
+[submodule "offline-ai-apk"]
+	path = offline-ai-apk
+	url = git@gitee.com:er6y/offline-ai-apk.git
