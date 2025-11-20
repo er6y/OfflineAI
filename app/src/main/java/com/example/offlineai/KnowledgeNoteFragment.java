@@ -662,12 +662,31 @@ public class KnowledgeNoteFragment extends Fragment {
                                         long entitiesStartTime = System.currentTimeMillis();
 
                                         List<Long> entityIds = new ArrayList<>();
+                                        int aliasNormalizedCount = 0;
                                         for (HanLpNerHandler.NerResult.Entity entity : entities) {
-                                            long entityId = noteVectorDb.addEntity(entity.text, entity.type, entity.confidence);
+                                            if (entity == null || entity.text == null) {
+                                                continue;
+                                            }
+                                            String baseText = entity.text;
+                                            String normalizedText = nerHandler.normalizeTextForGraph(baseText);
+                                            if (normalizedText == null) {
+                                                continue;
+                                            }
+                                            if (!normalizedText.equals(baseText)) {
+                                                aliasNormalizedCount++;
+                                            }
+
+                                            long entityId = noteVectorDb.addEntity(normalizedText, entity.type, entity.confidence);
                                             if (entityId > 0) {
                                                 entityIds.add(entityId);
-                                                noteVectorDb.linkChunkToEntity(docId, entity.text, entity.type, entity.confidence);
+                                                noteVectorDb.linkChunkToEntity(docId, normalizedText, entity.type, entity.confidence);
                                             }
+                                        }
+
+                                        if (aliasNormalizedCount > 0) {
+                                            String aliasMsg = String.format("[NOTE_ALIAS] Normalized %d note entities by alias map", aliasNormalizedCount);
+                                            LogManager.logD(TAG, aliasMsg);
+                                            updateProgress(aliasMsg);
                                         }
 
                                         // Build co-occurrence edges between entities in this note
@@ -713,7 +732,7 @@ public class KnowledgeNoteFragment extends Fragment {
                         return;
                     }
 
-                    int hubThreshold = ConfigManager.getGraphHubThreshold(requireContext());
+                    int hubThreshold = ConfigManager.getGraphHubThresholdBuild(requireContext());
                     if (hubThreshold > 0) {
                         try {
                             int removed = noteVectorDb.applyHubThreshold(hubThreshold);

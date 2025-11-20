@@ -151,7 +151,8 @@
     <string name="menu_graph_viewer">Knowledge Graph Viewer</string>
 
     <!-- Knowledge Graph RAG Settings (labels shared with Chinese resources) -->
-    <string name="label_graph_hub_threshold">Super-entity Threshold\n(neighbors,0=off):</string>
+    <string name="label_graph_hub_threshold">Super-entity Threshold (Build)\n(neighbors,0=off):</string>
+    <string name="label_graph_hub_threshold_query">Super-entity Threshold (Recall)\n(neighbors,0=off):</string>
     <string name="label_graph_stopwords">Graph Stopwords File:</string>
 
     <!-- Common buttons -->

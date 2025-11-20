@@ -97,7 +97,11 @@ public class ConfigManager {
     public static final String KEY_GRAPH_RAG_ENABLED = "graph_rag_enabled";
     public static final String KEY_GRAPH_RAG_WEIGHT_PRESET = "graph_rag_weight_preset";
     public static final String KEY_GRAPH_MAX_EXPAND_CHUNKS = "graph_max_expand_chunks";
-    public static final String KEY_GRAPH_HUB_THRESHOLD = "graph_hub_threshold"; // 超大实体门限（0=关闭）
+    // 旧版单一 Hub 阈值（仅作兼容回退，推荐使用 BUILD/QUERY 两个新键）
+    public static final String KEY_GRAPH_HUB_THRESHOLD = "graph_hub_threshold"; // Legacy super-entity hub threshold (0=disabled)
+    // 新版：构建期 / 召回期分别配置的超大实体门限
+    public static final String KEY_GRAPH_HUB_THRESHOLD_BUILD = "graph_hub_threshold_build";   // 构建阶段 Hub 过滤阈值
+    public static final String KEY_GRAPH_HUB_THRESHOLD_QUERY = "graph_hub_threshold_query";   // 查询阶段 Hub 过滤阈值
     public static final String KEY_GRAPH_STOPWORDS_PATH = "graph_stopwords_path"; // 图谱停用词表路径
     
     // 设置相关的键
@@ -194,7 +198,11 @@ public class ConfigManager {
     public static final boolean DEFAULT_GRAPH_RAG_ENABLED = true;
     public static final int DEFAULT_GRAPH_MAX_EXPAND_CHUNKS = 50;
     public static final int DEFAULT_GRAPH_RAG_WEIGHT_PRESET = 1;
-    public static final int DEFAULT_GRAPH_HUB_THRESHOLD = 100; // 超大实体门限（基于连接数/总权重的经验默认值，0=关闭）
+    // 旧版单一 Hub 阈值默认值（仅用于向后兼容，不再直接展示在设置界面）
+    public static final int DEFAULT_GRAPH_HUB_THRESHOLD = 100; // Legacy hub threshold (0=disabled)
+    // 新版：构建/召回独立默认值
+    public static final int DEFAULT_GRAPH_HUB_THRESHOLD_BUILD = 1000; // 超大实体门限（构建，0=关闭）
+    public static final int DEFAULT_GRAPH_HUB_THRESHOLD_QUERY = 300;  // 超大实体门限（召回，0=关闭）
     
     // 硬编码的子目录名称
     private static final String SUBDIR_MODELS = "models";
@@ -1134,21 +1142,78 @@ public class ConfigManager {
     }
 
     /**
-     * Get super-entity (hub) threshold for graph filtering
+     * Legacy getter for super-entity (hub) threshold.
+     * For backward compatibility this now returns the build-time
+     * hub threshold. New code should prefer getGraphHubThresholdBuild
+     * or getGraphHubThresholdQuery explicitly.
+     *
      * @param context Context
-     * @return Hub threshold based on neighbor count (0 = disabled)
+     * @return Hub threshold used during graph building (0 = disabled)
      */
     public static int getGraphHubThreshold(Context context) {
-        return getInt(context, KEY_GRAPH_HUB_THRESHOLD, DEFAULT_GRAPH_HUB_THRESHOLD);
+        return getGraphHubThresholdBuild(context);
     }
 
     /**
-     * Set super-entity (hub) threshold for graph filtering
+     * Get super-entity (hub) threshold for graph building phase.
+     * Resolution order:
+     * 1. KEY_GRAPH_HUB_THRESHOLD_BUILD (new)
+     * 2. KEY_GRAPH_HUB_THRESHOLD (legacy single threshold)
+     * 3. DEFAULT_GRAPH_HUB_THRESHOLD_BUILD
+     */
+    public static int getGraphHubThresholdBuild(Context context) {
+        try {
+            JSONObject config = loadConfig(context);
+            if (config.has(KEY_GRAPH_HUB_THRESHOLD_BUILD)) {
+                return config.getInt(KEY_GRAPH_HUB_THRESHOLD_BUILD);
+            }
+            if (config.has(KEY_GRAPH_HUB_THRESHOLD)) {
+                return config.getInt(KEY_GRAPH_HUB_THRESHOLD);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, getLogString(context, R.string.config_get_int_failed) + ": " + KEY_GRAPH_HUB_THRESHOLD_BUILD, e);
+        }
+        return DEFAULT_GRAPH_HUB_THRESHOLD_BUILD;
+    }
+
+    /**
+     * Set super-entity (hub) threshold for graph building phase.
      * @param context Context
      * @param threshold Hub threshold based on neighbor count (0 = disabled)
      */
-    public static void setGraphHubThreshold(Context context, int threshold) {
-        setInt(context, KEY_GRAPH_HUB_THRESHOLD, threshold);
+    public static void setGraphHubThresholdBuild(Context context, int threshold) {
+        setInt(context, KEY_GRAPH_HUB_THRESHOLD_BUILD, threshold);
+    }
+
+    /**
+     * Get super-entity (hub) threshold for query-time Graph RAG filtering.
+     * Resolution order:
+     * 1. KEY_GRAPH_HUB_THRESHOLD_QUERY (new)
+     * 2. KEY_GRAPH_HUB_THRESHOLD (legacy single threshold)
+     * 3. DEFAULT_GRAPH_HUB_THRESHOLD_QUERY
+     */
+    public static int getGraphHubThresholdQuery(Context context) {
+        try {
+            JSONObject config = loadConfig(context);
+            if (config.has(KEY_GRAPH_HUB_THRESHOLD_QUERY)) {
+                return config.getInt(KEY_GRAPH_HUB_THRESHOLD_QUERY);
+            }
+            if (config.has(KEY_GRAPH_HUB_THRESHOLD)) {
+                return config.getInt(KEY_GRAPH_HUB_THRESHOLD);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, getLogString(context, R.string.config_get_int_failed) + ": " + KEY_GRAPH_HUB_THRESHOLD_QUERY, e);
+        }
+        return DEFAULT_GRAPH_HUB_THRESHOLD_QUERY;
+    }
+
+    /**
+     * Set super-entity (hub) threshold for query-time Graph RAG filtering.
+     * @param context Context
+     * @param threshold Hub threshold based on neighbor count (0 = disabled)
+     */
+    public static void setGraphHubThresholdQuery(Context context, int threshold) {
+        setInt(context, KEY_GRAPH_HUB_THRESHOLD_QUERY, threshold);
     }
 
     /**

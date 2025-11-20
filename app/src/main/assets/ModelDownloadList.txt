@@ -30,7 +30,7 @@
       "llm.mnn": "https://www.modelscope.cn/models/MNN/Qwen3-0.6B-MNN/resolve/master/llm.mnn",
       "llm.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen3-0.6B-MNN/resolve/master/llm.mnn.weight",
       "tokenizer.txt": "https://www.modelscope.cn/models/MNN/Qwen3-0.6B-MNN/resolve/master/tokenizer.txt",
-	  "comments": "Qwen3 Text2Text."
+	    "comments": "Qwen3 Text2Text."
     },
     "Qwen3-4B-Thinking-2507-MNN-int4": {
       "config.json": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Thinking-2507-MNN/resolve/master/config.json",
@@ -39,7 +39,17 @@
       "llm.mnn": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Thinking-2507-MNN/resolve/master/llm.mnn",
       "llm.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Thinking-2507-MNN/resolve/master/llm.mnn.weight",
       "tokenizer.txt": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Thinking-2507-MNN/resolve/master/tokenizer.txt",
-	  "comments": "Qwen3 Text2Text. Suitable for local RAG."
+	    "comments": "Qwen3 Text2Text. Suitable for local RAG."
+    },    
+    "VibeThinker-1.5B-MNN-int4": {
+      "config.json": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/config.json",
+      "configuration.json": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/configuration.json",
+      "llm_config.json": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/llm_config.json",
+      "llm.mnn.json": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/llm.mnn.json",
+      "llm.mnn": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/llm.mnn",
+      "llm.mnn.weight": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/llm.mnn.weight",
+      "tokenizer.txt": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/tokenizer.txt",
+	  "comments": "VibeThinker-1.5B Text2Text. Suitable for local RAG."
     },    
     "Qwen3-VL-4B-Thinking-MNN-int4": {
       "config.json": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/config.json",

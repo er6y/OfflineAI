@@ -279,12 +279,50 @@ OfflineAI supports Stable Diffusion text-to-image generation for AI art creation
   - `dictionary/` - 自定义词典存储目录 / Custom dictionary storage
 - **配置简化 / Configuration Simplification**：只需设置一个根目录，所有数据自动组织管理 / Only need to set one root directory, all data automatically organized
 
-### 4.2 文本分块设置 / Text Chunking Settings
+### 4.2 RAG 设置 / RAG Settings
+
+#### 4.2.1 文本分块设置 / Text Chunking Settings
 
 - **分块大小 / Chunk Size**：设置文本分块的大小（默认1000字符）/ Set text chunk size (default 1000 characters)
 - **重叠大小 / Overlap Size**：设置文本分块的重叠大小（默认200字符）/ Set text chunk overlap size (default 200 characters)
 - **最小分块限制 / Minimum Chunk Limit**：设置文本分块的最小长度（默认50字符）/ Set minimum length for text chunks (default 50 characters)
 - **JSON训练集分块优化 / JSON Training Set Chunk Optimization**：特殊处理JSON格式的训练数据集 / Special processing for JSON format training datasets
+
+#### 4.2.2 知识图谱RAG设置 / Knowledge Graph RAG Settings
+
+- **自定义词典选择 / Custom Dictionary Selection**：选择领域专用词典文件，用于提升实体识别与别名归一化效果。/ Select domain-specific dictionary files to improve entity recognition and alias normalization.
+  - 词典放置在 `数据根目录/dictionary/` 目录。/ Place dictionaries under `Data Root/dictionary/`.
+  - 支持JSON格式的HanLP自定义词典，词典结构与生成方法详见第6.6节。/ Supports JSON format HanLP custom dictionaries; see Section 6.6 for format and generation.
+
+- **实体置信度阈值 / Entity Confidence Threshold**：设置丢弃低置信度实体的阈值（默认约 0.7）。/ Set the threshold for discarding low-confidence entities (default ~0.7).
+  - 更详细的实体识别与置信度调优说明，见第6.5.3与6.5.6节。/ For detailed explanations and tuning, see Sections 6.5.3 and 6.5.6.
+
+- **图扩展最小边权重 / Graph Min Edge Weight**：控制图谱中保留的最小共现强度，值越大保留的关系越“强”。/ Controls the minimal co-occurrence strength to keep in the graph; larger values keep only stronger relations.
+  - 调参思路与示例见第6.5.4与6.5.6节。/ See Sections 6.5.4 and 6.5.6 for tuning ideas and examples.
+
+- **图扩展最大实体数 / Graph Max Expand Entities**：限制一次查询中最多从图谱扩展的新增实体数量。/ Limits how many new entities can be expanded from the graph in a single query.
+  - 大图谱与小图谱的典型配置建议，见第6.5.5与6.5.6节。/ For typical settings on small vs large graphs, see Sections 6.5.5 and 6.5.6.
+
+- **图扩展最大 Chunk 数 / Graph Max Expand Chunks**：限制图谱扩展阶段最多引入多少新增文本块参与排序与融合。/ Limits how many additional chunks graph expansion can contribute to scoring and fusion.
+  - 与检索深度、近似深度配合的策略，见第6.5.5与6.5.6节。/ For how to coordinate with search depth and approximate depth, see Sections 6.5.5 and 6.5.6.
+
+- **Graph RAG 融合权重预设 / Graph RAG Fusion Presets**
+  - 向量优先：更依赖向量相似度，图谱只做轻量加成。/ Vector-first: rely more on vector similarity, graph gives a small boost.
+  - 平衡：向量、图谱和实体重叠相对平衡。/ Balanced: vectors, graph and entity overlap are relatively balanced.
+  - 图谱增强：更强调图谱关系，对结构化/实体密集型知识库更有利。/ Graph-enhanced: emphasizes graph relations, useful for structured or entity-dense KBs.
+  - 不同模型和知识库规模下的推荐预设，见第6.5.6节。/ For recommendations under different models and KB sizes, see Section 6.5.6.
+
+- **超大实体门限（构建）/ Super-entity Threshold (Build)**
+  - 控制在知识库构建完成后，对图谱中“极端高频实体（Hub）”进行物理删除的阈值。默认约为1000，来自自定义词典的实体享受约5×阈值豁免。/ Controls the threshold for physically removing extremely high-frequency hub entities after build. Default is about 1000, and entities from custom dictionaries enjoy ~5× threshold exemption.
+  - Hub过滤原理、私有词典豁免机制以及不同规模知识库下的调优建议，详见第6.5.4与6.5.6节。/ For hub filtering principles, private-dictionary exemptions, and tuning for different KB sizes, see Sections 6.5.4 and 6.5.6.
+
+- **超大实体门限（召回）/ Super-entity Threshold (Recall)**
+  - 控制在Graph RAG查询阶段，将哪些高频实体视为Hub并在扩展/选种时跳过使用；不会删除数据库中的数据。默认约为300（UI使用指数滑块映射到邻近档位）。/ Controls which high-frequency entities are treated as hubs and skipped during Graph RAG query-time expansion and seed selection; no data is deleted. Default is about 300 (UI uses an exponential slider mapped to the nearest step).
+  - 查询期Hub控制策略、回退到纯向量的触发条件及日志观测方法，见第6.5.5与6.5.6节。/ For query-time hub control strategy, conditions for falling back to vector-only, and how to read logs, see Sections 6.5.5 and 6.5.6.
+
+- **更多 Graph RAG 原理与高级用法 / More on Graph RAG Principles and Advanced Usage**
+  - 本小节仅对关键设置项做简要说明，便于快速查找和修改参数。/ This subsection only provides brief explanations of key settings for quick lookup and editing.
+  - 如需了解完整的RAG/图谱RAG工作流、实体识别与图谱构建细节，请参阅第6章（特别是6.1、6.5、6.6小节）。/ For full RAG/Graph RAG workflows and details of entity recognition and graph construction, see Chapter 6 (especially Sections 6.1, 6.5 and 6.6).
 
 ### 4.3 LLM推理设置 / LLM Inference Settings
 
@@ -330,68 +368,12 @@ OfflineAI supports Stable Diffusion text-to-image generation for AI art creation
   - 联发科天玑：推荐OpenCL / MediaTek Dimensity: recommend OpenCL
   - 老旧设备：建议使用CPU / Older devices: recommend CPU
 
-### 4.6 知识图谱RAG设置 / Knowledge Graph RAG Settings
-
-- **自定义词典选择 / Custom Dictionary Selection**：选择领域专用词典文件 / Select domain-specific dictionary file
-  - 词典放置在 `数据根目录/dictionary/` 目录 / Dictionaries are placed in `Data Root/dictionary/` directory
-  - 支持JSON格式的HanLP自定义词典 / Supports JSON format HanLP custom dictionaries
-  - 词典格式详见第6.6节 / Dictionary format details in Section 6.6
-
-- **Graph RAG 工作原理（简要）/ How Graph RAG Works (Brief)**
-  - 问题发送后，系统首先使用 HanLP 对用户问题做实体识别，并从向量检索结果的前若干个文本块中提取实体，组合成“种子实体集合”。 / After you send a question, the app uses HanLP to extract entities from the query and from the top vector search chunks, combining them into a "seed entity set".
-  - 系统会自动过滤一些通用、高频、语义不强的词（如“测试/进行/实现/使用/数据/系统”等），避免它们在图谱中放大噪声。 / The app automatically filters generic, high-frequency and low-informative words (e.g. "测试/test", "进行/perform", "实现/implement", "使用/use", "数据/data", "系统/system") to avoid amplifying noise in the graph.
-  - 每次查询最多只保留有限数量的种子实体（系统内部上限约为 32 个），防止图扩展过宽导致性能问题。 / Each query keeps at most a limited number of seed entities (internal limit ~32) to prevent graph expansion from becoming too wide and hurting performance.
-  - 基于种子实体，图谱会向外扩展一跳，找到与这些实体强关联的其他实体，并通过这些实体反查更多相关文本块。 / Based on the seed entities, the knowledge graph expands one hop to find strongly related entities and retrieves more related chunks through those entities.
-  - 最终系统会综合三类信息给每个文本块打分：向量相似度、图谱中的实体共现权重、与种子实体的重叠数量，并进行归一化后加权融合，排序靠前的文本块将作为模型上下文。 / In the end, the app scores each chunk using three signals: vector similarity, graph-based entity co-occurrence weights, and overlap with seed entities. These signals are normalized and fused with preset weights, and top-ranked chunks are used as context for the LLM.
-
-- **实体置信度阈值 / Entity Confidence Threshold**：过滤低置信度实体（默认 0.7）/ Filter low-confidence entities (default 0.7)
-  - 范围：0.5 - 1.0 / Range: 0.5 - 1.0
-  - 值越高，识别越精确但可能遗漏实体 / Higher values mean more precise recognition but may miss some entities
-  - 值越低，召回更多实体但可能引入噪声 / Lower values recall more entities but may introduce more noise
-
-- **图扩展最小边权重 / Graph Min Edge Weight**
-  - 控制图谱中“共现关系”的最低权重，权重大表示在多个文本块中共同出现。/ Controls the minimum weight of co-occurrence edges in the graph; larger weights mean entities co-occur in more chunks.
-  - 建议范围：1-4。值越高，保留的关系越“强”，扩展实体会更少。/ Recommended range: 1-4. Higher values keep only stronger relations and fewer expanded entities.
-
-- **图扩展最大实体数 / Graph Max Expand Entities**
-  - 控制每次查询中最多可以从图谱扩展多少个新实体。/ Controls how many new entities can be added from the graph in each query.
-  - 范围：10-100。建议在 20-60 之间，根据设备性能和知识库规模调整。/ Range: 10-100. Recommended 20-60 depending on device performance and KB size.
-
-- **图扩展最大 Chunk 数 / Graph Max Expand Chunks**
-  - 限制图扩展阶段最多可以增加多少个候选文本块参与打分。/ Limits how many additional chunks graph expansion can contribute to scoring.
-  - 范围：10-100。值越大，召回更充分，但排序和融合成本也更高。/ Range: 10-100. Larger values recall more but increase sorting and fusion cost.
-
-- **Graph RAG 融合权重预设 / Graph RAG Fusion Presets**
-  - 向量优先：更依赖向量相似度，图谱只做轻量加成。/ Vector-first: rely more on vector similarity, graph gives a small boost.
-  - 平衡：向量、图谱和实体重叠相对平衡。/ Balanced: vectors, graph and entity overlap are relatively balanced.
-  - 图谱增强：更强调图谱关系，对结构化/实体密集型知识库更有利。/ Graph-enhanced: emphasizes graph relations, useful for structured or entity-dense KBs.
-
-- **推荐设置：在线大模型 / Recommended Settings: Online Large LLMs**
-  - 场景：使用云端大模型（如 GPT、通义千问云端版等），模型本身能力强，Graph RAG 主要用来补充召回。/ Scenario: using powerful cloud LLMs (e.g. GPT-style APIs); Graph RAG mainly supplements recall.
-  - 建议：
-    - 图扩展最小边权重 / Graph Min Edge Weight：2-3
-    - 图扩展最大实体数 / Graph Max Expand Entities：20-40
-    - 图扩展最大 Chunk 数 / Graph Max Expand Chunks：20-40
-    - 实体置信度阈值 / Entity Confidence Threshold：0.7-0.8
-    - 融合预设 / Fusion Preset：向量优先或平衡（Vector-first or Balanced）
-  - 思路：让“向量检索 + 重排”保持主导，图谱提供少量额外证据，避免图谱噪声对强大模型产生过多干扰。/ Idea: keep "vector retrieval + rerank" dominant, use graph as a light additional signal to avoid noisy graph signals disturbing strong LLMs.
-
-- **推荐设置：本地小模型 / Recommended Settings: Local Small LLMs**
-  - 场景：使用 0.6B-4B 的本地小模型（如 Qwen3-0.6B / 4B 等），模型对上下文质量更敏感。/ Scenario: using 0.6B-4B local LLMs (e.g. Qwen3-0.6B/4B) where model quality is more sensitive to context.
-  - 建议：
-    - 图扩展最小边权重 / Graph Min Edge Weight：2
-    - 图扩展最大实体数 / Graph Max Expand Entities：40-60
-    - 图扩展最大 Chunk 数 / Graph Max Expand Chunks：20-40
-    - 实体置信度阈值 / Entity Confidence Threshold：0.6-0.7
-    - 融合预设 / Fusion Preset：平衡或图谱增强（Balanced or Graph-enhanced）
-  - 思路：适度放宽实体召回并加大图谱权重，让知识图谱帮助小模型更好地“对齐”到与问题相关的块；同时建议将“检索数量”下拉（search depth）设置在 4-6 之间，该数值也会限制最终送入 LLM 的文本块数量，避免本地小模型一次接收过多上下文。/ Idea: relax entity recall and increase graph weight so that the knowledge graph helps small models better focus on relevant chunks; at the same time, set the "retrieval count" (search depth dropdown) to around 4-6, which also limits how many chunks are finally sent to the LLM to avoid overloading small local models.
-
-### 4.7 全局设置 / Global Settings
+### 4.6 全局设置 / Global Settings
 
 - **调试模式 / Debug Mode**：启用详细日志输出 / Enable detailed log output
 - **字体大小 / Font Size**：调整应用中文本的显示大小 / Adjust text display size in the application
 
-### 4.8 操作说明 / Operation Instructions
+### 4.7 操作说明 / Operation Instructions
 
 1. 从主菜单点击"设置"进入设置页面 / Click "Settings" from main menu to enter settings page
 2. 调整各项设置 / Adjust various settings
@@ -531,11 +513,6 @@ Provides Chinese-English interface switching functionality to meet different use
 ---
 
 ## 6. RAG 知识库系统（专题章节）/ RAG Knowledge Base System
-
-本章详细介绍 RAG（检索增强生成）知识库系统的原理、使用方法和高级功能，包括知识图谱RAG和自定义词典生成。
-
-This chapter provides detailed information about the RAG (Retrieval-Augmented Generation) knowledge base system, including principles, usage methods, and advanced features such as Knowledge Graph RAG and custom dictionary generation.
-
 ### 6.1 RAG 基本原理 / RAG Basic Principles
 
 RAG（检索增强生成 / Retrieval-Augmented Generation）是一种结合了检索系统和生成式AI的技术框架，能够让大语言模型(LLM)基于特定知识回答问题，提高回答的准确性和可靠性。
@@ -566,6 +543,23 @@ RAG Q&A Process:                                            v
 │                  │     │ Model (LLM)       │     │                   │
 └------------------┘     └-------------------┘     └-------------------┘                     
 ```
+
+**Graph RAG 增强流程（示意）/ Knowledge Graph RAG Enhancement (Overview)**
+
+```text
+Knowledge Graph RAG Enhancement:
+┌-------------------┐     ┌------------------------┐     ┌-------------------┐
+│  Vector Retrieval │ --> │ Seed Entities & Filter │ --> │ Graph Expansion   │
+└-------------------┘     └------------------------┘     └-------------------┘
+                                                                  │
+                                                                  v
+┌-------------------┐
+│ Multi-signal      │
+│ Scoring & Merge   │
+└-------------------┘
+```
+
+简要来说，Graph RAG 会在普通向量检索的基础上，从检索结果中抽取实体、通过知识图谱做一跳扩展，并结合“向量相似度 + 图谱共现权重 + 种子实体重叠”三类信号进行融合排序。/ In short, Graph RAG enhances vanilla vector retrieval by extracting entities from results, expanding them through the knowledge graph, and fusing three signals—vector similarity, graph co-occurrence weights, and seed-entity overlap—for final ranking.
 
 #### RAG 核心步骤 / RAG Core Steps
 
@@ -867,6 +861,18 @@ Can set entity confidence threshold (default 0.5) to filter low-confidence entit
 4. **图谱扩展 / Graph Expansion** - 查找相关实体（1-2跳），获取实体的关联文档，补充上下文信息 / Find related entities (1-2 hops), get associated documents, supplement context
 5. **上下文合并 / Context Merging** - 合并向量检索结果和图谱扩展结果，去重并排序，发送给LLM生成回答 / Merge vector retrieval and graph expansion results, deduplicate and sort, send to LLM
 
+**种子实体与 Hub 过滤 / Seed Entities and Hub Filtering**
+
+- 种子实体集合主要来自两个来源：用户问题中的实体，以及向量检索前若干个文本块中的实体，系统会自动去重并使用别名信息做归一化。/ The seed entity set mainly comes from two sources: entities in the user question and entities in the top vector-retrieved chunks; the system automatically deduplicates and normalizes them using alias information.
+- 系统会自动过滤一些通用、高频、语义不强的词（如“测试/进行/实现/使用/数据/系统”等），并结合“超大实体门限（召回）”将极端高频实体标记为Hub，避免噪声在图扩展中被放大。/ The app automatically filters generic, high-frequency, low-informative words (e.g. "测试/test", "进行/perform", "实现/implement", "使用/use", "数据/data", "系统/system"), and together with the recall-time hub threshold, marks extremely frequent entities as hubs to prevent noise from dominating expansion.
+- 每次查询最多只保留有限数量的种子实体（内部上限约为32个），以控制图扩展的宽度和计算开销。/ Each query keeps at most a limited number of seed entities (internal cap around 32) to control expansion width and computation cost.
+
+**多信号打分与融合 / Multi-signal Scoring and Fusion**
+
+- 每个候选文本块会综合三类信号打分：向量相似度、图谱实体共现权重、与种子实体的重叠数量。/ Each candidate chunk is scored by combining three signals: vector similarity, graph-based entity co-occurrence weights, and overlap with seed entities.
+- 这些信号会归一化后按预设权重（由“Graph RAG 融合权重预设”等参数控制）进行加权融合，排序靠前的文本块将作为LLM的上下文。/ These signals are normalized and fused with preset weights (controlled by the Graph RAG fusion presets and related parameters); top-ranked chunks are used as LLM context.
+- 具体可调参数及推荐默认值，请参见第4.6节“知识图谱RAG设置”。/ For concrete tunable parameters and recommended defaults, see Section 4.6 "Knowledge Graph RAG Settings".
+
 **优势 / Advantages**：
 
 - **发现隐含关联**：找到向量检索可能遗漏的相关信息 / Discover implicit associations: find relevant information that vector retrieval might miss
@@ -876,9 +882,9 @@ Can set entity confidence threshold (default 0.5) to filter low-confidence entit
 
 #### 6.5.6 参数说明 / Parameter Description
 
-在设置页面（第4.6节）可配置知识图谱RAG参数：
+在设置页面（第4.2.2节，知识图谱RAG设置）可配置知识图谱RAG参数：
 
-Configure Knowledge Graph RAG parameters in settings page (Section 4.6):
+Configure Knowledge Graph RAG parameters in settings page (Section 4.2.2, Knowledge Graph RAG Settings):
 
 **自定义词典路径 / Custom Dictionary Path**
 - 选择领域专用词典文件 / Select domain-specific dictionary file
@@ -901,6 +907,58 @@ Configure Knowledge Graph RAG parameters in settings page (Section 4.6):
 2. **通用场景**：使用默认配置即可 / General scenarios: default configuration is sufficient
 3. **精确查询**：提高置信度阈值（0.7-0.8）/ Precise queries: increase confidence threshold (0.7-0.8)
 4. **探索性查询**：增加扩展深度（2-3层）/ Exploratory queries: increase expansion depth (2-3 hops)
+
+**Hub 过滤阈值 / Hub Filtering Thresholds**
+
+- **超大实体门限（构建）/ Super-entity Threshold (Build)**
+  - 用途：在知识库构建完成后，对图谱中“极端高频实体（Hub）”进行一次性清理，物理删除这些实体及其边，防止图谱在结构上被超级节点“炸穿”。/ Purpose: after knowledge base build, perform a one-time cleanup of extremely high-frequency entities (hubs) in the graph, physically removing these entities and their edges to prevent the graph from being dominated by super nodes.
+  - 默认值：`1000`（邻居数或总边权重 ≥ 1000 视为构建期 Hub）。/ Default: `1000` (entities with neighbor count or total edge weight ≥ 1000 are treated as build-time hubs).
+  - 私有词典豁免 / Private dictionary exemption：
+    - 来自自定义词典（如 `Starblaze-tech.json`）的实体会使用 **5× 构建门限** 作为兜底阈值：/ Entities coming from custom dictionaries (e.g. `Starblaze-tech.json`) use **5× build threshold** as a fallback:
+      - 普通实体：`degree >= 1000` 或 `totalWeight >= 1000` 即在构建时被删除；/ Normal entities: deleted at build time when `degree >= 1000` or `totalWeight >= 1000`.
+      - 私有词典实体：只有当 `degree` 或 `totalWeight` **≥ 5000** 时才会被视为构建 Hub 并删除。/ Private-dictionary entities: treated as build hubs and removed only when `degree` or `totalWeight` **≥ 5000`.
+  - 调整建议 / Tuning tips：
+    - 小/中型知识库（几千～几万块）：通常不需要调太低，保持 800–1500 可以保证图谱结构尽量保留，只清理真正的“全局怪物节点”。/ Small to medium KBs (thousands to tens of thousands chunks): keep 800–1500 so the graph structure is largely preserved, only true global monsters are removed.
+    - 特别大的知识库（几十万块以上）：如日志、海量爬虫数据，可视需要适当降低到 600–800，以更积极地瘦身图谱。/ Very large KBs (hundreds of thousands chunks): e.g. logs or massive crawled data, you may lower to 600–800 to slim down the graph more aggressively.
+
+- **超大实体门限（召回）/ Super-entity Threshold (Recall)**
+  - 用途：在 Graph RAG 查询阶段，标记“高频实体”为 Hub，在图扩展与种子筛选时跳过使用这些实体，但不会删除数据库中的数据。/ Purpose: during Graph RAG query phase, mark high-frequency entities as hubs so that they are skipped during graph expansion and seed selection, without deleting any data from the database.
+  - 默认值：`300`（配置层默认），UI 滑块采用指数刻度（50/100/200/400/800/...），实际显示会映射到最接近的档位（通常是 400）。/ Default: `300` at config level; the UI slider uses exponential steps (50/100/200/400/800/...), and the displayed value is mapped to the nearest step (typically 400).
+  - 私有词典豁免 / Private dictionary exemption：
+    - 普通实体：`degree >= RecallThreshold` 或 `totalWeight >= RecallThreshold` 即被视为查询 Hub，在 Graph RAG 中不作为种子/不扩展。/ Normal entities: treated as query-time hubs when `degree >= RecallThreshold` or `totalWeight >= RecallThreshold`, and are not used as seeds or for expansion.
+    - 私有词典实体：使用 **5× 召回门限** 作为兜底阈值，默认约为 `5 × 300 = 1500`：/ Private-dictionary entities: use **5× recall threshold** as fallback, by default about `5 × 300 = 1500`:
+      - 只在 `degree` 或 `totalWeight` 极端巨大（≥1500）时，才会在查询时被当成 Hub 跳过；/ Only when `degree` or `totalWeight` is extremely large (≥1500) are they treated as hubs and skipped at query time.
+      - 在一般场景下，领域技术词仍然会作为 Graph RAG 的种子和扩展实体参与决策。/ In normal scenarios, domain-specific technical terms still participate as seeds and expansion entities in Graph RAG.
+  - 调整建议 / Tuning tips：
+    - 小型知识库 / Small KB：推荐 300–500 区间，数值越小过滤越激进；如果发现 Graph RAG 经常“没有合适种子、回退到纯向量”，可以适当上调到 400–500。/ Recommended 300–500 range, smaller values filter more aggressively; if Graph RAG often falls back to vector-only because no valid seeds remain, consider raising to 400–500.
+    - 中/大型知识库 / Medium & large KB：推荐 200–400 区间，大图中高频实体更多，需要更积极地标记 Hub。/ Recommended 200–400 range; large graphs have more high-frequency entities and benefit from more aggressive hub marking.
+    - 调参方法 / How to tune：关注日志中的 `[HUB_FILTER_QUERY]` 与 `[GRAPH_RAG] No valid seed entities...` 提示，结合实际问答质量微调阈值。/ Watch `[HUB_FILTER_QUERY]` and `[GRAPH_RAG] No valid seed entities...` logs, and adjust thresholds based on observed answer quality.
+
+（以上阈值均通过设置页面第4.2.2节“知识图谱RAG设置”中的“超大实体门限（构建/召回）”进行配置。）/ (All of the above thresholds are configured via the "Super-entity Threshold (Build/Recall)" options in Section 4.2.2 "Knowledge Graph RAG Settings".)
+
+**推荐设置：在线大模型 / Recommended Settings: Online Large LLMs**
+
+- 场景：使用云端大模型（如 GPT、通义千问云端版等），模型本身能力强，Graph RAG 主要用来补充召回。/ Scenario: using powerful cloud LLMs (e.g. GPT-style APIs); Graph RAG mainly supplements recall.
+- 建议：
+  - 图扩展最小边权重 / Graph Min Edge Weight：2-3
+  - 图扩展最大实体数 / Graph Max Expand Entities：20-40
+  - 图扩展最大 Chunk 数 / Graph Max Expand Chunks：20-40
+  - 实体置信度阈值 / Entity Confidence Threshold：0.7-0.8
+  - 融合预设 / Fusion Preset：向量优先或平衡（Vector-first or Balanced）
+- 思路：让“向量检索 + 重排”保持主导，图谱提供少量额外证据，避免图谱噪声对强大模型产生过多干扰。/ Idea: keep "vector retrieval + rerank" dominant, use graph as a light additional signal to avoid noisy graph signals disturbing strong LLMs.
+- 相关参数的具体名称与位置，请参考第4.2.2节“知识图谱RAG设置”中的对应设置项。/ For exact parameter names and where to change them, see the corresponding items in Section 4.2.2 "Knowledge Graph RAG Settings".
+
+**推荐设置：本地小模型 / Recommended Settings: Local Small LLMs**
+
+- 场景：使用 0.6B-4B 的本地小模型（如 Qwen3-0.6B / 4B 等），模型对上下文质量更敏感。/ Scenario: using 0.6B-4B local LLMs (e.g. Qwen3-0.6B/4B) where model quality is more sensitive to context.
+- 建议：
+  - 图扩展最小边权重 / Graph Min Edge Weight：2
+  - 图扩展最大实体数 / Graph Max Expand Entities：40-60
+  - 图扩展最大 Chunk 数 / Graph Max Expand Chunks：20-40
+  - 实体置信度阈值 / Entity Confidence Threshold：0.6-0.7
+  - 融合预设 / Fusion Preset：平衡或图谱增强（Balanced or Graph-enhanced）
+- 思路：适度放宽实体召回并加大图谱权重，让知识图谱帮助小模型更好地“对齐”到与问题相关的块；同时建议将“检索数量”下拉（search depth）设置在 4-6 之间，该数值也会限制最终送入 LLM 的文本块数量，避免本地小模型一次接收过多上下文。/ Idea: relax entity recall and increase graph weight so that the knowledge graph helps small models better focus on relevant chunks; at the same time, set the "retrieval count" (search depth dropdown) to around 4-6, which also limits how many chunks are finally sent to the LLM to avoid overloading small local models.
+- 相关参数的具体名称与位置，请参考第4.6节中的对应设置项。/ For exact parameter names and where to change them, see the corresponding items in Section 4.6.
 
 ### 6.6 自定义词典生成指南 / Custom Dictionary Generation Guide
 

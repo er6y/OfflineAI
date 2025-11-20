@@ -1060,10 +1060,26 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
      * Query hub entities by threshold without mutating the database.
      * This is used for query-time hub filtering in Graph RAG to ignore
      * super-entities during graph expansion and scoring.
+     *
      * @param threshold Hub threshold (0 or negative = disabled)
      * @return Set of entity_text values considered hubs
      */
     public java.util.Set<String> getHubEntities(int threshold) {
+        return getHubEntities(threshold, null);
+    }
+
+    /**
+     * Query hub entities by threshold with optional protected entities.
+     * Protected entities (typically from custom dictionaries) are exempt
+     * from normal hub filtering and only treated as hubs when they exceed
+     * a higher fallback threshold (5x).
+     *
+     * @param threshold Hub threshold (0 or negative = disabled)
+     * @param protectedEntities Optional set of entity_text values that should
+     *                          be preserved unless they are extreme hubs
+     * @return Set of entity_text values considered hubs
+     */
+    public java.util.Set<String> getHubEntities(int threshold, java.util.Set<String> protectedEntities) {
         java.util.Set<String> hubEntities = new java.util.HashSet<>();
         if (threshold <= 0) {
             LogManager.logD(TAG, String.format("[HUB_FILTER_QUERY] Threshold <= 0, skip hub query (threshold=%d)", threshold));
@@ -1087,19 +1103,39 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
             cursor = db.rawQuery(hubQuery, new String[]{collection, collection});
 
             int hubCount = 0;
+            int fallbackThreshold = threshold * 5;
             while (cursor.moveToNext()) {
                 String entityText = cursor.getString(0);
                 int degree = cursor.getInt(1);
                 int totalWeight = cursor.getInt(2);
 
-                if (degree >= threshold || totalWeight >= threshold) {
+                boolean isProtected = protectedEntities != null && protectedEntities.contains(entityText);
+                boolean selectAsHub = false;
+
+                if (!isProtected) {
+                    if (degree >= threshold || totalWeight >= threshold) {
+                        selectAsHub = true;
+                    }
+                } else {
+                    if (fallbackThreshold > 0 && (degree >= fallbackThreshold || totalWeight >= fallbackThreshold)) {
+                        selectAsHub = true;
+                    }
+                }
+
+                if (selectAsHub) {
                     hubEntities.add(entityText);
                     hubCount++;
 
                     if (hubCount <= 10) {
-                        LogManager.logD(TAG, String.format(
-                            "[HUB_FILTER_QUERY] Hub candidate '%s': degree=%d, totalWeight=%d",
-                            entityText, degree, totalWeight));
+                        if (!isProtected) {
+                            LogManager.logD(TAG, String.format(
+                                "[HUB_FILTER_QUERY] Hub candidate '%s': degree=%d, totalWeight=%d",
+                                entityText, degree, totalWeight));
+                        } else {
+                            LogManager.logD(TAG, String.format(
+                                "[HUB_FILTER_QUERY] Protected hub candidate '%s' exceeded fallback threshold: degree=%d, totalWeight=%d, baseThreshold=%d, fallbackThreshold=%d",
+                                entityText, degree, totalWeight, threshold, fallbackThreshold));
+                        }
                     }
                 }
             }

@@ -860,7 +860,9 @@
     <string name="label_graph_entity_confidence_threshold">实体置信度阈值\n(0.5~1.0):</string>
     <string name="label_graph_max_expand_entities">图扩展最大实体数\n(10~100):</string>
     <string name="label_graph_rag_mode">图谱RAG模式</string>
-    <string name="label_graph_hub_threshold">超大实体门限\n(邻居数,0=关闭):</string>
+    <!-- 构建/召回双 Hub 门限标签 -->
+    <string name="label_graph_hub_threshold">超大实体门限（构建）\n(邻居数,0=关闭):</string>
+    <string name="label_graph_hub_threshold_query">超大实体门限（召回）\n(邻居数,0=关闭):</string>
     <string name="label_graph_stopwords">图谱停用词表:</string>
     <string name="hint_graph_min_edge_weight">过滤低权重边，避免噪音</string>
     <string name="hint_graph_max_expand_entities">限制图扩展返回的实体数量</string>

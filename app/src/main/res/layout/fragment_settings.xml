@@ -388,7 +388,7 @@
                 android:layout_weight="1" />
         </LinearLayout>
 
-        <!-- Graph super-entity (hub) threshold -->
+        <!-- Graph super-entity (hub) threshold - Build phase -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -410,13 +410,47 @@
                 android:layout_marginStart="0dp"
                 android:layout_marginEnd="0dp"
                 android:max="10"
-                android:progress="4" />
+                android:progress="5" />
 
             <TextView
                 android:id="@+id/textViewGraphHubThresholdValue"
                 android:layout_width="40dp"
                 android:layout_height="wrap_content"
-                android:text="400"
+                android:text="1000"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+
+        <!-- Graph super-entity (hub) threshold - Query phase -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_graph_hub_threshold_query"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarGraphHubThresholdQuery"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="10"
+                android:progress="4" />
+
+            <TextView
+                android:id="@+id/textViewGraphHubThresholdQueryValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="300"
                 android:textSize="14sp"
                 android:gravity="center"
                 android:layout_marginStart="0dp" />

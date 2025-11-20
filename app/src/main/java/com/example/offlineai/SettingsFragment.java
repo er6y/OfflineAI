@@ -76,8 +76,11 @@ public class SettingsFragment extends Fragment {
     private Spinner spinnerGraphRagWeightPreset;
     private SeekBar seekBarGraphMaxExpandChunks;
     private TextView textViewGraphMaxExpandChunksValue;
+    // Hub thresholds: build & query
     private SeekBar seekBarGraphHubThreshold;
     private TextView textViewGraphHubThresholdValue;
+    private SeekBar seekBarGraphHubThresholdQuery;
+    private TextView textViewGraphHubThresholdQueryValue;
     private Spinner spinnerGraphStopwords;
     
     private EditText editTextDataRootPath;
@@ -210,6 +213,8 @@ public class SettingsFragment extends Fragment {
         textViewGraphMaxExpandChunksValue = view.findViewById(R.id.textViewGraphMaxExpandChunksValue);
         seekBarGraphHubThreshold = view.findViewById(R.id.seekBarGraphHubThreshold);
         textViewGraphHubThresholdValue = view.findViewById(R.id.textViewGraphHubThresholdValue);
+        seekBarGraphHubThresholdQuery = view.findViewById(R.id.seekBarGraphHubThresholdQuery);
+        textViewGraphHubThresholdQueryValue = view.findViewById(R.id.textViewGraphHubThresholdQueryValue);
         spinnerGraphStopwords = view.findViewById(R.id.spinnerGraphStopwords);
         
         editTextDataRootPath = view.findViewById(R.id.editTextDataRootPath);
@@ -720,6 +725,7 @@ public class SettingsFragment extends Fragment {
             }
         });
 
+        // Hub threshold (build phase)
         seekBarGraphHubThreshold.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -732,7 +738,24 @@ public class SettingsFragment extends Fragment {
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
                 int threshold = mapHubProgressToThreshold(seekBar.getProgress());
-                ConfigManager.setGraphHubThreshold(requireContext(), threshold);
+                ConfigManager.setGraphHubThresholdBuild(requireContext(), threshold);
+            }
+        });
+
+        // Hub threshold (query-time Graph RAG)
+        seekBarGraphHubThresholdQuery.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateGraphHubThresholdQueryText(progress);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int threshold = mapHubProgressToThreshold(seekBar.getProgress());
+                ConfigManager.setGraphHubThresholdQuery(requireContext(), threshold);
             }
         });
         
@@ -1114,6 +1137,11 @@ public class SettingsFragment extends Fragment {
         textViewGraphHubThresholdValue.setText(String.valueOf(threshold));
     }
 
+    private void updateGraphHubThresholdQueryText(int progress) {
+        int threshold = mapHubProgressToThreshold(progress);
+        textViewGraphHubThresholdQueryValue.setText(String.valueOf(threshold));
+    }
+
     private int mapHubProgressToThreshold(int progress) {
         if (progress <= 0) {
             return 0;
@@ -1282,11 +1310,17 @@ public class SettingsFragment extends Fragment {
         seekBarGraphMaxExpandChunks.setProgress(graphMaxExpandChunksProgress);
         updateGraphMaxExpandChunksText(graphMaxExpandChunksProgress);
 
-        int graphHubThreshold = ConfigManager.getGraphHubThreshold(ctx);
-        int graphHubProgress = mapHubThresholdToProgress(graphHubThreshold);
-        graphHubProgress = Math.max(0, Math.min(graphHubProgress, seekBarGraphHubThreshold.getMax()));
-        seekBarGraphHubThreshold.setProgress(graphHubProgress);
-        updateGraphHubThresholdText(graphHubProgress);
+        int graphHubThresholdBuild = ConfigManager.getGraphHubThresholdBuild(ctx);
+        int graphHubBuildProgress = mapHubThresholdToProgress(graphHubThresholdBuild);
+        graphHubBuildProgress = Math.max(0, Math.min(graphHubBuildProgress, seekBarGraphHubThreshold.getMax()));
+        seekBarGraphHubThreshold.setProgress(graphHubBuildProgress);
+        updateGraphHubThresholdText(graphHubBuildProgress);
+
+        int graphHubThresholdQuery = ConfigManager.getGraphHubThresholdQuery(ctx);
+        int graphHubQueryProgress = mapHubThresholdToProgress(graphHubThresholdQuery);
+        graphHubQueryProgress = Math.max(0, Math.min(graphHubQueryProgress, seekBarGraphHubThresholdQuery.getMax()));
+        seekBarGraphHubThresholdQuery.setProgress(graphHubQueryProgress);
+        updateGraphHubThresholdQueryText(graphHubQueryProgress);
 
         boolean graphRagEnabled = ConfigManager.isGraphRagEnabled(ctx);
         switchGraphRagMode.setChecked(graphRagEnabled);

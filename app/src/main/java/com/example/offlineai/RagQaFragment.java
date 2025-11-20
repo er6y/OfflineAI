@@ -4143,6 +4143,7 @@ public class RagQaFragment extends Fragment {
             return;
         }
         try {
+            HanLpNerHandler graphNerHandler = null;
             // Load stopwords matcher for query-time cleaning
             String stopwordsPath = ConfigManager.getGraphStopwordsPath(requireContext());
             GraphStopwordsMatcher stopwordsMatcher = null;
@@ -4156,8 +4157,18 @@ public class RagQaFragment extends Fragment {
             }
 
             // Load hub entities for query-time hub filtering (read-only)
-            int hubThreshold = ConfigManager.getGraphHubThreshold(requireContext());
-            Set<String> hubEntities = vectorDb.getHubEntities(hubThreshold);
+            int hubThreshold = ConfigManager.getGraphHubThresholdQuery(requireContext());
+            Set<String> protectedEntities = null;
+            try {
+                graphNerHandler = getOrCreateGraphNerHandler();
+                if (graphNerHandler != null) {
+                    protectedEntities = graphNerHandler.getCustomDictionaryWords();
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[GRAPH_RAG] Failed to load protected entities from custom dictionary: " + e.getMessage(), e);
+            }
+
+            Set<String> hubEntities = vectorDb.getHubEntities(hubThreshold, protectedEntities);
             if (!hubEntities.isEmpty()) {
                 LogManager.logD(TAG, "[GRAPH_RAG][HUB_QUERY] Query-time hub set size=" + hubEntities.size());
             }
@@ -4166,9 +4177,20 @@ public class RagQaFragment extends Fragment {
             float confidenceThreshold = ConfigManager.getGraphEntityConfidenceThreshold(requireContext());
             Set<String> queryEntityTexts = new HashSet<>();
             List<String> seedOrder = new ArrayList<>();
+            int aliasNormalizedCount = 0;
             for (HanLpNerHandler.NerResult.Entity e : queryEntities) {
                 if (e == null) continue;
                 String normalized = normalizeEntityText(e.text);
+                if (graphNerHandler != null && normalized != null) {
+                    String canonical = graphNerHandler.normalizeTextForGraph(normalized);
+                    if (canonical == null) {
+                        continue;
+                    }
+                    if (!canonical.equals(normalized)) {
+                        aliasNormalizedCount++;
+                    }
+                    normalized = canonical;
+                }
                 if (normalized == null) continue;
                 if (e.confidence < confidenceThreshold) continue;
                 if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) continue;
@@ -4189,6 +4211,16 @@ public class RagQaFragment extends Fragment {
                 if (list == null) continue;
                 for (String t : list) {
                     String normalized = normalizeEntityText(t);
+                    if (graphNerHandler != null && normalized != null) {
+                        String canonical = graphNerHandler.normalizeTextForGraph(normalized);
+                        if (canonical == null) {
+                            continue;
+                        }
+                        if (!canonical.equals(normalized)) {
+                            aliasNormalizedCount++;
+                        }
+                        normalized = canonical;
+                    }
                     if (normalized == null) continue;
                     if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) continue;
                     if (hubEntities.contains(normalized)) continue;
@@ -4203,6 +4235,10 @@ public class RagQaFragment extends Fragment {
                 LogManager.logI(TAG, "Task stopped/cancelled after seed collection");
                 updateProgressOnUiThread("Operation stopped by user");
                 return;
+            }
+
+            if (aliasNormalizedCount > 0) {
+                LogManager.logD(TAG, String.format("[GRAPH_ALIAS] Query-time alias normalization applied to %d entity texts", aliasNormalizedCount));
             }
 
             Set<String> seedEntities = new HashSet<>();
@@ -4231,6 +4267,16 @@ public class RagQaFragment extends Fragment {
                     continue;
                 }
                 String normalized = normalizeEntityText(ce.entityText);
+                if (graphNerHandler != null && normalized != null) {
+                    String canonical = graphNerHandler.normalizeTextForGraph(normalized);
+                    if (canonical == null) {
+                        continue;
+                    }
+                    if (!canonical.equals(normalized)) {
+                        aliasNormalizedCount++;
+                    }
+                    normalized = canonical;
+                }
                 if (normalized == null) {
                     continue;
                 }
@@ -4252,6 +4298,16 @@ public class RagQaFragment extends Fragment {
                     continue;
                 }
                 String normalized = normalizeEntityText(ce.entityText);
+                if (graphNerHandler != null && normalized != null) {
+                    String canonical = graphNerHandler.normalizeTextForGraph(normalized);
+                    if (canonical == null) {
+                        continue;
+                    }
+                    if (!canonical.equals(normalized)) {
+                        aliasNormalizedCount++;
+                    }
+                    normalized = canonical;
+                }
                 if (normalized == null) {
                     continue;
                 }

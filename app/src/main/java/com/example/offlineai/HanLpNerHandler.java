@@ -12,6 +12,10 @@ import java.io.File;
 import java.io.FileReader;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -31,6 +35,16 @@ public class HanLpNerHandler {
     private String dictionaryErrorMessage = null;
     private String dictionaryPath = null;
     private int loadedWordCount = 0;
+    
+    // Custom dictionary word set for graph hub filtering and protected entities
+    private final Set<String> customDictionaryWords = new HashSet<>();
+
+    // Alias normalization map: alias/variant text -> canonical text
+    private final Map<String, String> aliasToCanonical = new HashMap<>();
+
+    // Limit debug logs for alias normalization hits to avoid log spam
+    private int aliasHitLogCount = 0;
+    private static final int MAX_ALIAS_HIT_LOGS = 20;
     
     public HanLpNerHandler(String dictPath) {
         mExecutor = Executors.newFixedThreadPool(THREAD_COUNT);
@@ -94,6 +108,8 @@ public class HanLpNerHandler {
             }
             
             int count = 0;
+            int canonicalCount = 0;
+            int aliasCount = 0;
             for (int i = 0; i < entries.length(); i++) {
                 JSONObject entry = entries.getJSONObject(i);
                 String word = entry.getString("word");
@@ -101,14 +117,36 @@ public class HanLpNerHandler {
                 int frequency = entry.optInt("frequency", 10000);
                 
                 CustomDictionary.add(word, nature + " " + frequency);
+                addWordToCustomSet(word);
                 count++;
+
+                // Register canonical form for alias normalization
+                String canonicalKey = normalizeAliasKey(word);
+                if (canonicalKey != null && !aliasToCanonical.containsKey(canonicalKey)) {
+                    aliasToCanonical.put(canonicalKey, canonicalKey);
+                    canonicalCount++;
+                }
                 
                 JSONArray aliases = entry.optJSONArray("aliases");
                 if (aliases != null) {
                     for (int j = 0; j < aliases.length(); j++) {
                         String alias = aliases.getString(j);
                         CustomDictionary.add(alias, nature + " " + frequency);
+                        addWordToCustomSet(alias);
                         count++;
+
+                        // Map alias to canonical form for graph normalization
+                        String aliasKey = normalizeAliasKey(alias);
+                        if (aliasKey != null) {
+                            String existing = aliasToCanonical.get(aliasKey);
+                            // Do not override existing mapping to keep the first definition as canonical
+                            if (existing == null) {
+                                if (canonicalKey != null) {
+                                    aliasToCanonical.put(aliasKey, canonicalKey);
+                                    aliasCount++;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -117,6 +155,8 @@ public class HanLpNerHandler {
             dictionaryLoaded = true;
             dictionaryErrorMessage = null;
             LogManager.logI(TAG, "Loaded " + count + " words from dictionary");
+            LogManager.logI(TAG, String.format("[DICT_ALIAS] Built alias normalization map: canonical=%d, aliases=%d, totalKeys=%d",
+                canonicalCount, aliasCount, aliasToCanonical.size()));
             
         } catch (Exception e) {
             dictionaryLoaded = false;
@@ -219,6 +259,60 @@ public class HanLpNerHandler {
             }
         }
         return sb.toString();
+    }
+    
+    private void addWordToCustomSet(String text) {
+        if (text == null) {
+            return;
+        }
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) {
+            return;
+        }
+        customDictionaryWords.add(trimmed);
+    }
+    
+    public Set<String> getCustomDictionaryWords() {
+        return new HashSet<>(customDictionaryWords);
+    }
+    
+    private String normalizeAliasKey(String text) {
+        if (text == null) {
+            return null;
+        }
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        return trimmed;
+    }
+    
+    /**
+     * Normalize entity text for graph usage.
+     * This method applies basic trimming and alias normalization
+     * based on the custom dictionary entries and their aliases.
+     */
+    public String normalizeTextForGraph(String text) {
+        if (text == null) {
+            return null;
+        }
+        String trimmed = text.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+
+        if (!aliasToCanonical.isEmpty()) {
+            String canonical = aliasToCanonical.get(trimmed);
+            if (canonical != null) {
+                if (!trimmed.equals(canonical) && aliasHitLogCount < MAX_ALIAS_HIT_LOGS) {
+                    aliasHitLogCount++;
+                    LogManager.logD(TAG, "[DICT_ALIAS] Normalized alias '" + trimmed + "' -> '" + canonical + "'");
+                }
+                return canonical;
+            }
+        }
+
+        return trimmed;
     }
     
     public static class NerResult {

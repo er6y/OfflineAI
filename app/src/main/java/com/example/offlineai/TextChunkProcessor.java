@@ -736,7 +736,7 @@ public class TextChunkProcessor {
 
             // Load graph stopwords and hub threshold config
             String stopwordsPath = ConfigManager.getGraphStopwordsPath(context);
-            int hubThreshold = ConfigManager.getGraphHubThreshold(context);
+            int hubThreshold = ConfigManager.getGraphHubThresholdBuild(context);
             GraphStopwordsMatcher stopwordsMatcher = null;
             if (stopwordsPath != null && !stopwordsPath.isEmpty()) {
                 try {
@@ -804,8 +804,8 @@ public class TextChunkProcessor {
 
             LogManager.logD(TAG, "Starting unified knowledge base building (NER: " + (nerEnabled ? "ON" : "OFF") + ")");
 
-            // Initialize in-memory graph builder for entities/edges
-            final InMemoryGraphBuilder inMemoryGraphBuilder = new InMemoryGraphBuilder();
+            // Initialize in-memory graph builder for entities/edges (inject protected entities from custom dictionary)
+            final InMemoryGraphBuilder inMemoryGraphBuilder = new InMemoryGraphBuilder(nerHandler.getCustomDictionaryWords());
             LogManager.logI(TAG, "[GRAPH_MEM] Initialized in-memory graph builder");
 
             // If graph DB already exists (append mode), preload existing graph into memory
@@ -1041,6 +1041,38 @@ public class TextChunkProcessor {
                                             chunkIndexForLog, filteredCount, entities.size(), filteredEntities.size()));
                                 }
                                 entities = filteredEntities;
+                            }
+
+                            // Alias normalization based on custom dictionary (canonical form for graph)
+                            if (nerHandler != null && entities != null && !entities.isEmpty()) {
+                                List<HanLpNerHandler.NerResult.Entity> normalizedEntities = new ArrayList<>();
+                                int aliasNormalizedCount = 0;
+                                for (HanLpNerHandler.NerResult.Entity entity : entities) {
+                                    if (entity == null || entity.text == null) {
+                                        continue;
+                                    }
+                                    String baseText = entity.text;
+                                    String normalizedText = nerHandler.normalizeTextForGraph(baseText);
+                                    if (normalizedText == null) {
+                                        continue;
+                                    }
+                                    if (!normalizedText.equals(baseText)) {
+                                        aliasNormalizedCount++;
+                                    }
+                                    HanLpNerHandler.NerResult.Entity normalizedEntity =
+                                            new HanLpNerHandler.NerResult.Entity(normalizedText, entity.type, entity.start, entity.end, entity.confidence);
+                                    normalizedEntities.add(normalizedEntity);
+                                }
+                                if (!normalizedEntities.isEmpty()) {
+                                    entities = normalizedEntities;
+                                    if (aliasNormalizedCount > 0) {
+                                        LogManager.logD(TAG, String.format(
+                                                "[GRAPH_ALIAS] Chunk %d: normalized %d entities by alias map (after stopwords)",
+                                                chunkIndexForLog, aliasNormalizedCount));
+                                    }
+                                } else {
+                                    entities = normalizedEntities;
+                                }
                             }
 
                             long dbStartTime = System.currentTimeMillis();
@@ -1393,6 +1425,16 @@ public class TextChunkProcessor {
         private int totalEntities;
         private long totalPotentialEdges;
 
+        private final Set<String> protectedEntityTexts;
+
+        InMemoryGraphBuilder(Set<String> protectedEntityTexts) {
+            if (protectedEntityTexts != null && !protectedEntityTexts.isEmpty()) {
+                this.protectedEntityTexts = new HashSet<>(protectedEntityTexts);
+            } else {
+                this.protectedEntityTexts = null;
+            }
+        }
+
         void loadFromDatabase(SQLiteDatabase db, String collection) {
             long startTime = System.currentTimeMillis();
             int loadedEntities = 0;
@@ -1641,13 +1683,23 @@ public class TextChunkProcessor {
             }
 
             Set<String> hubEntities = new HashSet<>();
+            Set<String> protectedSet = protectedEntityTexts;
+            int fallbackThreshold = threshold * 5;
             for (Map.Entry<String, HubStats> entry : hubStatsMap.entrySet()) {
                 String text = entry.getKey();
                 HubStats stats = entry.getValue();
                 int degree = stats.degree;
                 int totalWeight = stats.totalWeight;
-                if (degree >= threshold || totalWeight >= threshold) {
-                    hubEntities.add(text);
+
+                boolean isProtected = protectedSet != null && protectedSet.contains(text);
+                if (!isProtected) {
+                    if (degree >= threshold || totalWeight >= threshold) {
+                        hubEntities.add(text);
+                    }
+                } else {
+                    if (fallbackThreshold > 0 && (degree >= fallbackThreshold || totalWeight >= fallbackThreshold)) {
+                        hubEntities.add(text);
+                    }
                 }
             }
 
