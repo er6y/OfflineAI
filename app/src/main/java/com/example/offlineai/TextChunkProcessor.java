@@ -1601,7 +1601,7 @@ public class TextChunkProcessor {
             long startTime = System.currentTimeMillis();
 
             class HubStats {
-                Set<String> neighbors = new HashSet<>();
+                int degree;
                 int totalWeight;
             }
 
@@ -1613,28 +1613,38 @@ public class TextChunkProcessor {
                 }
                 int w = edge.weight;
 
-                HubStats sFrom = hubStatsMap.get(edge.from);
-                if (sFrom == null) {
-                    sFrom = new HubStats();
-                    hubStatsMap.put(edge.from, sFrom);
-                }
-                sFrom.neighbors.add(edge.to);
-                sFrom.totalWeight += w;
+                if (edge.from.equals(edge.to)) {
+                    HubStats s = hubStatsMap.get(edge.from);
+                    if (s == null) {
+                        s = new HubStats();
+                        hubStatsMap.put(edge.from, s);
+                    }
+                    s.degree += 1;
+                    s.totalWeight += w;
+                } else {
+                    HubStats sFrom = hubStatsMap.get(edge.from);
+                    if (sFrom == null) {
+                        sFrom = new HubStats();
+                        hubStatsMap.put(edge.from, sFrom);
+                    }
+                    sFrom.degree += 1;
+                    sFrom.totalWeight += w;
 
-                HubStats sTo = hubStatsMap.get(edge.to);
-                if (sTo == null) {
-                    sTo = new HubStats();
-                    hubStatsMap.put(edge.to, sTo);
+                    HubStats sTo = hubStatsMap.get(edge.to);
+                    if (sTo == null) {
+                        sTo = new HubStats();
+                        hubStatsMap.put(edge.to, sTo);
+                    }
+                    sTo.degree += 1;
+                    sTo.totalWeight += w;
                 }
-                sTo.neighbors.add(edge.from);
-                sTo.totalWeight += w;
             }
 
             Set<String> hubEntities = new HashSet<>();
             for (Map.Entry<String, HubStats> entry : hubStatsMap.entrySet()) {
                 String text = entry.getKey();
                 HubStats stats = entry.getValue();
-                int degree = stats.neighbors.size();
+                int degree = stats.degree;
                 int totalWeight = stats.totalWeight;
                 if (degree >= threshold || totalWeight >= threshold) {
                     hubEntities.add(text);

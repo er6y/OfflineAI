@@ -277,6 +277,21 @@
     <string name="dialog_title_about">About OfflineAI</string>
     <string name="dialog_message_about">Version: %1$s\n\nLocal RAG (Retrieval Augmented Generation) Application</string>
 
+    <!-- OTA update strings -->
+    <string name="ota_label_current_version">Current version: %1$s</string>
+    <string name="ota_label_new_version">New version: %1$s</string>
+    <string name="ota_text_no_new_version">None</string>
+    <string name="ota_text_unknown_version">--</string>
+    <string name="ota_label_release_notes">Release notes: %1$s</string>
+    <string name="ota_button_update">Update</string>
+    <string name="ota_status_checking">Checking for updates...</string>
+    <string name="ota_status_no_new_version">You are already on the latest version</string>
+    <string name="ota_status_check_failed">Failed to check for updates: %1$s</string>
+    <string name="ota_status_downloading">Downloading update: %1$d%%</string>
+    <string name="ota_status_download_complete">Download complete, ready to install.</string>
+    <string name="ota_status_download_failed">Download failed: %1$s</string>
+    <string name="ota_status_install_start">Starting installer...</string>
+
     <!-- TextEditorFragment Messages -->
     <string name="menu_text_editor">Text Editor</string>
     <string name="title_text_editor">Text Editor</string>

@@ -299,19 +299,21 @@ afterEvaluate {
             def buildTime = project.ext.buildTimeStamp
             def releaseApk = file('build/outputs/apk/release/app-release.apk')
             if (releaseApk.exists()) {
-                def outputDir = new File(project.rootDir, "offline-ai-apk")
-
-                if (!outputDir.exists()) {
-                    outputDir.mkdirs()
-                }
-
-                def targetName = "OfflineAI_release.apk"
+                // Copy release APK to project root with timestamp in filename
+                def rootDir = project.rootDir
+                def targetApkName = "OfflineAI_release_${buildTime}.apk"
                 copy {
                     from releaseApk
-                    into outputDir
-                    rename { targetName }
+                    into rootDir
+                    rename { targetApkName }
                 }
-                println "Release APK copied to: ${new File(outputDir, targetName).absolutePath}"
+                println "Release APK copied to: ${new File(rootDir, targetApkName).absolutePath}"
+
+                // Prepare offline-ai-apk directory for release_info.json
+                def infoDir = new File(project.rootDir, "offline-ai-apk")
+                if (!infoDir.exists()) {
+                    infoDir.mkdirs()
+                }
 
                 def gitCommitId = ""
                 def gitCommitMessage = ""
@@ -333,7 +335,22 @@ afterEvaluate {
                     println "Warning: failed to obtain git commit info: ${e.message}"
                 }
 
-                def infoFile = new File(outputDir, "release_info.json")
+                def infoFile = new File(infoDir, "release_info.json")
+
+                def existingAppUrl = ""
+                if (infoFile.exists()) {
+                    try {
+                        def text = infoFile.getText('UTF-8')
+                        if (text != null && text.trim()) {
+                            def parsed = new groovy.json.JsonSlurper().parseText(text)
+                            if (parsed != null && parsed.app_url != null) {
+                                existingAppUrl = parsed.app_url.toString()
+                            }
+                        }
+                    } catch (Exception e) {
+                        println "Warning: failed to read existing app_url from release_info.json: ${e.message}"
+                    }
+                }
 
                 // Build JSON string manually to keep Chinese characters as-is (UTF-8),
                 // while still escaping special characters correctly.
@@ -348,7 +365,8 @@ afterEvaluate {
                 def json = """{
   \"build_version\": \"${escapeJson(buildTime)}\",
   \"git_commit_id\": \"${escapeJson(gitCommitId)}\",
-  \"git_commit_message\": \"${escapeJson(gitCommitMessage)}\"
+  \"git_commit_message\": \"${escapeJson(gitCommitMessage)}\",
+  \"app_url\": \"${escapeJson(existingAppUrl)}\"
 }
 """
 
@@ -359,7 +377,7 @@ afterEvaluate {
             }
         }
     }
-    
+
     // 为assembleDebug任务添加APK复制
     tasks.named('assembleDebug').configure {
         doLast {

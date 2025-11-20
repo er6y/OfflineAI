@@ -7,6 +7,7 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.content.FileProvider;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentTransaction;
 import androidx.viewpager2.adapter.FragmentStateAdapter;
@@ -21,6 +22,7 @@ import com.google.android.material.bottomnavigation.BottomNavigationView;
 import android.Manifest;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
@@ -38,22 +40,37 @@ import com.example.offlineai.LogManager;
 import com.example.offlineai.EmbeddingHandler;
 import com.example.offlineai.api.LocalLlmAdapter;
 import com.example.offlineai.AcceleratorDiagnostics;
+import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.WindowManager;
+import android.widget.Button;
+import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileWriter;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 
 public class MainActivity extends AppCompatActivity implements SettingsFragment.SettingsChangeListener {
 
     private static final String TAG = "OfflineAI"; // 添加TAG用于日志打印
     // 使用BuildConfig中的构建时间作为版本号，而不是实时时间
     private static final String BUILD_VERSION = BuildConfig.BUILD_VERSION;
+    // OTA constants
+    private static final String OTA_SUBDIR_NAME = "ota";
+    private static final String OTA_RELEASE_INFO_FILENAME = "release_info.json";
+    private static final String OTA_APK_FILENAME = "OfflineAI_release.apk";
+    // Use raw URLs on Gitee to download file content directly.
+    private static final String OTA_RELEASE_INFO_URL = "https://gitee.com/er6y/offline-ai-apk/raw/master/release_info.json";
+    // APK download URL is now provided by release_info.json (app_url field).
+
     
     // 权限请求相关常量
     private static final int PERMISSION_REQUEST_CODE = 1001;
@@ -68,6 +85,10 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
     private boolean isInForeground = false;
     private UnifiedForegroundService unifiedForegroundService;
     private ServiceConnection serviceConnection;
+    // OTA download state flag
+    private volatile boolean isOtaDownloading = false;
+    // OTA APK URL loaded from release_info.json (app_url)
+    private volatile String otaApkUrlFromServer = null;
     
     // ActivityResultLauncher替代startActivityForResult
     private ActivityResultLauncher<Intent> manageStorageLauncher;
@@ -529,16 +550,455 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
     }
     
     private void showAboutDialog() {
-        // 组合完整的版本信息
+        // Build current version info string
         String versionName = BuildConfig.VERSION_NAME;
         String buildVersion = BUILD_VERSION;
-        String versionInfo = String.format("v%s (Build: %s)", versionName, buildVersion);
-        
+        String versionInfo = String.format("build: %s", buildVersion);
+
+        LayoutInflater inflater = LayoutInflater.from(this);
+        View contentView = inflater.inflate(R.layout.dialog_about_ota, null);
+        TextView labelCurrentVersion = contentView.findViewById(R.id.labelCurrentVersion);
+        TextView labelNewVersion = contentView.findViewById(R.id.labelNewVersion);
+        TextView textCurrentVersion = contentView.findViewById(R.id.textCurrentVersion);
+        TextView textNewVersion = contentView.findViewById(R.id.textNewVersion);
+        TextView textOtaMessage = contentView.findViewById(R.id.textOtaMessage);
+        TextView textOtaStatus = contentView.findViewById(R.id.textOtaStatus);
+
+        labelCurrentVersion.setText(getString(R.string.ota_label_current_version, ""));
+        labelNewVersion.setText(getString(R.string.ota_label_new_version, ""));
+        textCurrentVersion.setText(versionInfo);
+        textNewVersion.setText(getString(R.string.ota_text_unknown_version));
+        if (textOtaMessage != null) {
+            textOtaMessage.setText("");
+        }
+        textOtaStatus.setText(getString(R.string.ota_status_checking));
+
         androidx.appcompat.app.AlertDialog.Builder builder = new androidx.appcompat.app.AlertDialog.Builder(this);
         builder.setTitle(stateDisplayManager.getDialogDisplay(AppConstants.DIALOG_TITLE_ABOUT));
-        builder.setMessage(String.format(stateDisplayManager.getDialogDisplay(AppConstants.DIALOG_MESSAGE_ABOUT), versionInfo));
+        builder.setView(contentView);
         builder.setPositiveButton(stateDisplayManager.getButtonDisplay(AppConstants.BUTTON_TEXT_OK), null);
-        builder.show();
+        builder.setNeutralButton(getString(R.string.ota_button_update), null);
+
+        final androidx.appcompat.app.AlertDialog dialog = builder.create();
+        dialog.show();
+
+        final Button buttonOk = dialog.getButton(DialogInterface.BUTTON_POSITIVE);
+        final Button buttonUpdate = dialog.getButton(DialogInterface.BUTTON_NEUTRAL);
+
+        if (buttonUpdate != null) {
+            // Disable update button until remote version info is loaded
+            buttonUpdate.setEnabled(false);
+        }
+
+        // Start background check for remote OTA version
+        startOtaVersionCheck(textNewVersion, textOtaStatus, buttonUpdate, textOtaMessage);
+
+        if (buttonUpdate != null && buttonOk != null) {
+            buttonUpdate.setOnClickListener(v -> {
+                if (!buttonUpdate.isEnabled()) {
+                    return;
+                }
+                if (isOtaDownloading) {
+                    return;
+                }
+                startOtaApkDownload(dialog, textOtaStatus, buttonUpdate, buttonOk);
+            });
+        }
+    }
+
+    /**
+     * Start background check for OTA version by downloading release_info.json
+     * into dataRoot/ota and comparing build_version with local BUILD_VERSION.
+     */
+    private void startOtaVersionCheck(final TextView textNewVersion,
+                                      final TextView textOtaStatus,
+                                      final Button buttonUpdate,
+                                      final TextView textOtaMessage) {
+        final String localBuildVersion = BUILD_VERSION;
+
+        new Thread(() -> {
+            String remoteBuildVersion = null;
+            String remoteCommitMessage = null;
+            String remoteAppUrl = null;
+            String errorMessage = null;
+
+            try {
+                File otaDir = getOrCreateOtaDirectory();
+                if (otaDir == null) {
+                    errorMessage = "Failed to create OTA directory";
+                } else {
+                    File infoFile = new File(otaDir, OTA_RELEASE_INFO_FILENAME);
+                    downloadFileSimple(OTA_RELEASE_INFO_URL, infoFile);
+
+                    String json = readFileToString(infoFile);
+                    JSONObject obj = new JSONObject(json);
+                    remoteBuildVersion = obj.optString("build_version", "");
+                    remoteCommitMessage = obj.optString("git_commit_message", "");
+                    remoteAppUrl = obj.optString("app_url", "");
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[OTA] Failed to check release info: " + e.getMessage(), e);
+                errorMessage = e.getMessage();
+            }
+
+            final String finalRemoteBuildVersion = remoteBuildVersion;
+            final String finalRemoteCommitMessage = remoteCommitMessage;
+            final String finalRemoteAppUrl = remoteAppUrl;
+            final String finalErrorMessage = errorMessage;
+
+            runOnUiThread(() -> {
+                if (finalErrorMessage != null) {
+                    textOtaStatus.setText(getString(R.string.ota_status_check_failed, finalErrorMessage));
+                    textNewVersion.setText(getString(R.string.ota_text_no_new_version));
+                    if (textOtaMessage != null) {
+                        textOtaMessage.setText(getString(R.string.ota_text_no_new_version));
+                    }
+                    if (buttonUpdate != null) {
+                        buttonUpdate.setEnabled(false);
+                    }
+                } else {
+                    if (finalRemoteBuildVersion != null && !finalRemoteBuildVersion.isEmpty()) {
+                        boolean hasNewerVersion = false;
+                        try {
+                            hasNewerVersion = finalRemoteBuildVersion.compareTo(localBuildVersion) > 0;
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[OTA] Failed to compare build versions: " + e.getMessage(), e);
+                            hasNewerVersion = false;
+                        }
+
+                        if (hasNewerVersion) {
+                            // Save OTA APK URL from server when a newer version is available
+                            if (finalRemoteAppUrl != null && !finalRemoteAppUrl.isEmpty()) {
+                                otaApkUrlFromServer = finalRemoteAppUrl;
+                            } else {
+                                otaApkUrlFromServer = null;
+                            }
+                            String newVersionInfo = String.format("build: %s", finalRemoteBuildVersion);
+                            textNewVersion.setText(newVersionInfo);
+                            textOtaStatus.setText("");
+                            if (textOtaMessage != null && finalRemoteCommitMessage != null && !finalRemoteCommitMessage.isEmpty()) {
+                                textOtaMessage.setText(getString(R.string.ota_label_release_notes, finalRemoteCommitMessage));
+                            } else if (textOtaMessage != null) {
+                                textOtaMessage.setText("");
+                            }
+                            if (buttonUpdate != null) {
+                                // Only enable update button when we have a valid app_url
+                                buttonUpdate.setEnabled(otaApkUrlFromServer != null && !otaApkUrlFromServer.isEmpty());
+                            }
+                        } else {
+                            otaApkUrlFromServer = null;
+                            textNewVersion.setText(getString(R.string.ota_text_no_new_version));
+                            textOtaStatus.setText(getString(R.string.ota_status_no_new_version));
+                            if (textOtaMessage != null) {
+                                textOtaMessage.setText(getString(R.string.ota_text_no_new_version));
+                            }
+                            if (buttonUpdate != null) {
+                                buttonUpdate.setEnabled(false);
+                            }
+                        }
+                    } else {
+                        textNewVersion.setText(getString(R.string.ota_text_no_new_version));
+                        textOtaStatus.setText(getString(R.string.ota_status_no_new_version));
+                        if (textOtaMessage != null) {
+                            textOtaMessage.setText(getString(R.string.ota_text_no_new_version));
+                        }
+                        if (buttonUpdate != null) {
+                            buttonUpdate.setEnabled(false);
+                        }
+                    }
+                }
+            });
+        }).start();
+    }
+
+    /**
+     * Start downloading OfflineAI_release.apk into dataRoot/ota with progress
+     * updates and trigger installation when completed.
+     */
+    private void startOtaApkDownload(final androidx.appcompat.app.AlertDialog dialog,
+                                     final TextView textOtaStatus,
+                                     final Button buttonUpdate,
+                                     final Button buttonOk) {
+        if (isOtaDownloading) {
+            return;
+        }
+
+        if (otaApkUrlFromServer == null || otaApkUrlFromServer.isEmpty()) {
+            LogManager.logE(TAG, "[OTA] Cannot start download: app_url is empty in release_info.json");
+            textOtaStatus.setText(getString(R.string.ota_status_download_failed, "app_url is empty"));
+            return;
+        }
+        isOtaDownloading = true;
+
+        if (buttonUpdate != null) {
+            buttonUpdate.setEnabled(false);
+        }
+        if (buttonOk != null) {
+            buttonOk.setEnabled(false);
+        }
+
+        textOtaStatus.setText(getString(R.string.ota_status_downloading, 0));
+
+        new Thread(() -> {
+            File apkFile = null;
+            String errorMessage = null;
+
+            try {
+                File otaDir = getOrCreateOtaDirectory();
+                if (otaDir == null) {
+                    errorMessage = "Failed to create OTA directory";
+                } else {
+                    apkFile = new File(otaDir, OTA_APK_FILENAME);
+                    downloadApkWithProgress(otaApkUrlFromServer, apkFile, textOtaStatus);
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[OTA] Failed to download APK: " + e.getMessage(), e);
+                errorMessage = e.getMessage();
+            }
+
+            final File finalApkFile = apkFile;
+            final String finalErrorMessage = errorMessage;
+
+            runOnUiThread(() -> {
+                isOtaDownloading = false;
+                if (buttonOk != null) {
+                    buttonOk.setEnabled(true);
+                }
+
+                if (finalErrorMessage != null) {
+                    textOtaStatus.setText(getString(R.string.ota_status_download_failed, finalErrorMessage));
+                    if (buttonUpdate != null) {
+                        // Allow user to retry download
+                        buttonUpdate.setEnabled(true);
+                    }
+                } else if (finalApkFile != null && finalApkFile.exists()) {
+                    textOtaStatus.setText(getString(R.string.ota_status_download_complete));
+                    startOtaApkInstall(finalApkFile, textOtaStatus);
+                }
+            });
+        }).start();
+    }
+
+    /**
+     * Download release info (or other small file) without progress reporting.
+     */
+    private void downloadFileSimple(String urlString, File targetFile) throws Exception {
+        HttpURLConnection connection = null;
+        InputStream input = null;
+        FileOutputStream output = null;
+        try {
+            URL url = new URL(urlString);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Android; OfflineAI OTA) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0 Mobile Safari/537.36");
+            connection.setRequestProperty("Accept", "*/*");
+            connection.setRequestProperty("Referer", "https://gitee.com/er6y/offline-ai-apk");
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(30000);
+            connection.setInstanceFollowRedirects(true);
+
+            int responseCode = connection.getResponseCode();
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                throw new Exception("HTTP " + responseCode);
+            }
+
+            input = connection.getInputStream();
+            File parent = targetFile.getParentFile();
+            if (parent != null && !parent.exists()) {
+                // Ensure parent directory exists
+                //noinspection ResultOfMethodCallIgnored
+                parent.mkdirs();
+            }
+            output = new FileOutputStream(targetFile);
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = input.read(buffer)) != -1) {
+                output.write(buffer, 0, count);
+            }
+            output.flush();
+        } finally {
+            if (input != null) {
+                try {
+                    input.close();
+                } catch (Exception ignore) {
+                }
+            }
+            if (output != null) {
+                try {
+                    output.close();
+                } catch (Exception ignore) {
+                }
+            }
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    /**
+     * Download APK with progress updates into targetFile.
+     */
+    private void downloadApkWithProgress(String urlString, File targetFile, final TextView textOtaStatus) throws Exception {
+        HttpURLConnection connection = null;
+        InputStream input = null;
+        FileOutputStream output = null;
+        try {
+            URL url = new URL(urlString);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (Android; OfflineAI OTA) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0 Mobile Safari/537.36");
+            connection.setRequestProperty("Accept", "*/*");
+            connection.setRequestProperty("Referer", "https://gitee.com/er6y/offline-ai-apk");
+            connection.setConnectTimeout(60000);
+            connection.setReadTimeout(120000);
+            connection.setInstanceFollowRedirects(true);
+
+            int responseCode = connection.getResponseCode();
+            if (responseCode != HttpURLConnection.HTTP_OK) {
+                throw new Exception("HTTP " + responseCode);
+            }
+
+            long contentLength = connection.getContentLengthLong();
+            if (contentLength <= 0) {
+                String header = connection.getHeaderField("Content-Length");
+                if (header != null && !header.isEmpty()) {
+                    try {
+                        contentLength = Long.parseLong(header);
+                    } catch (NumberFormatException e) {
+                        LogManager.logW(TAG, "[OTA] Failed to parse Content-Length: " + header);
+                    }
+                }
+            }
+
+            input = connection.getInputStream();
+            File parent = targetFile.getParentFile();
+            if (parent != null && !parent.exists()) {
+                // Ensure parent directory exists
+                //noinspection ResultOfMethodCallIgnored
+                parent.mkdirs();
+            }
+            output = new FileOutputStream(targetFile);
+            byte[] buffer = new byte[8192];
+            long totalRead = 0;
+            int lastProgress = 0;
+            int count;
+
+            while ((count = input.read(buffer)) != -1) {
+                output.write(buffer, 0, count);
+                totalRead += count;
+
+                if (contentLength > 0) {
+                    int progress = (int) ((totalRead * 100) / contentLength);
+                    if (progress != lastProgress) {
+                        lastProgress = progress;
+                        final int finalProgress = progress;
+                        runOnUiThread(() -> textOtaStatus.setText(getString(R.string.ota_status_downloading, finalProgress)));
+                    }
+                }
+            }
+            output.flush();
+
+            if (contentLength > 0 && totalRead < contentLength) {
+                LogManager.logW(TAG, "[OTA] Downloaded size " + totalRead + " < expected " + contentLength);
+            }
+        } finally {
+            if (input != null) {
+                try {
+                    input.close();
+                } catch (Exception ignore) {
+                }
+            }
+            if (output != null) {
+                try {
+                    output.close();
+                } catch (Exception ignore) {
+                }
+            }
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    /**
+     * Start system package installer for the downloaded APK file.
+     */
+    private void startOtaApkInstall(File apkFile, final TextView textOtaStatus) {
+        try {
+            textOtaStatus.setText(getString(R.string.ota_status_install_start));
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                if (!getPackageManager().canRequestPackageInstalls()) {
+                    LogManager.logE(TAG, "[OTA] Cannot start installer: install from unknown sources is not allowed for this app");
+                    textOtaStatus.setText(getString(R.string.ota_status_download_failed, "install permission required"));
+                    try {
+                        Intent settingsIntent = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES);
+                        settingsIntent.setData(Uri.parse("package:" + getPackageName()));
+                        settingsIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(settingsIntent);
+                    } catch (Exception settingsEx) {
+                        LogManager.logE(TAG, "[OTA] Failed to open unknown app sources settings: " + settingsEx.getMessage(), settingsEx);
+                    }
+                    return;
+                }
+            }
+
+            Uri contentUri = FileProvider.getUriForFile(this,
+                    getPackageName() + ".fileprovider",
+                    apkFile);
+
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(contentUri, "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+            startActivity(intent);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[OTA] Failed to start installer: " + e.getMessage(), e);
+            textOtaStatus.setText(getString(R.string.ota_status_download_failed, e.getMessage()));
+        }
+    }
+
+    /**
+     * Ensure OTA directory under data root path exists.
+     */
+    private File getOrCreateOtaDirectory() {
+        try {
+            String dataRootPath = ConfigManager.getDataRootPath(this);
+            File baseDir = new File(dataRootPath);
+            File otaDir = new File(baseDir, OTA_SUBDIR_NAME);
+            if (!otaDir.exists()) {
+                if (!otaDir.mkdirs()) {
+                    LogManager.logE(TAG, "[OTA] Failed to create OTA directory: " + otaDir.getAbsolutePath());
+                    return null;
+                }
+            }
+            return otaDir;
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[OTA] Exception while creating OTA directory: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     * Read a small text file fully into a String using default charset.
+     */
+    private String readFileToString(File file) throws Exception {
+        InputStream input = null;
+        try {
+            input = new java.io.FileInputStream(file);
+            byte[] buffer = new byte[(int) file.length()];
+            int read = input.read(buffer);
+            if (read <= 0) {
+                return "";
+            }
+            return new String(buffer, 0, read);
+        } finally {
+            if (input != null) {
+                try {
+                    input.close();
+                } catch (Exception ignore) {
+                }
+            }
+        }
     }
     
     @Override

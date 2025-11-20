@@ -272,6 +272,20 @@
     <string name="dialog_message_need_storage_permission">OfflineAI 需要访问外部存储权限才能读取和保存模型文件、知识库文件等。\n\n请在设置中授予应用存储权限，否则应用将无法正常工作。</string>
     <string name="dialog_title_about">关于 OfflineAI</string>
     <string name="dialog_message_about">版本: %1$s\n\n本地RAG (检索增强生成) 应用</string>
+    <!-- OTA update strings -->
+    <string name="ota_label_current_version">当前版本：%1$s</string>
+    <string name="ota_label_new_version">新版本：%1$s</string>
+    <string name="ota_text_no_new_version">无</string>
+    <string name="ota_text_unknown_version">--</string>
+    <string name="ota_label_release_notes">更新说明：%1$s</string>
+    <string name="ota_button_update">更新</string>
+    <string name="ota_status_checking">正在检查更新...</string>
+    <string name="ota_status_no_new_version">当前已是最新版本</string>
+    <string name="ota_status_check_failed">检查更新失败：%1$s</string>
+    <string name="ota_status_downloading">正在下载更新：%1$d%%</string>
+    <string name="ota_status_download_complete">下载完成，可以安装新版本。</string>
+    <string name="ota_status_download_failed">下载失败：%1$s</string>
+    <string name="ota_status_install_start">正在启动安装...</string>
     <string name="dialog_add_new_api_address">添加新的API地址</string>
 
 
