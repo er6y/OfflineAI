@@ -30,7 +30,7 @@
       "llm.mnn": "https://www.modelscope.cn/models/MNN/Qwen3-0.6B-MNN/resolve/master/llm.mnn",
       "llm.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen3-0.6B-MNN/resolve/master/llm.mnn.weight",
       "tokenizer.txt": "https://www.modelscope.cn/models/MNN/Qwen3-0.6B-MNN/resolve/master/tokenizer.txt",
-	    "comments": "Qwen3 Text2Text."
+	    "comments": "Qwen3 Text2Text. try fast RAG without tinking; try ARS +TTS for fast voice conversations."
     },
     "Qwen3-4B-Thinking-2507-MNN-int4": {
       "config.json": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Thinking-2507-MNN/resolve/master/config.json",
@@ -39,8 +39,18 @@
       "llm.mnn": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Thinking-2507-MNN/resolve/master/llm.mnn",
       "llm.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Thinking-2507-MNN/resolve/master/llm.mnn.weight",
       "tokenizer.txt": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Thinking-2507-MNN/resolve/master/tokenizer.txt",
-	    "comments": "Qwen3 Text2Text. Suitable for local RAG."
+	    "comments": "Qwen3 Text2Text. Suitable for local RAG, but slow. Too much thinking ..."
     },    
+    "Qwen3-4B-Instruct-2507-MNN-int4": {
+      "config.json": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Instruct-2507-MNN/resolve/master/config.json",
+      "configuration.json": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Instruct-2507-MNN/resolve/master/configuration.json",
+      "llm_config.json": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Instruct-2507-MNN/resolve/master/llm_config.json",
+      "llm.mnn.json": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Instruct-2507-MNN/resolve/master/llm.mnn.json",
+      "llm.mnn": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Instruct-2507-MNN/resolve/master/llm.mnn",
+      "llm.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Instruct-2507-MNN/resolve/master/llm.mnn.weight",
+      "tokenizer.txt": "https://www.modelscope.cn/models/MNN/Qwen3-4B-Thinking-2507-MNN/resolve/master/tokenizer.txt",
+	    "comments": "Qwen3 Text2Text. Recommended for local RAG!!"
+    },  
     "VibeThinker-1.5B-MNN-int4": {
       "config.json": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/config.json",
       "configuration.json": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/configuration.json",
@@ -49,7 +59,7 @@
       "llm.mnn": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/llm.mnn",
       "llm.mnn.weight": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/llm.mnn.weight",
       "tokenizer.txt": "https://www.modelscope.cn/models/MNN/VibeThinker-1.5B-MNN/resolve/master/tokenizer.txt",
-	  "comments": "VibeThinker-1.5B Text2Text. Suitable for local RAG."
+	  "comments": "VibeThinker-1.5B Text2Text. Poor ability on documents, Not Suitable for local RAG."
     },    
     "Qwen3-VL-4B-Thinking-MNN-int4": {
       "config.json": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/config.json",
@@ -61,7 +71,7 @@
       "tokenizer.txt": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/tokenizer.txt",
       "visual.mnn": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/visual.mnn",
       "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/visual.mnn.weight",
-	    "comments": "Qwen3 VL 4B Thinking Text-Image2Text"
+	    "comments": "Qwen3 VL 4B Thinking Text-Image2Text, good images understanding, Too much thinking ..."
     },
     "Qwen3-VL-4B-Instruct-MNN-int4": {
       "config.json": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Instruct-MNN/resolve/master/config.json",
@@ -85,7 +95,7 @@
       "tokenizer.txt": "https://www.modelscope.cn/models/MNN/Qwen3-VL-2B-Instruct-MNN/resolve/master/tokenizer.txt",
       "visual.mnn": "https://www.modelscope.cn/models/MNN/Qwen3-VL-2B-Instruct-MNN/resolve/master/visual.mnn",
       "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen3-VL-2B-Instruct-MNN/resolve/master/visual.mnn.weight",
-	    "comments": "Qwen3 VL 2B Instruct Text-Image2Text"
+	    "comments": "Qwen3 VL 2B Instruct Text-Image2Text, fast image understanding"
     },
     "MiniCPM-V-4-MNN-int4": {
       "config.json": "https://www.modelscope.cn/models/MNN/MiniCPM-V-4-MNN/resolve/master/config.json",
@@ -98,17 +108,6 @@
       "visual.mnn": "https://www.modelscope.cn/models/MNN/MiniCPM-V-4-MNN/resolve/master/visual.mnn",
       "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/MiniCPM-V-4-MNN/resolve/master/visual.mnn.weight",
 	    "comments": "MiniCPM-V-4-MNN-int4 Text-Image2Text, Tested to be good."
-    },
-    "PaddleOCR-VL-0.9B-int4": {
-      "config.json": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/config.json",
-      "configuration.json": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/configuration.json",
-      "embeddings_bf16.bin": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/embeddings_bf16.bin",
-      "llm_config.json": "https://www.modelscope.cn/models/MNN/Qwen3-VL-4B-Thinking-MNN/resolve/master/llm_config.json" ,
-      "llm.mnn.json": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/llm_config.json",
-      "llm.mnn": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/llm.mnn",
-      "tokenizer.txt": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/tokenizer.txt",
-      "visual.mnn": "https://www.modelscope.cn/models/Anionex/paddleocr-vl-0.9b-mnn-4bit/resolve/master/visual.mnn",
-	    "comments": "PaddleOCR-VL-0.9B的MNN格式4bit量化版本，专为移动端和边缘设备部署优化"
     },
     "Qwen2.5-Omni-3B-MNN-int4": {
       "config.json": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-3B-MNN/resolve/master/config.json",
@@ -158,7 +157,7 @@
       "talker_embeddings_bf16.bin": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/talker_embeddings_bf16.bin",
       "visual.mnn": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/visual.mnn",
       "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/visual.mnn.weight",
-      "comments": "Qwen2.5 Omni Multimodal: Text+Image+Audio2Text (Full multimodal support with audio input/output)"
+      "comments": "Qwen2.5 Omni Multimodal: Text+Image+Audio2Text (Full multimodal support with audio input/output), slow for mobiles"
     },
     "stable-diffusion-v1-5-mnn-opencl-int8": {
       "configuration.json": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/configuration.json",

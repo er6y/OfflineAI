@@ -99,23 +99,30 @@ public class HelpFragment extends Fragment {
             // 从assets目录读取帮助文档
             InputStream inputStream = requireContext().getAssets().open("USER_GUIDE.md");
             String markdownContent = readFromInputStream(inputStream);
-            
-            // 使用Markwon渲染Markdown内容，添加等宽字体支持
+
+            // 记录当前正文字号（px），用于给代码块设置略小的字体大小
+            final float baseTextSizePx = helpTextView.getTextSize();
+            final int codeTextSizePx = (int) (baseTextSizePx * 0.7f);
+            final int codeBlockTextSizePx = (int) (baseTextSizePx * 0.6f);
+
+            // 使用Markwon渲染Markdown内容：正文跟随全局字体设置，代码块/图示使用等宽小字号
             final Markwon markwon = Markwon.builder(requireContext())
                     .usePlugin(LinkifyPlugin.create())
-                    // 添加自定义插件，确保代码块和表格使用等宽字体
                     .usePlugin(new io.noties.markwon.AbstractMarkwonPlugin() {
                         @Override
                         public void configureTheme(@NonNull io.noties.markwon.core.MarkwonTheme.Builder builder) {
-                            // 设置代码块使用等宽字体
                             builder
+                                // 代码与代码块使用等宽字体
                                 .codeTypeface(android.graphics.Typeface.MONOSPACE)
                                 .codeBlockTypeface(android.graphics.Typeface.MONOSPACE)
+                                // 代码与代码块使用略小字号，避免 ASCII 图表被放大撑乱
+                                .codeTextSize(codeTextSizePx)
+                                .codeBlockTextSize(codeBlockTextSizePx)
                                 // 设置代码块背景色，提高可读性
                                 .codeBlockBackgroundColor(android.graphics.Color.parseColor("#f5f5f5"))
                                 .codeBackgroundColor(android.graphics.Color.parseColor("#f0f0f0"))
                                 // 增加代码块内边距
-                                .codeBlockMargin(16);
+                                .codeBlockMargin(4);
                         }
                     })
                     .build();

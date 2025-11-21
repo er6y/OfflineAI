@@ -2652,7 +2652,8 @@ Java_com_offlineai_mnn_MnnInference_computeScores(
         LOGI("[RERANKER] Calling reranker->compute_scores()...");
         LOGI("[RERANKER] This may take a long time on emulator (several minutes)...");
         
-        // Debug: Get token IDs for "yes" and "no" (Qwen3Reranker only)
+        // Debug tokenizer diagnostics for Qwen3 reranker are disabled in production to reduce overhead.
+#if 0
         auto* qwen3_reranker = dynamic_cast<Qwen3Reranker*>(reranker);
         if (qwen3_reranker) {
             auto llm = qwen3_reranker->get_llm();
@@ -2696,6 +2697,7 @@ Java_com_offlineai_mnn_MnnInference_computeScores(
                 LOGI("[RERANKER][DEBUG] ========================================");
             }
         }
+#endif
         
         auto start_time = std::chrono::high_resolution_clock::now();
         

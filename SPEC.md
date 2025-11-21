@@ -9220,7 +9220,10 @@ KEY_GRAPH_ENTITY_CONFIDENCE_THRESHOLD = "graph_entity_confidence_threshold" // �
 KEY_GRAPH_RAG_ENABLED = "graph_rag_enabled"                    // 是否启用 Graph RAG 查询模式
 KEY_GRAPH_RAG_WEIGHT_PRESET = "graph_rag_weight_preset"       // Graph RAG 融合权重预设索引
 KEY_GRAPH_MAX_EXPAND_CHUNKS = "graph_max_expand_chunks"       // 图扩展阶段允许返回的最大 chunk 数
-KEY_GRAPH_HUB_THRESHOLD = "graph_hub_threshold"               // 超大实体（hub）门限：按邻居数/总边权重过滤，0=关闭
+KEY_GRAPH_RAG_VECTOR_EXPAND = "graph_rag_vector_expand"       // Graph RAG 向量粗召回放大 (+K)，控制初始向量检索 topK = depth + K+
+KEY_GRAPH_HUB_THRESHOLD = "graph_hub_threshold"               // Legacy 单一超大实体（hub）门限：按邻居数/总边权重过滤，0=关闭，仅用于兼容旧配置
+KEY_GRAPH_HUB_THRESHOLD_BUILD = "graph_hub_threshold_build"   // 构建阶段 Hub 过滤阈值（按邻居数/总边权重），0=关闭
+KEY_GRAPH_HUB_THRESHOLD_QUERY = "graph_hub_threshold_query"   // 查询阶段 Hub 过滤阈值（Graph RAG 召回期），0=关闭
 KEY_GRAPH_STOPWORDS_PATH = "graph_stopwords_path"             // 图谱停用词 JSON 文件绝对路径（空字符串表示未启用）
 
 // 默认值（逻辑层）
@@ -9230,7 +9233,10 @@ DEFAULT_GRAPH_ENTITY_CONFIDENCE_THRESHOLD = 0.7f // 只保留高置信度实体
 DEFAULT_GRAPH_RAG_ENABLED = true                 // 默认开启 Graph RAG，在手机端通过合理上限控制性能
 DEFAULT_GRAPH_MAX_EXPAND_CHUNKS = 50             // 图扩展最多增加 50 个候选 chunk
 DEFAULT_GRAPH_RAG_WEIGHT_PRESET = 1              // 融合权重预设：1=平衡（0.7/0.2/0.1）
-DEFAULT_GRAPH_HUB_THRESHOLD = 200                // hub 门限默认 200（按邻居数/总边权重），对中小型知识库有适度清洗
+DEFAULT_GRAPH_RAG_VECTOR_EXPAND = 20             // Graph RAG 模式下向量粗召回默认扩大量（K+20）
+DEFAULT_GRAPH_HUB_THRESHOLD = 100                // Legacy hub 门限默认 100（按邻居数/总边权重），仅用于旧版本配置的回读
+DEFAULT_GRAPH_HUB_THRESHOLD_BUILD = 1000         // 构建期 Hub 门限默认 1000（邻居数或总边权重 ≥ 1000 视为构建期 Hub）
+DEFAULT_GRAPH_HUB_THRESHOLD_QUERY = 300          // 召回期 Hub 门限默认 300（邻居数或总边权重 ≥ 300 视为查询期 Hub）
 
 **停用词表与文本编辑器（TextEditorFragment）**：
 - 图谱停用词 JSON 文件位于 `dataRoot/stopwords` 目录，由 `ConfigManager.ensureDefaultStopwordsExample()` 在首次启动或缺失时，将 `assets/example_stop.json` 复制为 `example_stop.json` 示例文件，供用户参考和修改。
@@ -9264,6 +9270,17 @@ DEFAULT_GRAPH_HUB_THRESHOLD = 200                // hub 门限默认 200（按�
   - 文案：`label_graph_max_expand_chunks` – "图扩展最大chunk数\n(10~100):" / "Graph Max Expand Chunks\n(10~100):"
   - 提示：`hint_graph_max_expand_chunks` – 限制图扩展阶段参与打分的 chunk 数量。
   - UI 映射：`chunks = progress * 10 + 10`（10–100，步长 10），写入 `KEY_GRAPH_MAX_EXPAND_CHUNKS`。
+
+- 超大实体门限（构建/召回）滑条：
+  - 文案：`label_graph_hub_threshold` / `label_graph_hub_threshold_query` – 分别对应“超大实体门限（构建）”与“超大实体门限（召回）”。
+  - UI 使用离散预设数组 `HUB_THRESHOLD_PRESETS`：`{0, 50, 100, 200, 300, 400, 600, 800, 1000, 1200, 1600, 2000, 2500, 3200, 4800, 6400, 9600, 12800, 25600}`，进度值直接索引该数组。
+  - `0` 表示关闭 Hub 过滤，其余档位覆盖从中小型到超大知识库的常见规模，其中 **800–1600 区间刻度更密集**，便于对“略洗 / 多洗一点”做精细调参。
+  - 构建期与召回期滑条共用同一套预设，但分别写入 `KEY_GRAPH_HUB_THRESHOLD_BUILD` 与 `KEY_GRAPH_HUB_THRESHOLD_QUERY`，便于在“物理删边”和“查询期跳过”两个阶段采用不同强度。
+
+- 向量粗召回放大 (K+) 滑条：
+  - 文案：`label_graph_rag_vector_expand` – "图谱向量粗召回放大\n(+K文档数):" / "Graph RAG Vector Coarse Recall Expand\n(+K docs):"。
+  - 预设数组 `GRAPH_RAG_VECTOR_EXPAND_PRESETS = {0, 3, 5, 8, 10, 15, 20, 25, 30, 40, 50}`，SeekBar 进度 0–10 依次映射到上述 K+ 值，写入 `KEY_GRAPH_RAG_VECTOR_EXPAND`。
+  - 默认档位为 `K+20`（对应 progress≈6），即初始向量检索使用 `topK = searchDepth + 20`，而最终送入 LLM 的文档数仍由“检索数量/搜索深度”限制。
 
 > 说明：上述范围收紧通过 UI 映射和 `SettingsFragment` 内的 clamp 实现，只影响运行时参数的可选范围，不改变已有知识库的结构与数据，无需触发 KB 重建。
 
@@ -9310,6 +9327,7 @@ DEFAULT_GRAPH_HUB_THRESHOLD = 200                // hub 门限默认 200（按�
     - `KEY_GRAPH_MIN_EDGE_WEIGHT`：2–3（过滤极低频共现，保留中高置信度关系）。
     - `KEY_GRAPH_MAX_EXPAND_ENTITIES`：20–40（控制扩展宽度，避免一次拉入过多实体）。
     - `KEY_GRAPH_MAX_EXPAND_CHUNKS`：20–40（限制图扩展带来的候选数量）。
+    - `KEY_GRAPH_RAG_VECTOR_EXPAND`：0–20（推荐默认 20），在 Graph RAG 开启时为图谱提供少量额外候选，避免过度放大向量召回成本。
     - `KEY_GRAPH_ENTITY_CONFIDENCE_THRESHOLD`：0.7–0.8（偏保守，只使用高置信度实体）。
     - `KEY_GRAPH_RAG_WEIGHT_PRESET`：0 或 1（向量优先 / 平衡）。
   - 配合建议：向量检索近似深度设置在 4–8，重排数量约为近似深度的 2–3 倍；Graph RAG 建议保持开启，但权重偏向向量通道，避免过度依赖图谱纠错。
@@ -9320,6 +9338,7 @@ DEFAULT_GRAPH_HUB_THRESHOLD = 200                // hub 门限默认 200（按�
     - `KEY_GRAPH_MIN_EDGE_WEIGHT`：2（在中小型知识库中保留更多共现关系）。
     - `KEY_GRAPH_MAX_EXPAND_ENTITIES`：40–60（适度加大实体扩展宽度，在种子上限 32 的前提下获取更多关联实体）。
     - `KEY_GRAPH_MAX_EXPAND_CHUNKS`：20–40（为小模型提供适度但可控的候选上下文，避免图扩展过宽）。
+    - `KEY_GRAPH_RAG_VECTOR_EXPAND`：10–30（推荐默认 20），在保证响应延迟可接受的前提下，让图谱有更大空间提升长尾文档。
     - `KEY_GRAPH_ENTITY_CONFIDENCE_THRESHOLD`：0.6–0.7（在保证质量的前提下适当放宽召回）。
     - `KEY_GRAPH_RAG_WEIGHT_PRESET`：1 或 2（平衡 / 图谱增强），在本地模型表现较弱时可考虑偏向图谱增强。
   - 配合建议：检索数量 / 向量检索近似深度一般设置在 4–6（该数值同时限制最终送入 LLM 的文档条数），重排数量约为近似深度的 2 倍；在设备性能有限时优先通过调小 `KEY_GRAPH_MAX_EXPAND_ENTITIES/CHUNKS` 和检索数量控制图扩展与上下文长度成本，而不是关闭 Graph RAG。

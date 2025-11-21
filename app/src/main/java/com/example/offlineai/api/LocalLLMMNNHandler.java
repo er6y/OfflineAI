@@ -1015,6 +1015,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 if (callback != null) {
                     callback.onError("Inference failed: " + e.getMessage());
                 }
+            } finally {
+                // Ensure generation state and task reference are always cleared
+                isGenerating.set(false);
+                currentTask = null;
             }
         });
     }
@@ -1029,10 +1033,11 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         shouldStop.set(true);
 
         // Try to cancel running task to avoid lingering threads on model switch
+        // Use cancel(false) to avoid interrupting threads running inside native code
         try {
             if (currentTask != null && !currentTask.isDone()) {
-                currentTask.cancel(true);
-                LogManager.logD(TAG, "Cancelled current inference task");
+                currentTask.cancel(false);
+                LogManager.logD(TAG, "Cancelled current inference task (no thread interrupt)");
             }
         } catch (Exception e) {
             LogManager.logW(TAG, "Failed to cancel inference task: " + e.getMessage());

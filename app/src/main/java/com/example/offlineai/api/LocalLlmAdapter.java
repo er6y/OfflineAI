@@ -146,12 +146,18 @@ public class LocalLlmAdapter {
                     break;
                     
                 case BUSY:
-                    // 模型正忙，强制停止之前的推理并重新开始
-                    LogManager.logW(TAG, "Model busy, force stop previous inference and restart: " + modelName);
-                    // 强制停止当前推理
-                    localLlmHandler.stopInference();
-                    // 等待推理停止后重新开始
-                    waitForModelStoppedAndRestart(modelName, prompt, finalImagePaths, callback);
+                    // 模型正忙，立即停止并重置引擎，然后重新加载目标模型
+                    LogManager.logW(TAG, "Model busy, force stop previous inference and reload engine: " + modelName);
+                    try {
+                        // 发送停止信号
+                        localLlmHandler.stopInference();
+                        // 卸载当前模型和会话资源，重置状态为 UNLOADED
+                        localLlmHandler.unloadModel();
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Error while force stopping/unloading busy model: " + e.getMessage(), e);
+                    }
+                    // 直接重新加载目标模型并开始推理
+                    loadModelAndInference(modelName, prompt, finalImagePaths, finalAudioPaths, callback);
                     break;
                     
                 case UNLOADED:

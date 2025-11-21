@@ -306,6 +306,11 @@ OfflineAI supports Stable Diffusion text-to-image generation for AI art creation
 - **图扩展最大 Chunk 数 / Graph Max Expand Chunks**：限制图谱扩展阶段最多引入多少新增文本块参与排序与融合。/ Limits how many additional chunks graph expansion can contribute to scoring and fusion.
   - 与检索深度、近似深度配合的策略，见第6.5.5与6.5.6节。/ For how to coordinate with search depth and approximate depth, see Sections 6.5.5 and 6.5.6.
 
+- **向量粗召回放大 (K+) / Vector Coarse Recall Expand (K+)**
+  - 仅在启用知识图谱 RAG 时生效。初始向量检索会使用 `topK = 搜索深度 + K+`，**最终送入 LLM 的文档数量仍由“检索数量/搜索深度”决定**，不会因为 K+ 增大而直接增加上下文长度。/ Only takes effect when Knowledge Graph RAG is enabled. The initial vector retrieval uses `topK = search depth + K+`, but the final number of documents sent to the LLM is still limited by the retrieval count / search depth, so K+ does not directly increase context length.
+  - 可选档位：`0 / 3 / 5 / 8 / 10 / 15 / 20 / 25 / 30 / 40 / 50`，默认值为 **K+20**。/ Presets: `0 / 3 / 5 / 8 / 10 / 15 / 20 / 25 / 30 / 40 / 50`, with **K+20** as the default.
+  - 典型调参场景及更详细说明见第6.5.6节。/ For typical tuning scenarios and detailed explanation, see Section 6.5.6.
+
 - **Graph RAG 融合权重预设 / Graph RAG Fusion Presets**
   - 向量优先：更依赖向量相似度，图谱只做轻量加成。/ Vector-first: rely more on vector similarity, graph gives a small boost.
   - 平衡：向量、图谱和实体重叠相对平衡。/ Balanced: vectors, graph and entity overlap are relatively balanced.
@@ -523,40 +528,40 @@ RAG is a technical framework that combines retrieval systems with generative AI,
 
 ```text
 Knowledge Vector Database Construction:
-┌------------------┐     ┌-------------------┐     ┌-------------------┐
-│                  │     │                   │     │  Text Vectorize   │
-│  User Documents  │ --> │   Text Chunking   │ --> │  Tokenize &       │
-│                  │     │ (Size/Overlap)    │     │  Embed & Normalize│
-└------------------┘     └-------------------┘     └-------------------┘
+ +------------------+     +-------------------+     +-------------------+
+ |                  |     |                   |     |  Text Vectorize   |
+ |  User Documents  | --> |   Text Chunking   | --> |  Tokenize &       |
+ |                  |     | (Size/Overlap)    |     |  Embed & Normalize|
+ +------------------+     +-------------------+     +-------------------+
                                                             │           
 RAG Q&A Process:                                            v           
-┌------------------┐     ┌-------------------┐     ┌-------------------┐
-│                  │     │  Text Vectorize   │     │                   │
-│  User Question   │ --> │  Tokenize &       │ --> │ Vector Database   │
-│                  │     │  Embed & Normalize│     │    Retrieval      │
-└------------------┘     └-------------------┘     └-------------------┘
+ +------------------+     +-------------------+     +-------------------+
+ |                  |     |  Text Vectorize   |     |                   |
+ |  User Question   | --> |  Tokenize &       | --> | Vector Database   |
+ |                  |     |  Embed & Normalize|     |    Retrieval      |
+ +------------------+     +-------------------+     +-------------------+
                                                             │           
                                                             v           
-┌------------------┐     ┌-------------------┐     ┌-------------------┐
-│                  │     │                   │     │                   │
-│ Generate Answer  │ <-- │ Large Language    │ <-- │ Build Context     │
-│                  │     │ Model (LLM)       │     │                   │
-└------------------┘     └-------------------┘     └-------------------┘                     
+ +------------------+     +-------------------+     +-------------------+
+ |                  |     |                   |     |                   |
+ | Generate Answer  | <-- | Large Language    | <-- | Build Context     |
+ |                  |     | Model (LLM)       |     |                   |
+ +------------------+     +-------------------+     +-------------------+                     
 ```
 
 **Graph RAG 增强流程（示意）/ Knowledge Graph RAG Enhancement (Overview)**
 
 ```text
 Knowledge Graph RAG Enhancement:
-┌-------------------┐     ┌------------------------┐     ┌-------------------┐
-│  Vector Retrieval │ --> │ Seed Entities & Filter │ --> │ Graph Expansion   │
-└-------------------┘     └------------------------┘     └-------------------┘
+ +-------------------+     +------------------------+     +-------------------+
+ |  Vector Retrieval | --> | Seed Entities & Filter | --> | Graph Expansion   |
+ +-------------------+     +------------------------+     +-------------------+
                                                                   │
                                                                   v
-┌-------------------┐
-│ Multi-signal      │
-│ Scoring & Merge   │
-└-------------------┘
+ +-------------------+
+ | Multi-signal      |
+ | Scoring & Merge   |
+ +-------------------+
 ```
 
 简要来说，Graph RAG 会在普通向量检索的基础上，从检索结果中抽取实体、通过知识图谱做一跳扩展，并结合“向量相似度 + 图谱共现权重 + 种子实体重叠”三类信号进行融合排序。/ In short, Graph RAG enhances vanilla vector retrieval by extracting entities from results, expanding them through the knowledge graph, and fusing three signals—vector similarity, graph co-occurrence weights, and seed-entity overlap—for final ranking.
@@ -607,12 +612,14 @@ Knowledge Graph RAG Enhancement:
 
 #### 3. 推荐分块策略 / Recommended Chunking Strategies
 
-| Strategy / 策略            | Use Case / 使用场景             | Example Params / 示例参数    | Advantages / 优势        |
-|----------------------------|--------------------------------|-----------------------------|--------------------------|
-| Fixed Length / 固定长度     | Tech Docs/Code / 技术文档/代码  | 500 chars, 100              | Simple & Fast / 简单快速  |
-| Semantic Chunk / 语义分块   | Narrative Content / 叙述内容    | By Paragraph / 按段落        | Keep Semantic / 保持语义 |
-| Hierarchical / 层次化       | Structured Docs / 结构化文档    | Title+Content / 标题+内容    | Keep Context / 保持上下文 |
-| Dynamic Chunk / 动态分块    | Mixed Content / 混合内容        | Content Analysis / 内容分析  | Adaptive Best / 自适应最优|
+```text
+| Strategy         | Use Case           | Example Params   | Advantages          |
+|------------------|--------------------|------------------|---------------------|
+| Fixed Length     | Tech Docs / Code   | 500 chars, 100   | Simple & Fast       |
+| Semantic Chunk   | Narrative Content  | By Paragraph     | Keep Semantics      |
+| Hierarchical     | Structured Docs    | Title + Content  | Keep Context        |
+| Dynamic Chunk    | Mixed Content      | Content Analysis | Adaptive / Flexible |
+```
 
 **最佳实践建议 / Best Practice Recommendations**：
 
@@ -738,7 +745,7 @@ Rerank models are specialized models for reordering retrieval results, capable o
 
 知识图谱RAG是在传统向量检索基础上，结合实体识别和关系抽取，构建结构化知识图谱，提供更精准的知识问答能力。
 
-Knowledge Graph RAG builds on traditional vector retrieval by combining entity recognition and relationship extraction to construct structured knowledge graphs, providing more accurate knowledge Q&A capabilities.
+Knowledge Graph RAG is built on top of vanilla vector retrieval with entity recognition and relation extraction to construct a structured knowledge graph for more accurate Q&A.
 
 #### 6.5.1 图谱原理简介 / Graph Principles
 
@@ -787,14 +794,16 @@ OfflineAI 使用 HanLP 进行中文实体识别，支持以下词性标注：
 
 OfflineAI uses HanLP for Chinese entity recognition, supporting the following part-of-speech tags:
 
-| 标注 / Tag | 名称 / Name | 说明 / Description | 示例 / Examples |
-|------|------|------|------|
-| `gi` | 机构团体 / Organization | 技术概念、算法、框架 / Technical concepts, algorithms, frameworks | 深度学习, Transformer, 神经网络 |
-| `ntc` | 公司名 / Company | 品牌、产品线 / Brands, product lines | OpenAI, Google, 微软 |
-| `nrf` | 音译人名 / Transliterated | 外来技术术语 / Foreign technical terms | BERT, ResNet, YOLO |
-| `ns` | 地名 / Location | 地理位置 / Geographic locations | 硅谷, 深圳, Silicon Valley |
-| `n` | 一般名词 / Noun | 技术名词 / Technical nouns | 控制器, 固态硬盘, 处理器 |
-| `nz` | 其他专名 / Proper Noun | 型号、标准 / Model numbers, standards | PCIe, NVMe, USB 3.0 |
+```text
+| Tag | Name           | Description                          | Examples                        |
+|-----|----------------|--------------------------------------|---------------------------------|
+| gi  | Organization   | Technical concepts / frameworks      | deep learning, Transformer, NN  |
+| ntc | Company        | Companies / brands / product lines   | OpenAI, Google, Microsoft       |
+| nrf | Transliterated | Foreign technical terms / acronyms   | BERT, ResNet, YOLO              |
+| ns  | Location       | Geographic locations                 | Silicon Valley, Shenzhen        |
+| n   | Noun           | General technical nouns              | controller, SSD, processor      |
+| nz  | Proper Noun    | Model numbers / standards            | PCIe, NVMe, USB 3.0             |
+```
 
 **自定义词典 / Custom Dictionary**
 
@@ -861,6 +870,8 @@ Can set entity confidence threshold (default 0.5) to filter low-confidence entit
 4. **图谱扩展 / Graph Expansion** - 查找相关实体（1-2跳），获取实体的关联文档，补充上下文信息 / Find related entities (1-2 hops), get associated documents, supplement context
 5. **上下文合并 / Context Merging** - 合并向量检索结果和图谱扩展结果，去重并排序，发送给LLM生成回答 / Merge vector retrieval and graph expansion results, deduplicate and sort, send to LLM
 
+在实际实现中，启用 Graph RAG 时第 2 步向量检索会先执行一次“粗召回”：初始 topK 使用 `搜索深度 + K+`，其中 K+ 由设置页面第4.2.2节中的“向量粗召回放大 (K+)”滑条控制；随后仍按“检索数量/搜索深度”截断，只保留固定数量的文档送入 LLM。/ In the concrete implementation, when Graph RAG is enabled, step 2 performs a coarse recall where the initial topK is `search depth + K+`, with K+ controlled by the "Vector Coarse Recall Expand (K+)" slider in Section 4.2.2; the final number of chunks sent to the LLM is still limited by the retrieval count / search depth.
+
 **种子实体与 Hub 过滤 / Seed Entities and Hub Filtering**
 
 - 种子实体集合主要来自两个来源：用户问题中的实体，以及向量检索前若干个文本块中的实体，系统会自动去重并使用别名信息做归一化。/ The seed entity set mainly comes from two sources: entities in the user question and entities in the top vector-retrieved chunks; the system automatically deduplicates and normalizes them using alias information.
@@ -871,7 +882,7 @@ Can set entity confidence threshold (default 0.5) to filter low-confidence entit
 
 - 每个候选文本块会综合三类信号打分：向量相似度、图谱实体共现权重、与种子实体的重叠数量。/ Each candidate chunk is scored by combining three signals: vector similarity, graph-based entity co-occurrence weights, and overlap with seed entities.
 - 这些信号会归一化后按预设权重（由“Graph RAG 融合权重预设”等参数控制）进行加权融合，排序靠前的文本块将作为LLM的上下文。/ These signals are normalized and fused with preset weights (controlled by the Graph RAG fusion presets and related parameters); top-ranked chunks are used as LLM context.
-- 具体可调参数及推荐默认值，请参见第4.6节“知识图谱RAG设置”。/ For concrete tunable parameters and recommended defaults, see Section 4.6 "Knowledge Graph RAG Settings".
+- 具体可调参数及推荐默认值，请参见第4.2.2节“知识图谱RAG设置”。/ For concrete tunable parameters and recommended defaults, see Section 4.2.2 "Knowledge Graph RAG Settings".
 
 **优势 / Advantages**：
 
@@ -907,6 +918,29 @@ Configure Knowledge Graph RAG parameters in settings page (Section 4.2.2, Knowle
 2. **通用场景**：使用默认配置即可 / General scenarios: default configuration is sufficient
 3. **精确查询**：提高置信度阈值（0.7-0.8）/ Precise queries: increase confidence threshold (0.7-0.8)
 4. **探索性查询**：增加扩展深度（2-3层）/ Exploratory queries: increase expansion depth (2-3 hops)
+
+**向量粗召回放大 (K+) / Vector Coarse Recall Expand (K+)**
+
+- 在 Graph RAG 模式下，向量检索分为两步：首先进行“粗召回”，然后结合图谱做扩展与多信号融合。/ In Graph RAG mode, vector retrieval is split into two steps: a coarse recall first, then graph expansion with multi-signal fusion.
+- 第一步粗召回使用 `topK = 搜索深度 + K+` 从向量数据库中获取候选文档，其中“搜索深度”来自问答页面的下拉框（如 5、8、10），而 **K+** 由设置页面第4.2.2节中的“向量粗召回放大 (K+)”滑条控制。/ The first coarse recall uses `topK = search depth + K+` to fetch candidates from the vector database, where the search depth comes from the dropdown on the Q&A page (e.g. 5, 8, 10), and **K+** is controlled by the "Vector Coarse Recall Expand (K+)" slider in Section 4.2.2.
+- 第二步图谱扩展会从粗召回结果中抽取实体，结合知识图谱做一跳扩展，并与原始向量结果一并参与三路信号融合（向量相似度 / 图谱共现权重 / 实体重叠）。/ The second step performs graph expansion from the coarse recall results and combines them with the original vector results using three signals (vector similarity / graph-based co-occurrence weights / entity overlap).
+- **最终仍然只会保留“搜索深度”条文档** 作为回答上下文，例如搜索深度=5 时，最终送入 LLM 的文档数仍为 5，而不是 `5 + K+`。/ **The final number of documents sent to the LLM is still limited by the search depth**, e.g. with depth=5 the LLM still only receives 5 chunks, not `5 + K+`.
+
+参数语义 / Parameter Semantics：
+
+- **K+ = 0**：不进行粗召回放大，Graph RAG 只在原始搜索深度范围内工作，行为更接近传统向量 RAG。/ **K+ = 0**: disables coarse recall expansion so Graph RAG only works within the original search depth, behaving closer to vanilla vector RAG.
+- **K+ > 0**：在第一步向量检索中额外多取 K+ 条候选，让图谱扩展与融合有更多“备选文档”可以重排，但不会增加最终送入 LLM 的文档数量。/ **K+ > 0**: adds K+ extra candidates in the first step so graph expansion and fusion have more documents to re-rank, without increasing the final context size.
+
+推荐设置 / Recommended Settings：
+
+- 小型知识库 / 短文档：搜索深度 5-8，K+ 建议 `10-20`，可以显著增加被图谱提升的长尾文档（例如原始 vecRank 在 10-20 之间但图谱信号很强）。/ Small KBs or short documents: search depth 5–8 with K+ in the `10–20` range, which significantly increases the chance that long-tail documents (vecRank 10–20 but strong graph signals) are promoted.
+- 中大型知识库 / 长文档：搜索深度 8-10，K+ 可适当提高到 `20-30`，若发现向量检索时间明显增加，可下调到 15 或 20。/ Medium to large KBs or long documents: search depth 8–10 with K+ raised to `20–30`; if vector search latency becomes noticeable, lower to 15 or 20.
+
+注意事项 / Notes：
+
+- **K+ 只在 Graph RAG 开启时生效**，普通向量 RAG 模式不会使用该参数。/ **K+ only takes effect when Graph RAG is enabled**; it is ignored in plain vector RAG.
+- 向量检索时间大致随 topK 线性增长，在多数手机上 `K+20` 的开销仍然较小；建议结合日志中的 `[VECTOR_SEARCH] topK=... time=...` 评估实际影响。/ Vector search time grows roughly linearly with topK; on most phones `K+20` is still affordable. Use the `[VECTOR_SEARCH] topK=... time=...` logs to assess impact.
+- 当配合“超大实体门限（构建/召回）”一起调优时，通常建议**先稳定 hub 门限，再微调 K+**，避免同时调整太多参数导致效果难以判断。/ When tuning together with the build/recall hub thresholds, it is usually better to **stabilize hub thresholds first, then fine-tune K+**, to avoid changing too many knobs at once.
 
 **Hub 过滤阈值 / Hub Filtering Thresholds**
 
@@ -958,7 +992,7 @@ Configure Knowledge Graph RAG parameters in settings page (Section 4.2.2, Knowle
   - 实体置信度阈值 / Entity Confidence Threshold：0.6-0.7
   - 融合预设 / Fusion Preset：平衡或图谱增强（Balanced or Graph-enhanced）
 - 思路：适度放宽实体召回并加大图谱权重，让知识图谱帮助小模型更好地“对齐”到与问题相关的块；同时建议将“检索数量”下拉（search depth）设置在 4-6 之间，该数值也会限制最终送入 LLM 的文本块数量，避免本地小模型一次接收过多上下文。/ Idea: relax entity recall and increase graph weight so that the knowledge graph helps small models better focus on relevant chunks; at the same time, set the "retrieval count" (search depth dropdown) to around 4-6, which also limits how many chunks are finally sent to the LLM to avoid overloading small local models.
-- 相关参数的具体名称与位置，请参考第4.6节中的对应设置项。/ For exact parameter names and where to change them, see the corresponding items in Section 4.6.
+- 相关参数的具体名称与位置，请参考第4.2.2节中的对应设置项。/ For exact parameter names and where to change them, see the corresponding items in Section 4.2.2.
 
 ### 6.6 自定义词典生成指南 / Custom Dictionary Generation Guide
 
@@ -1521,12 +1555,14 @@ Viewing logs can help locate the cause of problems, especially when processing l
 
 **内存消耗参考（以Qwen2.5-3B为例）/ Memory Consumption Reference (Qwen2.5-3B example)**：
 
-| 序列长度 / Sequence Length | KV Cache内存 / KV Cache Memory | 适用场景 / Use Case |
-|---------------------------|-------------------------------|-------------------|
-| **1024** | ~294 MB | 短对话、内存受限设备 / Short conversations, memory-limited devices |
-| **2048** | ~589 MB | 普通对话（推荐）/ Normal conversations (Recommended) ✅ |
-| **4096** | ~1.15 GB | 长对话、RAG检索 / Long conversations, RAG retrieval |
-| **6144** | ~1.73 GB | 超长文本、深度对话 / Very long texts, deep conversations |
+```text
+| Seq Length | KV Cache Memory | Use Case                                   |
+|------------|-----------------|--------------------------------------------|
+| 1024       | ~294 MB         | Short conversations, memory-limited device |
+| 2048       | ~589 MB         | Normal conversations (recommended)         |
+| 4096       | ~1.15 GB        | Long conversations, RAG retrieval          |
+| 6144       | ~1.73 GB        | Very long texts, deep conversations        |
+```
 
 **配置建议 / Configuration Recommendations**：
 
@@ -1704,12 +1740,14 @@ AI art requires skills and experience, here are some practical recommendations:
 
 **后端性能对比 / Backend Performance Comparison**：
 
-| 后端 Backend | 速度 Speed | 兼容性 Compatibility | 推荐场景 Recommended Scenario |
-|-------------|-----------|---------------------|----------------------------|
-| CPU | ★☆☆☆☆ | ★★★★★ | 测试、老旧设备 / Testing, old devices |
-| OpenCL | ★★★★☆ | ★★★★☆ | 大多数安卓设备（推荐）/ Most Android devices (Recommended) |
-| Vulkan | ★★★★★ | ★★★☆☆ | 高端设备、追求极致速度 / High-end devices, maximum speed |
-| NNAPI | ★★★☆☆ | ★★☆☆☆ | 特定设备、实验性 / Specific devices, experimental |
+```text
+| Backend | Speed (1-5) | Compatibility (1-5) | Recommended Scenario                    |
+|---------|-------------|---------------------|-----------------------------------------|
+| CPU     | 1/5         | 5/5                 | Testing, old devices                    |
+| OpenCL  | 4/5         | 4/5                 | Most Android devices (recommended)      |
+| Vulkan  | 5/5         | 3/5                 | High-end devices, maximum speed         |
+| NNAPI   | 3/5         | 2/5                 | Specific devices, experimental          |
+```
 
 **创作流程建议 / Creative Workflow Recommendations**：
 

@@ -97,6 +97,7 @@ public class ConfigManager {
     public static final String KEY_GRAPH_RAG_ENABLED = "graph_rag_enabled";
     public static final String KEY_GRAPH_RAG_WEIGHT_PRESET = "graph_rag_weight_preset";
     public static final String KEY_GRAPH_MAX_EXPAND_CHUNKS = "graph_max_expand_chunks";
+    public static final String KEY_GRAPH_RAG_VECTOR_EXPAND = "graph_rag_vector_expand"; // Graph RAG 向量粗召回放大 (+K)
     // 旧版单一 Hub 阈值（仅作兼容回退，推荐使用 BUILD/QUERY 两个新键）
     public static final String KEY_GRAPH_HUB_THRESHOLD = "graph_hub_threshold"; // Legacy super-entity hub threshold (0=disabled)
     // 新版：构建期 / 召回期分别配置的超大实体门限
@@ -198,6 +199,7 @@ public class ConfigManager {
     public static final boolean DEFAULT_GRAPH_RAG_ENABLED = true;
     public static final int DEFAULT_GRAPH_MAX_EXPAND_CHUNKS = 50;
     public static final int DEFAULT_GRAPH_RAG_WEIGHT_PRESET = 1;
+    public static final int DEFAULT_GRAPH_RAG_VECTOR_EXPAND = 20; // Graph RAG 模式下向量粗召回默认扩大量（K+20）
     // 旧版单一 Hub 阈值默认值（仅用于向后兼容，不再直接展示在设置界面）
     public static final int DEFAULT_GRAPH_HUB_THRESHOLD = 100; // Legacy hub threshold (0=disabled)
     // 新版：构建/召回独立默认值
@@ -1139,6 +1141,25 @@ public class ConfigManager {
      */
     public static void setGraphRagEnabled(Context context, boolean enabled) {
         setBoolean(context, KEY_GRAPH_RAG_ENABLED, enabled);
+    }
+
+    /**
+     * Get vector coarse recall expansion (+K) for Graph RAG.
+     * This value is only applied when Graph RAG is enabled.
+     * @param context Context
+     * @return Extra topK to add for initial vector search
+     */
+    public static int getGraphRagVectorExpand(Context context) {
+        return getInt(context, KEY_GRAPH_RAG_VECTOR_EXPAND, DEFAULT_GRAPH_RAG_VECTOR_EXPAND);
+    }
+
+    /**
+     * Set vector coarse recall expansion (+K) for Graph RAG.
+     * @param context Context
+     * @param expand Extra topK to add for initial vector search
+     */
+    public static void setGraphRagVectorExpand(Context context, int expand) {
+        setInt(context, KEY_GRAPH_RAG_VECTOR_EXPAND, expand);
     }
 
     /**

@@ -53,7 +53,7 @@
         app:layout_constraintTop_toTopOf="@+id/textViewApiKeyLabel"
         app:layout_constraintBottom_toBottomOf="@+id/textViewApiKeyLabel"
         app:layout_constraintStart_toEndOf="@+id/guidelineLabel"
-        app:layout_constraintEnd_toStartOf="@+id/checkBoxThinkingModeKey" />
+        app:layout_constraintEnd_toStartOf="@+id/textViewThinkingModeLabel" />
     
     <Spinner
         android:id="@+id/spinnerBackendPreference"
@@ -67,11 +67,19 @@
         app:layout_constraintStart_toEndOf="@+id/guidelineLabel"
         app:layout_constraintEnd_toStartOf="@+id/textViewSearchDepthLabel" />
         
+    <TextView
+        android:id="@+id/textViewThinkingModeLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/text_thinking_mode"
+        app:layout_constraintTop_toTopOf="@+id/textViewApiKeyLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewApiKeyLabel"
+        app:layout_constraintEnd_toStartOf="@+id/checkBoxThinkingModeKey" />
+
     <CheckBox
         android:id="@+id/checkBoxThinkingModeKey"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="@string/text_thinking_mode"
         android:layout_marginStart="8dp"
         app:layout_constraintTop_toTopOf="@+id/textViewApiKeyLabel"
         app:layout_constraintBottom_toBottomOf="@+id/textViewApiKeyLabel"
@@ -181,6 +189,24 @@
         app:layout_constraintTop_toTopOf="@+id/textViewSystemPromptLabel"
         app:layout_constraintBottom_toBottomOf="@+id/textViewSystemPromptLabel"
         app:layout_constraintStart_toEndOf="@+id/guidelineLabel"
+        app:layout_constraintEnd_toStartOf="@+id/textViewGraphRagLabel" />
+
+    <TextView
+        android:id="@+id/textViewGraphRagLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/label_graph_rag_short"
+        app:layout_constraintTop_toTopOf="@+id/textViewSystemPromptLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewSystemPromptLabel"
+        app:layout_constraintEnd_toStartOf="@+id/checkBoxGraphRagMode" />
+
+    <CheckBox
+        android:id="@+id/checkBoxGraphRagMode"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp"
+        app:layout_constraintTop_toTopOf="@+id/textViewSystemPromptLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewSystemPromptLabel"
         app:layout_constraintEnd_toEndOf="parent" />
 
     <!-- Chat messages RecyclerView -->

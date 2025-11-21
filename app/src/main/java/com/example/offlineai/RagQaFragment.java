@@ -164,6 +164,7 @@ public class RagQaFragment extends Fragment {
     private Handler longPressHandler;  // Handler for long press detection
     private TextView textViewResponse; // Response text view
     private CheckBox checkBoxThinkingMode; // Thinking mode checkbox
+    private CheckBox checkBoxGraphRagMode;
     private RecyclerView recyclerViewImageThumbnails; // Media thumbnail container (images and audio)
     private MediaThumbnailAdapter mediaThumbnailAdapter; // Media thumbnail adapter
     // 避免程序化设置复选框状态时触发监听器造成误保存
@@ -272,6 +273,7 @@ public class RagQaFragment extends Fragment {
         float graphScore;
         float finalScore;
         int entityOverlap;
+        int vectorRank; // Original rank in pure vector search (-1 if only from graph expansion)
     }
 
     // Graph RAG limits for seed entities to avoid explosion
@@ -297,6 +299,7 @@ public class RagQaFragment extends Fragment {
         spinnerSearchDepth = view.findViewById(R.id.spinnerSearchDepth); // Initialize search depth spinner
         spinnerRerankCount = view.findViewById(R.id.spinnerRerankCount); // Initialize rerank count spinner
         checkBoxThinkingMode = view.findViewById(R.id.checkBoxThinkingModeKey); // Initialize thinking mode checkbox
+        checkBoxGraphRagMode = view.findViewById(R.id.checkBoxGraphRagMode);
         recyclerViewImageThumbnails = view.findViewById(R.id.recyclerViewImageThumbnails); // Initialize image thumbnail container
         textViewResponse = view.findViewById(R.id.textViewResponse); // Initialize response text view
         recyclerViewChat = view.findViewById(R.id.recyclerViewChat); // Initialize chat RecyclerView
@@ -564,6 +567,15 @@ public class RagQaFragment extends Fragment {
             // So logic needs to be inverted here
             ConfigManager.setBoolean(requireContext(), ConfigManager.KEY_NO_THINKING, !isChecked);
             LogManager.logD(TAG, "Thinking mode changed: " + (isChecked ? "enabled" : "disabled"));
+        });
+
+        checkBoxGraphRagMode.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (isUpdatingUiFromConfig) {
+                LogManager.logD(TAG, "Ignore graph RAG checkbox change during config-driven UI update");
+                return;
+            }
+            ConfigManager.setGraphRagEnabled(requireContext(), isChecked);
+            LogManager.logD(TAG, "Graph RAG mode changed: " + (isChecked ? "enabled" : "disabled"));
         });
         
         // Initialize voice recording components
@@ -891,12 +903,17 @@ public class RagQaFragment extends Fragment {
         
         // Rerank count already loaded in initializeRerankCountSpinner
         
-        // Load thinking mode setting
+        // Load thinking mode and Graph RAG settings
         // Note: no_thinking=TRUE unchecks, false checks
             isUpdatingUiFromConfig = true;
             boolean noThinking = ConfigManager.getNoThinking(requireContext());
             checkBoxThinkingMode.setChecked(!noThinking);
+            boolean graphRagEnabled = ConfigManager.isGraphRagEnabled(requireContext());
+            if (checkBoxGraphRagMode != null) {
+                checkBoxGraphRagMode.setChecked(graphRagEnabled);
+            }
             LogManager.logD(TAG, "Loaded thinking mode setting: " + (!noThinking ? "enabled" : "disabled"));
+            LogManager.logD(TAG, "Loaded Graph RAG mode setting: " + (graphRagEnabled ? "enabled" : "disabled"));
             isUpdatingUiFromConfig = false;
             
             // Update initial display based on API URL (show API Key or Backend Preference)
@@ -937,6 +954,12 @@ public class RagQaFragment extends Fragment {
             // Save regardless of empty or not, ensuring user can correctly save when clearing system prompt
             ConfigManager.setSystemPrompt(requireContext(), systemPrompt);
             LogManager.logD(TAG, "Saved system prompt: " + (systemPrompt.isEmpty() ? "[empty]" : systemPrompt));
+
+            if (checkBoxGraphRagMode != null) {
+                boolean graphRagEnabled = checkBoxGraphRagMode.isChecked();
+                ConfigManager.setGraphRagEnabled(requireContext(), graphRagEnabled);
+                LogManager.logD(TAG, "Saved Graph RAG mode: " + (graphRagEnabled ? "enabled" : "disabled"));
+            }
             
             // Search depth automatically saved through spinner selection listener
             // Rerank count automatically saved through spinner selection listener
@@ -1355,7 +1378,7 @@ public class RagQaFragment extends Fragment {
             try {
                 if (ragTaskFuture != null) {
                     if (!ragTaskFuture.isDone()) {
-                        boolean cancelBeforeSend = ragTaskFuture.cancel(true);
+                        boolean cancelBeforeSend = ragTaskFuture.cancel(false);
                         LogManager.logW(TAG, "Found leftover RAG Future before new send, cancel issued -> " + cancelBeforeSend);
                     }
                     ragTaskFuture = null;
@@ -1767,7 +1790,7 @@ public class RagQaFragment extends Fragment {
         if (ragTaskFuture != null) {
             if (!ragTaskFuture.isDone()) {
                 LogManager.logW(TAG, "RAG task Future not done during reset, forcing cancel");
-                ragTaskFuture.cancel(true);
+                ragTaskFuture.cancel(false);
             }
             ragTaskFuture = null;
             LogManager.logD(TAG, "Cleared ragTaskFuture reference");
@@ -3752,11 +3775,26 @@ public class RagQaFragment extends Fragment {
                 // Search similar text blocks
                 updateChatMessage("\n[RAG] Searching similar text blocks...");
                 
-                // Get retrieval count setting
+                // Get retrieval count setting (final document count used for answer)
                 int retrievalCount = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
-                
-                // Search similar text blocks
-                List<KnowledgeGraphDatabase.SearchResult> searchResults = vectorDb.searchSimilar(queryVector, retrievalCount);
+
+                // Determine whether Graph RAG is enabled
+                boolean graphRagEnabled = ConfigManager.isGraphRagEnabled(requireContext());
+
+                // Compute initial vector topK: for Graph RAG use coarse recall (base + expand),
+                // for pure vector mode use base retrievalCount
+                int vectorTopK = retrievalCount;
+                if (graphRagEnabled) {
+                    int expand = ConfigManager.getGraphRagVectorExpand(requireContext());
+                    if (expand < 0) {
+                        expand = 0;
+                    }
+                    vectorTopK = retrievalCount + expand;
+                    LogManager.logI(TAG, "[RAG][Graph] Using vector coarse recall: base=" + retrievalCount + ", expand=" + expand + ", topK=" + vectorTopK);
+                }
+
+                // Search similar text blocks with selected topK
+                List<KnowledgeGraphDatabase.SearchResult> searchResults = vectorDb.searchSimilar(queryVector, vectorTopK);
                 
                 // Check global stop flag
                 if (userRequestedStop) {
@@ -3780,14 +3818,13 @@ public class RagQaFragment extends Fragment {
                     LogManager.logI(TAG, "Retrieval similarity scores: " + similarityInfo.toString());
                 }
                 
-                // Check global stop flag
+                // Check global stop flag before Graph RAG / reranker stage
                 if (userRequestedStop) {
                     LogManager.logD(TAG, "Global stop requested, aborting before reranking");
                     updateProgressOnUiThread("Operation stopped by user");
                     return;
                 }
-                
-                boolean graphRagEnabled = ConfigManager.isGraphRagEnabled(requireContext());
+
                 if (graphRagEnabled) {
                     updateChatMessage("\n[RAG] Graph RAG mode enabled, combining vector and graph results...");
                     processGraphRagResults(userQuery, searchResults, vectorDb, retrievalCount);
@@ -4337,13 +4374,15 @@ public class RagQaFragment extends Fragment {
             }
 
             Map<Long, GraphRagCandidate> candidateMap = new HashMap<>();
-            for (KnowledgeGraphDatabase.SearchResult r : searchResults) {
+            for (int i = 0; i < searchResults.size(); i++) {
+                KnowledgeGraphDatabase.SearchResult r = searchResults.get(i);
                 GraphRagCandidate c = new GraphRagCandidate();
                 c.result = r;
                 c.vectorScore = r.similarity;
                 c.graphScore = 0.0f;
                 c.finalScore = r.similarity;
                 c.entityOverlap = 0;
+                c.vectorRank = i; // 记录纯向量检索中的原始排名（从0开始）
                 candidateMap.put(r.id, c);
             }
             for (KnowledgeGraphDatabase.SearchResult r : graphChunks) {
@@ -4354,6 +4393,7 @@ public class RagQaFragment extends Fragment {
                     c.graphScore = 0.0f;
                     c.finalScore = r.similarity;
                     c.entityOverlap = 0;
+                    c.vectorRank = -1; // 仅由图扩展引入的候选
                     candidateMap.put(r.id, c);
                 }
             }
@@ -4475,6 +4515,8 @@ public class RagQaFragment extends Fragment {
                 GraphRagCandidate c = candidates.get(i);
                 fusedDocs.add(c.result.content);
                 scoreDebug.append("#").append(i + 1)
+                        .append(" id=").append(c.result.id)
+                        .append(" vecRank=").append(c.vectorRank)
                         .append(" vec=").append(String.format("%.3f", c.vectorScore))
                         .append(" graph=").append(String.format("%.3f", c.graphScore))
                         .append(" overlap=").append(c.entityOverlap)
@@ -4486,7 +4528,9 @@ public class RagQaFragment extends Fragment {
                 }
             }
 
-            updateChatMessage(scoreDebug.toString());
+            String scoreDebugStr = scoreDebug.toString();
+            updateChatMessage(scoreDebugStr);
+            LogManager.logI(TAG, scoreDebugStr);
             LogManager.logI(TAG, "[GRAPH_RAG] Fused scores: " + similarityInfoBuilder.toString());
 
             // Build a SearchResult list in fused order so that we can reuse the existing reranker pipeline.
@@ -5164,6 +5208,13 @@ public class RagQaFragment extends Fragment {
                 spinnerBackendPreference.setSelection(selectedIndex);
                 LogManager.logD(TAG, "Synced backend preference from settings: " + backendPreference);
             }
+            isUpdatingUiFromConfig = false;
+        }
+
+        if (checkBoxGraphRagMode != null) {
+            isUpdatingUiFromConfig = true;
+            boolean graphRagEnabled = ConfigManager.isGraphRagEnabled(getContext());
+            checkBoxGraphRagMode.setChecked(graphRagEnabled);
             isUpdatingUiFromConfig = false;
         }
         

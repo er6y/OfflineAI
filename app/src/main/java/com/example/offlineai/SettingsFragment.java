@@ -65,6 +65,19 @@ public class SettingsFragment extends Fragment {
     private SeekBar seekBarEmbeddingThreads;
     private TextView textViewEmbeddingThreadsValue;
     
+    // Hub 阈值和 Graph RAG 向量粗召回放大预设值
+    private static final int[] HUB_THRESHOLD_PRESETS = {
+        0,
+        50, 100, 200, 300, 400, 600,
+        800, 1000, 1200, 1600,
+        2000, 2500, 3200,
+        4800, 6400, 9600, 12800, 25600
+    };
+
+    private static final int[] GRAPH_RAG_VECTOR_EXPAND_PRESETS = {
+        0, 3, 5, 8, 10, 15, 20, 25, 30, 40, 50
+    };
+    
     // Knowledge Graph RAG UI组件
     private SeekBar seekBarGraphMinEdgeWeight;
     private TextView textViewGraphMinEdgeWeightValue;
@@ -81,6 +94,8 @@ public class SettingsFragment extends Fragment {
     private TextView textViewGraphHubThresholdValue;
     private SeekBar seekBarGraphHubThresholdQuery;
     private TextView textViewGraphHubThresholdQueryValue;
+    private SeekBar seekBarGraphRagVectorExpand;
+    private TextView textViewGraphRagVectorExpandValue;
     private Spinner spinnerGraphStopwords;
     
     private EditText editTextDataRootPath;
@@ -215,6 +230,8 @@ public class SettingsFragment extends Fragment {
         textViewGraphHubThresholdValue = view.findViewById(R.id.textViewGraphHubThresholdValue);
         seekBarGraphHubThresholdQuery = view.findViewById(R.id.seekBarGraphHubThresholdQuery);
         textViewGraphHubThresholdQueryValue = view.findViewById(R.id.textViewGraphHubThresholdQueryValue);
+        seekBarGraphRagVectorExpand = view.findViewById(R.id.seekBarGraphRagVectorExpand);
+        textViewGraphRagVectorExpandValue = view.findViewById(R.id.textViewGraphRagVectorExpandValue);
         spinnerGraphStopwords = view.findViewById(R.id.spinnerGraphStopwords);
         
         editTextDataRootPath = view.findViewById(R.id.editTextDataRootPath);
@@ -356,6 +373,13 @@ public class SettingsFragment extends Fragment {
         if (getActivity() != null && ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar() != null) {
             ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setDisplayHomeAsUpEnabled(true);
             ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setTitle(R.string.title_settings);
+        }
+
+        if (switchGraphRagMode != null) {
+            boolean graphRagEnabled = ConfigManager.isGraphRagEnabled(requireContext());
+            if (switchGraphRagMode.isChecked() != graphRagEnabled) {
+                switchGraphRagMode.setChecked(graphRagEnabled);
+            }
         }
     }
     
@@ -759,6 +783,23 @@ public class SettingsFragment extends Fragment {
             }
         });
         
+        // Graph RAG vector coarse recall expand
+        seekBarGraphRagVectorExpand.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                updateGraphRagVectorExpandText(progress);
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int expand = mapGraphRagVectorExpandProgressToValue(seekBar.getProgress());
+                ConfigManager.setGraphRagVectorExpand(requireContext(), expand);
+            }
+        });
+        
         seekBarMaxSequenceLength.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
@@ -1146,25 +1187,56 @@ public class SettingsFragment extends Fragment {
         if (progress <= 0) {
             return 0;
         }
-        // progress 1->50, 2->100, 3->200, ... (doubling)
-        int value = 50;
-        for (int i = 1; i < progress; i++) {
-            value *= 2;
+        if (progress >= HUB_THRESHOLD_PRESETS.length) {
+            progress = HUB_THRESHOLD_PRESETS.length - 1;
         }
-        return value;
+        return HUB_THRESHOLD_PRESETS[progress];
     }
 
     private int mapHubThresholdToProgress(int threshold) {
         if (threshold <= 0) {
             return 0;
         }
-        int value = 50;
-        int progress = 1;
-        while (progress < 10 && value < threshold) {
-            value *= 2;
-            progress++;
+        int bestIndex = 0;
+        int bestDiff = Integer.MAX_VALUE;
+        for (int i = 0; i < HUB_THRESHOLD_PRESETS.length; i++) {
+            int v = HUB_THRESHOLD_PRESETS[i];
+            int diff = Math.abs(v - threshold);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                bestIndex = i;
+            }
         }
-        return progress;
+        return bestIndex;
+    }
+
+    private void updateGraphRagVectorExpandText(int progress) {
+        int value = mapGraphRagVectorExpandProgressToValue(progress);
+        textViewGraphRagVectorExpandValue.setText(String.valueOf(value));
+    }
+
+    private int mapGraphRagVectorExpandProgressToValue(int progress) {
+        if (progress < 0) {
+            progress = 0;
+        }
+        if (progress >= GRAPH_RAG_VECTOR_EXPAND_PRESETS.length) {
+            progress = GRAPH_RAG_VECTOR_EXPAND_PRESETS.length - 1;
+        }
+        return GRAPH_RAG_VECTOR_EXPAND_PRESETS[progress];
+    }
+
+    private int mapGraphRagVectorExpandValueToProgress(int value) {
+        int bestIndex = 0;
+        int bestDiff = Integer.MAX_VALUE;
+        for (int i = 0; i < GRAPH_RAG_VECTOR_EXPAND_PRESETS.length; i++) {
+            int v = GRAPH_RAG_VECTOR_EXPAND_PRESETS[i];
+            int diff = Math.abs(v - value);
+            if (diff < bestDiff) {
+                bestDiff = diff;
+                bestIndex = i;
+            }
+        }
+        return bestIndex;
     }
     
     private void updateGraphEntityConfidenceThresholdText(int progress) {
@@ -1321,6 +1393,12 @@ public class SettingsFragment extends Fragment {
         graphHubQueryProgress = Math.max(0, Math.min(graphHubQueryProgress, seekBarGraphHubThresholdQuery.getMax()));
         seekBarGraphHubThresholdQuery.setProgress(graphHubQueryProgress);
         updateGraphHubThresholdQueryText(graphHubQueryProgress);
+
+        int graphRagVectorExpand = ConfigManager.getGraphRagVectorExpand(ctx);
+        int graphRagVectorExpandProgress = mapGraphRagVectorExpandValueToProgress(graphRagVectorExpand);
+        graphRagVectorExpandProgress = Math.max(0, Math.min(graphRagVectorExpandProgress, seekBarGraphRagVectorExpand.getMax()));
+        seekBarGraphRagVectorExpand.setProgress(graphRagVectorExpandProgress);
+        updateGraphRagVectorExpandText(graphRagVectorExpandProgress);
 
         boolean graphRagEnabled = ConfigManager.isGraphRagEnabled(ctx);
         switchGraphRagMode.setChecked(graphRagEnabled);

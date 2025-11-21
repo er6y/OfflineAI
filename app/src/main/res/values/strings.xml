@@ -410,7 +410,7 @@
     <string name="label_knowledge_base">知识库:</string>
     <string name="label_search_depth">检索数:</string>
     <string name="label_rerank_count">重排数:</string>
-    <string name="label_system_prompt">系统提示:</string>
+    <string name="label_system_prompt">系统:</string>
     <string name="label_user_prompt">用户提问:（长按浏览图片、相机）</string>
     <string name="label_title">标题:</string>
     <string name="label_content">内容:</string>
@@ -860,6 +860,9 @@
     <string name="label_graph_entity_confidence_threshold">实体置信度阈值\n(0.5~1.0):</string>
     <string name="label_graph_max_expand_entities">图扩展最大实体数\n(10~100):</string>
     <string name="label_graph_rag_mode">图谱RAG模式</string>
+    <string name="label_graph_rag_short">图谱</string>
+    <string name="label_graph_rag_checkbox">使用图谱RAG</string>
+    <string name="label_graph_rag_vector_expand">图谱向量粗召回放大\n(+K文档数):</string>
     <!-- 构建/召回双 Hub 门限标签 -->
     <string name="label_graph_hub_threshold">超大实体门限（构建）\n(邻居数,0=关闭):</string>
     <string name="label_graph_hub_threshold_query">超大实体门限（召回）\n(邻居数,0=关闭):</string>

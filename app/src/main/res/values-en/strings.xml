@@ -419,7 +419,7 @@
 
     <!-- UI text -->
     <string name="text_new_conversation">New</string>
-    <string name="text_thinking_mode">Thinking Mode</string>
+    <string name="text_thinking_mode">ThinkMode</string>
     <string name="label_llm_api_url">API URL:</string>
     <string name="label_llm_api_key">API Key:</string>
     <string name="label_llm_model">Model:</string>
@@ -872,10 +872,12 @@
     <string name="label_json_dataset_splitting">JSON Dataset Chunking Optimization</string>
     
     <!-- Knowledge Graph RAG Settings -->
-    <string name="label_graph_min_edge_weight">Graph Min Edge Weight\n(1~10):</string>
-    <string name="label_graph_entity_confidence_threshold">Entity Confidence Threshold\n(0.5~1.0):</string>
-    <string name="label_graph_max_expand_entities">Graph Max Expand Entities\n(10~100):</string>
-    <string name="label_graph_rag_mode">Graph RAG Mode</string>
+    <string name="label_graph_min_edge_weight">Min edge weight\n(1~10):</string>
+    <string name="label_graph_entity_confidence_threshold">Entity confidence threshold\n(0.5~1.0):</string>
+    <string name="label_graph_max_expand_entities">Max expand entities\n(10~100):</string>
+    <string name="label_graph_rag_mode">Knowledge Graph RAG mode</string>
+    <string name="label_graph_rag_short">GRAG</string>
+    <string name="label_graph_rag_vector_expand">Graph RAG vector coarse recall expand\n(+K documents):</string>
     <string name="hint_graph_max_expand_entities">Limit number of entities returned by graph expansion</string>
     <string name="hint_graph_entity_confidence_threshold">Keep only high-confidence entities</string>
     <string name="label_graph_rag_weight_preset">Graph RAG Fusion Preset:</string>
