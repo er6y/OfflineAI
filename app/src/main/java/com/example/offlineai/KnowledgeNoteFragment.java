@@ -55,6 +55,7 @@ import com.example.offlineai.AppConstants;
 import com.example.offlineai.TextChunkProcessor; // 导入文本处理器
 import com.example.offlineai.HanLpNerHandler;
 import com.example.offlineai.GraphStopwordsMatcher;
+import com.example.offlineai.ipc.InferenceClient;
 
 // Removed @SuppressWarnings("deprecation") - No longer using deprecated APIs
 public class KnowledgeNoteFragment extends Fragment {
@@ -96,6 +97,7 @@ public class KnowledgeNoteFragment extends Fragment {
     private Spinner spinnerKnowledgeBase;
     private Button buttonAddToKnowledgeBase;
     private ExecutorService executorService;
+    private String noteTaskId;
     private volatile boolean isProcessing = false;
     private volatile boolean isCancelled = false;
     private List<String> knowledgeBaseNames = new ArrayList<>();
@@ -141,6 +143,18 @@ public class KnowledgeNoteFragment extends Fragment {
                     LogManager.logI(TAG, "[NOTE] User confirmed cancel during note processing");
                     isCancelled = true;
                     updateProgress(getString(R.string.dialog_message_cancel_current_operation));
+                    if (noteTaskId != null) {
+                        try {
+                            BackgroundTaskManager.getInstance().updateTask(
+                                    noteTaskId,
+                                    BackgroundTask.TaskState.CANCELLED,
+                                    0,
+                                    "Note processing cancelled by user"
+                            );
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[TASK] Failed to update note background task on user cancel: " + e.getMessage(), e);
+                        }
+                    }
                 });
             } else {
                 addToKnowledgeBase();
@@ -158,6 +172,9 @@ public class KnowledgeNoteFragment extends Fragment {
         loadKnowledgeBaseNames();
         // 在页面恢复时重新应用字体大小，以便在设置页面修改后能够立即生效
         applyGlobalTextSize();
+        // Lightweight UI state resync based on active NOTE_PROCESSING background tasks
+        resyncNoteUiStateWithBackgroundTasks();
+        replayNoteLogsFromUnifiedService();
     }
 
     @Override
@@ -166,6 +183,91 @@ public class KnowledgeNoteFragment extends Fragment {
         // 关闭线程池
         if (executorService != null && !executorService.isShutdown()) {
             executorService.shutdown();
+        }
+    }
+
+    // Lightweight UI state resync for note processing: restore button state based on active background tasks
+    private void resyncNoteUiStateWithBackgroundTasks() {
+        try {
+            java.util.List<BackgroundTask> activeTasks = BackgroundTaskManager.getInstance().getActiveTasks();
+            if (activeTasks == null || activeTasks.isEmpty()) {
+                return;
+            }
+
+            // Determine current knowledge base selection
+            String currentKb = null;
+            if (spinnerKnowledgeBase != null && spinnerKnowledgeBase.getSelectedItem() != null) {
+                currentKb = spinnerKnowledgeBase.getSelectedItem().toString();
+            }
+            if (currentKb == null || currentKb.isEmpty() ||
+                    StateDisplayManager.isKnowledgeBaseStatusDisplayText(requireContext(), currentKb)) {
+                currentKb = ConfigManager.getString(requireContext(), ConfigManager.KEY_KNOWLEDGE_BASE, "");
+            }
+            if (currentKb == null || currentKb.isEmpty()) {
+                return;
+            }
+
+            boolean hasNoteTaskForKb = false;
+            for (BackgroundTask task : activeTasks) {
+                if (task.getType() != BackgroundTask.TaskType.NOTE_PROCESSING) {
+                    continue;
+                }
+                java.util.Map<String, String> extras = task.getExtras();
+                if (extras == null || extras.isEmpty()) {
+                    continue;
+                }
+                String kbName = extras.get("kbName");
+                if (kbName != null && kbName.equals(currentKb)) {
+                    hasNoteTaskForKb = true;
+                    break;
+                }
+            }
+
+            if (!hasNoteTaskForKb) {
+                return;
+            }
+
+            // Restore processing state and button as "Cancel"
+            isProcessing = true;
+            isCancelled = false;
+            if (buttonAddToKnowledgeBase != null) {
+                buttonAddToKnowledgeBase.setEnabled(true);
+                buttonAddToKnowledgeBase.setText(getString(R.string.common_cancel));
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TASK] Failed to resync note UI state with background tasks: " + e.getMessage(), e);
+        }
+    }
+
+    private void replayNoteLogsFromUnifiedService() {
+        try {
+            if (!isAdded() || getActivity() == null) {
+                return;
+            }
+            if (!(getActivity() instanceof MainActivity)) {
+                return;
+            }
+            MainActivity activity = (MainActivity) getActivity();
+            UnifiedForegroundService service = activity.getUnifiedForegroundService();
+            if (service == null) {
+                return;
+            }
+            if (service.getCurrentTaskType() != UnifiedForegroundService.TaskType.NOTE_PROCESSING) {
+                return;
+            }
+            java.util.List<String> logs = service.getLogSnapshot();
+            if (logs == null || logs.isEmpty()) {
+                return;
+            }
+            if (textViewProgress == null) {
+                return;
+            }
+            textViewProgress.setText("");
+            for (String line : logs) {
+                appendNoteProgress(line, true);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[FG] Failed to replay note logs from UnifiedForegroundService: " + e.getMessage(), e);
         }
     }
 
@@ -297,6 +399,28 @@ public class KnowledgeNoteFragment extends Fragment {
         
         String selectedKnowledgeBase = knowledgeBaseNames.get(spinnerKnowledgeBase.getSelectedItemPosition());
         
+        try {
+            java.util.Map<String, String> extras = new java.util.HashMap<>();
+            extras.put("kbName", selectedKnowledgeBase);
+            extras.put("titleLength", String.valueOf(title.length()));
+            extras.put("contentLength", String.valueOf(content.length()));
+            extras.put("fullTextLength", String.valueOf(fullText.length()));
+            BackgroundTask task = BackgroundTaskManager.getInstance().createTask(
+                    BackgroundTask.TaskType.NOTE_PROCESSING,
+                    "Add note to knowledge base: " + selectedKnowledgeBase,
+                    false,
+                    extras
+            );
+            noteTaskId = task.getId();
+            LogManager.logD(TAG, "[TASK] Created background task for note processing, id=" + noteTaskId);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TASK] Failed to create background task for note processing: " + e.getMessage(), e);
+            noteTaskId = null;
+        }
+
+        // Mark note processing as a foreground task so long-running operations keep app process alive
+        notifyForegroundServiceNoteStart(selectedKnowledgeBase);
+        
         // 显示进度
         textViewProgress.setText(getString(R.string.processing_status) + "\n");
 
@@ -308,12 +432,15 @@ public class KnowledgeNoteFragment extends Fragment {
         
         // 在后台线程中处理
         executorService.execute(() -> {
+            boolean noteTaskSuccess = false;
             try {
                 if (isCancelled) {
                     updateProgress(getString(R.string.processing_status_task_interrupted));
                     enableAddButton();
                     return;
                 }
+
+                updateNoteBackgroundTaskProgress(0, "Note processing started");
                 // 获取知识库目录
                 String knowledgeBasePath = ConfigManager.getKnowledgeBasePath(requireContext());
                 File knowledgeBaseDir = new File(knowledgeBasePath, selectedKnowledgeBase);
@@ -485,11 +612,13 @@ public class KnowledgeNoteFragment extends Fragment {
                     return;
                 }
 
-                // 使用EmbeddingHandler加载模型
-                EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(requireContext());
-                
+                // 使用推理子进程进行模型加载和重用（通过 InferenceClient 间接管理 EmbeddingHandler）
                 try {
-                    if (!embeddingHandler.loadModel(embeddingModelPath)) {
+                    com.example.offlineai.RuntimeConfigUtil.pushToInference(requireContext());
+                    InferenceClient client = InferenceClient.getInstance(requireContext().getApplicationContext());
+                    // Probe once to ensure model can be loaded in inference process
+                    float[] probe = client.computeEmbedding(embeddingModelPath, EmbeddingHandler.MemoryMode.LOW.getValue(), "dimension probe text");
+                    if (probe == null || probe.length == 0) {
                         updateProgress(getString(R.string.error_embedding_model_handler_failed));
                         enableAddButton();
                         return;
@@ -499,17 +628,19 @@ public class KnowledgeNoteFragment extends Fragment {
                     enableAddButton();
                     return;
                 }
-                
+
                 if (isCancelled) {
                     updateProgress(getString(R.string.processing_status_task_interrupted));
                     enableAddButton();
                     return;
                 }
 
+                updateNoteBackgroundTaskProgress(20, "Embedding model prepared for note processing");
+
                 // MNN embedding has built-in tokenizer
                 updateProgress("Using MNN built-in tokenizer");
                 
-                updateProgress(getString(R.string.embedding_model_loaded_success, embeddingHandler.getEmbeddingModel()));
+                updateProgress(getString(R.string.embedding_model_loaded_success, embeddingModelPath));
                 
                 // 使用 KnowledgeGraphDatabase 添加笔记
                 updateProgress(getString(R.string.adding_note_to_kb));
@@ -535,7 +666,19 @@ public class KnowledgeNoteFragment extends Fragment {
 
                     // Generate embedding vector for complete note (title + content)
                     updateProgress(getString(R.string.generating_embedding_vector));
-                    float[] contentEmbedding = embeddingHandler.computeEmbedding(fullText);
+                    float[] contentEmbedding;
+                    try {
+                        com.example.offlineai.RuntimeConfigUtil.pushToInference(requireContext());
+                        InferenceClient client = InferenceClient.getInstance(requireContext().getApplicationContext());
+                        contentEmbedding = client.computeEmbedding(embeddingModelPath, EmbeddingHandler.MemoryMode.LOW.getValue(), fullText);
+                        if (contentEmbedding == null || contentEmbedding.length == 0) {
+                            throw new Exception("Embedding vector is null or empty");
+                        }
+                    } catch (Exception e) {
+                        updateProgress(getString(R.string.vector_processing_error, e.getMessage()));
+                        // 异常情况下生成随机单位向量
+                        contentEmbedding = VectorAnomalyHandler.generateRandomUnitVector(128); // fallback dimension, will be adjusted below if needed
+                    }
                     
                     // 向量异常处理
                     try {
@@ -565,6 +708,7 @@ public class KnowledgeNoteFragment extends Fragment {
                     // 记录向量调试信息
                     String vectorDebugInfo = "Content vector generated, dimension: " + contentEmbedding.length;
                     updateProgress(vectorDebugInfo);
+                    updateNoteBackgroundTaskProgress(50, "Note embedding vector generated");
                     
                     if (isCancelled) {
                         updateProgress(getString(R.string.processing_status_task_interrupted));
@@ -748,6 +892,7 @@ public class KnowledgeNoteFragment extends Fragment {
                     int afterChunkCount = noteVectorDb.getChunkCount();
                     updateProgress(getString(R.string.db_chunk_count_after, afterChunkCount));
                     updateProgress(getString(R.string.new_chunk_count, afterChunkCount - beforeChunkCount));
+                    updateNoteBackgroundTaskProgress(80, "Note saved to database and graph updated");
                     
                     // 在关闭数据库之前检查文本块数量
                     boolean hasChunks = noteVectorDb.getChunkCount() > 0;
@@ -759,6 +904,7 @@ public class KnowledgeNoteFragment extends Fragment {
                     LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
                     
                     if (hasChunks) {
+                        noteTaskSuccess = true;
                         updateProgress(getString(R.string.note_added_success));
                         
                         // 清空输入框
@@ -777,6 +923,7 @@ public class KnowledgeNoteFragment extends Fragment {
                 LogManager.logE(TAG, "添加到知识库失败", e);
                 updateProgress(getString(R.string.error_message, e.getMessage()));
             } finally {
+                finalizeNoteBackgroundTask(noteTaskSuccess, isCancelled);
                 enableAddButton();
             }
         });
@@ -827,12 +974,134 @@ public class KnowledgeNoteFragment extends Fragment {
     // 更新进度显示
     private void updateProgress(String message) {
         requireActivity().runOnUiThread(() -> {
-            textViewProgress.append(message + "\n");
-            // 滚动到底部
-            scrollViewProgress.post(() -> {
-                scrollViewProgress.fullScroll(ScrollView.FOCUS_DOWN);
-            });
+            appendNoteProgress(message, false);
         });
+    }
+
+    private void appendNoteProgress(String message, boolean fromServiceReplay) {
+        if (textViewProgress == null || scrollViewProgress == null) {
+            return;
+        }
+        textViewProgress.append(message + "\n");
+        scrollViewProgress.post(() -> {
+            scrollViewProgress.fullScroll(ScrollView.FOCUS_DOWN);
+        });
+
+        if (!fromServiceReplay) {
+            try {
+                if (!isAdded() || getActivity() == null) {
+                    return;
+                }
+                if (!(getActivity() instanceof MainActivity)) {
+                    return;
+                }
+                MainActivity activity = (MainActivity) getActivity();
+                UnifiedForegroundService service = activity.getUnifiedForegroundService();
+                if (service == null) {
+                    return;
+                }
+                if (service.getCurrentTaskType() != UnifiedForegroundService.TaskType.NOTE_PROCESSING) {
+                    return;
+                }
+                service.appendClientLogLine(message);
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[FG] Failed to append note log to UnifiedForegroundService: " + e.getMessage(), e);
+            }
+        }
+    }
+
+    private void updateNoteBackgroundTaskProgress(int progress, String message) {
+        if (noteTaskId == null) {
+            return;
+        }
+        try {
+            BackgroundTaskManager.getInstance().updateTask(
+                    noteTaskId,
+                    BackgroundTask.TaskState.RUNNING,
+                    progress,
+                    message
+            );
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TASK] Failed to update note background task progress: " + e.getMessage(), e);
+        }
+    }
+
+    private void finalizeNoteBackgroundTask(boolean success, boolean wasCancelled) {
+        try {
+            if (noteTaskId != null) {
+                BackgroundTask.TaskState finalState;
+                int finalProgress;
+                String finalMessage;
+
+                if (wasCancelled) {
+                    finalState = BackgroundTask.TaskState.CANCELLED;
+                    finalProgress = 0;
+                    finalMessage = "Note processing cancelled";
+                } else if (success) {
+                    finalState = BackgroundTask.TaskState.COMPLETED;
+                    finalProgress = 100;
+                    finalMessage = "Note added to knowledge base successfully";
+                } else {
+                    finalState = BackgroundTask.TaskState.FAILED;
+                    finalProgress = 0;
+                    finalMessage = "Note processing failed";
+                }
+
+                BackgroundTaskManager.getInstance().updateTask(
+                        noteTaskId,
+                        finalState,
+                        finalProgress,
+                        finalMessage
+                );
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TASK] Failed to finalize note background task: " + e.getMessage(), e);
+        } finally {
+            noteTaskId = null;
+            // Always attempt to end foreground note processing session when background task finishes
+            notifyForegroundServiceNoteEnd();
+        }
+    }
+
+    private void notifyForegroundServiceNoteStart(String knowledgeBaseName) {
+        try {
+            if (!isAdded() || getActivity() == null) {
+                return;
+            }
+            if (!(getActivity() instanceof MainActivity)) {
+                return;
+            }
+            MainActivity activity = (MainActivity) getActivity();
+            UnifiedForegroundService service = activity.getUnifiedForegroundService();
+            if (service != null) {
+                String desc = "Note processing for KB: " + (knowledgeBaseName != null ? knowledgeBaseName : "unknown");
+                service.startTask(UnifiedForegroundService.TaskType.NOTE_PROCESSING, desc);
+                LogManager.logD(TAG, "[FG] Started NOTE_PROCESSING foreground task: " + desc);
+            } else {
+                LogManager.logW(TAG, "[FG] UnifiedForegroundService not available when starting note processing");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[FG] Failed to start NOTE_PROCESSING foreground task: " + e.getMessage(), e);
+        }
+    }
+
+    private void notifyForegroundServiceNoteEnd() {
+        try {
+            if (!isAdded() || getActivity() == null) {
+                return;
+            }
+            if (!(getActivity() instanceof MainActivity)) {
+                return;
+            }
+            MainActivity activity = (MainActivity) getActivity();
+            UnifiedForegroundService service = activity.getUnifiedForegroundService();
+            if (service != null && service.getCurrentTaskType() == UnifiedForegroundService.TaskType.NOTE_PROCESSING) {
+                service.endTask();
+                LogManager.logD(TAG, "[FG] Ended NOTE_PROCESSING foreground task");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[FG] Failed to end NOTE_PROCESSING foreground task: " + e.getMessage(), e);
+        }
     }
 
     // 获取可用的嵌入模型列表

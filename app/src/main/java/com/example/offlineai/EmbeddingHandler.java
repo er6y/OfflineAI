@@ -14,6 +14,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import com.offlineai.mnn.MnnInference;
+import com.example.offlineai.RuntimeConfigHolder;
 
 /**
  * MNN Embedding Handler - Unified embedding model handler
@@ -61,6 +62,9 @@ public class EmbeddingHandler {
     private int mEmbeddingDimension = 0;
     private MemoryMode mCurrentMemoryMode = null;
     private Context mContext;  // For accessing ConfigManager
+    // Track last runtime config used for this embedding session
+    private String mLastBackend = null;
+    private int mLastThreads = -1;
     
     // ========== Thread Management ==========
     private final ExecutorService mExecutor;
@@ -117,6 +121,25 @@ public class EmbeddingHandler {
         }
         
         LogManager.logI(TAG, "Loading MNN embedding model: " + modelPath + ", memory mode: " + memoryMode.getValue());
+
+        // Detect runtime config changes (backend/threads) and reload session if needed
+        int currentThreads = RuntimeConfigHolder.getThreadsOrDefault(ConfigManager.DEFAULT_THREADS);
+        String currentBackend = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
+
+        boolean backendChanged = (mLastBackend != null && !mLastBackend.equalsIgnoreCase(currentBackend));
+        boolean threadsChanged = (mLastThreads >= 0 && mLastThreads != currentThreads);
+
+        if (mNativeHandle != 0 && (backendChanged || threadsChanged)) {
+            LogManager.logI(TAG, "[CONFIG][Embedding] Runtime config changed (backend: "
+                    + mLastBackend + " -> " + currentBackend
+                    + ", threads: " + mLastThreads + " -> " + currentThreads
+                    + "), reloading embedding session");
+            // Use unified release to reset internal state
+            releaseModel();
+        }
+
+        mLastBackend = currentBackend;
+        mLastThreads = currentThreads;
         
         // Check if already loaded with same mode
         if (mCurrentModelPath != null && mCurrentModelPath.equals(modelPath) && 
@@ -494,11 +517,11 @@ public class EmbeddingHandler {
      * Only contains runtime parameters (memory, power, precision, thread_num)
      */
     private String buildRuntimeConfig(MemoryMode memoryMode) {
-        // Get thread count from settings
-        int threads = ConfigManager.getThreads(mContext);
+        // Get thread count from RuntimeConfig snapshot
+        int threads = RuntimeConfigHolder.getThreadsOrDefault(ConfigManager.DEFAULT_THREADS);
 
-        // Resolve backend from global settings (same as LLM)
-        String backendPreference = SettingsFragment.getBackendPreference(mContext);
+        // Resolve backend from RuntimeConfig snapshot (same as LLM)
+        String backendPreference = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
         String mnnBackend;
         switch (backendPreference) {
             case "OPENCL":
@@ -563,18 +586,18 @@ public class EmbeddingHandler {
         // Use directory name
         return modelDir.getName();
     }
-    
+
     /**
      * Check if file is a model file (Utils功能)
      */
     public static boolean isModelFile(File file) {
-        if (!file.isFile()) {
+        if (file == null || !file.isFile()) {
             return false;
         }
         String name = file.getName().toLowerCase();
         return name.endsWith(".mnn") || name.equals("config.json");
     }
-    
+
     /**
      * Check and load embedding model (Utils功能)
      * Migrated from EmbeddingModelUtils
@@ -584,26 +607,26 @@ public class EmbeddingHandler {
             KnowledgeGraphDatabase vectorDb,
             java.util.function.Consumer<String> callback,
             ModelSelectedCallback modelSelectedCallback) {
-        
+
         // Get configuration paths
         String embeddingModelPath = ConfigManager.getEmbeddingModelPath(context);
         String modeldir = vectorDb.getMetadata().getModeldir();
-        
+
         boolean needEmbeddingModelSelection = false;
         String modelPath = null;
-        
+
         // Check embedding model
         if (modeldir != null && !modeldir.isEmpty()) {
             File embeddingModelDir = new File(embeddingModelPath);
             boolean embeddingModelFound = false;
-            
+
             if (embeddingModelDir.exists() && embeddingModelDir.isDirectory()) {
                 File[] directories = embeddingModelDir.listFiles(File::isDirectory);
                 if (directories != null) {
                     for (File dir : directories) {
                         if (dir.getName().equals(modeldir)) {
                             // Check if directory contains model files
-                            File[] modelFiles = dir.listFiles(file -> isModelFile(file));
+                            File[] modelFiles = dir.listFiles(EmbeddingHandler::isModelFile);
                             if (modelFiles != null && modelFiles.length > 0) {
                                 modelPath = modelFiles[0].getAbsolutePath();
                                 embeddingModelFound = true;
@@ -613,17 +636,17 @@ public class EmbeddingHandler {
                     }
                 }
             }
-            
+
             if (!embeddingModelFound) {
                 needEmbeddingModelSelection = true;
             }
         } else {
             needEmbeddingModelSelection = true;
         }
-        
+
         // If selection needed, show dialog (simplified version)
         if (needEmbeddingModelSelection) {
-            LogManager.logI("EmbeddingHandler", "Model selection needed");
+            LogManager.logI(TAG, "Model selection needed");
             // For now, just callback with null to indicate selection needed
             // Full dialog implementation can be added later if needed
             callback.accept(null);
@@ -631,14 +654,14 @@ public class EmbeddingHandler {
             callback.accept(modelPath);
         }
     }
-    
+
     /**
      * Model selection callback interface
      */
     public interface ModelSelectedCallback {
         void onModelSelected(String embeddingModel, String rerankerModel);
     }
-    
+
     // ========== Resource Management ==========
     
     /**

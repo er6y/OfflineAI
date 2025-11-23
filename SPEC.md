@@ -86,7 +86,7 @@ flowchart TB
           Categories --> Options --> Actions --> Progress
       end
   ```
-- **Settings/Help/LogViewFragment/KnowledgeGraphViewerFragment**：设置页强调配置项互斥与即时生效（如手动参数优先），帮助页加载 assets 内文档并支持跳转锚点；日志页需读写本地 .log 文件并支持过滤/导出；图谱查看器展示知识库的实体关系网络。**菜单导航策略（方案 2）**：所有菜单 Fragment（Help、GraphViewer、Settings、Log 等）作为顶层页面处理，`MainActivity.onOptionsItemSelected()` 在打开新的菜单 Fragment 之前调用 `popBackStack(null, POP_BACK_STACK_INCLUSIVE)` 清空现有 Fragment back stack，确保任意时刻栈中最多只有一个菜单 Fragment，避免嵌套导航和复杂生命周期。**统一关闭按钮**：所有菜单 Fragment 使用 `MenuProvider` API 在 ActionBar 显示关闭按钮（X），点击后清空 back stack 并返回主界面（恢复 ViewPager）。**实现位置**：`onViewCreated()` 中注册 `MenuProvider`，处理 `android.R.id.home` 点击事件。**主要 API**：`SettingsFragment.saveSettings()`、`SettingsFragment.loadSettings()`、`HelpFragment.loadMarkdown()`、`LogViewFragment.refreshLogs()`、`LogViewFragment.filterByLevel()`、`KnowledgeGraphViewerFragment.loadGraphData()`。**关键数据结构**：`StateDisplayManager.DisplayEntry`、`LogManager.LogBuffer`、`MarkdownRenderer`、`KnowledgeGraphExporter.GraphStats`。**布局示意**：
+ - **Settings/Help/LogViewFragment/KnowledgeGraphViewerFragment**：设置页强调配置项互斥与即时生效（如手动参数优先），帮助页加载 assets 内文档并支持跳转锚点；日志页需读写本地 .log 文件并支持过滤/导出；图谱查看器展示知识库的实体关系网络，并在顶部展示当前知识库的 hubThreshold 与 runtime hub 实体列表（以空格分隔的实体名字符串），便于排查 Hub 过滤效果。**菜单导航策略（方案 2）**：所有菜单 Fragment（Help、GraphViewer、Settings、Log 等）作为顶层页面处理，`MainActivity.onOptionsItemSelected()` 在打开新的菜单 Fragment 之前调用 `popBackStack(null, POP_BACK_STACK_INCLUSIVE)` 清空现有 Fragment back stack，确保任意时刻栈中最多只有一个菜单 Fragment，避免嵌套导航和复杂生命周期。**统一关闭按钮**：所有菜单 Fragment 使用 `MenuProvider` API 在 ActionBar 显示关闭按钮（X），点击后清空 back stack 并返回主界面（恢复 ViewPager）。**实现位置**：`onViewCreated()` 中注册 `MenuProvider`，处理 `android.R.id.home` 点击事件。**主要 API**：`SettingsFragment.saveSettings()`、`SettingsFragment.loadSettings()`、`HelpFragment.loadMarkdown()`、`LogViewFragment.refreshLogs()`、`LogViewFragment.filterByLevel()`、`KnowledgeGraphViewerFragment.loadGraphData()`。**关键数据结构**：`StateDisplayManager.DisplayEntry`、`LogManager.LogBuffer`、`MarkdownRenderer`、`KnowledgeGraphExporter.GraphStats`。**布局示意**：
   ```mermaid
   flowchart TB
       subgraph SettingsFragment
@@ -102,13 +102,57 @@ flowchart TB
   ```
 
 ### 2.2 业务逻辑层（跨界面共享的核心服务）
-- **RagQueryManager**：封装完整的 RAG 调度流程。需求：响应问答请求时，根据当前设置决定是否执行知识库检索/重排，注入系统提示词与历史上下文，并与推理引擎双向通信（流式回调、停止信号）。设计：内部将流程拆为检索（SQLiteVectorDatabaseHandler）、可选重排（RerankerHandler）、上下文模板填充与调用 LocalLLMMNNHandler。提供详细日志（得分、拼接上下文 token 统计）便于调试。**主要 API**：`executeRagQuery()`（对外入口，驱动检索+推理）、`buildDirectPrompt()`/`buildFullPrompt()`（prompt 组装）、`queryKnowledgeBase()`（内部调用向量库）；回调接口 `RagQueryCallback`。**关键数据结构**：`RagQueryCallback`（进度/流式数据回传）、`LlmModelFactory.Provider`（在线模型适配）。
+- **RagQueryManager**：封装 RAG + LLM + TTS 调度核心，作为 RagQaFragment 与推理引擎之间的业务中枢。需求：响应问答请求时，根据当前设置决定是否执行知识库检索 / GraphRAG / 重排，注入系统提示词与历史上下文，并通过回调与 UI 双向通信（流式 token、进度、停止信号、TTS 结果）。设计：对外统一入口 `startQuery(QueryRequest)`，内部使用单线程执行器 `ragQueryExecutor` 负责从 ASR / 多模态预处理 → 向量检索管线（`runRagRetrievalPipeline`）→ GraphRAG 融合（`runGraphRagPipeline`）→ 可选重排（`runRerankerPipeline`）→ 上下文模板填充（`buildPromptWithKnowledgeBase` / `buildPromptWithoutKnowledgeBase`）→ LLM+TTS 流水线（`runLlmPipeline`，统一封装 `LlmApiAdapter` 调用）的完整管线。**主要 API**：`startQuery(QueryRequest)`、`runQueryPipeline()`、`runAsrAndContinue()`、`runFullRagPipelineFromAsrResult()`、`runDirectLlmWithoutKnowledgeBase()`、`runRagLlmWithKnowledgeBase()`、`runRagRetrievalPipeline()`、`runGraphRagPipeline()`、`runRerankerPipeline()`、`runLlmPipeline()`、`getStopStatus()` / `shouldStop()`、`getRelevantDocumentsSnapshot()` / `getSimilarityInfoSnapshot()`；回调接口 `RagQueryCallback` 负责把业务层事件映射为 UI 操作（发送状态、前台服务开始/结束、流式文本、TTS 结果、前台会话控制）。**关键数据结构**：`QueryRequest`（不可变查询快照）、`RagQueryCallback`（进度/流式/前台服务/TTS 回传）、`LlmModelFactory.Provider`（在线模型适配）。
+  - **统一管线调度（2025-12-05 v3 重构）**：`runQueryPipeline()` 作为 Manager 侧唯一管线入口，在接收 `QueryRequest` 后统一执行：① 重置本地/全局停止标志并通过 `getStopStatus()/shouldStop()` 提供只读视图；② 调用 `RagQueryCallback.onRequestStartInferenceForeground()` 启动统一的 INFERENCE 前台任务；③ **在 Manager 内部创建 LLM 背景任务**（`createLlmTask()`），并通过 `onQueryStarted(taskId)` 通知 Fragment 保存 taskId（纯通知，Fragment 不参与流程控制）；④ 将整个查询任务投递到 Manager 自己持有的单线程执行器 `ragQueryExecutor` 上，由 Manager 根据 `audioPaths/needsAsr/asrModel` 判断是否走 ASR 管线（`runAsrAndContinue()`），并在得到最终文本与 ASR 调试信息后，**直接调用 `runFullRagPipelineFromAsrResult()` 继续主流程**（不再回调 Fragment）。
+  - **查询快照与 ASR 决策 / 文本统一入口**：`QueryRequest` 除基础字段（apiUrl/apiKey/model/knowledgeBase/systemPrompt/userPrompt）外，还携带检索与多模态配置：`imagePaths` / `audioPaths` / `audioDuration`、`searchDepth`、`graphRagEnabled`、`needsAsr`、`asrModel`。Fragment 仅在发送入口构造 `QueryRequest` 并调用 `RagQueryManager.startQuery()`，不再直接参与 ASR 业务逻辑；是否启用 ASR 以及使用何种模型由 Manager 内部基于 `needsAsr/asrModel` 决策，并在 `runAsrAndContinue()` 中通过 IPC (`InferenceClient.runAsr`) 完成转写，将 ASR 文本与用户文本合并后直接调用 `runFullRagPipelineFromAsrResult()`。
+  - **LLM 背景任务生命周期与日志集成**：RAG/LLM 查询在 Manager 侧的 `runQueryPipeline()` 开始时通过 `createLlmTask(extras)` 创建 `TaskType.LLM_INFERENCE` 任务，并将任务 id 缓存在 `currentLlmTaskId` 字段中，然后通过 `onQueryStarted(taskId)` 通知 Fragment 保存 taskId；`runDirectLlmWithoutKnowledgeBase()` / `runRagLlmWithKnowledgeBase()` 在构建 Prompt 后统一调用 `runLlmPipeline()`，并传入该 taskId 用于 `updateLlmTaskProgress()`、`finalizeLlmTask()` 与 `appendInferenceLog()/replayInferenceLogsForConsumer()` 对接 `BackgroundTaskManager + TaskLogBuffer`，保证推理进度与调试日志在 Fragment 重建、前台服务切换场景下仍可完整恢复。UI 侧仅持有 `llmTaskId` 与日志重放游标，所有状态变更以 Manager 为唯一来源。
+  - **Buffer 写入架构（2025-12-05 v3）**：
+    - **核心原则**：Buffer（`TaskLogBuffer`）只由 Manager 写入，Fragment 绝不写 Buffer。
+    - **统一写入方法**：`emitStreamingChunkFromManager(chunk)` 先写 Buffer（`appendInferenceLog`），再通知 UI（`cb.onStreamingData`）。
+    - **Fragment 只读**：`onStreamingData` 回调只更新 UI 显示，不写 Buffer。
+    - **设计优势**：UI 销毁时 Buffer 写入不受影响；UI 重建后从 Buffer replay 即可恢复完整内容。
+  - **UI/逻辑完全分离架构（2025-12-05 清理）**：
+    - **设计原则**：`RagQaFragment` 仅作为订阅者/展示者，不执行任何核心业务逻辑（ASR、Embedding、Rerank、LLM、Diffusion、TTS）。所有业务流程由 `RagQueryManager` 或其他 Manager 类驱动。
+    - **已删除的遗留代码**：
+      - `callLLMApi()` 方法及其所有相关回调代码（约 500 行）：LLM API 调用现由 `RagQueryManager.runLlmPipeline()` 直接使用 `LlmApiAdapter` 完成。
+      - `RagQueryCallback.onRequestCallLlm()` 接口方法：Manager 不再将 LLM 调用委托回 Fragment。
+      - 所有 `if (ragQueryManager != null) ... else ...` fallback 路径：`ragQueryManager` 在 `onViewCreated` 中初始化，正常情况下不为 null，fallback 逻辑属于冗余防御代码。
+    - **Debug 信息持久化**：`RagQueryManager` 使用 `fullResponseAccumulator` 累积完整响应（包括 debug 信息），在 `onSuccess` 时通过 `ChatHistoryManager.appendAssistantTextMessage()` 写入 Markdown。关键点：先检测并关闭 `<debug>` 块，再累积过滤后的 chunk，确保 `[TEXT:]` 等 marker 不会出现在 debug 块内。
+    - **UI 生命周期无关性**：核心流程（ASR → Embedding → Rerank → LLM → Diffusion → TTS）在 Manager 侧执行，用户切后台、小窗口切回时，可通过 `resyncUiStateWithBackgroundTasks()` 重连 UI 状态和日志流。
+    - **流式输出 Buffer 与 UI 重建恢复机制（2025-12-05 v2）**：
+      - **核心设计**：`RagQueryManager` 是主体，`TaskLogBuffer` 是桥梁，UI 可随时销毁重建。
+      - **数据流**：
+        1. `RagQueryManager` push 流式数据到 `TaskLogBuffer`
+        2. UI 通过 `popNewLogs()` 获取并显示（cursor 自动推进）
+        3. `RagQueryManager` 落 MD 时清空 buffer（`resetLogConsumerCursorAfterPersist()`）
+        4. 下一段内容继续 push，UI 继续 pop
+      - **正常流式场景**：
+        1. 开始时 buffer 为空，cursor=0
+        2. Manager push debug 信息 → UI pop 并显示
+        3. debug 落 MD → buffer 清空 → cursor 回到 0
+        4. Manager push 推理内容 → UI pop 并显示
+        5. 推理落 MD → buffer 清空 → cursor 回到 0
+        6. Manager push performance → UI pop 并显示
+        7. performance 落 MD → buffer 清空 → 完成
+      - **UI 重建场景**（小窗口切换导致 Fragment 销毁重建）：
+        1. `loadChatHistory()` 从 Markdown 加载已持久化的历史消息
+        2. `resyncUiStateWithBackgroundTasks()` 恢复 `llmTaskId`
+        3. `replayInferenceLogsFromUnifiedService()` 调用 `popNewLogs()` 获取所有未落盘内容
+        4. 因为新 consumer 的 cursor 默认是 0，所以能拿到 buffer 中所有内容
+        5. UI 无缝衔接：MD（已落盘）+ buffer（未落盘）= 完整内容
+      - **关键点**：
+        - cursor 语义是"MD 已持久化到哪里"，不是"UI 已显示到哪里"
+        - `popNewLogs()` 内部会推进 cursor，无需外部调用 `advanceLogConsumerToEnd()`
+        - 落 MD 时清空 buffer，确保 buffer 只存未落盘内容
+        - UI 被 kill 时通知失败不影响主流程，重建后自动恢复
+      - **主要 API**：`RagQueryManager.appendInferenceLog()`、`resetLogConsumerCursorAfterPersist()`、`getNewLogsForConsumer()`。
 - **EmbeddingHandler / RerankerHandler**：MNN 一站式嵌入与重排管理器。需求：以单例形式常驻模型，适配构建任务（高负载）与问答（低延迟）两种场景，支持中断与模式切换。设计：统一调用 MnnInference JNI，维护 native handle 生命周期，确保线程安全（synchronized + AtomicBoolean）与内存模式管理。**主要 API**：`EmbeddingHandler.loadModel()`、`computeEmbedding()`、`stopInference()`；`RerankerHandler.loadModel()`、`setInstruction()`、`rerank()`、`setScoreCallback()`。**关键数据结构**：`EmbeddingHandler.MemoryMode`、`RerankerHandler.RerankResult`、`RerankerHandler.ScoreCallback`。
 - **KnowledgeBaseService**：管理知识库目录结构与元信息。需求：提供新建/删除/重命名/校验接口，维护 SQLite 数据文件、文档快照、临时中间文件。设计：封装路径拼接与权限校验，所有写操作记录日志便于排查权限问题。**主要 API**：`createKnowledgeBase()`、`deleteKnowledgeBase()`、`loadMetadata()`、`validatePath()`。**关键数据结构**：`KnowledgeBaseService.Metadata`（记录 embedding 模型、创建时间、统计信息）。
 - **TextChunkProcessor + DocumentParser**：文档解析与分块管线。需求：支持主流办公格式（PDF/Office/TXT/Markdown/JSON），按配置执行分块与重叠策略，并在失败时可恢复。设计：解析阶段使用 DocumentParser 抽取文本，分块阶段依据 chunkSize/overlap/minChunkSize 生成 TextChunk 集合，写入中间文件供断点续跑，随后驱动 EmbeddingHandler 写入向量库。**主要 API**：`processFiles()`、`extractTextFromFiles()`、`processChunksToVectors()`、`DocumentParser.extractText()`。**关键数据结构**：`TextChunkProcessor.TextChunk`、`ProgressCallback`、`NotificationProgressCallback`。
 - **ChatHistoryManager**：会话与附件管理。需求：记录聊天 Markdown、图像缩略图、AI 语音音频、Diffusion 输出，一并落地到 chathistory/<session> 中。设计：以 Markdown + 元数据形式存储，加载时解析音频/图像链接恢复 UI 状态，提供历史迁移与分享能力。**主要 API**：`saveChat()`、`loadChat()`、`appendAudioRecord()`、`convertChatToMarkdown()`。**关键数据结构**：`ChatHistoryManager.ChatRecord`、`ChatDataItem`、音频/图像文件命名规范。
 - **ProgressManager / StateDisplayManager**：状态广播与多语言文案中心。ProgressManager 负责知识库构建等长任务的阶段进度与耗时统计；StateDisplayManager 统一管理中英文文案，将业务状态映射为 UI 可读提示，减少界面硬编码。**主要 API**：`ProgressManager.initFileProcessing()`、`updateFileProgress()`、`initVectorization()`、`markCompleted()`；`StateDisplayManager.getDialogDisplay()`、`getButtonDisplay()`。**关键数据结构**：`ProgressManager.ProgressData`、`StateDisplayManager.DisplayEntry`。
-- **LogManager**：统一日志输出、文件滚动、logcat 捕获。需求：Release 默认强制写盘，支持多线程安全写入与大小限制（1MB 自动裁剪）。设计：所有模块通过 LogManager 记录关键事件，并在日志页面按级别过滤显示。**主要 API**：`LogManager.getInstance()`、`d/i/w/e()`、`setForceLogToFile()`、`loadLogConfig()`、`saveLogConfig()`。**关键数据结构**：日志文件 `.log`、内部线程池、格式化模板。
+- **LogManager**：统一日志输出、文件滚动、logcat 捕获。需求：Release 默认强制写盘，支持多线程安全写入与大小限制（1MB 自动裁剪）。设计：使用单线程写入队列，超过容量自动裁剪头部，并支持手动导出。
+- **AcceleratorDiagnostics**：加速器检测与策略管理。需求：启动时检测设备是否支持 Vulkan/OpenCL/NNAPI/KleidiAI，并结合 Settings 中的偏好决定实际后端，同时提供日志可观测性。设计：通过 JNI 获取硬件能力、编译宏信息，按优先级回退到 CPU，并在日志中标记可用性和降级原因。**主要 API**：`initializeGPUHandling()`、`performAcceleratorConfigCheck()`、`logHardwareCaps()`。**关键数据结构**：后端能力快照（Vulkan/NNAPI flags）、`AcceleratorDiagnostics.Result`。
 
 ### 2.3 推理与原生层
 - **LocalLLMMNNHandler**：MNN 推理枢纽，需求是对不同模型类型（纯文本 LLM、视觉-语言、Diffusion、TTS）进行统一探测、配置构建、推理调度，并处理流式回调与停止控制。设计：通过检测模型目录内文件（llm.mnn、visual.mnn、text_encoder.mnn、audio.mnn、talker.mnn）判定功能，使用 MnnInference.ConfigBuilder 构建 runtime config，注册回调处理文本 token、图像/音频输出，支持 dit_steps/dit_solver、KV Cache 等高级参数。**主要 API**：`findModelFile()`、`initialize()`、`generate()`、`stopGeneration()`、`buildMnnConfig()`、`handleStreamingToken()`。**关键数据结构**：`LocalLlmHandler.InferenceParams`、`MnnInference.ConfigBuilder`、`StreamingCallback`。
@@ -119,25 +163,100 @@ flowchart TB
     - `libs/mnn-jni` 的 `debug` 构建禁用 `ndk.debugSymbolLevel` 并传递 Release 参数，统一使用 O3 优化；Java 层仍可保留 Debug 便于问题定位。
     - 如需对 native 进行调试，建议在本地分支临时开启符号和断言，不要影响主线发布构建。
     - 最佳实践：仅在必要时打开 native 调试符号；发布通道一律保持 Release 优化以确保 TTS/LLM 性能。
-- **StreamingApiClient / LlmApiAdapter**：在线推理客户端。需求：兼容多家 OpenAI/Claude 风格 API，实现统一的流式回调、错误处理、重试机制，与本地流程共享同一回调接口。设计：使用 Volley/OkHttp 发起 HTTP 请求，按流式事件将增量内容回传给 RagQaFragment，支持停止信号中断网络请求。**主要 API**：`StreamingApiClient.startStreaming()`、`stopStreaming()`、`LlmApiAdapter.ApiCallback`（成功/失败/流式回调）。**关键数据结构**：`LlmApiAdapter.ProviderConfig`、`StreamingChunk`。
+- **StreamingApiClient / LlmApiAdapter**：在线 + 本地统一推理客户端。需求：兼容多家 OpenAI/Claude 风格 API，同时以相同回调接口封装本地 MNN 推理。设计：
+  - **在线路径**：使用 Volley/OkHttp 发起 HTTP 请求，按流式事件将增量内容回传给 RagQaFragment，支持停止信号中断网络请求。**主要 API**：`StreamingApiClient.startStreaming()`、`stopStreaming()`、`LlmApiAdapter.ApiCallback`（成功/失败/流式回调）。**关键数据结构**：`LlmApiAdapter.ProviderConfig`、`StreamingChunk`。
+  - **本地路径（多进程推理架构，2025-11-22，2025-12-05 IPC 重构）**：
+    - 本地 LLM/MNN 推理迁移到独立进程 `:inference`，由 `InferenceService` 持有 `LocalLlmAdapter + LocalLLMMNNHandler` 以及所有 JNI 句柄（MNN 会话、Embedding、Reranker、ASR、External TTS），主进程不再直接触碰重型 JNI 调用。
+    - 主进程通过 `InferenceClient` 使用 AIDL/Binder 调用 `IInferenceService` 接口，`LlmApiAdapter` 在检测到 `ApiType.LOCAL` 时不再直接调用 `LocalLlmAdapter`，而是路由到 `InferenceClient.runLlmTask()`，从而实现：
+      - UI → `LlmApiAdapter` → `InferenceClient`（主进程）→ `InferenceService`（:inference）→ `LocalLlmAdapter`/`LocalLLMMNNHandler` → `MnnInference` JNI。
+      - `ILlmCallback` 将子进程内的流式 token / 完整回复 / 错误回传给主进程，再转交给 `LlmApiAdapter.ApiCallback` 与 RagQaFragment。
+    - **IPC 接口清单（IInferenceService.aidl）**：
+      - `runLlmTask()` - LLM 推理（支持图像/音频多模态）
+      - `computeEmbedding()` / `initKbEmbedding()` / `computeKbEmbedding()` - 向量嵌入
+      - `rerank()` - 重排序
+      - `runAsr()` - 语音识别
+      - `runTts()` - External TTS 合成（MNN TTS 模型）
+      - `stopAll()` - 停止当前推理
+      - `resetStopFlag()` - 重置停止标志（新查询前调用）
+      - `getStatus()` - 查询服务状态
+      - `updateRuntimeConfig()` - 推送运行时配置
+      - `forceKillSelf()` - 强制终止子进程
+    - **主进程调用约定（2025-12-05 重构）**：
+      - 主进程中的 `LocalLlmAdapter`/`LocalLlmHandler`/`LocalLLMMNNHandler` 单例仅用于文件扫描（`listAvailableModels()`），不持有任何模型资源。
+      - 所有模型状态查询（`getModelState()`、`isModelBusy()`、`isInferenceRunning()`）通过 `InferenceClient.safeGetStatus()` 获取子进程状态。
+      - 停止标志重置通过 `InferenceClient.resetStopFlag()` 调用子进程。
+      - External TTS 通过 `InferenceClient.runTts()` 在子进程执行，System TTS 仍在主进程（Android 系统服务）。
+      - 后端设置（GPU/CPU）通过 `RuntimeConfigUtil.pushToInference()` 推送到子进程，主进程不再调用 `LocalLlmAdapter.updateGpuSetting()`。
+    - **代码目录重构（2025-12-05）**：
+      - 所有推理相关类统一移到 `ipc/` 包：`LocalLlmAdapter`、`LocalLlmHandler`、`LocalLLMMNNHandler`、`AsrAdapter`、`TtsAdapter`。
+      - `ExternalTtsHandler` 已合并到 `TtsAdapter`，删除冗余文件。
+      - `TtsAdapter.synthesizeExternal()` 方法供 `InferenceService.runTts()` 调用，统一 External TTS 入口。
+      - `api/` 包仅保留 `LlmApiAdapter`、`LlmModelFactory`、`StreamingApiClient` 等主进程 API 适配器。
+    - **停止与 5 秒超时 kill 策略**：
+      - 正常 Stop：RagQaFragment 停止分支调用 `InferenceClient.requestStopWithTimeout(5000)`，该方法先通过 Binder 调 `IInferenceService.stopAll()`，在推理子进程内部仅执行协作式 `shouldStop`/`stop_requested_` 停止（不直接打断 JNI 线程）。
+      - 超时兜底：`InferenceClient` 在主进程启动一个 ~5 秒的定时器；若期间收到 `onComplete/onError`（说明 LLM 已干净退出），定时器会被取消；否则 5 秒到期且仍有 `hasActiveTask=true` 时，通过 AIDL 调用 `IInferenceService.forceKillSelf()`，在推理进程中执行 `Process.killProcess(Process.myPid())`，只杀掉 `:inference` 进程而不影响 UI 进程。
+      - 崩溃/卡死检测：Binder 抛出 `RemoteException/DeadObjectException` 或 `getStatus()` 返回异常状态时，`InferenceClient` 会清空本地 service 引用并触发下次调用时自动重新 bind，RagQaFragment 侧收到错误后将当前任务标记为失败并提示用户“引擎已重启，请重试”。
+    - 该多进程方案保证：
+      - JNI/MNN 层的 SIGSEGV/SIGBUS 或 GPU 崩溃只会终止子进程，主进程 UI 保持存活；
+      - 用户点击 Stop 时体验可控：要么在协作式停止内快速结束，要么在 5 秒后强制重启推理引擎，避免“按钮已变回发送但模型仍在后台输出”的错乱状态。
 - **AcceleratorDiagnostics**：加速器检测与策略管理。需求：启动时检测设备是否支持 Vulkan/OpenCL/NNAPI/KleidiAI，并结合 Settings 中的偏好决定实际后端，同时提供日志可观测性。设计：通过 JNI 获取硬件能力、编译宏信息，按优先级回退到 CPU，并在日志中标记可用性和降级原因。**主要 API**：`initializeGPUHandling()`、`performAcceleratorConfigCheck()`、`logHardwareCaps()`。**关键数据结构**：后端能力快照（Vulkan/NNAPI flags）、`AcceleratorDiagnostics.Result`。
 
 ### 2.4 数据与资源层
 - **ConfigManager**：配置中心。需求：统一存储路径配置、推理参数、UI 习惯、API Key 等，保证热更新能力。设计：结合 SharedPreferences（快速存取）与内部 .config JSON 文件（备份/同步），提供强类型访问器与默认值，兼容历史字段并记录迁移日志。**主要 API**：`getKnowledgeBasePath()`、`getEmbeddingModelPath()`、`getMaxNewTokens()`、`getPriorityManualParams()`、`setInt/Float/Boolean()` 等强类型访问器。**关键数据结构**：配置键常量（`KEY_*` 系列）、`.config` JSON。
 - **SQLiteVectorDatabaseHandler**：向量数据库封装。需求：管理向量表、元数据表、构建进度表，支持批量写入、删除、查询、统计。设计：使用事务保障批量插入一致性，提供相似度查询接口与分页能力，并在构建流程结束后返回写入统计供 UI 展示。**主要 API**：`loadDatabase()`、`searchSimilar()`、`insertChunk()`、`closeDatabase()`。**关键数据结构**：`SearchResult`（包含 text/similarity/source）、SQLite 表结构。
 - **文件系统布局**：统一根目录 `/storage/emulated/0/Download/OfflineAIData` 下的 models、embeddings、rerankers、knowledge_bases、chathistory 等子目录。需求：自动创建、校验剩余空间、提供错误提示。设计：ConfigManager 负责路径生成，FileUtil 校验读写权限，并在日志中记录异常文件路径。**主要 API**：`FileUtil.ensureDirectory()`、`ConfigManager.ensureDataDirs()`。**关键数据结构**：目录常量、`File` 对象。
-- **UnifiedForegroundService**：前台服务框架。需求：对知识库构建、模型下载、长时间推理等任务保持前台通知和 WakeLock，防止系统回收。设计：通过 Binder 向各 Fragment 提供回调注册，通知栏显示任务状态与进度，任务完成后自动降级通知并释放资源。**主要 API**：`startTask()`、`setProgressCallback()`、`stopTask()`、`releaseWakeLock()`。**关键数据结构**：`TaskType` 枚举、`ProgressCallback`。
+- **UnifiedForegroundService**：前台服务框架。需求：对知识库构建、模型下载、长时间推理等任务保持前台通知和 WakeLock，防止系统回收，并为长任务提供**可重连的进度/日志视图**。设计：通过 Binder 向各 Fragment 提供回调注册，维护当前任务类型与整体进度，同时内置内存日志缓冲区（有界 ring buffer）：构建过程中所有 `onLogLine()` 文本首先写入服务侧缓冲，再分发给 UI。`BuildKnowledgeBaseFragment` 在重新绑定服务时通过 `getLogSnapshot()` 拉取已有日志并顺序回放，结合 `ProgressManager.ProgressData` 补齐数值进度，从而在 Activity/Fragment 重建、切小窗等场景下恢复“进度框打印”历史，而无需依赖单个 Fragment 实例中的 TextView 状态。任务完成后自动降级通知并释放 WakeLock。**主要 API**：`startTask()`、`setProgressCallback()`、`endTask()`、`getLogSnapshot()`、`releaseWakeLock()`。**关键数据结构**：`TaskType` 枚举、`ProgressCallback`、服务内日志缓冲（`MAX_LOG_LINES` 有界 ring buffer）。
+  - **推理日志统一管线（INFERENCE 任务）**：同一 ring buffer 也被复用为 RAG/LLM/Diffusion/ASR 调试与性能日志的**唯一来源**：
+    - 写入侧：
+      - RagQaFragment 中所有 RAG/LLM/ASR 诊断信息（如 `[RAG]` / `[LLM]` / `[ASR]`）通过 `emitInferenceDebugLog()` 统一调用 `UnifiedForegroundService.appendInferenceLogFromClient()` 写入缓冲，不再直接写 UI。
+      - LlmApiAdapter 在 `onStreamingData()` 中调用 `appendInferenceDebugChunk()`，将包含 `<debug>` / `<performance>` / `[IMAGE:]` / `[DIFF_DEBUG]` / `[DIFFUSION]` / `UNet Steps` / `Completed (...)` 的关键 token 过滤后写入同一 log buffer，避免 token 级刷屏。
+    - 读取侧：
+      - RagQaFragment 通过 `replayInferenceLogsFromUnifiedService()` 按 `lastFgLogIndex` 增量读取 `getLogSnapshot()` 返回的日志行，并将每行交给 `updateChatMessage()`。
+      - `updateChatMessage()` / `CollapsibleTextParser` 负责把 `<debug>...</debug>`、`<performance>...</performance>` 解析进 `ChatDataItem.debugText/performanceText/displayText`，再由 RecyclerView 折叠区呈现；普通回答内容仍走原有 streaming 通路。
+      - ChatHistoryManager 在 `saveConversation()` 中仅使用 `ChatDataItem.debugText/performanceText/displayText` 生成 `<debug>` / `<performance>` 与正文块，因此 UI 与 `conversation.md` 对同一条推理日志只保留一份权威视图，完全由 ring buffer 驱动。
+  - **BackgroundTask / BackgroundTaskManager（统一后台任务抽象，2025-11）**：为所有长任务提供统一的任务快照模型与集中管理器，便于 UI 恢复、任务重连与前台服务联动。
+    - **任务模型 BackgroundTask**：不可变数据类，包含 `id`、`TaskType`（如 `KB_BUILD` / `MODEL_DOWNLOAD` / `NOTE_PROCESSING` / `LLM_INFERENCE` / `TTS_GENERATION` / `OTHER`）、`TaskState`（`PENDING` / `RUNNING` / `COMPLETED` / `FAILED` / `CANCELLED`）、`progress`（0–100）、`title`、`message`、时间戳与可选 `extras`（如模型名、KB 名、文件数等），每次更新生成快照，便于监听器获得一致视图。
+    - **任务管理器 BackgroundTaskManager**：进程内单例，负责创建/更新/查询任务和分发监听事件。对外暴露线程安全方法：`createTask(TaskType, title, requireForeground, extras)`、`updateTask(id, state, progress, message)`、`getTask(id)`、`getAllTasks()`、`addListener()/removeListener()`。内部使用并发容器保存任务快照，更新时自动通知所有监听器（包括前台服务与 UI）。
+    - **前台服务集成策略**：`UnifiedForegroundService` 作为 `BackgroundTaskManager` 的监听器之一，根据当前处于 `RUNNING` 状态且 `requireForeground=true` 的任务集合，动态维护前台通知（标题、进度条、描述文案）与 WakeLock。KB 构建、模型下载、RAG/LLM 推理等任务在创建时统一写入 `requireForeground=true`，短任务可标记为 `false` 仅在 UI 层展示。
+    - **Fragment 侧使用约定**：
+      - `ModelDownloadFragment`：在开始批量下载前创建 `TaskType.MODEL_DOWNLOAD` 任务，并在每个文件完成/失败/用户取消时调用 `updateTask` 更新进度与 message，下载完成/失败/取消时将 `TaskState` 置为 `COMPLETED` / `FAILED` / `CANCELLED`。
+      - `KnowledgeNoteFragment`：在“添加到知识库”入口创建 `TaskType.NOTE_PROCESSING` 任务，在检查模型 → 生成向量 → 写入数据库 → 构建图谱等阶段同步更新 progress 与阶段 message，用户取消或异常时标记为 `CANCELLED` / `FAILED`，成功落库后标记为 `COMPLETED`。
+      - `RagQaFragment`：对每次问答流创建 `TaskType.LLM_INFERENCE` 任务：RAG 检索开始时标记 `RUNNING`（低进度）、知识库查询完成/绕过时提高到 ~30%、发起 LLM 请求时提高到 ~40%、流式输出开始时提高到 ~60%、外挂 TTS 启动时提高到 ~80%，最终在推理 + TTS 完成后通过统一的 `resetSendingState()` 将状态收敛到 `COMPLETED`（100%），在用户中断或 LLM/ASR/TTS 出错时统一标记为 `CANCELLED` 或 `FAILED`。所有错误路径须在原有并发/业务逻辑不变的前提下补充 `[TASK]` English 日志与 `updateTask` 调用，确保任务状态可被前台服务和后续 UI 正确感知。
+  - **TaskLogBuffer（任务日志缓冲，2025-11-28 重构）**：为每个需要日志的后台任务（LLM/TTS/Diffusion/KB_BUILD）提供独立的线程安全环形日志缓冲，解决 Fragment 销毁重建时日志丢失的问题。设计：
+    - **统一架构原则**：
+      - **单一日志源**：所有日志都写入 `BackgroundTaskManager.TaskLogBuffer`，不依赖 `UnifiedForegroundService` 的本地缓冲。
+      - **Fragment 管理重放索引**：每个 Fragment 实例维护自己的 `lastFgLogIndex`，通过 `saveState()`/`restoreState()` 持久化，解决全局索引导致的重复/丢失问题。
+      - **日志写入不依赖 UI 状态**：`LlmApiAdapter` 持有 `taskId` 闭包，直接写入 `BackgroundTaskManager`，无需经过 `UnifiedForegroundService` 中转。
+    - **核心数据结构**：`TaskLogBuffer` 类封装日志缓冲（最大2000行/1MB）、streaming内容缓冲（最大512KB）、debug区域状态（`<debug>`标签开闭）。
+    - **日志管理API**：
+      - `appendLog(message)` 自动检测 `<debug>`/`</debug>` 标签更新状态；
+      - `appendStreaming(content)` 累积模型输出；
+      - `getLogsFromIndex(startIndex)` 返回从指定索引到末尾的日志（取代旧的 `getNewLogsSinceLastReplay()`）；
+      - `getLogCount()` 返回当前日志条数；
+      - `getSnapshot()` 返回不可变快照用于 UI 恢复。
+    - **BackgroundTaskManager 集成**：创建任务时若 `requiresLogBuffer()` 返回 true，自动为该任务创建 `TaskLogBuffer`；提供 `appendLog(taskId, message)`、`getLogBuffer(taskId)`、`getLogsFromIndex(taskId, fromIndex)` 等统一API；支持 `LogListener` 接口实时推送日志到订阅者。
+    - **任务查询增强**：`getActiveTaskSummary(chatFolderPath)` 返回 `TaskSummary`（包含 `hasLlmTask`/`hasTtsTask`/`hasDiffusionTask` 及对应 taskId），简化 `RagQaFragment.resyncUiStateWithBackgroundTasks()` 的遍历逻辑。
+    - **LlmApiAdapter 直接写入**：`setTaskId(taskId)` 方法设置当前任务 ID，`onStreamingData()` 直接调用 `BackgroundTaskManager.appendLog(taskId, chunk)` 写入日志，确保 Fragment 销毁时日志不丢失。
+    - **RagQaFragment 状态恢复**：
+      - `saveState()` 保存 `lastFgLogIndex` 和 `llmTaskId` 到 Bundle；
+      - `restoreState()` 恢复这两个值，继续增量重放；
+      - `resyncUiStateWithBackgroundTasks()` 恢复 `llmTaskId` 时重置 `lastFgLogIndex=-1` 以重放所有日志；
+      - `replayInferenceLogsFromUnifiedService()` 使用 `buffer.getLogsFromIndex(lastFgLogIndex)` 获取增量日志，重放后更新 `lastFgLogIndex=buffer.getLogCount()`。
+    - **优势**：任务日志与 Fragment 生命周期完全解耦；每个 Fragment 独立管理重放进度；日志写入不依赖 UI 状态；Fragment 销毁重建、切小窗、息屏恢复后能正确继续增量重放。
 
 ## 3. 核心功能设计
 
 ### 3.1 RAG 问答体系
 - **模型来源**：支持本地 MNN 模型（文本/多模态/TTS/Diffusion/ASR）与在线 API。需求：在同一界面可无缝切换模型来源，在停机/弱网环境下优先走本地路径。设计：模型选择下拉列表合并本地与在线条目，发送前依据模型类型设置后端参数（如音频/图像开关）。
 - **知识库选择**：提供知识库多选与深度、重排数配置。需求：用户可按场景快速切换知识库，并设定检索深度与重排策略。设计：ConfigManager 持久化最近使用的知识库和检索参数，RagQueryManager 在执行检索前加载对应向量库。
-- **检索流程**：问题向量化 → 向量召回 → 条件重排 → 上下文拼装 → 调用模型。需求：过程需可中断、可观测、可调试。设计：在日志窗口输出向量分数/重排分数，统计拼装上下文 token 数，遇到异常（如向量全为零）立即告警并回退。**主要 API**：RagQueryManager 的 `executeRagQuery()`、EmbeddingHandler 的 `computeEmbedding()`、RerankerHandler 的 `rerank()`、LocalLLMMNNHandler 的 `generate()`。**关键数据结构**：`ChatDataItem`、`SQLiteVectorDatabaseHandler.SearchResult`、`RerankerResult`。
+- **检索 + 推理解算流程（2025-12-01 重构）**：问题向量化 → 向量召回 / GraphRAG → 可选重排 → 上下文拼装 → LLM+TTS 推理。需求：过程需可中断、可观测、可调试。设计：RAG 检索 / GraphRAG / 重排由 `RagQueryManager` 内部的 `runRagRetrievalPipeline` / `runGraphRagPipeline` / `runRerankerPipeline` 分层驱动，LLM+TTS 调用通过 `runLlmPipeline` 统一封装 `LlmApiAdapter`，Fragment 仅作为 UI 层通过 `RagQueryCallback` 获取流式 token、进度与完成通知，并在 `resetSendingState()` 中统一收尾（按钮状态、前台服务、BackgroundTask 等）。**主要 API**：`RagQaFragment.prepareAndSendMessage()` + `RagQueryManager.startQuery(QueryRequest)`（统一入口）、`runRagRetrievalPipeline()`、`runGraphRagPipeline()`、`runRerankerPipeline()`、`runLlmPipeline()`；底层仍依赖 `EmbeddingHandler.computeEmbedding()`、`RerankerHandler.rerank()`、`LocalLLMMNNHandler.generate()`。**关键数据结构**：`QueryRequest`、`ChatDataItem`、`KnowledgeGraphDatabase.SearchResult`、`RerankerHandler.RerankResult`。
+  - **Manager 驱动的 QueryPipeline（2025-12 重构补充）**：RAG 问答完整链路以 `RagQueryManager.startQuery(QueryRequest)` 为唯一入口，内部通过 `runQueryPipeline()` 承担三项职责：① 统一复位并检查 Stop 状态，保证所有下游管线只读 Stop 视图而不直接写标志；② 调用回调 `onRequestStartInferenceForeground()` / `onRequestEndInferenceForeground()` 与 `executeOnRagQueryExecutor()`，把“前台服务 + 线程调度”的发起权集中在 Manager；③ 在管线内部依次调用 `runRagRetrievalPipeline()` / `runGraphRagPipeline()` / `runRerankerPipeline()` 与 `runLlmPipeline()`，并通过 `updateRagResults()` / `getRelevantDocumentsSnapshot()` / `getSimilarityInfoSnapshot()` 将 RAG 状态对 UI 解耦，确保 Fragment 销毁/重建不会影响业务决策与日志状态。
+- **RAG 结果状态与重排决策（2025-12-01 重构）**：RAG 检索阶段产出的 `relevantDocuments` 及相似度信息统一由 RagQueryManager 内部维护（线程安全锁 + `ragRelevantDocuments` / `ragSimilarityInfo`），Fragment 不再持有本地字段。所有写入通过 `updateRagResults(docs, similarityInfo)` 完成，读取一律使用 `getRelevantDocumentsSnapshot()` / `getSimilarityInfoSnapshot()` 获取只读快照，用于拼接 Prompt 或继续后续推理。GraphRAG、向量检索、reranker 三条路径共用这一套管理接口，保障状态一致性与 UI 重建后的可恢复性；是否启用 reranker、重排条数与模型路径的决策集中在 Manager（`resolveRerankerConfig()` / `getConfiguredRerankCount()`），RagQaFragment 仅负责提供当前开关与路径配置并消费结果。
+- **Stop/Cancel 统一收口（2025-12-01 重构）**：停止/取消语义由 RagQueryManager 提供只读视图统一封装：内部定义 `StopStatus{userRequestedStop, taskCancelled, globalStopFlag, shouldStop}` 及 `shouldStop(isTaskCancelled, globalStopFlag)` / 纯业务侧 `shouldStop()`，对外只暴露合并后的只读状态。算法链中所有 Stop 判断（如 `loadModelAndProcessQuery`、`runRagRetrievalPipeline`、GraphRAG 管线、向量检索结果处理、reranker 结果处理、`callLLMApi` 等）一律通过 Manager 的 stop 接口读取状态，不再到处直接拼接 `userRequestedStop` / `isTaskCancelled` / `globalStopFlag` 组合判断；Fragment 仅在“事件入口”写入这些标志位（发送/停止按钮确认、TTS 停止、严重错误回滚、`resetSendingState` 收尾），并在需要时调用 `ragQueryManager.requestStop()` 与推理进程交互，实现“业务逻辑只读、事件入口集中写入”的 Stop 管理模型，在不改变原有 UI 行为的前提下，显著提升可维护性和可测试性。
 - **会话特性**：Markdown 渲染、折叠菜单、复制、转笔记；支持最多 3 张图像输入并保留历史缩略图；语音输入需提供长按录音/上滑取消提示；TTS 输出落地文件并在聊天列表显示播放器；全局停止按钮即时中断流式输出。设计：通过 ChatRecyclerViewAdapter 管理多类型消息（文本、图片、音频、Diffusion 图片），结合 ChatHistoryManager 进行持久化。
 - **TTS 流程优化（2025-11-01）**：需求：外挂 TTS 生成时，按钮状态应准确反映当前阶段（LLM 推理 → TTS 生成），用户可随时停止。设计：**按钮状态机**：`"发送 ▶"` → LLM 推理 → `"推理中…（点击停止）"` → LLM 完成 → `"生成语音中…（点击停止）"` → TTS 生成 → TTS 完成 → `"发送 ▶"`。**实现要点**：①添加 `isTtsGenerating` 原子标志跟踪 TTS 状态；②`resetSendingState()` 检查 TTS 状态，如果 TTS 还在生成则不重置；③`updateButtonText()` 根据状态优先级更新按钮文本（TTS > LLM > 发送），**关键修复**：在设置 `isSending.set(true)` 后必须调用 `updateButtonText()` 而不是直接设置按钮文本，确保状态机生效；④`handleSendStopClick()` 支持停止 TTS（设置 `globalStopFlag`）；⑤`LocalLLMMNNHandler` 在 TTS 开始/结束时通过 callback 发送 `[TTS_START]`/`[TTS_END]` 标记，**关键修复**：在 TTS 生成的 3 个关键点检查 `shouldStop` 标志（开始前、线程启动时、处理前），确保用户停止请求能及时响应；⑥`RagQaFragment` 在 `onToken()` 中处理 TTS 标记，更新状态和按钮。**Omni 内置 TTS**：无需额外状态管理，`generateWavform()` 同步阻塞，`isSending` 覆盖全程，用户点击"停止" → `stop_requested_` → MNN 自动停止。**资源文件**：`R.string.button_send`、`R.string.button_inferring`、`R.string.button_generating_tts`。**主要 API**：`updateButtonText()`、`stopTtsGeneration()`、`isTtsGenerating.set()`。**关键数据结构**：`AtomicBoolean isTtsGenerating`、TTS 状态标记（`[TTS_START]`/`[TTS_END]`）。**修复位置**：`RagQaFragment.java` Line 1804-1805、Line 5878-5879；`LocalLLMMNNHandler.java` Line 697-720、Line 1798-1803。
 - **媒体文件处理流程（2025-10-30重构）**：需求：在用户点击发送/松开录音的瞬间，立即完成所有文件操作（保存、记录、清空），确保数据一致性和UI响应速度。设计：**核心方法 `prepareAndSaveUserInput()`** 统一处理所有媒体文件，执行步骤：①检查/创建聊天文件夹 → ②同步保存所有媒体文件到聊天文件夹（录音/图片/音频转WAV格式，文件名：`{type}_{timestamp}_user.{ext}`）→ ③创建 `UserInput` 结构体（包含文本、图片路径列表、音频路径列表、时长）→ ④创建用户消息并添加到 `chatMessages` → ⑤立即保存到 `conversation.md` → ⑥清空输入框和媒体缩略图。**调用时机**：`handleSendStopClick()`（点击发送）和 `sendVoiceMessage()`（松开录音）。**关键改进**：RAG查询流程 `executeRagQueryWithAsr()` 接受 `UserInput` 参数，使用其中已保存的文件路径，而不是从已清空的 `mediaThumbnailAdapter` 获取。**已修复问题**：①ASR后图片丢失（文件已在发送瞬间保存）②并发修改异常（创建快照避免）③文件保存时机错误（不延迟到后台）④RAG获取不到文件（使用UserInput路径）。**主要 API**：`prepareAndSaveUserInput()`、`MediaThumbnailAdapter.processImage()`、`MediaThumbnailAdapter.convertAudioToWav()`、`executeRagQueryWithAsr(userInput)`。**关键数据结构**：`UserInput`（包含textPrompt/imagePaths/audioPaths/audioDuration）、`ChatDataItem`、`conversation.md`。**详细文档**：`MEDIA_PROCESSING_FLOW.md`。
-- **ASR（语音识别）集成**：支持外挂ASR模型将语音转文本后走RAG流程。需求：用户可在设置中选择ASR模型（或选择"无"跳过），语音输入时自动转换为文本并与用户文本合并，支持失败降级到原始音频标签模式。设计：**将sherpa-mnn源码完整集成到mnn-jni模块**，通过C++ JNI实现，支持arm64-v8a和x86_64架构；使用sherpa-onnx C API进行在线语音识别，支持Zipformer/Paraformer等模型；懒加载策略（首次使用时加载）；转换失败时自动降级到`<audio>`标签模式。**实现位置**：C++层（mnn_jni.cpp）实现JNI方法，Java层（LocalLLMMNNHandler）封装调用接口。**主要 API**：`MnnInference.createAsr()`、`MnnInference.transcribeAudio()`、`LocalLLMMNNHandler.loadAsrModel()`、`LocalLLMMNNHandler.transcribeAudio()`、`RagQaFragment.convertAndSendAsText()`。**关键数据结构**：C++层使用`SherpaOnnxOnlineRecognizer*`、Java层使用`long asrHandle`。**流程示意**：
+- **ASR（语音识别）集成**：支持外挂ASR模型将语音转文本后走RAG流程。需求：用户可在设置中选择ASR模型（或选择"无"跳过），语音输入时自动转换为文本并与用户文本合并，支持失败降级到原始音频标签模式。设计：**将sherpa-mnn源码完整集成到mnn-jni模块**，通过C++ JNI实现，支持arm64-v8a和x86_64架构；使用sherpa-onnx C API进行在线语音识别，支持Zipformer/Paraformer等模型；懒加载策略（首次使用时加载）；转换失败时自动降级到`<audio>`标签模式。Java 层通过多进程推理架构封装 ASR：主进程由 `InferenceClient.runAsr()` 向 `:inference` 进程发起转写请求，子进程内部再委托 `LocalLLMMNNHandler` / `MnnInference` 完成实际推理。ASR 成功后，由 `RagQueryManager.runAsrAndContinue()` 统一将语音文本包装为 `[Audio]` 片段，与用户原始文本合并并通过回调 `RagQaFragment.onStartQueryWithAsrResult()` 进入 `runFullRagPipelineFromAsrResult()` 主流程；ASR 失败或返回空文本时自动回退到 `<audio>` 标签模式，确保多模态模型仍能消费原始音频。**实现位置**：C++层（mnn_jni.cpp）实现JNI方法，Java层由 `InferenceService` + `InferenceClient` + `RagQueryManager.runAsrAndContinue()` 驱动整体管线。**主要 API**：`MnnInference.createAsr()`、`MnnInference.transcribeAudio()`、`LocalLLMMNNHandler.loadAsrModel()`、`LocalLLMMNNHandler.transcribeAudio()`、`InferenceClient.runAsr()`、`RagQueryManager.runAsrAndContinue()`、`RagQaFragment.onStartQueryWithAsrResult()`。**关键数据结构**：C++层使用`SherpaOnnxOnlineRecognizer*`、Java层使用`long asrHandle` 和 `RagQueryManager.QueryRequest`。**流程示意**：
   ```
   用户语音输入 → 检查ASR设置
   ├─ 选择了ASR模型：
@@ -155,6 +274,11 @@ flowchart TB
   - **关闭 Debug 区域**：`RagQaFragment.onStreamingData()` 检测到输出头标记后，立即输出 `</debug>\n` 并设置 `debugClosed=true`，同时**过滤掉头标记本身**，避免显示在 UI 上。
   - **错误处理**：如果推理过程出错且 `debugClosed=false`，在 `onError()` 中补充 `</debug>\n`，确保标签平衡。
   - **历史记录清理**：`ChatHistoryFilter` 在加载历史对话时，**必须移除所有 debug 标记**（`<debug>`、`</debug>`、`[TEXT:]`、`[RAG]`、`[LLM]`、`[ASR]`、`[Diffusion]`、`<performance>` 等），**防止模型学习并模仿输出这些内容**。
+  - **与 UnifiedForegroundService 的协同**：
+    - Debug 区域的开闭与绝大部分诊断语句（RAG/LLM/ASR、Diffusion 性能）都经由 `emitInferenceDebugLog()` / `appendInferenceDebugChunk()` 先写入 `UnifiedForegroundService.logBuffer`，再由 RagQaFragment 通过 `replayInferenceLogsFromUnifiedService()` 拉取并交给 `updateChatMessage()`，从而保证：
+      - 推理日志与 UI 生命周期解耦，小窗/后台重建时依然可以完整重放；
+      - Chat UI 折叠区和 `conversation.md` 中的 `<debug>/<performance>` 内容与 ring buffer 一致，不再依赖旧版 `textViewResponse` 路径；
+      - streaming 主回答 token 在 `onStreamingData()` 中仅负责 user-facing 文本展示，包含 `<debug>/<performance>` 或 Diffusion 诊断标记的 chunk 会被视为诊断流量，从 UI 直接路径中剔除，避免重复和污染正文。
   - **实现位置**：
     - `RagQaFragment.java`：Line 1673（开启 debug）、Line 2490-2502（检测头标记并关闭 debug + 过滤头标记）、Line 2583-2586（错误时关闭 debug）。
     - `LocalLLMMNNHandler.java`：Line 817-818（重置 `textHeadSent` 标志）、Line 705-709（`performHistoryInference` 发送 `[TEXT:]`）、Line 853-857（`inferenceLLM` 发送 `[TEXT:]`）。
@@ -239,6 +363,8 @@ flowchart TB
 
 ### 4.2 在线推理适配
 - **StreamingApiClient / LlmApiAdapter**：面向在线 API 的统一接入层。需求：兼容 OpenAI/Claude 风格接口，支持 SSE/流式输出、错误重试、请求超时、API Key 管理。设计：内部对不同厂商适配各自参数（model、temperature 等），并与 RagQueryManager 共用回调接口，以统一 UI 展示逻辑。
+- **API URL 策略与默认配置**：ConfigManager 在 `.config` 初始化及缺失修复时为 `api_keys` 写入常用在线服务基础地址（DeepSeek、Moonshot、Dashscope 兼容模式、Ark、Xfyun Spark 等），RAG 工作台的在线 API 下拉优先从该字段读取，resources 中的 `api_urls` 仅作为兜底；`KEY_API_URL` 默认仍指向本地 `AppConstants.ApiUrl.LOCAL`，确保“开箱即用离线优先”。LlmApiAdapter 在构建最终 HTTP 端点时，对以 `/v1` 结尾或不以 `/v1` 结尾的基础 URL 做统一规范，所有 OpenAI 兼容服务最终都落到 `/v1/chat/completions` 路径，避免出现 `.../v1/v1/chat/completions` 之类的 404。
+- **系统提示词 + 历史 + 当前问题 注入策略（在线 HTTP）**：RagQueryManager 在调用在线 LLM 时，先通过 `buildPromptWith/WithoutKnowledgeBase()` 组合系统提示词和（可选）知识库上下文，再对 HTTP API（`apiUrl != AppConstants.ApiUrl.LOCAL`）调用在线历史助手：从当前会话 Markdown 通过 `ChatHistoryManager.loadConversation()` 加载所有消息，使用本次请求的 system prompt 与 `historyRounds` 参数调用 `ChatHistoryFilter.buildHistoryForInference()` 得到纯文本历史，并格式化为 `[History]` 段（若干行 `User: ...`/`Assistant: ...`），随后追加 `[Question]` + 当前用户问题，作为 user 区域文本注入；StreamingApiClient 按“首个空行之前为 system、之后为 user”的规则再拆分为 OpenAI 风格 `messages` 数组。`historyRounds = 0` 时不会注入任何历史，在线路径退化为“系统提示词 + 当前问题”。
 
 ### 4.3 加速器与资源检测
 - **AcceleratorDiagnostics**：需求是评估设备可用的硬件后端（CPU、Vulkan、NNAPI、KleidiAI 等），并在后端不可用时自动回退，输出详细日志。设计：启动时通过 JNI 调用获取硬件能力、编译宏与运行时检测结果，结合 Settings 中的偏好确定实际后端，失败时记录原因。
@@ -285,7 +411,7 @@ flowchart TB
   - `entities` 表：实体信息（文本、类型、频率、置信度）
   - `entity_edges` 表：实体关系（共现关系、权重）
   - `chunk_entities` 表：文本块-实体映射（多对多）
-  - `metadata` 表：数据库元信息（版本、创建时间等）
+  - `metadata` 表：数据库元信息（版本、创建时间、embedding 模型名、维度、reranker 路径、构建期 hub 门限 `hub_threshold` 以及 runtime hub 实体列表 `runtime_hub_entities` 文本串等）
 - **实体关系构建**：在知识库构建过程中自动提取实体并建立关系：
   - **实体提取**：使用 HanLP NER 识别人名、地名、机构名等实体
   - **关系建立**：同一文本块中的实体视为共现关系，建立双向边
@@ -299,6 +425,7 @@ flowchart TB
   - 核心关系网络 TOP N（实体对及共现次数）
   - 实体分类统计（按类型分组的高频实体）
   - 数据库统计（文本块数、实体数、关系数）
+- **知识图谱查看（Knowledge Graph Viewer）**：`KnowledgeGraphViewerFragment` 使用 WebView 加载本地 `knowledge_graph.html`，将 `KnowledgeGraphDatabase` 提供的统计信息、节点/边列表以及 `hub_threshold`、`runtime_hub_entities` 元数据封装为 JSON 传入 JS `renderGraph()`；HTML 报告在关系表下方追加 “Hub Info” 区块展示 hub 阈值与运行时 hub 实体列表，避免在原生布局中使用额外的 TextView/ScrollView 分屏，占用可视图区域。
 
 ### 5.3 会话历史
 - **ChatHistoryManager**：负责对话序列化、附件管理。需求：保存聊天 Markdown、图像、AI 音频、Diffusion 图片，并能加载恢复 UI 状态。设计：Markdown 中以特定标记记录附件，加载时解析并生成相应 ViewHolder。
@@ -309,7 +436,7 @@ flowchart TB
   - **滑动窗口**：根据 `maxRounds` 参数截取最近 N 轮对话，避免上下文过长。
   - **空内容跳过**：过滤后为空的消息不加入历史，避免无效 token。
   - **AI 生成图片跳过**：包含 `🖼️ [图片:]` 的 AI 消息不加入历史（Diffusion 生成与 LLM 推理无关）。
-  - **实现位置**：`ChatHistoryFilter.java`，被 `LocalLLMMNNHandler.performHistoryInference()` 调用。
+  - **实现位置**：`ChatHistoryFilter.java`，被 `LocalLLMMNNHandler.inferenceWithConversationHistory()`（本地 MNN 路径）以及 `RagQueryManager` 的在线 HTTP 历史注入助手复用，保证本地与在线在“可见历史”上的筛选与滑窗规则保持一致。
 
 ### 5.4 配置与日志
 - **配置文件**：SharedPreferences + `.config` JSON 双轨并存，前者用于即时读取，后者用于备份/导出。需求：启动时校验两者一致性，避免错乱。
@@ -9196,18 +9323,6 @@ CREATE TABLE chunk_entities (
 - entity_edges: from_entity, to_entity, collection, weight DESC
 - chunk_entities: chunk_id, entity_text
 
-**分块级图构建策略（Android 实现）**：
-- 构建阶段由 `TextChunkProcessor` 按 chunk 流式执行：每处理完一个 chunk，即刻进行 NER、实体入库、chunk–实体映射写入，以及实体–实体共现边更新。
-- 对每个 chunk 内部的实体，两两成对写入/更新 `entity_edges`，边权重表示这些实体在多少个 chunk 中共同出现，随着更多 chunk 写入而累加。
-- `chunk_entities` 记录了“实体在哪些 chunk 中出现”，在查询阶段通过 `getChunkIdsByEntities()` 由实体反查所有相关 chunk，实现**跨 chunk 关联**，即使没有显式的 chunk–chunk 边，仍然可以通过实体把多个 chunk 关联起来。
-- 当前不显式构建 chunk–chunk 边（例如相邻段落或章节级关系），但图谱 RAG v1 的设计已经可以覆盖“同一实体多次出现在不同 chunk 中”的跨文档语义连接；如需更强的结构关系，可在后续版本增加独立的 chunk–chunk 图层。
- - **构建期图谱清洗（停用词 + hub 门限）**：在实体关系构建阶段，通过停用词过滤和 hub 门限清理，去除噪音实体和高频实体对图谱的负面影响，具体包括：
-  - **批量导入路径（TextChunkProcessor）**：在分块 NER 之后，对实体集合应用 `GraphStopwordsMatcher`（exact/prefix/regex 三类规则），丢弃命中停用词的实体；完成所有 chunk 处理后，通过 `KnowledgeGraphDatabase.applyHubThreshold()` 按邻居数 / 总边权重一次性清理 hub 实体及其相关边与 chunk–entity 关系。
-  - **知识库笔记路径（KnowledgeNoteFragment）**：用户在“知识库笔记”界面新增笔记时，使用 `HanLpNerHandler` 做 NER，并复用同一套 `GraphStopwordsMatcher` 规则在**写入图数据库前**过滤实体；完成该笔记的图构建后，同样调用 `applyHubThreshold()` 做 hub 清理，保证笔记入口与批量导入入口在图谱质量上的一致性。
-  - **查询期二次清洗（stop/hub）**：RAG 查询阶段在 `RagQaFragment.processGraphRagResults()` 中再次加载当前停用词表和 hub 门限，基于 `GraphStopwordsMatcher` + `KnowledgeGraphDatabase.getHubEntities()` 对“查询 NER 实体 + Top-K chunk 实体 + 图扩展实体 + 候选 chunk 内实体”做一次**只读的二次过滤**：
-    - 任何命中停用词或被判定为 hub 的实体都不会进入种子集合、不会参与图扩展，也不会参与最终重叠计分与图分数累积；
-    - 二次清洗的阈值设计为“**不比构建期更宽松**”：如果构建期已经通过更严格的 stop/hub 配置把某些实体删除，查询期只是对剩余实体再做一次 in-memory 过滤，不会放宽条件恢复被删除的实体；
-    - 通过修改 stopwords JSON 或调节 hub 阈值，用户可以在**无需重建知识库**的前提下，对 Graph RAG 效果做精细调参（多洗一点 / 少洗一点），便于在不同知识库规模和噪声分布下快速迭代。
 
 ### H.4 配置参数
 

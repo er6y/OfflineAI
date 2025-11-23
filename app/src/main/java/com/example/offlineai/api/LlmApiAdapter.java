@@ -7,6 +7,8 @@ import com.android.volley.RequestQueue;
 import com.android.volley.toolbox.Volley;
 import com.example.offlineai.LogManager;
 import com.example.offlineai.AppConstants;
+import com.example.offlineai.BackgroundTaskManager;
+import com.example.offlineai.ipc.InferenceClient;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -26,6 +28,9 @@ public class LlmApiAdapter {
     private final Context context;
     private final RequestQueue requestQueue;
     private final StreamingApiClient streamingClient;
+    
+    // Task ID for log routing - set before calling callLlmApi
+    private volatile String currentTaskId = null;
     
     /**
      * 回调接口定义
@@ -53,6 +58,22 @@ public class LlmApiAdapter {
         this.context = context;
         this.requestQueue = Volley.newRequestQueue(context);
         this.streamingClient = new StreamingApiClient(context);
+    }
+    
+    /**
+     * Set the task ID for log routing.
+     * Must be called before callLlmApi() for logs to be properly captured.
+     */
+    public void setTaskId(String taskId) {
+        this.currentTaskId = taskId;
+        LogManager.logD(TAG, "[TASK] Set adapter taskId: " + taskId);
+    }
+    
+    /**
+     * Get the current task ID.
+     */
+    public String getTaskId() {
+        return currentTaskId;
     }
     
     /**
@@ -92,9 +113,11 @@ public class LlmApiAdapter {
         try {
             // 如果是本地模型，使用本地适配器
             if (apiType == ApiType.LOCAL) {
-                LogManager.logD(TAG, "使用本地模型: " + model);
-                // [STREAM] Use proxy callback to inject streaming logs for local model
-                LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(context);
+                LogManager.logD(TAG, "使用本地模型(多进程): " + model);
+                // Push latest runtime configuration to inference process before each call
+                com.example.offlineai.RuntimeConfigUtil.pushToInference(context);
+                // [STREAM] Use proxy callback to inject streaming logs for local model via IPC
+                InferenceClient client = InferenceClient.getInstance(context.getApplicationContext());
                 ApiCallback proxyCb = new ApiCallback() {
                     @Override
                     public void onSuccess(String response) {
@@ -105,7 +128,10 @@ public class LlmApiAdapter {
                     
                     @Override
                     public void onStreamingData(String chunk) {
-                        // Token-level logging removed to reduce log spam
+                        // CRITICAL: Do NOT write to buffer here!
+                        // Buffer writes are handled by RagQueryManager.emitStreamingChunkFromManager()
+                        // which is called via callback.onStreamingData() -> RagQueryManager.onStreamingData()
+                        // Writing here would cause duplicate entries (was causing 3x duplication)
                         callback.onStreamingData(chunk);
                     }
                     
@@ -115,7 +141,7 @@ public class LlmApiAdapter {
                         callback.onError(errorMessage);
                     }
                 };
-                localAdapter.callLocalModel(model, prompt, imagePaths, audioPaths, proxyCb);
+                client.runLlmTask(model, prompt, imagePaths, audioPaths, proxyCb);
                 return;
             }
             
@@ -169,14 +195,20 @@ public class LlmApiAdapter {
         // 根据API类型添加正确的端点路径
         switch (apiType) {
             case DEEPSEEK:
-                // DeepSeek API 端点
+                // DeepSeek API 端点（兼容以 /v1 结尾的基础地址）
+                if (url.endsWith("/v1")) {
+                    url = url.substring(0, url.length() - 3);
+                }
                 if (!url.contains("/v1/chat/completions")) {
                     url += "/v1/chat/completions";
                 }
                 break;
                 
             case MOONSHOT:
-                // Moonshot API 端点
+                // Moonshot API 端点（兼容以 /v1 结尾的基础地址）
+                if (url.endsWith("/v1")) {
+                    url = url.substring(0, url.length() - 3);
+                }
                 if (!url.contains("/v1/chat/completions")) {
                     url += "/v1/chat/completions";
                 }
@@ -205,7 +237,10 @@ public class LlmApiAdapter {
                 
             case OPENAI:
             default:
-                // OpenAI API 端点
+                // OpenAI API 端点（兼容以 /v1 结尾的基础地址）
+                if (url.endsWith("/v1")) {
+                    url = url.substring(0, url.length() - 3);
+                }
                 if (!url.contains("/v1/chat/completions")) {
                     url += "/v1/chat/completions";
                 }
@@ -278,8 +313,8 @@ public class LlmApiAdapter {
                 final StringBuilder result = new StringBuilder();
                 final StringBuilder error = new StringBuilder();
                 
-                LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(context);
-                localAdapter.callLocalModel(model, prompt, null, null, new ApiCallback() {
+                InferenceClient client = InferenceClient.getInstance(context.getApplicationContext());
+                client.runLlmTask(model, prompt, null, null, new ApiCallback() {
                     @Override
                     public void onSuccess(String response) {
                         int len = response != null ? response.length() : 0;

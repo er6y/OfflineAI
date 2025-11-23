@@ -466,18 +466,84 @@ public class StateDisplayManager {
      * Check if it is a model status
      */
     public boolean isModelStatus(String status) {
-        return AppConstants.ModelState.LOADING.equals(status) ||
-               AppConstants.ModelState.LOADED.equals(status) ||
-               AppConstants.ModelState.NOT_DOWNLOADED.equals(status);
+        if (status == null || status.isEmpty()) {
+            return false;
+        }
+
+        if (AppConstants.ModelState.DOWNLOADING.equals(status) ||
+            AppConstants.ModelState.DOWNLOADED.equals(status) ||
+            AppConstants.ModelState.NOT_DOWNLOADED.equals(status) ||
+            AppConstants.ModelState.DOWNLOAD_FAILED.equals(status) ||
+            AppConstants.ModelState.LOADING.equals(status) ||
+            AppConstants.ModelState.LOADED.equals(status) ||
+            AppConstants.ModelState.LOAD_FAILED.equals(status) ||
+            AppConstants.ModelState.UNLOADED.equals(status) ||
+            AppConstants.MODEL_STATUS_DIRECTORY_NOT_EXIST.equals(status) ||
+            AppConstants.MODEL_STATUS_NOT_FOUND.equals(status) ||
+            AppConstants.MODEL_STATUS_NO_AVAILABLE.equals(status) ||
+            AppConstants.MODEL_STATUS_FETCH_FAILED.equals(status) ||
+            AppConstants.MODEL_STATUS_PLEASE_SELECT_EMBEDDING.equals(status) ||
+            AppConstants.MODEL_STATUS_PARSE_FAILED.equals(status)) {
+            return true;
+        }
+
+        String sDownloading = context.getString(R.string.common_downloading);
+        String sDownloaded = context.getString(R.string.common_downloaded);
+        String sNotDownloaded = context.getString(R.string.model_state_not_downloaded);
+        String sDownloadFailed = context.getString(R.string.common_download) + context.getString(R.string.common_failed);
+        String sLoading = context.getString(R.string.common_loading);
+        String sLoaded = context.getString(R.string.common_loaded);
+        String sLoadFailed = context.getString(R.string.common_failed);
+        String sUnloaded = context.getString(R.string.model_state_unloaded);
+        String sDirNotExist = context.getString(R.string.model_status_directory_not_exist);
+        String sNotFound = context.getString(R.string.model_status_not_found);
+        String sNoAvailable = context.getString(R.string.model_status_no_available);
+        String sFetchFailed = context.getString(R.string.common_fetch_failed);
+        String sPleaseSelectEmbedding = context.getString(R.string.model_status_please_select_embedding);
+        String sParseFailed = context.getString(R.string.common_parse_failed);
+
+        return status.equals(sDownloading) ||
+               status.equals(sDownloaded) ||
+               status.equals(sNotDownloaded) ||
+               status.equals(sDownloadFailed) ||
+               status.equals(sLoading) ||
+               status.equals(sLoaded) ||
+               status.equals(sLoadFailed) ||
+               status.equals(sUnloaded) ||
+               status.equals(sDirNotExist) ||
+               status.equals(sNotFound) ||
+               status.equals(sNoAvailable) ||
+               status.equals(sFetchFailed) ||
+               status.equals(sPleaseSelectEmbedding) ||
+               status.equals(sParseFailed);
     }
     
     /**
      * Check if it is a knowledge base status
      */
     public boolean isKnowledgeBaseStatus(String status) {
-        return AppConstants.KnowledgeBaseState.LOADING.equals(status) ||
-               AppConstants.KnowledgeBaseState.EMPTY.equals(status) ||
-               AppConstants.KnowledgeBaseState.READY.equals(status);
+        if (status == null || status.isEmpty()) {
+            return false;
+        }
+
+        // Match by internal constants first
+        if (AppConstants.KnowledgeBaseState.LOADING.equals(status) ||
+            AppConstants.KnowledgeBaseState.EMPTY.equals(status) ||
+            AppConstants.KnowledgeBaseState.READY.equals(status) ||
+            AppConstants.KnowledgeBaseState.NONE.equals(status)) {
+            return true;
+        }
+
+        // Match by localized display text
+        String sLoading = context.getString(R.string.common_loading);
+        String sEmpty = context.getString(R.string.kb_state_empty);
+        String sReady = context.getString(R.string.common_ready);
+        String sNone = context.getString(R.string.common_none);
+
+        return status.equals(sLoading) ||
+               status.equals(sEmpty) ||
+               status.equals(sReady) ||
+               status.equals(sNone);
     }
     
     public static String getDialogDisplayText(Context context, String key) {

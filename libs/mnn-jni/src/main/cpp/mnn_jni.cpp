@@ -901,7 +901,14 @@ public:
             // Generate TTS audio if supported and output path is set
             // CRITICAL: Following ChatMNN pattern - directly generate audio on existing context
             // Reference: libs/mnn/apps/Android/MnnLlmChat/app/src/main/cpp/llm_session.cpp Line 325-327
-            if (!stop_requested_ && has_tts_ && !tts_output_path_.empty()) {
+            bool tts_path_ready = !tts_output_path_.empty();
+            LOGI("[TTS][DEBUG][HISTORY] Audio pre-check: has_tts=%d, path_ready=%d, enable_flag=%d, stop_flag=%d",
+                 has_tts_ ? 1 : 0,
+                 tts_path_ready ? 1 : 0,
+                 enable_audio_output_ ? 1 : 0,
+                 stop_requested_ ? 1 : 0);
+
+            if (!stop_requested_ && has_tts_ && tts_path_ready) {
                 LOGI("[TTS] ========== Starting TTS Generation ==========");
                 LOGI("[TTS] Generated text tokens: %d", current_size);
                 
@@ -955,7 +962,15 @@ public:
                 }
                 LOGI("[TTS] =========================================");
             } else {
-                // TTS not executed (stopped or no path), ensure flag is reset
+                // TTS not executed (stopped or no path), log detailed reason and ensure flag is reset
+                if (!has_tts_) {
+                    LOGW("[TTS][DEBUG][HISTORY] Skipping generateWavform: has_tts_ is false");
+                } else if (!tts_path_ready) {
+                    LOGW("[TTS][DEBUG][HISTORY] Skipping generateWavform: output path not set");
+                } else if (stop_requested_) {
+                    LOGW("[TTS][DEBUG][HISTORY] Skipping generateWavform: stop_requested_ is true");
+                }
+
                 if (enable_audio_output_) {
                     enable_audio_output_ = false;
                     LOGI("[TTS] Audio output disabled (TTS skipped)");
@@ -3107,26 +3122,9 @@ Java_com_offlineai_mnn_MnnInference_createDiffusion(
             onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
         }
         
-        // Print <debug> tag (createDiffusion always opens debug block)
-        if (onTokenMethod) {
-            jstring jmsg = env->NewStringUTF("<debug>");
-            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
-            env->DeleteLocalRef(jmsg);
-        }
-        
-        // Print model name
-        if (onTokenMethod) {
-            std::string modelDirStr(modelDir);
-            size_t lastSlash = modelDirStr.find_last_of('/');
-            if (lastSlash != std::string::npos) {
-                std::string modelName = modelDirStr.substr(lastSlash + 1);
-                char buf[512];
-                snprintf(buf, sizeof(buf), "\nModel: %s", modelName.c_str());
-                jstring jmsg = env->NewStringUTF(buf);
-                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
-                env->DeleteLocalRef(jmsg);
-            }
-        }
+        // NOTE: Debug section (<debug> ... </debug>) is now managed on the Java side
+        // (RagQueryManager / RagQaFragment). JNI only emits plain status lines for
+        // Diffusion so that there is a single owner of debug tags.
         
         // ========== 切换工作目录到后端缓存目录 ==========
         // Java 已经创建好目录，格式: <model_path>/<backend>/.tempcache
@@ -3140,24 +3138,6 @@ Java_com_offlineai_mnn_MnnInference_createDiffusion(
         } else {
             LOGE("[DIFFUSION] ❌ Failed to chdir to: %s (errno=%d)", cachePath, errno);
             LOGW("[DIFFUSION] .tempcache will use default location (may not be writable)");
-        }
-        
-        // Check cache status
-        struct stat buffer;
-        bool cacheExists = (stat(".tempcache", &buffer) == 0);
-        
-        // Print cache status
-        if (onTokenMethod) {
-            char buf[512];
-            if (cacheExists) {
-                long cacheSize = buffer.st_size / 1024; // KB
-                snprintf(buf, sizeof(buf), "\nGPU Kernel Cache: EXISTS (%ld KB)", cacheSize);
-            } else {
-                snprintf(buf, sizeof(buf), "\nGPU Kernel Cache: None");
-            }
-            jstring jmsg = env->NewStringUTF(buf);
-            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
-            env->DeleteLocalRef(jmsg);
         }
         
         // Validate backend type
@@ -3304,12 +3284,8 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
         static std::atomic<bool> first_run{true};
         bool is_first = first_run.exchange(false);
         
-        // Step 1: Print <debug> tag (only if not first run, createDiffusion already opened it)
-        if (!is_first && onTokenMethod) {
-            jstring jmsg = env->NewStringUTF("<debug>");
-            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
-            env->DeleteLocalRef(jmsg);
-        }
+        // NOTE: Debug section (<debug> ... </debug>) is opened/closed on Java side.
+        // JNI only emits plain status lines for Diffusion to avoid duplicate tags.
         
         // Step 2: Print model name (extract from current working directory)
         if (onTokenMethod) {

@@ -16,6 +16,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Parcelable;
 import android.os.Looper;
 import android.text.Selection;
 import android.text.Spannable;
@@ -64,20 +65,23 @@ import com.android.volley.Request;
 import com.android.volley.toolbox.JsonObjectRequest;
 import com.android.volley.toolbox.Volley;
 
-import com.example.offlineai.api.LocalLlmHandler;
-import com.example.offlineai.api.LocalLlmAdapter;
-import com.example.offlineai.api.TtsAdapter;
+import com.example.offlineai.ipc.LocalLlmHandler;
+import com.example.offlineai.ipc.LocalLlmAdapter;
+import com.example.offlineai.ipc.InferenceClient;
+import com.example.offlineai.ipc.TtsAdapter;
 import com.example.offlineai.ApiUrlAdapter;
-import com.example.offlineai.RerankerHandler;
+// Removed: import com.example.offlineai.RerankerHandler; - Now handled by RagQueryManager
 import com.example.offlineai.AppConstants;
 import com.example.offlineai.StateDisplayManager;
+import com.example.offlineai.StatefulFragment;
 import com.example.offlineai.adapter.StateAwareSpinnerAdapter;
 import com.example.offlineai.MediaThumbnailAdapter;
 import com.example.offlineai.EmbeddingHandler;
 import com.example.offlineai.HanLpNerHandler;
-import com.example.offlineai.GraphStopwordsMatcher;
+// Removed: import com.example.offlineai.GraphStopwordsMatcher; - Now handled by RagQueryManager
 // Removed: import com.example.offlineai.SQLiteVectorDatabaseHandler; - Now using KnowledgeGraphDatabase directly
 import com.example.offlineai.ConfigManager;
+import com.example.offlineai.TaskLogBuffer;
 import com.example.offlineai.chat.model.ChatDataItem;
 import com.example.offlineai.chat.chatlist.ChatRecyclerViewAdapter;
 import com.example.offlineai.chat.chatlist.ChatViewHolders;
@@ -123,13 +127,16 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
+
 @SuppressWarnings("deprecation")
-public class RagQaFragment extends Fragment {
+public class RagQaFragment extends Fragment implements StatefulFragment {
 
     private static final String TAG = "OfflineAI_RagQa"; // Add TAG for log printing
     private static final String LOG_FILE = "api_log.txt"; // Log file name
@@ -138,6 +145,15 @@ public class RagQaFragment extends Fragment {
     // Backend preference options (same as SettingsFragment)
     private static final String[] BACKEND_OPTIONS = {"CPU", "Vulkan", "OpenCL", "NNAPI"};
     private static final String[] BACKEND_VALUES = {"CPU", "VULKAN", "OPENCL", "NNAPI"};
+
+    private static final String STATE_KEY_USER_PROMPT = "ragqa_state_user_prompt";
+    private static final String STATE_KEY_CHAT_SCROLL = "ragqa_state_chat_scroll";
+    private static final String STATE_KEY_USER_SCROLLED_AWAY = "ragqa_state_user_scrolled_away";
+    private static final String STATE_KEY_IMAGE_URIS = "ragqa_state_image_uris";
+    private static final String STATE_KEY_AUDIO_URIS = "ragqa_state_audio_uris";
+    private static final String STATE_KEY_RESPONSE_TEXT = "ragqa_state_response_text";
+    private static final String STATE_KEY_LOG_INDEX = "ragqa_state_log_index";
+    private static final String STATE_KEY_LLM_TASK_ID = "ragqa_state_llm_task_id";
 
     private Spinner spinnerApiUrl;
     private EditText editTextApiKey;
@@ -169,6 +185,7 @@ public class RagQaFragment extends Fragment {
     private MediaThumbnailAdapter mediaThumbnailAdapter; // Media thumbnail adapter
     // 避免程序化设置复选框状态时触发监听器造成误保存
     private boolean isUpdatingUiFromConfig = false;
+    private boolean isInitializingKnowledgeBaseSpinner = false;
     
     // Chat UI components
     private RecyclerView recyclerViewChat; // Chat message list
@@ -201,12 +218,17 @@ public class RagQaFragment extends Fragment {
 
     private final AtomicBoolean isSending = new AtomicBoolean(false); // Track the state of the send/stop button with atomic operations
     private final AtomicBoolean isTtsGenerating = new AtomicBoolean(false); // Track TTS generation state
+    private final AtomicBoolean useExternalTtsForCurrentQuery = new AtomicBoolean(false);
+    private final AtomicBoolean useOmniTtsForCurrentQuery = new AtomicBoolean(false); // Track native Omni TTS usage for current query
     
     // Audio compression state tracking (for ANR prevention)
     private final AtomicBoolean isUserAudioCompressing = new AtomicBoolean(false); // User audio compression in progress
     private final AtomicBoolean isAiAudioCompressing = new AtomicBoolean(false);   // AI audio compression in progress
     private volatile String pendingUserAudioM4aPath = null;  // User audio M4A path after compression
     private volatile String pendingAiAudioM4aPath = null;    // AI audio M4A path after compression
+    
+    // ASR state tracking (to prevent premature resetSendingState)
+    private final AtomicBoolean isAsrRunning = new AtomicBoolean(false); // ASR transcription in progress
     
     // Audio decoding state tracking (for selected audio files)
     private final AtomicBoolean isAudioDecoding = new AtomicBoolean(false); // Audio decoding in progress
@@ -215,6 +237,8 @@ public class RagQaFragment extends Fragment {
     private static final String CONFIG_FILE = ".config"; // Configuration file name
     private List<String> systemPromptHistory = new ArrayList<>(); // System prompt history
     private Map<String, String> apiKeyMap = new HashMap<>(); // API Key mapping
+    // Track last READY model path per component to detect model reuse
+    private final Map<String, String> lastReadyModelPathByComponent = new HashMap<>();
     
     // Whether there is currently a running RAG query task
     private boolean isTaskRunning = false;
@@ -241,6 +265,8 @@ public class RagQaFragment extends Fragment {
     
     // TTS Adapter for streaming TTS (System/External TTS)
     private TtsAdapter ttsAdapter = null;
+    // Inference status listener for model state and rerank progress
+    private InferenceClient.StatusListener inferenceStatusListener;
     
     // RAG query thread pool
     private ExecutorService ragQueryExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -263,21 +289,39 @@ public class RagQaFragment extends Fragment {
     private boolean userScrolledAway = false; // Track if user manually scrolled away from bottom
     private Runnable pendingScrollRunnable = null; // Pending scroll task for debouncing
 
-    // Search result documents
-    private List<String> relevantDocuments;
-    private String similarityInfo;
+    private int lastFgLogIndex = -1;
+    private String restoredResponseTextFromState;
+    private boolean hasAppliedRestoredResponseFromState = false;
+    private Runnable uiStateResyncRunnable;
+    private static final long UI_STATE_RESYNC_INTERVAL_MS = 2000L;
+    
+    // Buffer polling for streaming UI updates (single source of truth)
+    // NOTE: 50ms is a balance between responsiveness and CPU usage.
+    // Too slow (200ms) may miss data before buffer is cleared after MD persist.
+    // Too fast (1ms) wastes CPU. 50ms should catch most streaming data.
+    private Runnable bufferPollRunnable;
+    private static final long BUFFER_POLL_INTERVAL_MS = 50L;
 
-    private static class GraphRagCandidate {
-        KnowledgeGraphDatabase.SearchResult result;
-        float vectorScore;
-        float graphScore;
-        float finalScore;
-        int entityOverlap;
-        int vectorRank; // Original rank in pure vector search (-1 if only from graph expansion)
-    }
+    private long lastStreamingHistorySaveTs = 0L;
+    private static final long STREAMING_HISTORY_SAVE_INTERVAL_MS = 3000L;
 
-    // Graph RAG limits for seed entities to avoid explosion
-    private static final int GRAPH_RAG_MAX_SEED_ENTITIES = 32;
+    // Track last diffusion task active state for current chat folder so that
+    // we can detect completion transitions even if Fragment callbacks were lost.
+    private boolean lastDiffusionTaskActive = false;
+
+    // Background task id for LLM/RAG inference
+    private String llmTaskId;
+
+    // Saved query parameters for resume after reranking (legacy, kept for compatibility)
+    private String lastApiUrl;
+    private String lastApiKey;
+    private String lastModel;
+    private String lastKnowledgeBase;
+    private String lastSystemPrompt;
+    private String lastUserPrompt;
+
+    // Manager instance for business logic (UI-independent, survives Fragment destruction)
+    private RagQueryManager ragQueryManager;
 
     @Nullable
     @Override
@@ -412,6 +456,7 @@ public class RagQaFragment extends Fragment {
         
         // Set initial data for other Spinners
         setupSpinner(spinnerApiModel, new String[]{getString(R.string.common_loading)});
+        isInitializingKnowledgeBaseSpinner = true;
         setupSpinner(spinnerKnowledgeBase, new String[]{getString(R.string.common_loading)});
         
         // Add selection listener for API URL Spinner to automatically load corresponding API Key / Backend Preference
@@ -494,6 +539,13 @@ public class RagQaFragment extends Fragment {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 String selectedKnowledgeBase = parent.getItemAtPosition(position).toString();
+                LogManager.logD(TAG, "[KB_SPINNER] onItemSelected: " + selectedKnowledgeBase);
+
+                if (isInitializingKnowledgeBaseSpinner) {
+                    LogManager.logD(TAG, "[KB_SPINNER] Ignore selection during initialization: " + selectedKnowledgeBase);
+                    return;
+                }
+
                 if (!StateDisplayManager.isKnowledgeBaseStatusDisplayText(requireContext(), selectedKnowledgeBase)) {
                     // Save to configuration when valid knowledge base is selected
                     ConfigManager.setString(requireContext(), ConfigManager.KEY_KNOWLEDGE_BASE, selectedKnowledgeBase);
@@ -603,13 +655,39 @@ public class RagQaFragment extends Fragment {
         ChatViewHolders.AssistantViewHolder.showDebugEnabled = showDebugPerf;
         ChatViewHolders.AssistantViewHolder.showPerformanceEnabled = showDebugPerf;
         LogManager.logD(TAG, "Collapsible section switches initialized: thinking=true, debug=" + showDebugPerf + ", performance=" + showDebugPerf);
+        LogManager.logD(TAG, "[UI_TRACE] onViewCreated - debugPerfConfig=" + showDebugPerf + 
+                ", showDebugEnabled=" + ChatViewHolders.AssistantViewHolder.showDebugEnabled +
+                ", showPerformanceEnabled=" + ChatViewHolders.AssistantViewHolder.showPerformanceEnabled);
         
         // Initialize main thread Handler
         mainHandler = new Handler(Looper.getMainLooper());
         
-        // Initialize TtsAdapter
+        // Initialize TtsAdapter and set it to Manager
         ttsAdapter = TtsAdapter.getInstance(requireContext());
         LogManager.logI(TAG, "[TTS] TtsAdapter initialized");
+        
+        // NOTE: TtsAdapter is set to Manager after Manager initialization in initializeRagQueryManager()
+        // This ensures proper initialization order
+
+        // Register inference status listener for model state and rerank progress
+        try {
+            InferenceClient client = InferenceClient.getInstance(requireContext().getApplicationContext());
+            inferenceStatusListener = new InferenceClient.StatusListener() {
+                @Override
+                public void onModelStateChanged(String component, String modelPath, String state, boolean busy, int threads) {
+                    handleInferenceModelStateChanged(component, modelPath, state, busy, threads);
+                }
+
+                @Override
+                public void onRerankProgress(String taskId, int current, int total) {
+                    handleInferenceRerankProgress(taskId, current, total);
+                }
+            };
+            client.addStatusListener(inferenceStatusListener);
+            LogManager.logI(TAG, "[STATUS] InferenceClient StatusListener registered in RagQaFragment");
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[STATUS] Failed to register InferenceClient StatusListener: " + e.getMessage(), e);
+        }
         
         // Setup custom action mode for long press on input field (must be after view is created)
         setupInputFieldLongPressMenu();
@@ -682,6 +760,279 @@ public class RagQaFragment extends Fragment {
         
         // Load chat history if available
         loadChatHistory();
+
+        // Get singleton RagQueryManager and update callback to this Fragment.
+        // Manager is a singleton that survives Fragment destruction.
+        // We always update the callback to ensure it points to the current Fragment instance.
+        ragQueryManager = RagQueryManager.getInstance(requireContext());
+        ragQueryManager.updateCallback(new RagQueryManager.RagQueryCallback() {
+                @Override
+                public void onSendingStateChanged(boolean sending) {
+                    isSending.set(sending);
+                    if (mainHandler != null) {
+                        mainHandler.post(() -> updateButtonText());
+                    } else {
+                        updateButtonText();
+                    }
+                }
+
+                @Override
+                public void onTtsStateChanged(boolean generating) {
+                    LogManager.logI(TAG, "[TTS] onTtsStateChanged: generating=" + generating);
+                    isTtsGenerating.set(generating);
+                    // Track whether external TTS is enabled for this query
+                    // When generating=true, TTS was just enabled; when false, TTS completed
+                    if (generating) {
+                        useExternalTtsForCurrentQuery.set(true);
+                        LogManager.logI(TAG, "[TTS] External TTS enabled for this query");
+                    } else {
+                        // External/System TTS completed for this query
+                        // Reset tracking flag so next query starts from a clean state
+                        useExternalTtsForCurrentQuery.set(false);
+                        // TTS completed - need to reset sending state if LLM is also done
+                        LogManager.logI(TAG, "[TTS] TTS completed, checking if should reset sending state");
+                    }
+                    if (mainHandler != null) {
+                        mainHandler.post(() -> {
+                            updateButtonText();
+                            // When TTS completes, try to reset sending state
+                            // (resetSendingState checks isTtsGenerating internally)
+                            if (!generating) {
+                                resetSendingState();
+                            }
+                        });
+                    } else {
+                        updateButtonText();
+                        if (!generating) {
+                            resetSendingState();
+                        }
+                    }
+                }
+
+                @Override
+                public void onProgressUpdate(int progress, String message) {
+                    if (mainHandler != null) {
+                        mainHandler.post(() -> updateLlmTaskProgress(progress, message));
+                    } else {
+                        updateLlmTaskProgress(progress, message);
+                    }
+                }
+
+                @Override
+                public void onQueryComplete(boolean success, String errorMessage) {
+                    LogManager.logD(TAG, "[MGR][LLM][CB] onQueryComplete success=" + success + ", error=" + errorMessage);
+
+                    if (!success) {
+                        if (errorMessage != null) {
+                            updateProgressOnUiThread("Error: " + errorMessage);
+                        }
+                        // Finalize task and reset state on error
+                        finalizeLlmTask(BackgroundTask.TaskState.FAILED, 0,
+                                errorMessage != null ? ("API call failed: " + errorMessage) : "API call failed");
+                        resetSendingState();
+                        return;
+                    }
+
+                    // Success path: decide whether external/system TTS is enabled for this query
+                    boolean hasTtsEnabledForThisQuery = (useExternalTtsForCurrentQuery.get()
+                            && ttsAdapter != null
+                            && ttsAdapter.isEnabled());
+
+                    if (hasTtsEnabledForThisQuery) {
+                        updateLlmTaskProgress(80, "TTS generation started");
+                        isTtsGenerating.set(true);
+                        if (mainHandler != null) {
+                            mainHandler.post(() -> updateButtonText());
+                        } else {
+                            updateButtonText();
+                        }
+                        try {
+                            ttsAdapter.complete();
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[TTS] Error calling TtsAdapter.complete in onQueryComplete", e);
+                            resetSendingState();
+                        }
+                    } else if (useOmniTtsForCurrentQuery.get()) {
+                        // Omni native TTS: defer reset until Omni audio compression completes.
+                        // resetSendingState() will be called from checkCompressionCompleteAndFinalize()
+                        LogManager.logI(TAG, "[TTS] Omni TTS enabled for this query, deferring resetSendingState to audio compression finalization");
+                    } else {
+                        // No TTS for this query, reset immediately
+                        resetSendingState();
+                    }
+
+                    // NOTE: Do NOT reload chat history here!
+                    // The in-memory chatMessages already has the correct data from streaming.
+                    // Calling loadChatHistory() would overwrite it with data from md file,
+                    // which may lose debug/image/performance info if md parsing has issues.
+                    // loadChatHistory() should only be called when UI is recreated (e.g., after
+                    // switching from background) and needs to restore state from persistent storage.
+                    LogManager.logD(TAG, "[QUERY_COMPLETE] Skipping loadChatHistory - in-memory data is authoritative");
+                }
+
+                @Override
+                public void onStreamingData(String chunk) {
+                    // NOTE: This callback is NO LONGER used for UI updates!
+                    // UI updates are now handled by pollBufferAndUpdateUi() which polls
+                    // the buffer every 200ms. This ensures a single source of truth
+                    // and proper handling of UI reconstruction.
+                    //
+                    // This callback is kept for diagnostic logging only.
+                    if (chunk != null && (chunk.contains("<debug>") ||
+                            chunk.contains("</debug>") ||
+                            chunk.contains("[TEXT:]") ||
+                            chunk.contains("[IMAGE:]") ||
+                            chunk.contains("[AUDIO:]") )) {
+                        String preview = chunk;
+                        if (preview.length() > 120) {
+                            preview = preview.substring(0, 120) + "...";
+                        }
+                        LogManager.logD(TAG, "[FRAG][STREAM] Received chunk with marker, preview=" + preview);
+                    }
+                }
+
+                @Override
+                public void onLlmCompleteWithAudio(String audioPath) {
+                    try {
+                        // Mirror existing logic that attaches audio to last assistant message
+                        if (audioPath == null || audioPath.isEmpty()) {
+                            return;
+                        }
+                        final File audioFile = new File(audioPath);
+                        if (!audioFile.exists()) {
+                            return;
+                        }
+                        final float duration = AudioService.getAudioDuration(audioPath);
+
+                        Runnable attachAudioTask = () -> {
+                            try {
+                                if (!chatMessages.isEmpty()) {
+                                    ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
+                                    if (lastMsg.getType() == ChatViewHolders.ASSISTANT) {
+                                        lastMsg.audioUri = Uri.fromFile(audioFile);
+                                        lastMsg.setHasOmniAudio(true);
+                                        lastMsg.setAudioDuration(duration);
+                                        if (chatAdapter != null) {
+                                            chatAdapter.notifyItemChanged(chatMessages.size() - 1);
+                                        }
+                                        // NOTE: TtsAdapter already persists audio via appendAssistantAudioMessage
+                                        // Fragment only updates UI display, no need to save again
+                                    }
+                                }
+                            } catch (Exception e) {
+                                LogManager.logE(TAG, "[TTS] Failed to attach audio from manager callback on main thread", e);
+                            }
+                        };
+
+                        if (mainHandler != null) {
+                            mainHandler.post(attachAudioTask);
+                        } else {
+                            attachAudioTask.run();
+                        }
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[TTS] Failed to attach audio from manager callback", e);
+                    }
+                }
+
+                @Override
+                public void onRequestReloadChatHistory() {
+                    if (mainHandler != null) {
+                        mainHandler.post(() -> loadChatHistory());
+                    } else {
+                        loadChatHistory();
+                    }
+                }
+
+                @Override
+                public void onRequestUpdateButtonText() {
+                    if (mainHandler != null) {
+                        mainHandler.post(() -> updateButtonText());
+                    } else {
+                        updateButtonText();
+                    }
+                }
+
+                // REMOVED: getTtsAdapter() - Manager now holds TtsAdapter reference directly
+                // @Override
+                // public TtsAdapter getTtsAdapter() {
+                //     return ttsAdapter;
+                // }
+
+                @Override
+                public void onResetStopFlagsForNewQuery() {
+                    if (globalStopFlag) {
+                        LogManager.logW(TAG, "[FIX] Detected stale globalStopFlag=true before startQuery task, resetting to false");
+                        globalStopFlag = false;
+                        userRequestedStop = false;
+                    }
+                }
+
+                /**
+                 * Notification from Manager that a query has started.
+                 * Fragment only saves taskId for UI state tracking - NO flow control here.
+                 * All pipeline logic is in Manager.
+                 */
+                @Override
+                public void onQueryStarted(@NonNull String taskId) {
+                    LogManager.logI(TAG, "[EXECUTOR] onQueryStarted - taskId=" + taskId);
+                    
+                    // Initialize per-query TTS flags based on current config
+                    try {
+                        String ttsModel = ConfigManager.getString(getContext(), ConfigManager.KEY_TTS_MODEL, "无");
+                        boolean isOmni = "原生(Omni)".equals(ttsModel);
+                        useOmniTtsForCurrentQuery.set(isOmni);
+                        LogManager.logD(TAG, "[TTS] Query started, useOmniTts=" + isOmni + ", model=" + ttsModel);
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[TTS] Failed to read TTS model for query start", e);
+                        useOmniTtsForCurrentQuery.set(false);
+                    }
+                    
+                    // Initialize UI state
+                    initializeSendingState();
+                    
+                    // Save taskId for UI state tracking and log replay
+                    llmTaskId = taskId;
+                    // Reset UI read position for new task
+                    uiBufferReadPos = -1;
+                    
+                    // Bind to foreground service for task tracking
+                    try {
+                        if (getActivity() instanceof MainActivity && taskId != null && !taskId.isEmpty()) {
+                            UnifiedForegroundService service = ((MainActivity) getActivity()).getUnifiedForegroundService();
+                            if (service != null) {
+                                service.setCurrentInferenceTaskId(taskId);
+                            }
+                        }
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[TASK] Failed to bind taskId to foreground service: " + e.getMessage(), e);
+                    }
+                }
+
+                @Override
+                public void onRequestStartInferenceForeground(@NonNull String description) {
+                    enterInferenceForegroundSession(description);
+                }
+
+                @Override
+                public void onRequestEndInferenceForeground() {
+                    leaveInferenceForegroundSession();
+                }
+
+                @Override
+                public void onAsrStateChanged(boolean isRunning) {
+                    isAsrRunning.set(isRunning);
+                    LogManager.logD(TAG, "[ASR] State changed: isRunning=" + isRunning);
+                }
+
+                // REMOVED: onRequestCallLlm - LLM calls are now handled directly by RagQueryManager
+            });
+        
+        // Set TtsAdapter to Manager after callback is set (Manager is now initialized)
+        // This ensures TtsAdapter survives UI destruction
+        if (ttsAdapter != null) {
+            ragQueryManager.setTtsAdapter(ttsAdapter);
+            LogManager.logD(TAG, "[TTS] TtsAdapter set to Manager after callback update");
+        }
     }
     
     // The following methods are copied from MainActivity and adjusted for Fragment needs
@@ -869,7 +1220,8 @@ public class RagQaFragment extends Fragment {
             
             // Load model name
             String modelName = ConfigManager.getString(requireContext(), ConfigManager.KEY_MODEL_NAME, "");
-            if (!modelName.isEmpty()) {
+            if (!modelName.isEmpty() &&
+                !StateDisplayManager.isModelStatusDisplayText(requireContext(), modelName)) {
                 // Check if it's a state display text, if so use directly, otherwise may need conversion
                 // Since model names are usually saved directly, use it directly here
                 setSpinnerSelection(spinnerApiModel, modelName);
@@ -941,7 +1293,11 @@ public class RagQaFragment extends Fragment {
             
             // Save directly to first-level configuration
             ConfigManager.setString(requireContext(), ConfigManager.KEY_API_URL, apiUrl);
-            ConfigManager.setString(requireContext(), ConfigManager.KEY_MODEL_NAME, model);
+            if (StateDisplayManager.isModelStatusDisplayText(requireContext(), model)) {
+                ConfigManager.setString(requireContext(), ConfigManager.KEY_MODEL_NAME, "");
+            } else {
+                ConfigManager.setString(requireContext(), ConfigManager.KEY_MODEL_NAME, model);
+            }
             ConfigManager.setString(requireContext(), ConfigManager.KEY_KNOWLEDGE_BASE, knowledgeBase);
             
             // Save API Key to corresponding URL
@@ -1006,6 +1362,85 @@ public class RagQaFragment extends Fragment {
                     break;
                 }
             }
+        }
+    }
+
+    private void replayInferenceLogsFromUnifiedService() {
+        try {
+            if (!isAdded() || getActivity() == null) {
+                LogManager.logD(TAG, "[FG][REPLAY] Skip, Fragment not attached");
+                return;
+            }
+            
+            // NOTE: This method is DEPRECATED. Buffer polling is now handled by pollBufferAndUpdateUi().
+            // Kept for backward compatibility but should not be called.
+            if (ragQueryManager != null && llmTaskId != null && !llmTaskId.isEmpty()) {
+                String consumerId = llmTaskId + "_" + fragmentInstanceId;
+                java.util.List<String> newLogs = ragQueryManager.getNewLogsForConsumer(llmTaskId, consumerId);
+                if (newLogs != null && !newLogs.isEmpty()) {
+                    LogManager.logI(TAG, "[FG][REPLAY] Replaying " + newLogs.size() + " logs from buffer");
+                    
+                    // CRITICAL FIX: Ensure assistant placeholder exists before replaying
+                    // After UI reconstruction, chatMessages is loaded from conversation.md which
+                    // doesn't include the in-progress assistant message. We need to create a
+                    // placeholder so that updateChatMessage() can append streaming content.
+                    ensureAssistantPlaceholderForReplay();
+                    
+                    for (String line : newLogs) {
+                        if (line != null && !line.isEmpty()) {
+                            // writeToBuffer=false: content already in buffer, just update UI
+                            updateChatMessage(line, false);
+                        }
+                    }
+                }
+                return;
+            }
+            LogManager.logD(TAG, "[FG][REPLAY] Skip replay: manager or llmTaskId not ready");
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[FG] Failed to replay inference logs: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Ensure an assistant placeholder message exists for replay.
+     * Called before replaying logs after UI reconstruction.
+     * If the last message is not ASSISTANT type, create a new placeholder.
+     */
+    private void ensureAssistantPlaceholderForReplay() {
+        if (chatMessages == null || chatAdapter == null) {
+            LogManager.logW(TAG, "[FG][REPLAY] Cannot ensure placeholder: chatMessages or adapter is null");
+            return;
+        }
+        
+        // Check if last message is already ASSISTANT type
+        if (!chatMessages.isEmpty()) {
+            ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
+            if (lastMsg.getType() == ChatViewHolders.ASSISTANT) {
+                LogManager.logD(TAG, "[FG][REPLAY] Assistant placeholder already exists, lastMsg.text.len=" + 
+                    (lastMsg.text != null ? lastMsg.text.length() : 0));
+                return;
+            }
+        }
+        
+        // Create new assistant placeholder for streaming content
+        LogManager.logI(TAG, "[FG][REPLAY] Creating assistant placeholder for replay (chatMessages.size=" + 
+            chatMessages.size() + ", lastMsgType=" + 
+            (chatMessages.isEmpty() ? "empty" : chatMessages.get(chatMessages.size() - 1).getType()) + ")");
+        
+        ChatDataItem aiMsg = new ChatDataItem(ChatViewHolders.ASSISTANT);
+        aiMsg.setLoading(true);  // Show loading indicator
+        aiMsg.text = "";  // Start with empty text, will be filled by replay
+        chatMessages.add(aiMsg);
+        
+        // Notify adapter on UI thread
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+            smartScrollToBottom();
+        } else if (getActivity() != null) {
+            getActivity().runOnUiThread(() -> {
+                chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+                smartScrollToBottom();
+            });
         }
     }
     
@@ -1189,6 +1624,7 @@ public class RagQaFragment extends Fragment {
     // Load knowledge base list
     private void loadKnowledgeBases() {
         LogManager.logD(TAG, "Starting to load knowledge base list");
+        isInitializingKnowledgeBaseSpinner = true;
         // Show loading status
         setupSpinner(spinnerKnowledgeBase, new String[]{StateDisplayManager.getKnowledgeBaseStatusDisplayText(requireContext(), AppConstants.KNOWLEDGE_BASE_STATUS_LOADING)});
         
@@ -1223,6 +1659,7 @@ public class RagQaFragment extends Fragment {
             setupSpinner(spinnerKnowledgeBase, new String[]{getString(R.string.common_none)});
             LogManager.logD(TAG, "No available knowledge bases found, showing only 'None' option");
         }
+        isInitializingKnowledgeBaseSpinner = false;
     }
     
     // Load last selected knowledge base
@@ -1350,11 +1787,13 @@ public class RagQaFragment extends Fragment {
                 String ragFutureState = (ragTaskFuture == null ? "null" : (ragTaskFuture.isDone() ? "done" : "not_done"));
                 Thread uiThread = Thread.currentThread();
 
-                LocalLlmAdapter adapter = LocalLlmAdapter.getInstance(requireContext());
-                String modelState = String.valueOf(adapter.getModelState());
-                boolean llmBusy = adapter.isModelBusy();
-                boolean llmRunning = adapter.isInferenceRunning();
-                boolean llmShouldStop = adapter.getShouldStop();
+                // Query status from inference process via IPC (not main process singleton)
+                com.example.offlineai.ipc.InferenceClient inferenceClient = com.example.offlineai.ipc.InferenceClient.getInstance(requireContext());
+                com.example.offlineai.ipc.ServiceStatus status = inferenceClient.safeGetStatus();
+                String modelState = status.modelState;
+                boolean llmBusy = status.llmBusy;
+                boolean llmRunning = status.llmRunning;
+                boolean llmShouldStop = false; // Stop flag is managed in child process now
 
                 LogManager.logI(
                         TAG,
@@ -1462,138 +1901,42 @@ public class RagQaFragment extends Fragment {
         if (textViewResponse != null) {
             textViewResponse.setText("");
         }
-        
-        // CRITICAL: Check if audio needs ASR processing before submitting RAG task
-        // If user selected ASR model (not "无") and there are audio files, use ASR flow
-        boolean needsAsrProcessing = false;
+
+        // Build QueryRequest snapshot for manager
+        int searchDepth = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
+        boolean graphRagEnabled = (checkBoxGraphRagMode != null && checkBoxGraphRagMode.isChecked());
+        boolean needsAsr = false;
+        String asrModel = null;
         if (userInput.hasAudio()) {
-            String asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
+            asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
             if (!"无".equals(asrModel)) {
-                needsAsrProcessing = true;
-                LogManager.logI(TAG, "[SEND] Audio detected with ASR enabled, will use ASR processing flow");
-            } else {
-                LogManager.logI(TAG, "[SEND] Audio detected but ASR disabled, will use <audio> tag flow");
+                needsAsr = true;
             }
         }
-        
-        // [Important Fix] Use dedicated RAG query thread pool to execute query tasks
-        // Avoid executing model operations in stop check thread, eliminate concurrency conflicts
-        LogManager.logI(TAG, "[SEND] Submitting RAG task to executor - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
-        
-        // CRITICAL: Check if previous task is stuck (cancelled but not done)
-        // This happens when native call (e.g. Reranker loading) is blocking the thread
-        if (ragTaskFuture != null && ragTaskFuture.isCancelled() && !ragTaskFuture.isDone()) {
-            LogManager.logW(TAG, "[EXECUTOR] Previous task is STUCK (cancelled but not done), recreating executor");
-            try {
-                ragQueryExecutor.shutdownNow();
-            } catch (Exception e) {
-                LogManager.logE(TAG, "[EXECUTOR] Error shutting down stuck executor: " + e.getMessage());
-            }
-            ragQueryExecutor = Executors.newSingleThreadExecutor(r -> {
-                Thread t = new Thread(r, "RagQa-Query-Thread");
-                t.setDaemon(true);
-                return t;
-            });
-            LogManager.logI(TAG, "[EXECUTOR] Executor recreated successfully");
+
+        if (ragQueryManager != null) {
+            RagQueryManager.QueryRequest request = new RagQueryManager.QueryRequest(
+                    apiUrl,
+                    apiKey,
+                    model,
+                    knowledgeBase,
+                    systemPrompt,
+                    userPrompt,
+                    userInput.imagePaths,
+                    userInput.audioPaths,
+                    userInput.audioDuration,
+                    searchDepth,
+                    graphRagEnabled,
+                    needsAsr,
+                    asrModel
+            );
+            LogManager.logI(TAG, "[SEND] Delegating query execution to RagQueryManager.startQuery");
+            ragQueryManager.startQuery(request);
+        } else {
+            LogManager.logE(TAG, "[SEND] ragQueryManager is null, manager-driven pipeline is required; aborting send");
+            restoreSendStateAfterValidationFailure("ragQueryManager is null");
+            return;
         }
-            
-            LogManager.logI(TAG, "[EXECUTOR] Before submit - isShutdown=" + ragQueryExecutor.isShutdown() + ", isTerminated=" + ragQueryExecutor.isTerminated());
-            
-            // Choose execution path based on ASR requirement
-            if (needsAsrProcessing) {
-                // ASR flow: convert audio to text first, then execute RAG query
-                String asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
-                // CRITICAL: Use cache WAV for ASR, NOT M4A from userInput!
-                File cacheWav = AudioService.getCacheWavFile(requireContext());
-                String audioPath = cacheWav.getAbsolutePath();
-                LogManager.logI(TAG, "[SEND] Routing to ASR flow: model=" + asrModel + ", audio=" + audioPath + " (cache WAV)");
-                
-                ragTaskFuture = ragQueryExecutor.submit(() -> {
-                    LogManager.logI(TAG, "[EXECUTOR] ASR task lambda ENTERED - thread=" + Thread.currentThread().getName());
-                    try {
-                        // Reset local LLM stop flag
-                        String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
-                        String currentApiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrlDisplay);
-                        if (AppConstants.ApiUrl.LOCAL.equals(currentApiUrl)) {
-                            try {
-                                LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(requireContext());
-                                localAdapter.resetStopFlag();
-                                LogManager.logD(TAG, "Reset local LLM stop flag in ASR task thread");
-                            } catch (Exception e) {
-                                LogManager.logE(TAG, "Error resetting local LLM stop flag", e);
-                            }
-                        }
-                        
-                        // Execute ASR conversion and RAG query
-                        convertAndSendAsTextInternal(audioPath, userPrompt, asrModel, apiUrl, apiKey, model, knowledgeBase, systemPrompt, userInput);
-                    } catch (Exception e) {
-                        LogManager.logE(TAG, "[ASR] Error in ASR task", e);
-                        mainHandler.post(() -> {
-                            Toast.makeText(requireContext(), "ASR processing failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-                            resetSendingState();
-                        });
-                    }
-                });
-            } else {
-                // Normal flow: execute RAG query directly (audio will be embedded as <audio> tag if present)
-                ragTaskFuture = ragQueryExecutor.submit(() -> {
-                    LogManager.logI(TAG, "[EXECUTOR] Task lambda ENTERED - thread=" + Thread.currentThread().getName());
-                    
-                    // ✅ FIX: Force reset globalStopFlag at task start to prevent inherited stop state
-                    // This fixes the issue where switching TTS and sending causes immediate abort
-                    if (globalStopFlag) {
-                        LogManager.logW(TAG, "[FIX] Detected stale globalStopFlag=true, resetting to false for new task");
-                        globalStopFlag = false;
-                        userRequestedStop = false;
-                    }
-                    
-                    // Background thread snapshot at RAG task start (English log)
-                    try {
-                        Thread worker = Thread.currentThread();
-                        boolean globalStopRequested = userRequestedStop;
-
-                        LocalLlmAdapter adapter = LocalLlmAdapter.getInstance(requireContext());
-                        String modelState = String.valueOf(adapter.getModelState());
-                        boolean llmBusy = adapter.isModelBusy();
-                        boolean llmRunning = adapter.isInferenceRunning();
-                        boolean llmShouldStop = adapter.getShouldStop();
-
-                        LogManager.logI(
-                            TAG,
-                            "[SNAPSHOT][BG_START] RAG-task start - thread=" + worker.getName()
-                                + ", interrupted=" + worker.isInterrupted()
-                                + ", userRequestedStop=" + globalStopRequested
-                                + ", modelState=" + modelState
-                                + ", llmBusy=" + llmBusy
-                                + ", llmRunning=" + llmRunning
-                                + ", llmShouldStop=" + llmShouldStop
-                        );
-                    } catch (Throwable th) {
-                        LogManager.logE(TAG, "Error collecting RAG-task start snapshot", th);
-                    }
-
-                    // [Fix] Only reset local LLM stop flag, do not reset global stop flag
-                    // Global stop flag can only be reset after confirming stop process completion
-                    String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
-                    String currentApiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrlDisplay);
-                    if (AppConstants.ApiUrl.LOCAL.equals(currentApiUrl)) {
-                        try {
-                            LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(requireContext());
-                            // Only reset local LLM stop flag, do not affect global stop flag
-                            localAdapter.resetStopFlag();
-                            LogManager.logD(TAG, "Reset local LLM stop flag in RAG query thread (global stop flag unchanged)");
-                        } catch (Exception e) {
-                            LogManager.logE(TAG, "Error resetting local LLM stop flag", e);
-                        }
-                    }
-                    
-                    // Display processing message in background thread, avoid UI thread nested calls
-                    //updateProgressOnUiThread("Starting knowledge base query...");
-                    // Pass UserInput to RAG query for file paths
-                    executeRagQuery(apiUrl, apiKey, model, knowledgeBase, systemPrompt, userPrompt, userInput);
-                });
-            }
-            LogManager.logI(TAG, "[EXECUTOR] After submit - ragTaskFuture=" + (ragTaskFuture == null ? "null" : "not_null") + ", isDone=" + (ragTaskFuture != null && ragTaskFuture.isDone()) + ", isCancelled=" + (ragTaskFuture != null && ragTaskFuture.isCancelled()));
 
         } else if (isSending.get()) {
             // Already sending - show confirm dialog before stopping
@@ -1625,72 +1968,18 @@ public class RagQaFragment extends Fragment {
                 LogManager.logI(TAG, "[STOP][CLICK] Enter stop flow - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
                 LogManager.logD(TAG, "Current state - isSending: " + isSending.get() + ", isTaskRunning: " + isTaskRunning + ", isTaskCancelled: " + isTaskCancelled);
                 
-                // Set global stop flag and task cancellation flag
+                // Set UI-local flags for UI state tracking
                 globalStopFlag = true;
                 isTaskCancelled = true;
                 
-                // Set static stop flag for cross-module communication
-                userRequestedStop = true;
-                LogManager.logI(TAG, "[STOP] Global stop requested - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isTaskRunning=" + isTaskRunning + ", ragFuture=" + (ragTaskFuture==null?"null":(ragTaskFuture.isDone()?"done":"not_done")));
-                
-                LogManager.logD(TAG, "Set global stop flag and task cancellation flag to true");
-                
-                // Stop all components: tokenizer, embedding, reranker, local LLM
-                LogManager.logD(TAG, "Starting to stop all components...");
-                
-                // 1. Stop local LLM inference
-                String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
-                String currentApiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrlDisplay);
-                LogManager.logD(TAG, "Current API URL: " + currentApiUrl);
-                
-                if (AppConstants.ApiUrl.LOCAL.equals(currentApiUrl)) {
-                    try {
-                        LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(requireContext());
-                        LogManager.logD(TAG, "Preparing to call local LLM stop method");
-                        localAdapter.stopGeneration();
-                        LogManager.logI(TAG, "✓ Successfully called local LLM stop method");
-                    } catch (Exception e) {
-                        LogManager.logE(TAG, "✗ Error calling local LLM stop method", e);
-                    }
-                } else {
-                    LogManager.logD(TAG, "Non-local model, skipping local LLM stop call");
-                }
-                
-                // 2. Stop Embedding model (if in use)
-                try {
-                    EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(getContext());
-                    if (embeddingHandler != null) {
-                        embeddingHandler.stopInference();
-                        LogManager.logI(TAG, "✓ Embedding model stop signal sent");
-                    } else {
-                        LogManager.logD(TAG, "Embedding handler is null");
-                    }
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "✗ Error stopping embedding model", e);
-                }
-                
-                // 3. Stop Reranker model (if in use)
-                try {
-                    RerankerHandler rerankerHandler = RerankerHandler.getInstance(getContext());
-                    if (rerankerHandler != null) {
-                        rerankerHandler.stopInference();
-                        LogManager.logI(TAG, "✓ Reranker model stop signal sent");
-                    } else {
-                        LogManager.logD(TAG, "Reranker handler is null");
-                    }
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "✗ Error stopping reranker model", e);
-                }
-                
-                // MNN models have built-in tokenizers, no external tokenizer to stop
-                LogManager.logI(TAG, "✓ MNN tokenizers are managed internally");
-                
-                LogManager.logI(TAG, "All component stop signals have been sent");
+                // Delegate stop to RagQueryManager (handles all component stop logic + Manager-owned flags)
+                // Manager's requestStopFromManager() sets Manager-owned stop flags (SINGLE SOURCE OF TRUTH)
+                ragQueryManager.requestStopFromManager();
                 
                 // CRITICAL FIX: Use cancel(false) instead of cancel(true) for graceful stop
                 // cancel(true) calls Thread.interrupt() which is abrupt interruption
                 // cancel(false) only sets flag, lets native call finish naturally, then checks mShouldStop
-                // This follows LLM's graceful stop pattern: set flag → wait for natural checkpoint → stop
+                // This follows LLM's graceful stop pattern: set flag  wait for natural checkpoint  stop
                 if (ragTaskFuture != null && !ragTaskFuture.isDone()) {
                     boolean cancelResult = ragTaskFuture.cancel(false);  // ✅ false = no interrupt
                     LogManager.logI(TAG, "Requested graceful cancellation for RAG task Future (no thread interrupt), result=" + cancelResult);
@@ -1735,27 +2024,6 @@ public class RagQaFragment extends Fragment {
         if (mainHandler != null) {
             mainHandler.post(this::updateButtonText);
         }
-        
-        // Reset stop flags for embedding and reranker handlers
-        try {
-            EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(getContext());
-            if (embeddingHandler != null) {
-                embeddingHandler.resetStopFlag();
-                LogManager.logD(TAG, "Embedding handler stop flag reset");
-            }
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Error resetting embedding handler stop flag", e);
-        }
-        
-        try {
-            RerankerHandler rerankerHandler = RerankerHandler.getInstance(getContext());
-            if (rerankerHandler != null) {
-                rerankerHandler.resetStopFlag();
-                LogManager.logD(TAG, "Reranker handler stop flag reset");
-            }
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Error resetting reranker handler stop flag", e);
-        }
     }
     
     /**
@@ -1766,9 +2034,11 @@ public class RagQaFragment extends Fragment {
     private void resetSendingState() {
         LogManager.logI(TAG, "[STATE] resetSendingState enter - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isSending=" + isSending.get() + ", isTaskRunning=" + isTaskRunning + ", isTaskCancelled=" + isTaskCancelled + ", globalStopFlag=" + globalStopFlag);
         
-        // CRITICAL: Always save conversation history first, even if TTS is still generating
-        // This ensures AI response text is saved immediately after LLM completes
-        saveChatHistory();
+        // NOTE: For local models (LLM/Diffusion), history is persisted by manager/handler
+        // via appendAssistantTextMessage/appendAssistantImageMessage. Fragment only reloads.
+        // For remote APIs, history is saved here as they don't have a backend writer.
+        // TODO: Clean up this legacy path - remote API should also use manager-driven persistence
+        // saveChatHistory(); // Disabled: manager handles persistence, Fragment only displays;
         
         // Check if TTS is still generating
         if (isTtsGenerating.get()) {
@@ -1776,6 +2046,25 @@ public class RagQaFragment extends Fragment {
             return;
         }
         
+        // Finalize LLM background task before clearing flags
+        if (llmTaskId != null) {
+            BackgroundTask.TaskState finalState;
+            int finalProgress;
+            String finalMessage;
+
+            if (isTaskCancelled || globalStopFlag || userRequestedStop) {
+                finalState = BackgroundTask.TaskState.CANCELLED;
+                finalProgress = 0;
+                finalMessage = "LLM inference cancelled";
+            } else {
+                finalState = BackgroundTask.TaskState.COMPLETED;
+                finalProgress = 100;
+                finalMessage = "LLM inference completed";
+            }
+
+            finalizeLlmTask(finalState, finalProgress, finalMessage);
+        }
+
         isTaskRunning = false;
         isTaskCancelled = false;
         
@@ -1840,21 +2129,329 @@ public class RagQaFragment extends Fragment {
                     LogManager.logW(TAG, "Cannot reset sending state, Fragment not attached to Activity");
                     return;
                 }
-                
-                try {
-                    updateButtonText();
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "Failed to reset button text", e);
-                }
+
+                LogManager.logD(TAG, "[UI_TRACE] resetSendingState - before updateButtonText & leaveInferenceForegroundSession");
+                updateButtonText();
+                // End foreground inference session in unified foreground service when all tasks are done
+                ragQueryManager.requestEndInferenceForeground();
+                LogManager.logD(TAG, "[UI_TRACE] resetSendingState - after leaveInferenceForegroundSession");
             });
         }
-        
-        // CHECKPOINT: Check if all audio compressions are complete
-        // Scenarios: 1) No TTS, 2) TTS without auto-play, 4) No user audio
-        LogManager.logI(TAG, "[STATE] Inference complete, checking compression status...");
-        mainHandler.post(() -> checkCompressionCompleteAndFinalize());
     }
+
+    // Lightweight UI state resync: restore basic flags based on active background tasks
+    // Returns true if there is any active LLM/TTS/Diffusion task for current chat folder.
+    // Uses BackgroundTaskManager.getActiveTaskSummary() for efficient lookup.
+    private boolean resyncUiStateWithBackgroundTasks() {
+        try {
+            String currentFolder = currentChatFolderPath;
+            if (TextUtils.isEmpty(currentFolder)) {
+                currentFolder = ConfigManager.getString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            }
+            if (TextUtils.isEmpty(currentFolder)) {
+                return false;
+            }
+
+            // Use the new unified API for task summary
+            BackgroundTaskManager.TaskSummary summary = BackgroundTaskManager.getInstance().getActiveTaskSummary(currentFolder);
+            
+            boolean hasLlmTaskForFolder = summary.hasLlmTask;
+            boolean hasTtsTaskForFolder = summary.hasTtsTask;
+            boolean hasDiffusionTaskForFolder = summary.hasDiffusionTask;
+            
+            // Update llmTaskId if we found an active LLM task but don't have the ID
+            // NOTE: No need to reset cursor here. The new design:
+            // - Cursor is reset to 0 by RagQueryManager when MD is persisted
+            // - New consumer starts at cursor 0 automatically
+            // - replayInferenceLogsFromUnifiedService() will pop all unpersisted content
+            if (hasLlmTaskForFolder && (llmTaskId == null || llmTaskId.isEmpty())) {
+                llmTaskId = summary.llmTaskId;
+                LogManager.logD(TAG, "[TASK] Restored llmTaskId from active task: " + llmTaskId);
+            }
+            
+            // Always sync UnifiedForegroundService's currentInferenceTaskId when there's an active LLM task
+            // This ensures log routing works correctly after Fragment recreation
+            if (hasLlmTaskForFolder && llmTaskId != null && !llmTaskId.isEmpty()) {
+                if (getActivity() instanceof MainActivity) {
+                    UnifiedForegroundService service = ((MainActivity) getActivity()).getUnifiedForegroundService();
+                    if (service != null) {
+                        String currentServiceTaskId = service.getCurrentInferenceTaskId();
+                        if (!llmTaskId.equals(currentServiceTaskId)) {
+                            LogManager.logD(TAG, "[TASK] Syncing UnifiedForegroundService taskId: " + currentServiceTaskId + " -> " + llmTaskId);
+                            service.setCurrentInferenceTaskId(llmTaskId);
+                        }
+                    }
+                }
+            }
+
+            // If there is an active LLM or Diffusion task for this folder, restore sending state
+            if (hasLlmTaskForFolder || hasDiffusionTaskForFolder) {
+                isTaskRunning = true;
+                isTaskCancelled = false;
+                isSending.set(true);
+            } else {
+                // No active LLM/Diffusion task - reset sending state if it was set
+                if (isSending.get()) {
+                    LogManager.logD(TAG, "[TASK] No active LLM/Diffusion task, resetting isSending state");
+                    isSending.set(false);
+                    isTaskRunning = false;
+                }
+            }
+
+            // If there is an active TTS task for this folder, restore TTS state
+            if (hasTtsTaskForFolder) {
+                isTtsGenerating.set(true);
+            } else {
+                // No active TTS task - reset TTS state if it was set
+                if (isTtsGenerating.get()) {
+                    LogManager.logD(TAG, "[TASK] No active TTS task, resetting isTtsGenerating state");
+                    isTtsGenerating.set(false);
+                }
+            }
+
+            // Always update button text to reflect current state
+            updateButtonText();
+
+            // Detect diffusion completion for current chat folder so that we can
+            // reload chat history and surface newly appended image messages even
+            // if streaming callbacks were lost during Fragment recreation.
+            if (lastDiffusionTaskActive && !hasDiffusionTaskForFolder) {
+                LogManager.logD(TAG, "[TASK] Detected diffusion task completion for current folder, reloading chat history");
+                if (getActivity() != null) {
+                    getActivity().runOnUiThread(() -> {
+                        try {
+                            if (getActivity() == null || !isAdded() || isDetached()) {
+                                LogManager.logW(TAG, "Cannot reload chat history, Fragment not attached");
+                                return;
+                            }
+                            // Reload conversation from markdown so that diffusion
+                            // result image messages and performance info are
+                            // reflected in chat UI after small-window switch or
+                            // Fragment recreation.
+                            loadChatHistory();
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[TASK] Failed to reload chat history after diffusion completion", e);
+                        }
+                    });
+                }
+            }
+
+            lastDiffusionTaskActive = hasDiffusionTaskForFolder;
+
+            return summary.hasAnyTask;
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TASK] Failed to resync UI state with background tasks: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    // Apply restored debug response text snapshot from saved state if it has not
+    // been applied yet. This is called from onResume before replaying new logs
+    // from UnifiedForegroundService to avoid overriding them.
+    //
+    // CRITICAL: When llmTaskId is available and RingBuffer has data, we should
+    // skip this method and rely solely on replayInferenceLogsFromUnifiedService()
+    // to restore the UI. Otherwise, we get duplicate content:
+    // 1. First from savedInstanceState (this method)
+    // 2. Then from RingBuffer replay (replayInferenceLogsFromUnifiedService)
+    private void applyRestoredResponseTextFromStateIfNeeded() {
+        try {
+            if (hasAppliedRestoredResponseFromState) {
+                LogManager.logD(TAG, "[UI_TRACE] applyRestoredResponseTextFromStateIfNeeded - already applied, skip");
+                return;
+            }
+            if (restoredResponseTextFromState == null || restoredResponseTextFromState.isEmpty()) {
+                LogManager.logD(TAG, "[UI_TRACE] applyRestoredResponseTextFromStateIfNeeded - no restored text, skip");
+                return;
+            }
+            
+            // CRITICAL: If llmTaskId is available and RingBuffer has data, skip this method
+            // The RingBuffer replay will restore the UI content instead
+            if (llmTaskId != null && !llmTaskId.isEmpty()) {
+                TaskLogBuffer buffer = BackgroundTaskManager.getInstance().getLogBuffer(llmTaskId);
+                if (buffer != null && buffer.getLogCount() > 0) {
+                    LogManager.logD(TAG, "[UI_TRACE] applyRestoredResponseTextFromStateIfNeeded - " +
+                            "skipping, will use RingBuffer replay instead (taskId=" + llmTaskId + 
+                            ", bufferSize=" + buffer.getLogCount() + ")");
+                    hasAppliedRestoredResponseFromState = true;
+                    restoredResponseTextFromState = null;
+                    return;
+                }
+            }
+            
+            LogManager.logD(TAG, "[UI_TRACE] applyRestoredResponseTextFromStateIfNeeded - applying restored text, len=" +
+                    restoredResponseTextFromState.length());
+            updateResultOnUiThread(restoredResponseTextFromState);
+            hasAppliedRestoredResponseFromState = true;
+            restoredResponseTextFromState = null;
+            LogManager.logD(TAG, "[UI_TRACE] applyRestoredResponseTextFromStateIfNeeded - applied and cleared state");
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to apply restored response text from state", e);
+        }
+    }
+
+    // Periodic UI state resync loop used to keep send/stop button state in sync
+    // with BackgroundTaskManager even if callbacks were lost due to Fragment
+    // recreation.
+    private void startUiStateResyncLoop() {
+        if (mainHandler == null) {
+            mainHandler = new Handler(Looper.getMainLooper());
+        }
+        if (uiStateResyncRunnable != null) {
+            return;
+        }
+        uiStateResyncRunnable = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (!isAdded() || getActivity() == null || isDetached()) {
+                        uiStateResyncRunnable = null;
+                        return;
+                    }
+
+                    boolean hasActiveTasksForFolder = resyncUiStateWithBackgroundTasks();
+
+                    // NOTE: Buffer polling is now handled by bufferPollRunnable (200ms interval).
+                    // This loop only handles UI state resync (button state, etc.) every 2s.
+
+                    // If no active tasks remain for this folder but UI still thinks
+                    // it is sending or TTS generating, perform a safe reset.
+                    if (!hasActiveTasksForFolder && (isSending.get() || isTtsGenerating.get() || isTaskRunning)) {
+                        LogManager.logD(TAG, "[STATE] Periodic resync detected no active tasks, resetting sending state");
+                        resetSendingState();
+                    }
+
+                    if (uiStateResyncRunnable != null && mainHandler != null) {
+                        mainHandler.postDelayed(uiStateResyncRunnable, UI_STATE_RESYNC_INTERVAL_MS);
+                    }
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[STATE] UI state resync loop error: " + e.getMessage(), e);
+                }
+            }
+        };
+        mainHandler.postDelayed(uiStateResyncRunnable, UI_STATE_RESYNC_INTERVAL_MS);
+    }
+
+    private void stopUiStateResyncLoop() {
+        if (mainHandler != null && uiStateResyncRunnable != null) {
+            mainHandler.removeCallbacks(uiStateResyncRunnable);
+        }
+        uiStateResyncRunnable = null;
+    }
+
+    // Unique fragment instance ID for buffer consumer cursor.
+    // Each Fragment instance gets a unique ID, so UI reconstruction automatically
+    // starts with cursor=0 (new consumer, getOrDefault returns 0).
+    private final String fragmentInstanceId = java.util.UUID.randomUUID().toString().substring(0, 8);
     
+    // UI-maintained read position for ring buffer.
+    // -1 means not initialized yet, will be set to persistedPos on first poll.
+    private long uiBufferReadPos = -1;
+    
+    /**
+     * Start buffer polling loop for streaming UI updates.
+     * This is the SINGLE source of truth for UI updates - all streaming data
+     * goes through the buffer, and UI polls from it every 200ms.
+     * 
+     * NOTE: Each Fragment instance has a unique fragmentInstanceId, so after UI
+     * reconstruction, the new Fragment is a new consumer with cursor=0 automatically.
+     * No manual reset needed.
+     */
+    private void startBufferPollLoop() {
+        if (mainHandler == null) {
+            mainHandler = new Handler(Looper.getMainLooper());
+        }
+        if (bufferPollRunnable != null) {
+            return; // Already running
+        }
+        
+        bufferPollRunnable = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (!isAdded() || getActivity() == null || isDetached()) {
+                        bufferPollRunnable = null;
+                        return;
+                    }
+
+                    // Poll new logs from buffer and update UI
+                    pollBufferAndUpdateUi();
+
+                    // Continue polling if runnable is still active
+                    if (bufferPollRunnable != null && mainHandler != null) {
+                        mainHandler.postDelayed(bufferPollRunnable, BUFFER_POLL_INTERVAL_MS);
+                    }
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[POLL] Buffer poll loop error: " + e.getMessage(), e);
+                }
+            }
+        };
+        // Start immediately
+        mainHandler.post(bufferPollRunnable);
+    }
+
+    private void stopBufferPollLoop() {
+        if (mainHandler != null && bufferPollRunnable != null) {
+            mainHandler.removeCallbacks(bufferPollRunnable);
+        }
+        bufferPollRunnable = null;
+    }
+
+    /**
+     * Poll new logs from buffer and update UI.
+     * Called every 50ms by bufferPollRunnable.
+     * 
+     * UI maintains its own read position (uiBufferReadPos):
+     * - First poll: get persistedPos from Manager as starting point
+     * - Subsequent polls: read from uiBufferReadPos, update to newReadPos
+     * - This avoids re-reading the same data every poll
+     */
+    private void pollBufferAndUpdateUi() {
+        if (ragQueryManager == null || llmTaskId == null || llmTaskId.isEmpty()) {
+            return;
+        }
+
+        // First poll: initialize uiBufferReadPos from Manager's persistedPos
+        if (uiBufferReadPos < 0) {
+            uiBufferReadPos = ragQueryManager.getBufferPersistedPos(llmTaskId);
+            LogManager.logD(TAG, "[POLL] Initialized uiBufferReadPos=" + uiBufferReadPos);
+        }
+        
+        // Read from our maintained position
+        TaskLogBuffer.ReadResult result = ragQueryManager.readBufferFromPos(llmTaskId, uiBufferReadPos);
+        if (result == null || !result.hasData()) {
+            return;
+        }
+        
+        // Update our read position for next poll
+        long oldPos = uiBufferReadPos;
+        uiBufferReadPos = result.newReadPos;
+        LogManager.logD(TAG, "[POLL] Read " + result.data.length() + " chars, pos " + oldPos + " -> " + uiBufferReadPos);
+
+        // Ensure assistant placeholder exists before updating
+        ensureAssistantPlaceholderForReplay();
+
+        // Split data into lines and update UI
+        String data = result.data;
+        int start = 0;
+        for (int i = 0; i < data.length(); i++) {
+            if (data.charAt(i) == '\n') {
+                String line = data.substring(start, i + 1);
+                if (!line.isEmpty()) {
+                    performUpdateChatMessage(line);
+                }
+                start = i + 1;
+            }
+        }
+        // Handle remaining content without trailing newline
+        if (start < data.length()) {
+            String line = data.substring(start);
+            if (!line.isEmpty()) {
+                performUpdateChatMessage(line);
+            }
+        }
+    }
+
     /**
      * Update button text based on current state
      * Priority: Audio decoding > TTS generating > LLM inferring > Send
@@ -1867,15 +2464,31 @@ public class RagQaFragment extends Fragment {
             int progress = decodingProgress.get();
             buttonSendStop.setText("解压音频中... " + progress + "%");
             buttonSendStop.setEnabled(false); // Lock button during decoding
+            if (buttonNewChat != null) {
+                buttonNewChat.setEnabled(false);
+                buttonNewChat.setAlpha(0.5f);
+            }
         } else if (isTtsGenerating.get()) {
             buttonSendStop.setText(getString(R.string.button_generating_tts));
             buttonSendStop.setEnabled(true); // Allow stopping TTS
+            if (buttonNewChat != null) {
+                buttonNewChat.setEnabled(false);
+                buttonNewChat.setAlpha(0.5f);
+            }
         } else if (isSending.get()) {
             buttonSendStop.setText(getString(R.string.button_inferring));
             buttonSendStop.setEnabled(true); // Allow stopping inference
+            if (buttonNewChat != null) {
+                buttonNewChat.setEnabled(false);
+                buttonNewChat.setAlpha(0.5f);
+            }
         } else {
             buttonSendStop.setText(getString(R.string.button_send));
             buttonSendStop.setEnabled(true); // Allow sending new message
+            if (buttonNewChat != null) {
+                buttonNewChat.setEnabled(true);
+                buttonNewChat.setAlpha(1.0f);
+            }
         }
     }
     
@@ -1927,3122 +2540,110 @@ public class RagQaFragment extends Fragment {
             LogManager.logE(TAG, "Error restoring state after validation failure", th);
         }
     }
-    // Overload: without ASR info and UserInput
-    private void executeRagQuery(String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt, String userPrompt, UserInput userInput) {
-        // ✅ 统一 ASR 检测（无论本地还是在线模型）
-        // CRITICAL: Check if audio needs ASR processing before RAG query
-        if (userInput != null && userInput.hasAudio()) {
-            String asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
-            if (!"无".equals(asrModel)) {
-                // ASR enabled: convert audio to text first, then continue RAG flow
-                // CRITICAL: Use cache WAV for ASR, NOT M4A from userInput!
-                File cacheWav = AudioService.getCacheWavFile(requireContext());
-                String audioPath = cacheWav.getAbsolutePath();
-                LogManager.logI(TAG, "[ASR] Audio detected with ASR enabled, converting to text first");
-                LogManager.logI(TAG, "[ASR] Model: " + asrModel + ", Audio: " + audioPath + " (cache WAV)");
-                
-                // Submit ASR task (will call executeRagQueryWithAsr after conversion)
-                ragTaskFuture = ragQueryExecutor.submit(() -> {
-                    try {
-                        convertAndSendAsTextInternal(audioPath, userPrompt, asrModel, 
-                                                     apiUrl, apiKey, model, knowledgeBase, systemPrompt, userInput);
-                    } catch (Exception e) {
-                        LogManager.logE(TAG, "[ASR] Conversion failed", e);
-                        mainHandler.post(() -> {
-                            Toast.makeText(requireContext(), "ASR processing failed: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-                            resetSendingState();
-                        });
-                    }
-                });
-                return; // Exit early, ASR will continue the flow
-            } else {
-                LogManager.logI(TAG, "[ASR] Audio detected but ASR disabled, will use <audio> tag");
-            }
-        }
-        
-        // No ASR needed: continue normal RAG flow
-        executeRagQueryWithAsr(apiUrl, apiKey, model, knowledgeBase, systemPrompt, userPrompt, null, false, userInput);
-    }
-    
-    // Main implementation: with optional ASR info, audio embedding control, and UserInput
+    // ============================================
+    // DEPRECATED LEGACY METHODS REMOVED
+    // ============================================
+    // The following legacy methods have been removed as they are no longer called:
+    // - executeRagQuery(): Legacy entry point, replaced by RagQueryManager.startQuery()
+    // - executeRagQueryInternal(): Legacy ASR decision helper
+    // - executeRagQueryWithAsr(): Legacy main implementation (350+ lines)
+    // - convertAndSendAsTextInternal(): Legacy ASR conversion
+    // - sendAudioToModelInternal(): Legacy audio fallback
+    //
+    // All query execution now goes through:
+    // 1. RagQueryManager.startQuery() - entry point
+    // 2. RagQueryManager.runAsrAndContinue() - ASR pipeline
+    // 3. RagQueryCallback.onStartQueryWithAsrResult() - callback to Fragment
+    // 4. RagQueryManager.runFullRagPipelineFromAsrResult() - main pipeline
+    // ============================================
+
+    // NOTE: The following method was the legacy main implementation.
+    // It has been replaced by RagQueryManager.runFullRagPipelineFromAsrResult().
+    // Keeping a stub here to catch any accidental calls during transition.
+    @Deprecated
     private void executeRagQueryWithAsr(String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt, String userPrompt, String asrInfo, boolean skipAudioEmbedding, UserInput userInput) {
-        // [Fix] Use dedicated initialization method, do not reset global stop flag
-        initializeSendingState();
-        
-        LogManager.logD(TAG, "Starting RAG query execution with preserved global stop flag state");
-        
-        // ============================================
-        // Initialize TtsAdapter (if System/External TTS enabled)
-        // ============================================
-        String ttsModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_TTS_MODEL,
-                getString(R.string.settings_tts_model_none));
-        boolean isLocalModel = AppConstants.ApiUrl.LOCAL.equals(apiUrl);
-        String nativeTtsName = getString(R.string.settings_tts_model_native_omni);
-        boolean isOmniNativeTts = nativeTtsName.equals(ttsModel);
-        String noneOption = getString(R.string.settings_tts_model_none);
-        String commonNone = getString(R.string.common_none);
-        boolean isTtsNoneOrEmpty = (ttsModel == null
-                || ttsModel.trim().isEmpty()
-                || noneOption.equals(ttsModel)
-                || commonNone.equals(ttsModel)
-                || "None".equalsIgnoreCase(ttsModel));
-        
-        // Enable TtsAdapter for System/External TTS (not Omni Native, not None)
-        if (!isTtsNoneOrEmpty && !isOmniNativeTts) {
-            try {
-                String chatFolderPath = ConfigManager.getString(requireContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
-                boolean autoPlay = ConfigManager.getTtsAutoPlay(requireContext());
-                
-                // Create TtsCallback
-                TtsAdapter.TtsCallback ttsCallback = new TtsAdapter.TtsCallback() {
-                    @Override
-                    public void onTtsComplete(String mergedAudioPath, boolean playbackComplete) {
-                        LogManager.logI(TAG, "[TTS] ========== CALLBACK RECEIVED ==========");
-                        LogManager.logI(TAG, "[TTS] External TTS complete: " + mergedAudioPath);
-                        LogManager.logI(TAG, "[TTS] playbackComplete: " + playbackComplete);
-                        LogManager.logI(TAG, "[TTS] Current thread: " + Thread.currentThread().getName());
-                        
-                        // CRITICAL: Ensure callback runs on main thread
-                        mainHandler.post(() -> {
-                            LogManager.logI(TAG, "[TTS] ✅ Processing TTS completion on main thread");
-                            handleTtsAudioComplete(mergedAudioPath);
-                            LogManager.logI(TAG, "[TTS] ✅ handleTtsAudioComplete finished");
-                        });
-                    }
-                    
-                    @Override
-                    public void onError(String error) {
-                        LogManager.logE(TAG, "[TTS] External TTS error: " + error);
-                        mainHandler.post(() -> {
-                            if (getActivity() != null && isAdded()) {
-                                Toast.makeText(requireContext(), "TTS Error: " + error, Toast.LENGTH_SHORT).show();
-                                
-                                // Reset state on error
-                                isTtsGenerating.set(false);
-                                resetSendingState();
-                            }
-                        });
-                    }
-                };
-                
-                ttsAdapter.enable(ttsModel, chatFolderPath, autoPlay, ttsCallback);
-                LogManager.logI(TAG, "[TTS] TtsAdapter enabled: model=" + ttsModel + ", autoPlay=" + autoPlay);
-            } catch (Exception e) {
-                LogManager.logE(TAG, "[TTS] Failed to enable TtsAdapter", e);
-            }
-        } else {
-            LogManager.logI(TAG, "[TTS] TtsAdapter not enabled: ttsModel=" + ttsModel + ", isOmniNative=" + isOmniNativeTts);
-        }
-        
-        // ============================================
-        // START: Unified Debug Section Management
-        // ============================================
-        // Open debug section at the beginning of the entire flow
-        updateChatMessage("<debug>\n");
-        
-        // Output ASR info if provided (from ASR flow)
-        if (asrInfo != null && !asrInfo.isEmpty()) {
-            updateChatMessage(asrInfo);
-        }
-        
-        // Use image paths from UserInput (already saved to chat folder)
-        java.util.List<String> imagePaths = null;
-        if (userInput != null && userInput.hasImages()) {
-            imagePaths = userInput.imagePaths;
-            LogManager.logI(TAG, "[MULTIMODAL] Using " + imagePaths.size() + " image(s) from UserInput");
-        }
-        
-        // Use audio paths from UserInput (will be handled by JNI layer, similar to images)
-        // CRITICAL: Skip audio if ASR already converted audio to text
-        // CRITICAL: Use cache WAV for Omni, NOT M4A from userInput!
-        java.util.List<String> audioPaths = null;
-        final String originalUserPrompt = userPrompt; // Save original prompt for lambda
-        if (!skipAudioEmbedding && userInput != null && userInput.hasAudio()) {
-            // Use cache WAV for Omni audio understanding
-            File cacheWav = AudioService.getCacheWavFile(requireContext());
-            if (cacheWav.exists()) {
-                audioPaths = new java.util.ArrayList<>();
-                audioPaths.add(cacheWav.getAbsolutePath());
-                LogManager.logI(TAG, "[MULTIMODAL] Using cache WAV for Omni: " + cacheWav.getAbsolutePath());
-            } else {
-                LogManager.logW(TAG, "[MULTIMODAL] Cache WAV not found, skipping audio");
-            }
-            // NOTE: Audio tags will be added by JNI layer (similar to image handling)
-            // No need to modify userPrompt here
-        } else if (skipAudioEmbedding) {
-            LogManager.logI(TAG, "[MULTIMODAL] Skipped audio (ASR already converted to text)");
-        }
-        
-        // Save query parameters for recovery
-        lastApiUrl = apiUrl;
-        lastApiKey = apiKey;
-        lastModel = model;
-        lastKnowledgeBase = knowledgeBase;
-        lastSystemPrompt = systemPrompt;
-        lastUserPrompt = userPrompt;
-        
-        // Initialize relevant documents list
-        synchronized (this) {
-            relevantDocuments = new ArrayList<>();
-            similarityInfo = "";
-        }
-        
-        // Record start time
-        final long startTime = System.currentTimeMillis();
-        
-        // Get retrieval count
-        final int searchDepth = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
-        LogManager.logD(TAG, "[RAG] Params saved - kb=" + knowledgeBase + ", searchDepth=" + searchDepth + ", sys.len=" + (systemPrompt==null?0:systemPrompt.length()) + ", user.len=" + (userPrompt==null?0:userPrompt.length()));
-        
-        // Update UI to show query start
+        LogManager.logE(TAG, "[EXECUTOR] FATAL: executeRagQueryWithAsr called - this is a DEPRECATED legacy path");
+        LogManager.logE(TAG, "[EXECUTOR] All queries must go through RagQueryManager.startQuery() -> runFullRagPipelineFromAsrResult()");
         mainHandler.post(() -> {
-            isSending.set(true); // Use atomic operation to set sending state
-            updateButtonText(); // Update button text based on state machine
-            // [Fix] Task state already set in initializeSendingState, no need to set again here
-            
-            // Clear response area
-            //updateProgressOnUiThread("Querying knowledge base...");
-        });
-        
-        // Execute query synchronously (avoid concurrent conflicts)
-        try {
-            // Build media info for logging
-            StringBuilder mediaInfo = new StringBuilder();
-            if (imagePaths != null && !imagePaths.isEmpty()) {
-                mediaInfo.append("; image: ");
-                for (int i = 0; i < imagePaths.size(); i++) {
-                    if (i > 0) mediaInfo.append(", ");
-                    mediaInfo.append(new File(imagePaths.get(i)).getName());
-                }
-            }
-            if (audioPaths != null && !audioPaths.isEmpty()) {
-                mediaInfo.append("; audio: ");
-                for (int i = 0; i < audioPaths.size(); i++) {
-                    if (i > 0) mediaInfo.append(", ");
-                    mediaInfo.append(new File(audioPaths.get(i)).getName());
-                }
-            }
-            
-            // Log query information
-                String logMessage = "Executing RAG query:\n" +
-                        "API URL: " + apiUrl + "\n" +
-                        "Model: " + model + "\n" +
-                        "Knowledge Base: " + knowledgeBase + "\n" +
-                        "Retrieval Count: " + searchDepth + "\n" +
-                        "System Prompt: " + systemPrompt + "\n" +
-                        "User Question: " + userPrompt + mediaInfo.toString();
-                LogManager.logD(TAG, logMessage);
-                
-                // Update UI to show query log
-                mainHandler.post(() -> {
-                    //updateProgressOnUiThread("Starting knowledge base query...");
-                    //updateProgressOnUiThread("Knowledge base: " + knowledgeBase);
-                    //updateProgressOnUiThread("Retrieval count: " + searchDepth);
-                    updateProgressOnUiThread("\n " + getString(R.string.debug_info_header) + "\n\n" + getString(R.string.user_question, originalUserPrompt));
-                });
-                
-                // Check if knowledge base query is needed
-                String valueNone = getString(R.string.common_none);
-                String valueNoAvailableKb = getString(R.string.value_no_available_kb);
-                if (!valueNone.equals(knowledgeBase) && !valueNoAvailableKb.equals(knowledgeBase) && searchDepth > 0) {
-                    String kbInfo = getString(R.string.log_using_kb_for_query, knowledgeBase);
-                    LogManager.logD(TAG, kbInfo);
-                    // Output RAG info to debug section
-                    updateChatMessage("[RAG] Knowledge Base: " + knowledgeBase + "\n");
-                    updateChatMessage("[RAG] Retrieval count: " + searchDepth + "\n");
-                    
-                    // Query knowledge base for relevant content - only call queryKnowledgeBase, don't use return value
-                    queryKnowledgeBase(knowledgeBase, userPrompt);
-                    
-                    // Wait for query results - get from relevantDocuments member variable (remove timeout mechanism)
-                    List<String> relevantDocs = new ArrayList<>();
-                    
-                    while (true) {
-                        if (isTaskCancelled) {
-                            String cancelMsg = "RAG query cancelled by user";
-                            LogManager.logD(TAG, cancelMsg);
-                            updateProgressOnUiThread(cancelMsg);
-                            return;
-                        }
-                        
-                        // Check if query results are available
-                        synchronized (this) {
-                            if (relevantDocuments != null && !relevantDocuments.isEmpty()) {
-                                relevantDocs = new ArrayList<>(relevantDocuments);
-                                break;
-                            }
-                        }
-                        
-                        // Wait 100 milliseconds
-                        try {
-                            Thread.sleep(100);
-                        } catch (InterruptedException e) {
-                            LogManager.logE(TAG, "Interrupted while waiting for query results", e);
-                            // CRITICAL: Return immediately, don't continue to call LLM
-                            return;
-                        }
-                    }
-                    
-                    // Check query results
-                    if (relevantDocs.isEmpty()) {
-                        String warnMsg = "Warning: Knowledge base query returned no relevant documents";
-                        LogManager.logW(TAG, warnMsg);
-                        updateProgressOnUiThread(warnMsg);
-                        
-                        // Build prompt without knowledge base content
-                        String fullPrompt = buildPromptWithoutKnowledgeBase(systemPrompt, userPrompt);
-                        
-                        // Log prompt information
-                        int promptLength = fullPrompt.length();
-                        String promptInfo = "Prompt length: " + promptLength + " characters";
-                        LogManager.logD(TAG, promptInfo);
-                        updateProgressOnUiThread(promptInfo);
-                        
-                        // Log warning if prompt is too long
-                        if (promptLength > 4000) {
-                            String warnMsg2 = "Warning: Prompt length exceeds 4000 characters, may be truncated by model";
-                            LogManager.logW(TAG, warnMsg2);
-                            updateProgressOnUiThread(warnMsg2);
-                        }
-                        
-                        // Calculate query duration
-                        long queryTime = System.currentTimeMillis() - startTime;
-                        String timeMsg = "Knowledge base query duration: " + queryTime + "ms";
-                        LogManager.logD(TAG, timeMsg);
-                        updateProgressOnUiThread(timeMsg);
-                        
-                        // Call large model API to get response
-                        updateProgressOnUiThread("Calling LLM API...");
-                        callLLMApi(apiUrl, apiKey, model, fullPrompt, imagePaths, audioPaths);
-                    } else {
-                        // Get similarity information
-                        String simInfo = "";
-                        synchronized (this) {
-                            simInfo = this.similarityInfo;
-                        }
-                        
-                        // Display similarity information (regardless of debug mode)
-                        if (!TextUtils.isEmpty(simInfo)) {
-                            updateProgressOnUiThread("Similarity info: " + simInfo);
-                        }
-                        
-                        updateProgressOnUiThread("Found " + relevantDocs.size() + " relevant content items...");
-                        
-                        // Build prompt with knowledge base content
-                        //updateProgressOnUiThread("Building prompt");
-                        String fullPrompt = buildPromptWithKnowledgeBase(systemPrompt, userPrompt, relevantDocs);
-                        
-                        // Log prompt information - only show length, not content
-                        int promptLength = fullPrompt.length();
-                        String promptInfo = "Built prompt length: " + promptLength + " characters";
-                        LogManager.logD(TAG, promptInfo);
-                        updateProgressOnUiThread(promptInfo);
-                        
-                        // Log warning if prompt is too long
-                        if (promptLength > 4000) {
-                            String warnMsg = "Warning: Prompt length exceeds 4000 characters, may be truncated by model";
-                            LogManager.logW(TAG, warnMsg);
-                            updateProgressOnUiThread(warnMsg);
-                        }
-                        
-                        // Calculate query duration
-                        long queryTime = System.currentTimeMillis() - startTime;
-                        String timeMsg = getString(R.string.kb_query_time, queryTime);
-                        LogManager.logD(TAG, timeMsg);
-                        updateProgressOnUiThread(timeMsg);
-                        
-                        // Call large model API to get response
-                        updateProgressOnUiThread("Calling LLM API...");
-                        callLLMApi(apiUrl, apiKey, model, fullPrompt, imagePaths, audioPaths);
-                    }
-                } else {
-                    // Not using knowledge base or retrieval count is 0, call large model API directly
-                    String directMsg = searchDepth == 0 ? "Search depth is 0, skipping knowledge base query, calling LLM directly" : "No knowledge base configured, calling LLM directly";
-                    LogManager.logD(TAG, directMsg);
-                    // Output bypass info to debug section
-                    if (searchDepth == 0) {
-                        updateChatMessage("[RAG] Bypassed (search depth = 0)\n");
-                    } else {
-                        updateChatMessage("[RAG] Bypassed (no knowledge base)\n");
-                    }
-                    
-                    // Build prompt without knowledge base content
-                    String fullPrompt = buildPromptWithoutKnowledgeBase(systemPrompt, userPrompt);
-                    
-                    // Log prompt information - only show length, not content
-                    int promptLength = fullPrompt.length();
-                    String promptInfo = "Prompt length: " + promptLength + " characters";
-                    LogManager.logD(TAG, promptInfo);
-                    updateProgressOnUiThread(promptInfo);
-                    
-                    // Log warning if prompt is too long
-                    if (promptLength > 4000) {
-                        String warnMsg = "Warning: Prompt length exceeds 4000 characters, may be truncated by model";
-                        LogManager.logW(TAG, warnMsg);
-                        updateProgressOnUiThread(warnMsg);
-                    }
-                    
-                    // Call large model API to get response
-                    updateProgressOnUiThread("Calling LLM API...");
-                    callLLMApi(apiUrl, apiKey, model, fullPrompt, imagePaths, audioPaths);
-                }
-        } catch (Exception e) {
-            String errorMsg = "RAG query task execution failed: " + e.getMessage();
-            LogManager.logE(TAG, errorMsg, e);
-            
-            updateResultOnUiThread("Query failed: " + e.getMessage());
-            // CRITICAL: Reset state when exception occurs (before LLM is called)
+            Toast.makeText(requireContext(), "Internal error: legacy query path called", Toast.LENGTH_SHORT).show();
             resetSendingState();
+        });
+    }
+
+    // Legacy method stub - replaced by RagQueryManager.startQuery()
+    @Deprecated
+    private void executeRagQuery(String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt, String userPrompt, UserInput userInput) {
+        LogManager.logE(TAG, "[EXECUTOR] FATAL: executeRagQuery called - this is a DEPRECATED legacy path");
+        mainHandler.post(() -> {
+            Toast.makeText(requireContext(), "Internal error: legacy query path called", Toast.LENGTH_SHORT).show();
+            resetSendingState();
+        });
+    }
+
+    // ============================================
+    // END OF DEPRECATED LEGACY METHODS
+    // ============================================
+    // The 350+ line executeRagQueryWithAsr method body has been removed.
+    // All its functionality is now in RagQueryManager.runFullRagPipelineFromAsrResult()
+    // which calls back to Fragment via onRequestCallLlm() for the actual LLM call.
+    // ============================================
+
+    private boolean foregroundInferenceSessionActive = false;
+
+    private void enterInferenceForegroundSession(String description) {
+        try {
+            if (foregroundInferenceSessionActive) {
+                return;
+            }
+            if (!isAdded() || getActivity() == null) {
+                return;
+            }
+            if (!(getActivity() instanceof MainActivity)) {
+                return;
+            }
+            MainActivity activity = (MainActivity) getActivity();
+            UnifiedForegroundService service = activity.getUnifiedForegroundService();
+            if (service != null) {
+                String desc = (description != null && !description.isEmpty()) ? description : "Inference";
+                service.startTask(UnifiedForegroundService.TaskType.INFERENCE, desc);
+                LogManager.logD(TAG, "[FG] Started INFERENCE foreground session: " + desc);
+                foregroundInferenceSessionActive = true;
+            } else {
+                LogManager.logW(TAG, "[FG] UnifiedForegroundService not available when starting inference session");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[FG] Failed to start INFERENCE foreground session: " + e.getMessage(), e);
+        }
+    }
+
+    private void leaveInferenceForegroundSession() {
+        try {
+            if (!foregroundInferenceSessionActive) {
+                return;
+            }
+            if (!isAdded() || getActivity() == null) {
+                foregroundInferenceSessionActive = false;
+                return;
+            }
+            if (!(getActivity() instanceof MainActivity)) {
+                foregroundInferenceSessionActive = false;
+                return;
+            }
+            MainActivity activity = (MainActivity) getActivity();
+            UnifiedForegroundService service = activity.getUnifiedForegroundService();
+            if (service != null && service.getCurrentTaskType() == UnifiedForegroundService.TaskType.INFERENCE) {
+                service.endTask();
+                LogManager.logD(TAG, "[FG] Ended INFERENCE foreground session");
+            } else if (service != null) {
+                LogManager.logD(TAG, "[FG] Skip ending foreground session, currentTaskType=" + service.getCurrentTaskType());
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[FG] Failed to end INFERENCE foreground session: " + e.getMessage(), e);
         } finally {
-            // CRITICAL: Check if task was cancelled during embedding/reranker phase
-            // If cancelled, reset state immediately (LLM was never called)
-            // If not cancelled, LLM callback will handle state reset
-            if (isTaskCancelled || globalStopFlag) {
-                LogManager.logI(TAG, "Task cancelled during embedding/reranker phase, resetting state immediately");
-                resetSendingState();
-            } else {
-                LogManager.logD(TAG, "executeRagQuery completed, waiting for LLM callback to reset state");
-            }
+            foregroundInferenceSessionActive = false;
         }
     }
-    
-    // Query knowledge base to get relevant content
-    private List<String> queryKnowledgeBase(String knowledgeBase, String query) {
-        List<String> relevantDocs = new ArrayList<>();
-
-        try {
-            LogManager.logI(TAG, "[CALL][KB] enter queryKnowledgeBase - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", kb=" + knowledgeBase + ", query.len=" + (query==null?0:query.length()));
-            // Check global stop flag
-            if (globalStopFlag) {
-                LogManager.logD(TAG, "Global stop flag is set, aborting knowledge base query");
-                return relevantDocs;
-            }
-            
-            // Check if "None" knowledge base is selected
-            String valueNone = getString(R.string.common_none);
-            String valueNoAvailableKb = getString(R.string.value_no_available_kb);
-            if (valueNone.equals(knowledgeBase) || valueNoAvailableKb.equals(knowledgeBase)) {
-                LogManager.logD(TAG, "No knowledge base selected (" + knowledgeBase + "), skipping knowledge base query");
-                return relevantDocs; // Return empty list, skip knowledge base query
-            }
-            
-            LogManager.logD(TAG, "Starting knowledge base query: " + knowledgeBase + ", query keywords: " + query);
-            //updateProgressOnUiThread("Starting knowledge base query: " + knowledgeBase);
-
-            // Get search depth (from UI input field)
-            int searchDepth = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
-            LogManager.logD(TAG, "Using UI-configured search depth: " + searchDepth);
-            
-            // Check if knowledge base name is valid
-            if (knowledgeBase == null || knowledgeBase.trim().isEmpty()) {
-                String errorMsg = "Error: Knowledge base name is empty";
-                LogManager.logE(TAG, errorMsg);
-                updateProgressOnUiThread(errorMsg);
-                return relevantDocs;
-            }
-
-            // Check if context is available
-            if (!isAdded()) {
-                String errorMsg = "Error: Fragment not attached to Activity";
-                LogManager.logE(TAG, errorMsg);
-                return relevantDocs;
-            }
-
-            // Get knowledge base directory - use configured knowledge base path
-            String knowledgeBasePath = ConfigManager.getKnowledgeBasePath(requireContext());
-            LogManager.logD(TAG, "Retrieved knowledge base path from settings: " + knowledgeBasePath);
-
-            // Get knowledge base directory
-            File knowledgeBaseDir = new File(knowledgeBasePath, knowledgeBase);
-            String pathInfo = "Knowledge base directory path: " + knowledgeBaseDir.getAbsolutePath();
-            LogManager.logD(TAG, pathInfo);
-            updateProgressOnUiThread(pathInfo);
-
-            // Check if knowledge base directory exists
-            if (!knowledgeBaseDir.exists()) {
-                String errorMsg = "Error: Knowledge base directory does not exist: " + knowledgeBaseDir.getAbsolutePath();
-                LogManager.logE(TAG, errorMsg);
-                updateProgressOnUiThread(errorMsg);
-                return relevantDocs;
-            }
-
-            // Check SQLite database file (unified knowledge graph database)
-            File graphDbFile = new File(knowledgeBaseDir, "knowledge_graph.db");
-            if (!graphDbFile.exists()) {
-                String errorMsg = "Error: SQLite knowledge graph database file does not exist: " + graphDbFile.getAbsolutePath();
-                LogManager.logE(TAG, errorMsg);
-                updateProgressOnUiThread(errorMsg);
-                return relevantDocs;
-            } else {
-                String fileInfo = "SQLite database file exists: " + graphDbFile.getAbsolutePath() +
-                    ", size: " + (graphDbFile.length() / 1024) + "KB, " +
-                    "readable: " + graphDbFile.canRead();
-                LogManager.logI(TAG, fileInfo);
-            }
-
-            // Check metadata file
-            File metadataFile = new File(knowledgeBaseDir, "metadata.json");
-            if (!metadataFile.exists()) {
-                String errorMsg = "Error: Metadata file does not exist: " + metadataFile.getAbsolutePath();
-                LogManager.logE(TAG, errorMsg);
-                updateProgressOnUiThread(errorMsg);
-                return relevantDocs;
-            } else {
-                String fileInfo = "Metadata file exists: " + metadataFile.getAbsolutePath() +
-                    ", size: " + (metadataFile.length() / 1024) + "KB, " +
-                    "readable: " + metadataFile.canRead();
-                LogManager.logI(TAG, fileInfo);
-                
-                // Read metadata file content and log - use separate thread to avoid blocking
-                try {
-                    // Read file in background thread
-                    ExecutorService readExecutor = Executors.newSingleThreadExecutor();
-                    Future<String> metadataContentFuture = readExecutor.submit(() -> {
-                        try {
-                            StringBuilder content = new StringBuilder();
-                            try (BufferedReader reader = new BufferedReader(new FileReader(metadataFile))) {
-                                String line;
-                                while ((line = reader.readLine()) != null) {
-                                    content.append(line);
-                                }
-                            }
-                            return "Metadata file content: " + content.toString();
-                        } catch (Exception e) {
-                            return "Failed to read metadata file: " + e.getMessage();
-                        }
-                    });
-                    
-                    String metadataContent;
-                    try {
-                        metadataContent = metadataContentFuture.get(30, TimeUnit.SECONDS);
-                        LogManager.logI(TAG, metadataContent);
-                    } catch (Exception e) {
-                        String readError = "Reading metadata file timed out or failed: " + e.getMessage();
-                        LogManager.logE(TAG, readError);
-                        updateProgressOnUiThread(readError);
-                        return relevantDocs;
-                    } finally {
-                        readExecutor.shutdownNow();
-                    }
-                } catch (Exception e) {
-                    String readError = "Failed to start metadata file reading thread: " + e.getMessage();
-                    LogManager.logE(TAG, readError);
-                    updateProgressOnUiThread(readError);
-                    return relevantDocs;
-                }
-            }
-            
-            // Query vector database
-            // Declare vectorDb variable outside try block so it can be accessed in catch block
-            // Declare as final for use in lambda expressions
-            final KnowledgeGraphDatabase[] vectorDbRef = new KnowledgeGraphDatabase[1];
-            try {
-                // Create SQLite vector database handler
-                LogManager.logI(TAG, "Starting to create SQLite vector database handler, knowledge base directory: " + knowledgeBaseDir.getAbsolutePath());
-                
-                try {
-                    String dbPath = knowledgeBaseDir.getAbsolutePath() + "/knowledge_graph.db";
-                    vectorDbRef[0] = new KnowledgeGraphDatabase(requireContext(), dbPath, knowledgeBase);
-                    // KnowledgeGraphDatabase is auto-loaded on construction, no need to call loadDatabase()
-                } catch (Exception e) {
-                    String errorMsg = "Error occurred while creating or loading SQLite vector database: " + e.getMessage();
-                    LogManager.logE(TAG, errorMsg, e);
-                    updateProgressOnUiThread(errorMsg);
-                    if (vectorDbRef[0] != null) {
-                        vectorDbRef[0].close();
-                    }
-                    return relevantDocs;
-                }
-
-                // Get database statistics
-                int totalChunks = vectorDbRef[0].getChunkCount();
-                String dbInfo = "SQLite vector database loaded successfully, containing " + totalChunks + " text chunks";
-                LogManager.logD(TAG, dbInfo);
-                updateProgressOnUiThread(dbInfo);
-
-                // Get embedding model directory name
-                String embModelName = vectorDbRef[0].getMetadata().getModeldir();
-                String embeddingModelPath = ConfigManager.getEmbeddingModelPath(requireContext());
-                String foundModelPath = null;
-                
-                // Check if metadata has modeldir configuration
-                String modeldir = vectorDbRef[0].getMetadata().getModeldir();
-                if (modeldir != null && !modeldir.isEmpty()) {
-                    // Use directory specified by modeldir
-                    File modeldirFile = new File(embeddingModelPath, modeldir);
-                    if (modeldirFile.exists() && modeldirFile.isDirectory()) {
-                        // Search for model files in modeldir
-                        File[] files = modeldirFile.listFiles();
-                        if (files != null) {
-                            for (File file : files) {
-                                // MNN models use .mnn format or config.json
-                                if (file.isFile() && (file.getName().endsWith(".mnn") || 
-                                                     file.getName().equals("config.json"))) {
-                                    foundModelPath = file.getAbsolutePath();
-                                    LogManager.logD(TAG, "Using model from modeldir: " + foundModelPath);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // If no model found in modeldir, try using embeddingModel directly
-                if (foundModelPath == null) {
-                    foundModelPath = new File(embeddingModelPath, embModelName).getAbsolutePath();
-                }
-
-                // Check if model file exists
-                File modelFile = new File(foundModelPath);
-                if (!modelFile.exists()) {
-                    LogManager.logD(TAG, "Model file does not exist: " + foundModelPath + ", will try to search in embedding model directory");
-                    
-                    // Try to find model files in embedding model directory
-                    File embeddingModelDir = new File(embeddingModelPath);
-                    if (embeddingModelDir.exists() && embeddingModelDir.isDirectory()) {
-                        // Get all subdirectories for model selection
-                        List<String> availableModels = new ArrayList<>();
-                        File[] directories = embeddingModelDir.listFiles(File::isDirectory);
-                        if (directories != null) {
-                            for (File dir : directories) {
-                                // Check if directory contains MNN model files
-                                File[] modelFiles = dir.listFiles(file -> 
-                                    file.isFile() && (file.getName().endsWith(".mnn") || 
-                                                     file.getName().equals("config.json")));
-                                if (modelFiles != null && modelFiles.length > 0) {
-                                    availableModels.add(dir.getName());
-                                }
-                            }
-                        }
-                        
-                        // Also check for MNN model files in root directory
-                        File[] rootModelFiles = embeddingModelDir.listFiles(file -> 
-                            file.isFile() && (file.getName().endsWith(".mnn") || 
-                                             file.getName().equals("config.json")));
-                        if (rootModelFiles != null && rootModelFiles.length > 0) {
-                            availableModels.add("Root Directory");
-                        }
-                        
-                        if (!availableModels.isEmpty()) {
-                            // Show model selection dialog
-                            selectModelAndContinueQuery(embModelName, availableModels, knowledgeBase, embeddingModelPath, vectorDbRef[0]);
-                            // Note: Do not close database here as selectModelAndContinueQuery method will continue using it
-                            return relevantDocs; // Return early, waiting for user to select model
-                        } else {
-                            LogManager.logE(TAG, "No available model files found in embedding model directory");
-                            updateProgressOnUiThread("Error: No available model files found in embedding model directory");
-                            // Close database connection
-                            vectorDbRef[0].close();
-                            return relevantDocs; // Return early as no models are available
-                        }
-                    }
-                }
-                
-                // Use EmbeddingHandler to check and load embedding model
-                EmbeddingHandler.checkAndLoadEmbeddingModel(
-                    requireContext(),
-                    vectorDbRef[0],
-                    modelFoundPath -> {
-                        if (modelFoundPath == null) {
-                            // Model does not exist or requires user selection, handled by utility class
-                            return;
-                        }
-                        
-                        // Model exists, continue processing
-                        String modelInfo = "Using embedding model: " + embModelName + ", path: " + modelFoundPath;
-                        LogManager.logD(TAG, modelInfo);
-                        updateProgressOnUiThread("Using embedding model: " + embModelName);
-                        
-                        // Load embedding model
-                        try {
-                            loadModelAndProcessQuery(modelFoundPath, query, vectorDbRef[0]);
-                        } catch (InterruptedException ie) {
-                            LogManager.logI(TAG, "Model loading interrupted: " + ie.getMessage());
-                            Thread.currentThread().interrupt();
-                            throw new RuntimeException(ie);
-                        } catch (Exception e) {
-                            LogManager.logE(TAG, "Model loading failed: " + e.getMessage(), e);
-                            throw new RuntimeException(e);
-                        }
-                    },
-                    (selectedModel, selectedModelPath) -> {
-                        // User selected a model, continue processing
-                        String modelInfo = "Using selected embedding model: " + selectedModel + ", path: " + selectedModelPath;
-                        LogManager.logD(TAG, modelInfo);
-                        updateProgressOnUiThread("Using selected embedding model: " + selectedModel);
-                        
-                        // Load embedding model
-                        try {
-                            loadModelAndProcessQuery(selectedModelPath, query, vectorDbRef[0]);
-                        } catch (InterruptedException ie) {
-                            LogManager.logI(TAG, "Model loading interrupted: " + ie.getMessage());
-                            Thread.currentThread().interrupt();
-                            throw new RuntimeException(ie);
-                        } catch (Exception e) {
-                            LogManager.logE(TAG, "Model loading failed: " + e.getMessage(), e);
-                            throw new RuntimeException(e);
-                        }
-                    }
-                );
-                
-                // Note: Do not close database here as loadModelAndProcessQuery method will continue to use it
-                return relevantDocs;
-            } catch (Exception e) {
-                String errorMsg = "Error occurred while querying vector database: " + e.getMessage();
-                LogManager.logE(TAG, errorMsg, e);
-                if (isAdded()) {
-                    updateProgressOnUiThread(errorMsg);
-                }
-                
-                // MNN embedding handler manages model lifecycle automatically
-                LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
-                
-                // Close database connection
-                if (vectorDbRef[0] != null) {
-                    vectorDbRef[0].close();
-                    LogManager.logD(TAG, "Closed database connection in exception case");
-                }
-                
-                return relevantDocs;
-            }
-        } catch (Exception e) {
-            String errorMsg = "Error occurred while querying knowledge base: " + e.getMessage();
-            LogManager.logE(TAG, errorMsg, e);
-            if (isAdded()) {
-                updateProgressOnUiThread(errorMsg);
-            }
-            return relevantDocs;
-        }
-    }
-    
-    // Build prompt with knowledge base content
-    private String buildPromptWithKnowledgeBase(String systemPrompt, String userPrompt, List<String> relevantDocs) {
-        StringBuilder fullPrompt = new StringBuilder();
-        
-        LogManager.logD(TAG, "Building prompt with knowledge base content, found " + relevantDocs.size() + " relevant documents");
-        
-        // Add system prompt
-        if (!systemPrompt.isEmpty()) {
-            fullPrompt.append(systemPrompt).append("\n\n");
-            LogManager.logD(TAG, "Added system prompt, length: " + systemPrompt.length());
-        } else {
-            LogManager.logD(TAG, "System prompt is empty");
-        }
-        
-        // Add knowledge base content
-        if (!relevantDocs.isEmpty()) {
-            fullPrompt.append("The following is information related to the question:\n");
-            
-            for (int i = 0; i < relevantDocs.size(); i++) {
-                String docContent = relevantDocs.get(i);
-                if (docContent == null || docContent.trim().isEmpty()) {
-                    LogManager.logW(TAG, "Document #" + (i + 1) + " content is empty, skipped");
-                    continue;
-                }
-                
-                // No longer limit text length, display complete content
-                fullPrompt.append("Document").append(i + 1).append(":\n").append(docContent).append("\n\n");
-                LogManager.logD(TAG, "Added document #" + (i + 1) + ", length: " + docContent.length());
-            }
-        } else {
-            fullPrompt.append("No information related to the question was found.\n\n");
-            LogManager.logW(TAG, "No relevant documents found, prompting model with no relevant information");
-        }
-        
-        // Add user question
-        fullPrompt.append(userPrompt);
-        
-        // Record final prompt length
-        int promptLength = fullPrompt.length();
-        LogManager.logD(TAG, "Final prompt length: " + promptLength + " characters");
-        
-        return fullPrompt.toString();
-    }
-    
-    // Build prompt without knowledge base content
-    private String buildPromptWithoutKnowledgeBase(String systemPrompt, String userPrompt) {
-        StringBuilder fullPrompt = new StringBuilder();
-        
-        // Add system prompt
-        if (!systemPrompt.isEmpty()) {
-            fullPrompt.append(systemPrompt).append("\n\n");
-        }
-        
-        // Add user question
-        fullPrompt.append(userPrompt);
-        
-        return fullPrompt.toString();
-    }
-    
-    // Call LLM API to get answer
-    private void callLLMApi(String apiUrl, String apiKey, String model, String prompt) {
-        // Delegate to the version with multimodal support (no images/audio)
-        callLLMApi(apiUrl, apiKey, model, prompt, null, null);
-    }
-    
-    // Call LLM API to get answer (with multimodal support: images and audio)
-    private void callLLMApi(String apiUrl, String apiKey, String model, String prompt, java.util.List<String> imagePaths, java.util.List<String> audioPaths) {
-        try {
-            // Check global stop flag and task cancelled flag
-            if (globalStopFlag || isTaskCancelled) {
-                LogManager.logI(TAG, "Task stopped/cancelled, aborting LLM API call (globalStopFlag=" + globalStopFlag + ", isTaskCancelled=" + isTaskCancelled + ")");
-                resetSendingState();
-                return;
-            }
-            
-            // ============================================
-            // LLM Section: Check if model needs loading
-            // ============================================
-            // Check if this is a local model
-            boolean isLocalModel = AppConstants.ApiUrl.LOCAL.equals(apiUrl);
-            
-            if (isLocalModel) {
-                // Check if model is already loaded
-                com.example.offlineai.api.LocalLlmHandler localHandler = 
-                    com.example.offlineai.api.LocalLlmHandler.getInstance(requireContext());
-                boolean isModelLoaded = localHandler.isModelReady() && 
-                                       model.equals(localHandler.getCurrentModelName());
-                
-                if (isModelLoaded) {
-                    updateChatMessage("[LLM] ReUsing loaded model: " + model + "\n");
-                } else {
-                    updateChatMessage("[LLM] Loading model: " + model + "\n");
-                }
-            } else {
-                // Online API
-                updateChatMessage("[LLM] Using online API: " + model + "\n");
-                // CRITICAL: Close debug section for online API (no [TEXT:] marker from online models)
-                updateChatMessage("</debug>\n\n");
-            }
-            
-            // ============================================
-            // NOTE: For local models, debug section will be closed when [TEXT:]/[IMAGE:]/[AUDIO:] head is detected
-            // in onStreamingData callback below
-            // For online models, debug section is already closed above
-            // ============================================
-            
-            LogManager.logD(TAG, "Starting to call LLM API: " + apiUrl);
-            LogManager.logD(TAG, "Using model: " + model);
-            LogManager.logD(TAG, "Prompt length: " + prompt.length() + " characters");
-            
-            // Debug section will be closed when head marker is detected
-            
-            // Safety check: ensure Fragment is attached to Context
-            if (!isAdded()) {
-                String errorMsg = "Error: Fragment not attached to Context, cannot call API";
-                LogManager.logE(TAG, errorMsg);
-                updateResultOnUiThread(errorMsg);
-                return;
-            }
-            
-            Context context = getContext();
-            if (context == null) {
-                String errorMsg = "Error: Context is null, cannot call API";
-                LogManager.logE(TAG, errorMsg);
-                updateResultOnUiThread(errorMsg);
-                return;
-            }
-            
-            // Record start time
-            final long startTime = System.currentTimeMillis();
-            
-            // Create callback interface instance
-            com.example.offlineai.api.LlmApiAdapter.ApiCallback callback = new com.example.offlineai.api.LlmApiAdapter.ApiCallback() {
-                // In the onSuccess method, perform a complete Markdown rendering
-                @Override
-                public void onSuccess(String response) {
-                    LogManager.logI(TAG, "[CALL][LLM] onSuccess enter - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
-                    // Handle complete response
-                    LogManager.logD(TAG, "API call successful, duration: " + (System.currentTimeMillis() - startTime) + "ms");
-                    LogManager.logD(TAG, "Response length: " + response.length() + " characters");
-
-                    // Check Fragment lifecycle state
-                    if (getActivity() == null || !isAdded() || isDetached()) {
-                        LogManager.logW(TAG, "Cannot handle success, Fragment not attached to Activity");
-                        return;
-                    }
-                    
-                    // Perform final Markdown rendering and TTS audio setup in UI thread
-                    mainHandler.post(() -> {
-                        // Check for TTS audio output (local model only)
-                        String currentApiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
-                        String currentApiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrlDisplay);
-                        if (AppConstants.ApiUrl.LOCAL.equals(currentApiUrl)) {
-                            try {
-                                com.example.offlineai.api.LocalLlmAdapter localAdapter = 
-                                    com.example.offlineai.api.LocalLlmAdapter.getInstance(requireContext());
-                                String ttsAudioPath = localAdapter.getLastTtsAudioPath();
-                                if (ttsAudioPath != null && !chatMessages.isEmpty()) {
-                                    // Verify file exists before setting
-                                    java.io.File audioFile = new java.io.File(ttsAudioPath);
-                                    if (audioFile.exists()) {
-                                        ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
-                                        if (lastMsg.getType() == ChatViewHolders.ASSISTANT) {
-                                            lastMsg.audioUri = android.net.Uri.fromFile(audioFile);
-                                            lastMsg.setHasOmniAudio(true);
-                                            LogManager.logI(TAG, "[TTS] Set audio URI to assistant message: " + ttsAudioPath);
-                                            // Notify adapter to update the item (safe in UI thread)
-                                            if (chatAdapter != null) {
-                                                chatAdapter.notifyItemChanged(chatMessages.size() - 1);
-                                            }
-                                        }
-                                    } else {
-                                        LogManager.logW(TAG, "[TTS] Audio file not found: " + ttsAudioPath);
-                                    }
-                                    // Clear it for next inference
-                                    localAdapter.clearLastTtsAudioPath();
-                                }
-                            } catch (Exception e) {
-                                LogManager.logE(TAG, "[TTS] Error setting TTS audio to message", e);
-                            }
-                        }
-                        
-                        try {
-                            // Check Fragment state again
-                            if (getActivity() == null || !isAdded() || isDetached() || getView() == null) {
-                                LogManager.logW(TAG, "Cannot update UI in success callback, Fragment not attached");
-                                return;
-                            }
-                            
-                            TextView textViewResponse = getView().findViewById(R.id.textViewResponse);
-                            if (textViewResponse != null) {
-                                // Get currently displayed content
-                                String currentText = textViewResponse.getText().toString();
-                                
-                                // Check and fix code blocks
-                                if (hasIncompleteCodeBlock(currentText)) {
-                                    currentText = fixCodeBlocks(currentText);
-                                }
-                                
-                                // Use Markwon for final rendering
-                                markwon.setMarkdown(textViewResponse, currentText);
-                                
-                                // Ensure text is selectable
-                                textViewResponse.setTextIsSelectable(true);
-                                
-                                // Ensure links are clickable
-                                textViewResponse.setMovementMethod(LinkMovementMethod.getInstance());
-                                
-                                LogManager.logD(TAG, "Final Markdown rendering completed");
-                            }
-                            
-                            // Complete TtsAdapter (if enabled)
-                            // CRITICAL: Check both ttsAdapter existence AND enabled state
-                            // - ttsAdapter == null: TTS设置为"无"或Omni Native，没有创建adapter
-                            // - ttsAdapter.isEnabled() == false: adapter存在但未启用（之前启用过，现在禁用了）
-                            boolean hasTtsEnabled = (ttsAdapter != null && ttsAdapter.isEnabled());
-                            
-                            if (hasTtsEnabled) {
-                                // Set TTS generating state and update button
-                                isTtsGenerating.set(true);
-                                updateButtonText();  // Button shows "生成语音中"
-                                LogManager.logI(TAG, "[TTS] TTS generation started, button updated");
-                                
-                                ttsAdapter.complete();
-                                LogManager.logI(TAG, "[TTS] TtsAdapter.complete() called, waiting for callback");
-                            } else {
-                                // No TTS or TTS not enabled, reset state immediately
-                                resetSendingState();
-                                LogManager.logD(TAG, "Task completed (no TTS or TTS disabled), all states reset");
-                            }
-                        } catch (Exception e) {
-                            LogManager.logE(TAG, "Final Markdown rendering failed", e);
-                            // Use unified state reset method
-                            resetSendingState();
-                        }
-                    });
-                }
-                
-                // StringBuilder for accumulating streaming responses
-                private final StringBuilder responseBuilder = new StringBuilder();
-                // Track whether model response title has been added
-                private final boolean[] modelTitleAdded = {false};
-                // Last displayed response content
-                private final String[] lastDisplayedResponse = {""};
-                // Track if debug section has been closed
-                // CRITICAL: For online API, debug section doesn't exist, so default to true
-                // For local API, will be set to false in executeRagQueryWithAsr and closed when [TEXT:] detected
-                private boolean debugClosed = !isLocalModel;
-                // Detect if it's a Huawei device
-                private static boolean isHuaweiDevice() {
-                    return Build.MANUFACTURER.toLowerCase().contains("huawei") || 
-                           Build.BRAND.toLowerCase().contains("huawei") ||
-                           Build.BRAND.toLowerCase().contains("honor");
-                }
-                
-                // Character change threshold, changes smaller than this value won't trigger UI updates
-                private static final int MIN_CHAR_CHANGE = 5;
-                // Last UI update time
-                private long lastUpdateTime = System.currentTimeMillis();
-                // Update interval time (milliseconds)
-                private static final long UPDATE_INTERVAL = 100;
-
-                // In onStreamingData method, use simple setText method
-                @Override
-                public void onStreamingData(final String chunk) {
-                    // Token-level logging removed to reduce log spam
-                    // Check Fragment lifecycle state
-                    if (getActivity() == null || !isAdded() || isDetached()) {
-                        LogManager.logW(TAG, "Cannot handle streaming data, Fragment not attached to Activity");
-                        return;
-                    }
-                    
-                    // Check global stop flag
-                    if (globalStopFlag) {
-                        LogManager.logD(TAG, "Global stop flag is set, ignoring streaming data");
-                        return;
-                    }
-                    
-                    // Log received data chunk
-                    //LogManager.logD(TAG, "Received data chunk: [" + chunk + "]");
-                    
-                    // ============================================
-                    // Feed token to TtsAdapter (if enabled)
-                    // Filter out debug/performance tags, image/audio tags before sending to TTS
-                    // Only send to TTS after debug section is closed (debugClosed=true)
-                    // ============================================
-                    if (ttsAdapter != null && ttsAdapter.isEnabled() && debugClosed) {
-                        String ttsChunk = filterTtsContent(chunk);
-                        // Only send to TTS if there's valid text content after filtering
-                        if (!ttsChunk.trim().isEmpty()) {
-                            ttsAdapter.processToken(ttsChunk);
-                        }
-                    }
-                    
-                    // ============================================
-                    // CRITICAL: Detect head markers to close debug section
-                    // ============================================
-                    String filteredChunk = chunk;
-                    //LogManager.logD(TAG, "[DEBUG_TRACE] Chunk received: [" + chunk + "], debugClosed=" + debugClosed);
-                    
-                    // NOTE: TTS state is now managed by callback, no need to handle markers here
-                    
-                    // Close debug when detecting head markers (local model only)
-                    if (!debugClosed && (chunk.contains("[TEXT:]") || 
-                                        chunk.contains("[IMAGE:]") || 
-                                        chunk.contains("[AUDIO:]"))) {
-                        LogManager.logD(TAG, "[DEBUG_TRACE] Detected head marker, closing debug section");
-                        updateChatMessage("</debug>\n");
-                        debugClosed = true;
-                        LogManager.logD(TAG, "[DEBUG_TRACE] Debug section closed, TTS now enabled");
-                    }
-                    
-                    // CRITICAL: Always filter out [TEXT:] and [IMAGE:] markers from ALL chunks
-                    // (not just the first one, as online models may send [TEXT:] in response)
-                    filteredChunk = filteredChunk.replace("[TEXT:]", "")
-                                        .replace("[IMAGE:]", "");
-                    // NOTE: [AUDIO:path] is NOT filtered here - it will be handled in updateChatMessage()
-                    
-                    // Update chat message with filtered chunk
-                    updateChatMessage(filteredChunk);
-                    
-                    // Accumulate response content (for old TextView compatibility)
-                    responseBuilder.append(chunk);
-                    final String fullContent = responseBuilder.toString();
-                    
-                    // Update content in UI thread using plain text method
-                    getActivity().runOnUiThread(() -> {
-                        try {
-                            // Check Fragment state again
-                            if (getActivity() == null || !isAdded() || isDetached() || getView() == null) {
-                                LogManager.logW(TAG, "Cannot update UI in streaming callback, Fragment not attached");
-                                return;
-                            }
-                            
-                            // Get text view and scroll view
-                            TextView textViewResponse = getView().findViewById(R.id.textViewResponse);
-                            ScrollView scrollView = getView().findViewById(R.id.scrollViewResponse);
-                            if (textViewResponse == null || scrollView == null) return;
-                            
-                            // Check current scroll position
-                            boolean wasAtBottom = isScrolledToBottom(scrollView);
-                            
-                            // Prepare complete content to display
-                            String displayContent;
-                            long currentTime = System.currentTimeMillis();
-                            
-                            // If receiving data for the first time, add model response title
-                            if (!modelTitleAdded[0]) {
-                                modelTitleAdded[0] = true;
-                                String currentText = textViewResponse.getText().toString();
-                                displayContent = currentText.isEmpty() 
-                                    ? "\n\n---\n\n## " + getString(R.string.model_response) + "\n\n" + fullContent 
-                                    : currentText + "\n\n---\n\n## " + getString(R.string.model_response) + "\n\n" + fullContent;
-                            } else {
-                                // Check if content change is large enough or time interval is long enough
-                                int charDiff = fullContent.length() - lastDisplayedResponse[0].length();
-                                long timeDiff = currentTime - lastUpdateTime;
-                                
-                                // If change is not large enough and time interval is not long enough, don't update UI
-                                if (charDiff < MIN_CHAR_CHANGE && timeDiff < UPDATE_INTERVAL) {
-                                    return;
-                                }
-                                
-                                // Get current content and append new content
-                                String currentText = textViewResponse.getText().toString();
-                                
-                                // Find the position of last displayed content and replace with new complete content
-                                int lastResponseIndex = currentText.lastIndexOf(lastDisplayedResponse[0]);
-                                if (lastResponseIndex >= 0) {
-                                    displayContent = currentText.substring(0, lastResponseIndex) + fullContent;
-                                } else {
-                                    // If last content cannot be found, directly append new content
-                                    String incrementalContent = fullContent.substring(lastDisplayedResponse[0].length());
-                                    displayContent = currentText + incrementalContent;
-                                }
-                            }
-                            
-                            // Update last displayed content and time
-                            lastDisplayedResponse[0] = fullContent;
-                            lastUpdateTime = currentTime;
-                            
-                            // Update content using plain text method
-                            textViewResponse.setText(displayContent);
-                            
-                            // If was at bottom before, scroll to bottom
-                            if (wasAtBottom) {
-                                scrollToBottom(scrollView);
-                            }
-                        } catch (Exception e) {
-                            LogManager.logE(TAG, "Failed to update streaming response UI", e);
-                        }
-                    });
-                }
-                
-
-
-
-
-                // These variables are no longer used, but kept for potential reference by other methods
-                
-
-                
-                
-                /**
-                 * Record Markdown markers in content
-                 * @param content Content to check
-                 */
-                private void logMarkdownMarkers(String content) {
-                    if (content == null || content.isEmpty()) return;
-                    
-                    // Check common Markdown markers
-                    if (content.contains("```")) {
-                        LogManager.logD(TAG, "Detected code block marker: ``` in content");
-                    }
-                    if (content.contains("`")) {
-                        LogManager.logD(TAG, "Detected inline code marker: ` in content");
-                    }
-                    if (content.contains("**")) {
-                        LogManager.logD(TAG, "Detected bold marker: ** in content");
-                    }
-                    if (content.contains("#")) {
-                        LogManager.logD(TAG, "Detected heading marker: # in content");
-                    }
-                }
-                
-                /**
-                 * Check if there are incomplete code blocks in content
-                 * @param content Content to check
-                 * @return true if there are incomplete code blocks, false otherwise
-                 */
-                private boolean hasIncompleteCodeBlock(String content) {
-                    if (content == null || content.isEmpty()) return false;
-                    
-                    // Count code block markers
-                    int count = 0;
-                    int index = -1;
-                    
-                    // Use more precise method to detect code block markers
-                    while ((index = content.indexOf("```", index + 1)) != -1) {
-                        // Check if this is a real code block start/end marker, not text nested in other code blocks
-                        boolean isRealCodeBlockMarker = true;
-                        
-                        // Check if this marker is at the beginning of a line or preceded by a newline
-                        if (index > 0) {
-                            char prevChar = content.charAt(index - 1);
-                            // If the previous character is not a newline or space, it might not be a real code block marker
-                            if (prevChar != '\n' && prevChar != ' ' && prevChar != '\t') {
-                                // Further check, if there's a newline before, it might be a real code block marker
-                                int prevNewlineIndex = content.lastIndexOf('\n', index - 1);
-                                if (prevNewlineIndex == -1 || index - prevNewlineIndex > 4) { // Allow small indentation
-                                    isRealCodeBlockMarker = false;
-                                }
-                            }
-                        }
-                        
-                        if (isRealCodeBlockMarker) {
-                            count++;
-                        }
-                    }
-                    
-                    // If the number of code block markers is odd, there are incomplete code blocks
-                    return count % 2 != 0;
-                }
-                
-                /**
-                 * Count occurrences of a specified pattern in a string
-                 * @param content Content to check
-                 * @param pattern Pattern to search for
-                 * @return Number of pattern occurrences
-                 */
-                private int countOccurrences(String content, String pattern) {
-                    if (content == null || content.isEmpty() || pattern == null || pattern.isEmpty()) {
-                        return 0;
-                    }
-                    
-                    int count = 0;
-                    int index = 0;
-                    while ((index = content.indexOf(pattern, index)) != -1) {
-                        count++;
-                        index += pattern.length();
-                    }
-                    
-                    return count;
-                }
-                
-                /**
-                 * Fix code block markers in content
-                 * @param content Content to fix
-                 * @return Fixed content
-                 */
-                private String fixCodeBlocks(String content) {
-                    if (content == null || content.isEmpty()) return content;
-                    
-                    // Record original content length
-                    int originalLength = content.length();
-                    
-                    // Check and fix code block markers
-                    StringBuilder sb = new StringBuilder(content);
-                    
-                    // Calculate the number and positions of code block markers
-                    List<Integer> positions = new ArrayList<>();
-                    int index = -1;
-                    while ((index = content.indexOf("```", index + 1)) != -1) {
-                        positions.add(index);
-                    }
-                    
-                    // If the number of code block markers is odd, add an end marker
-                    if (positions.size() % 2 != 0) {
-                        LogManager.logD(TAG, "Detected incomplete code block, adding end marker");
-                        sb.append("\n```");
-                    }
-                    
-                    // Check the number of inline code markers
-                    int inlineCount = 0;
-                    index = -1;
-                    while ((index = content.indexOf("`", index + 1)) != -1) {
-                        // Skip code block markers
-                        boolean isCodeBlockMarker = false;
-                        for (int pos : positions) {
-                            if (Math.abs(index - pos) < 3) { // Allow small error
-                                isCodeBlockMarker = true;
-                                break;
-                            }
-                        }
-                        if (!isCodeBlockMarker) {
-                            inlineCount++;
-                        }
-                    }
-                    
-                    // If the number of inline code markers is odd, add an end marker
-                    if (inlineCount % 2 != 0) {
-                        LogManager.logD(TAG, "Detected incomplete inline code marker, adding end marker");
-                        sb.append("`");
-                    }
-                    
-                    String result = sb.toString();
-                    if (result.length() > originalLength) {
-                        LogManager.logD(TAG, "Content fixed, original length: " + originalLength + ", new length: " + result.length());
-                    }
-                    
-                    return result;
-                }
-                
-                /**
-                 * Check if the scroll view has scrolled to the bottom
-                 * @param scrollView Scroll view to check
-                 * @return true if scrolled to bottom, false otherwise
-                 */
-                private boolean isScrolledToBottom(ScrollView scrollView) {
-                    if (scrollView == null) return false;
-                    int scrollY = scrollView.getScrollY();
-                    int height = scrollView.getHeight();
-                    int scrollViewBottom = scrollY + height;
-                    int contentHeight = scrollView.getChildAt(0).getHeight();
-                    // Allow 20 pixels error for more reliable bottom detection
-                    return (scrollViewBottom >= contentHeight - 20);
-                }
-                
-                /**
-                 * Scroll the scroll view to the bottom
-                 * @param scrollView View to scroll
-                 */
-                private void scrollToBottom(ScrollView scrollView) {
-                    if (scrollView == null) return;
-                    scrollView.post(() -> {
-                        scrollView.fullScroll(ScrollView.FOCUS_DOWN);
-                    });
-                }
-                
-                @Override
-                public void onError(String errorMessage) {
-                    LogManager.logI(TAG, "[CALL][LLM] onError enter - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", err.len=" + (errorMessage==null?0:errorMessage.length()));
-                    // Handle error
-                    LogManager.logE(TAG, "API call failed, duration: " + (System.currentTimeMillis() - startTime) + "ms, error: " + errorMessage);
-                    
-                    // Check Fragment lifecycle state
-                    if (getActivity() == null || !isAdded() || isDetached()) {
-                        LogManager.logW(TAG, "Cannot handle error, Fragment not attached to Activity");
-                        return;
-                    }
-                    
-                    try {
-                        // CRITICAL: Close debug section if still open (error occurred before head was sent)
-                        if (!debugClosed) {
-                            updateChatMessage("</debug>\n");
-                            debugClosed = true;
-                            LogManager.logD(TAG, "Debug section closed due to error");
-                        }
-                        
-                        // Display error message
-                        updateResultOnUiThread("API call failed: " + errorMessage);
-                        
-                        // Use unified state reset method
-                        resetSendingState();
-                        LogManager.logD(TAG, "Task error, all states reset");
-                    } catch (Exception e) {
-                        LogManager.logE(TAG, "Failed to handle error callback", e);
-                    }
-                }
-            };
-            
-            // Create LlmApiAdapter instance and call API
-            // imagePaths and audioPaths are passed from method parameter (prepared by caller)
-            // JNI will: 1) Load model 2) Check multimodal support 3) Add tags and merge to prompt 4) Use or ignore media
-            com.example.offlineai.api.LlmApiAdapter apiAdapter = new com.example.offlineai.api.LlmApiAdapter(context);
-            apiAdapter.callLlmApi(apiUrl, apiKey, model, prompt, imagePaths, audioPaths, callback);
-            
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to call LLM API", e);
-            updateResultOnUiThread("API call failed: " + e.getMessage());
-            resetSendingState();
-            LogManager.logD(TAG, "Task exception, all states reset");
-        }
-    }
-    
-    // Save parameters of last query for recovery
-    private String lastApiUrl;
-    private String lastApiKey;
-    private String lastModel;
-    private String lastKnowledgeBase;
-    private String lastSystemPrompt;
-    private String lastUserPrompt;
-    private boolean queryNeedsResume = false;
-    
-    // Update progress information on UI thread with retry mechanism
-    private void updateProgressOnUiThread(String progress) {
-        updateProgressOnUiThreadWithRetry(progress, 3); // Maximum 3 retries
-    }
-    
-    // Update progress as plain text (no Markdown rendering) to avoid highlighting issues
-    private void updateProgressPlainText(String progress) {
-        if (getActivity() == null || !isAdded() || isDetached()) {
-            return;
-        }
-        
-        getActivity().runOnUiThread(() -> {
-            if (getActivity() == null || !isAdded() || isDetached() || getView() == null) {
-                return;
-            }
-            
-            TextView textViewResponse = getView().findViewById(R.id.textViewResponse);
-            ScrollView scrollView = getView().findViewById(R.id.scrollViewResponse);
-            if (textViewResponse == null || scrollView == null) return;
-            
-            // Append as plain text without Markdown rendering
-            CharSequence currentText = textViewResponse.getText();
-            String newText = currentText.length() == 0 ? progress : currentText + progress;
-            textViewResponse.setText(newText);
-            
-            // Force UI refresh to prevent buffering (ensure each dot appears immediately)
-            textViewResponse.invalidate();
-            textViewResponse.requestLayout();
-            
-            // Auto scroll
-            scrollView.post(() -> {
-                try {
-                    scrollView.fullScroll(View.FOCUS_DOWN);
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "Failed to scroll to bottom", e);
-                }
-            });
-        });
-    }
-    
-    // UI update method with retry mechanism
-    private void updateProgressOnUiThreadWithRetry(String progress, int retryCount) {
-        if (retryCount <= 0) {
-            LogManager.logW(TAG, "UI update retry attempts exhausted, giving up");
-            return;
-        }
-        
-        if (getActivity() == null || !isAdded() || isDetached()) {
-            LogManager.logW(TAG, "Cannot update UI, Fragment not attached to Activity, will retry in 1 second (remaining retries: " + retryCount + ")");
-            // Remove automatic query recovery logic to avoid automatic query execution on app startup
-            // queryNeedsResume = true; // Mark query needs recovery
-            
-            // Retry after 1 second
-            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                updateProgressOnUiThreadWithRetry(progress, retryCount - 1);
-            }, 1000);
-            return;
-        }
-        
-        getActivity().runOnUiThread(() -> {
-            // Check Fragment state again
-            if (getActivity() == null || !isAdded() || isDetached()) {
-                LogManager.logW(TAG, "Cannot update UI in progress callback, Fragment not attached");
-                return;
-            }
-            appendToResponse(progress);
-        });
-    }
-    
-    // Completely rewritten append content method to solve scrolling and Markdown rendering issues
-    private void appendToResponse(String text) {
-        if (getActivity() == null || !isAdded() || isDetached()) {
-            LogManager.logW(TAG, "Cannot append response, Fragment not attached to Activity");
-            return;
-        }
-        
-        // Check if already in UI thread
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            // Already in UI thread, execute directly
-            performAppendToResponse(text);
-        } else {
-            // Not in UI thread, switch to UI thread
-            getActivity().runOnUiThread(() -> performAppendToResponse(text));
-        }
-    }
-    
-    private void performAppendToResponse(String text) {
-        try {
-            // Check Fragment state
-            if (getActivity() == null || !isAdded() || isDetached() || getView() == null) {
-                LogManager.logW(TAG, "Cannot append response in UI thread, Fragment not attached");
-                return;
-            }
-            
-            // Get text view and scroll view
-            TextView textViewResponse = getView().findViewById(R.id.textViewResponse);
-            ScrollView scrollView = getView().findViewById(R.id.scrollViewResponse);
-            if (textViewResponse == null || scrollView == null) return;
-            
-            // Save current text
-            CharSequence currentText = textViewResponse.getText();
-            
-            // Prepare new text
-            String newText;
-            if (currentText.length() == 0) {
-                newText = text;
-            } else {
-                newText = currentText + "\n" + text;
-            }
-            
-            try {
-                // Optimized Markdown rendering: set text first, then render
-                textViewResponse.setText(newText);
-                if (markwon != null) {
-                    markwon.setMarkdown(textViewResponse, newText);
-                }
-            } catch (Exception e) {
-                LogManager.logE(TAG, "Markdown rendering failed, using plain text", e);
-                textViewResponse.setText(newText);
-            }
-            
-            // Auto scroll to bottom (delayed execution to ensure content is rendered)
-            scrollView.post(() -> {
-                try {
-                    scrollView.fullScroll(View.FOCUS_DOWN);
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "Failed to scroll to bottom", e);
-                }
-            });
-            
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to append content", e);
-        }
-    }
-    
-    // Update result on UI thread (replace all content)
-    private void updateResultOnUiThread(String result) {
-        if (getActivity() == null || !isAdded() || isDetached()) {
-            LogManager.logW(TAG, "Cannot update result, Fragment not attached to Activity");
-            return;
-        }
-        
-        mainHandler.post(() -> {
-            try {
-                // Check Fragment state again
-                if (getActivity() == null || !isAdded() || isDetached() || getView() == null) {
-                    LogManager.logW(TAG, "Cannot update result in UI thread, Fragment not attached");
-                    return;
-                }
-                
-                // Get result text view
-                TextView textViewResult = getView().findViewById(R.id.textViewResponse);
-                if (textViewResult == null) return;
-                
-                // Get scroll view
-                ScrollView scrollView = getView().findViewById(R.id.scrollViewResponse);
-                if (scrollView == null) return;
-                
-                // Add debug logs to view text content and Markdown rendering process
-                //LogManager.logD(TAG, "DEBUG-updateResult: Text content to render: " + result);
-        //LogManager.logD(TAG, "DEBUG-updateResult: Is Markwon instance null: " + (markwon == null ? "yes" : "no"));
-                
-                try {
-                    // Try using different ways to render Markdown
-                    // Set plain text first, then try rendering
-                    textViewResult.setText(result);
-                    
-                    // Optimized Markdown rendering logic
-                    // Always perform Markdown rendering to ensure correct format display
-                    try {
-                        // Use full Markdown rendering
-                        Spanned spanned = markwon.toMarkdown(result);
-                        markwon.setParsedMarkdown(textViewResult, spanned);
-                        //LogManager.logD(TAG, "DEBUG-updateResult: Using full Markdown rendering");
-                        
-                        // Ensure links are clickable
-                        if (textViewResult.getMovementMethod() == null) {
-                            textViewResult.setMovementMethod(LinkMovementMethod.getInstance());
-                        }
-                    } catch (Exception e) {
-                        // If rendering fails, fallback to simple text setting
-                        textViewResult.setText(result);
-                        //LogManager.logE(TAG, "DEBUG-updateResult: Markdown rendering failed, fallback to plain text", e);
-                    }
-                    
-                    // Check TextView properties
-                    //LogManager.logD(TAG, "DEBUG-updateResult: TextView text selectable state: " + textViewResult.isTextSelectable());
-            //LogManager.logD(TAG, "DEBUG-updateResult: TextView MovementMethod: " + textViewResult.getMovementMethod());
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "DEBUG-updateResult: Markdown rendering failed", e);
-                    // If advanced API fails, try using basic method
-                    markwon.setMarkdown(textViewResult, result);
-                }
-                
-                // Use multi-level delay to ensure scrolling to bottom
-                scrollView.post(() -> {
-                    scrollView.fullScroll(View.FOCUS_DOWN);
-                    
-                    scrollView.postDelayed(() -> {
-                        scrollView.fullScroll(View.FOCUS_DOWN);
-                    }, 100);
-                    
-                    scrollView.postDelayed(() -> {
-                        scrollView.fullScroll(View.FOCUS_DOWN);
-                    }, 300);
-                });
-            } catch (Exception e) {
-                LogManager.logE(TAG, "Failed to update result", e);
-            }
-        });
-    }
-    
-    // Get model list
-    
-    // Get model list
-    private void fetchModelsForApi() {
-        String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
-        String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
-        String apiKey = editTextApiKey.getText().toString();
-        
-        // Get currently saved model name for restoring selection
-        String savedModelName = ConfigManager.getString(requireContext(), ConfigManager.KEY_MODEL_NAME, "");
-        
-        // Show loading state
-        setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_LOADING)});
-        
-        // If it's a local model, get available model list from local model directory
-        String localDisplayText = StateDisplayManager.getApiUrlDisplayText(requireContext(), AppConstants.ApiUrl.LOCAL);
-        
-        if (AppConstants.ApiUrl.LOCAL.equals(apiUrl)) {
-            
-            // Get model path from configuration
-            String modelPath = ConfigManager.getModelPath(requireContext());
-            
-            File modelDir = new File(modelPath);
-            
-            if (!modelDir.exists() || !modelDir.isDirectory()) {
-                LogManager.logE(TAG, "Model directory does not exist: " + modelPath);
-                setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_DIRECTORY_NOT_EXIST)});
-                Toast.makeText(requireContext(), getString(R.string.toast_model_dir_not_exist, modelPath), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            // Get all subdirectories in the model directory (each subdirectory represents a model)
-            File[] modelDirs = modelDir.listFiles(File::isDirectory);
-            
-            if (modelDirs == null || modelDirs.length == 0) {
-                LogManager.logE(TAG, "No models found in model directory: " + modelPath);
-                setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_NOT_FOUND)});
-                Toast.makeText(requireContext(), getString(R.string.toast_no_model_found, modelPath), Toast.LENGTH_SHORT).show();
-                return;
-            }
-            
-            // Extract model names
-            List<String> modelsList = new ArrayList<>();
-            for (File dir : modelDirs) {
-                String modelName = dir.getName();
-                modelsList.add(modelName);
-            }
-            
-            // Update UI
-            if (modelsList.isEmpty()) {
-                setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_NO_AVAILABLE)});
-            } else {
-                setupSpinner(spinnerApiModel, modelsList.toArray(new String[0]));
-                // Restore user's previous selection
-                if (!savedModelName.isEmpty()) {
-                    setSpinnerSelection(spinnerApiModel, savedModelName);
-                    LogManager.logD(TAG, "Restoring local model selection: " + savedModelName);
-                }
-            }
-            
-            LogManager.logD(TAG, "Successfully got local model list: " + modelsList.size() + " models");
-            return;
-        }
-        
-        // If it's an online model, API Key is required
-        if (apiUrl.isEmpty() || apiKey.isEmpty()) {
-            Toast.makeText(requireContext(), getString(R.string.toast_set_api_first), Toast.LENGTH_SHORT).show();
-            setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_FETCH_FAILED)});
-            return;
-        }
-        
-        // Build request URL, adjust according to different APIs
-        String modelsUrl = apiUrl;
-        if (!modelsUrl.endsWith("/")) {
-            modelsUrl += "/";
-        }
-        modelsUrl += "models";
-        
-        // Create request headers
-        Map<String, String> headers = new HashMap<>();
-        headers.put("Authorization", "Bearer " + apiKey);
-        
-        // Use Volley to send request
-        JsonObjectRequest request = new JsonObjectRequest(Request.Method.GET, modelsUrl, null,
-            response -> {
-                try {
-                    // Parse response, extract model list
-                    JSONArray modelsArray = response.getJSONArray("data");
-                    List<String> modelsList = new ArrayList<>();
-                    
-                    for (int i = 0; i < modelsArray.length(); i++) {
-                        JSONObject modelObj = modelsArray.getJSONObject(i);
-                        String modelId = modelObj.getString("id");
-                        modelsList.add(modelId);
-                    }
-                    
-                    // Update UI
-                    if (modelsList.isEmpty()) {
-                        setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_NO_AVAILABLE)});
-                    } else {
-                        setupSpinner(spinnerApiModel, modelsList.toArray(new String[0]));
-                        // Restore user's previous selection
-                        if (!savedModelName.isEmpty()) {
-                            setSpinnerSelection(spinnerApiModel, savedModelName);
-                            LogManager.logD(TAG, "Restoring online model selection: " + savedModelName);
-                        }
-                    }
-                    
-                    LogManager.logD(TAG, "Successfully got model list: " + modelsList.size() + " models");
-                } catch (JSONException e) {
-                    LogManager.logE(TAG, "Failed to parse model list", e);
-                    setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_PARSE_FAILED)});
-                    Toast.makeText(requireContext(), getString(R.string.toast_parse_model_list_failed, e.getMessage()), Toast.LENGTH_SHORT).show();
-                }
-            },
-            error -> {
-                LogManager.logE(TAG, "Failed to get model list", error);
-                setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_FETCH_FAILED)});
-                Toast.makeText(requireContext(), getString(R.string.toast_get_model_list_failed, error.getMessage()), Toast.LENGTH_SHORT).show();
-            }
-        ) {
-            @Override
-            public Map<String, String> getHeaders() {
-                return headers;
-            }
-        };
-        
-        // Add request to queue
-        Volley.newRequestQueue(requireContext()).add(request);
-    }
-    
-    // Handle new chat button click
-    private void handleNewChatClick() {
-        // New chat debug log removed
-        
-        // Clear current chat folder setting (new conversation will create new folder)
-        ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
-        LogManager.logD(TAG, "[CHAT_HISTORY] Cleared current chat folder setting for new conversation");
-        
-        updateProgressOnUiThread("");
-        editTextUserPrompt.setText("");
-        
-        // Clear chat messages
-        if (chatAdapter != null) {
-            chatAdapter.reset();
-            LogManager.logD(TAG, "Chat messages cleared");
-        }
-        
-        // Clear answer box
-        if (textViewResponse != null) {
-            textViewResponse.setText("");
-        }
-        
-        // Reset send/stop button state
-        if (isSending.get()) {
-            buttonSendStop.setText(getString(R.string.button_send));
-            isSending.set(false); // Use atomic operation to reset sending state
-            if (isTaskRunning) {
-                isTaskCancelled = true;
-            }
-        }
-        
-        // Reset model memory - clear KV cache and conversation history
-        // [Fix] Move local model operations to background thread to avoid main thread calling model
-        String selectedApiDisplay = spinnerApiUrl.getSelectedItem().toString();
-        String selectedApi = StateDisplayManager.getApiUrlFromDisplayText(getContext(), selectedApiDisplay);
-        
-        if (AppConstants.ApiUrl.LOCAL.equals(selectedApi)) {
-            // Execute local model reset operation in background thread
-            ragTaskFuture = ragQueryExecutor.submit(() -> {
-                try {
-                    LocalLlmAdapter localAdapter = LocalLlmAdapter.getInstance(getContext());
-                    if (localAdapter != null) {
-                        localAdapter.resetModelMemory();
-                        LogManager.logD(TAG, "Reset local model memory in background thread");
-                    } else {
-                        LogManager.logW("RagQaFragment", "LocalLlmAdapter instance is null");
-                    }
-                } catch (Exception e) {
-                    LogManager.logE("RagQaFragment", "Failed to reset model memory", e);
-                }
-            });
-        } else {
-            // For online large models, clear local conversation history and state
-            // New chat debug log removed
-            // Online large models are usually stateless, each request is independent
-            // Here mainly clear local UI state and cache
-        }
-        
-        // New chat debug log removed
-    }
-    
-    // Create context menu
-    @Override
-    public void onCreateContextMenu(ContextMenu menu, View v, ContextMenuInfo menuInfo) {
-        super.onCreateContextMenu(menu, v, menuInfo);
-    }
-    
-    // Handle context menu item click
-    @Override
-    public boolean onContextItemSelected(MenuItem item) {
-        return super.onContextItemSelected(item);
-    }
-
-
-    
-    // Load model and process query
-    private void loadModelAndProcessQuery(String foundModelPath, String query, KnowledgeGraphDatabase vectorDb) throws InterruptedException {
-        try {
-            // Debug section already opened in executeRagQuery, just continue outputting
-            
-            // Update progress
-            updateChatMessage("[RAG] Loading embedding model...");
-            
-            // Get embedding handler instance
-            EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(requireContext());
-            
-            // No Thread.isInterrupted() check - using graceful stop pattern (flag only)
-            
-            LogManager.logI(TAG, "[LOCK] About to call embeddingHandler.loadModel() - thread=" + Thread.currentThread().getName());
-            if (!embeddingHandler.loadModel(foundModelPath)) {
-                throw new Exception("Failed to load embedding model");
-            }
-            LogManager.logI(TAG, "[LOCK] embeddingHandler.loadModel() returned - thread=" + Thread.currentThread().getName());
-            
-            // Show embedding model name
-            String embeddingModelName = embeddingHandler.getEmbeddingModel();
-            if (embeddingModelName != null) {
-                updateChatMessage("\n[RAG] Embedding Model: " + embeddingModelName);
-            }
-            
-            // CRITICAL: Check stop flags after loading
-            // If stopped, DON'T throw exception - model is already loaded and should be kept!
-            // Just skip inference and return gracefully
-            if (userRequestedStop || isTaskCancelled) {
-                LogManager.logI(TAG, "Task stopped after embedding loading - model loaded successfully, skipping inference");
-                updateProgressOnUiThread("Model loaded, operation stopped by user");
-                return;  // ✅ Graceful return, keep model loaded for next call
-            }
-            
-            // Get model vector dimension
-            int embeddingDimension = embeddingHandler.getEmbeddingDimension();
-            LogManager.logD(TAG, "Model vector dimension: " + embeddingDimension);
-            updateChatMessage("\n[RAG] Model vector dimension: " + embeddingDimension);
-
-            // Check if vector dimension matches knowledge base
-            int dbDimension = vectorDb.getMetadata().getEmbeddingDimension();
-            LogManager.logD(TAG, "Knowledge base vector dimension: " + dbDimension + ", model vector dimension: " + embeddingDimension);
-            updateChatMessage("\n[RAG] Knowledge base vector dimension: " + dbDimension);
-
-            if (dbDimension > 0 && dbDimension != embeddingDimension) {
-                String warningMsg = "Warning: Vector dimensions do not match! Knowledge base dimension: " + dbDimension + ", model dimension: " + embeddingDimension;
-                LogManager.logW(TAG, warningMsg);
-                updateChatMessage("\n" + warningMsg);
-                updateChatMessage("\nThis may cause search failure, recommend rebuilding knowledge base or using matching model");
-            }
-
-
-            // MNN embedding handler manages model lifecycle automatically
-            LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
-            //updateProgressOnUiThread("Mark model as in use to prevent auto-unloading");
-            
-            try {
-                // Check global stop flag
-                if (userRequestedStop) {
-                    LogManager.logD(TAG, "Global stop requested, aborting before vector generation");
-                    updateProgressOnUiThread("Operation stopped by user");
-                    return;
-                }
-                
-                // Generate query vector
-                updateChatMessage("\n[RAG] Generating query vector...");
-                
-                // CRITICAL: Use query parameter (from prepareAndSaveUserInput), NOT editTextUserPrompt
-                // Input field has been cleared at send moment, reading from it will get empty string
-                String userQuery = query;
-                
-                // Generate vector
-                float[] queryVector;
-                try {
-                    updateChatMessage(".");
-                    queryVector = embeddingHandler.computeEmbedding(userQuery);
-                    updateChatMessage(".");
-                } catch (InterruptedException ie) {
-                    LogManager.logI(TAG, "Embedding computation interrupted by user");
-                    updateProgressOnUiThread("Operation stopped by user");
-                    // CRITICAL: Set task cancelled flag to prevent further processing
-                    isTaskCancelled = true;
-                    // Close database before returning
-                    try {
-                        vectorDb.close();
-                        LogManager.logD(TAG, "Vector database closed after embedding interruption");
-                    } catch (Exception ex) {
-                        LogManager.logE(TAG, "Failed to close vector database: " + ex.getMessage(), ex);
-                    }
-                    return;
-                }
-                
-                // Check global stop flag
-                if (userRequestedStop) {
-                    LogManager.logD(TAG, "Global stop requested, aborting after vector generation");
-                    updateProgressOnUiThread("Operation stopped by user");
-                    return;
-                }
-                
-                // Record vector debug information
-                String vectorDebugInfo = "[RAG] Query vector generated, dimension: " + queryVector.length;
-                
-                // Only display basic vector information in non-debug mode
-                boolean isDebugMode = ConfigManager.getBoolean(requireContext(), ConfigManager.KEY_DEBUG_MODE, false);
-                
-                updateChatMessage("\n" + vectorDebugInfo);
-
-                
-                // Check global stop flag
-                if (userRequestedStop) {
-                    LogManager.logD(TAG, "Global stop requested, aborting before database search");
-                    updateProgressOnUiThread("Operation stopped by user");
-                    return;
-                }
-                
-                // Search similar text blocks
-                updateChatMessage("\n[RAG] Searching similar text blocks...");
-                
-                // Get retrieval count setting (final document count used for answer)
-                int retrievalCount = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
-
-                // Determine whether Graph RAG is enabled
-                boolean graphRagEnabled = ConfigManager.isGraphRagEnabled(requireContext());
-
-                // Compute initial vector topK: for Graph RAG use coarse recall (base + expand),
-                // for pure vector mode use base retrievalCount
-                int vectorTopK = retrievalCount;
-                if (graphRagEnabled) {
-                    int expand = ConfigManager.getGraphRagVectorExpand(requireContext());
-                    if (expand < 0) {
-                        expand = 0;
-                    }
-                    vectorTopK = retrievalCount + expand;
-                    LogManager.logI(TAG, "[RAG][Graph] Using vector coarse recall: base=" + retrievalCount + ", expand=" + expand + ", topK=" + vectorTopK);
-                }
-
-                // Search similar text blocks with selected topK
-                List<KnowledgeGraphDatabase.SearchResult> searchResults = vectorDb.searchSimilar(queryVector, vectorTopK);
-                
-                // Check global stop flag
-                if (userRequestedStop) {
-                    LogManager.logD(TAG, "Global stop requested, aborting after database search");
-                    updateProgressOnUiThread("Operation stopped by user");
-                    return;
-                }
-                
-                // Display retrieval result similarity - show immediately with all scores
-                if (!searchResults.isEmpty()) {
-                    StringBuilder similarityInfo = new StringBuilder("\n[RAG] Retrieval Similarity (");
-                    similarityInfo.append(searchResults.size()).append(" results): ");
-                    for (int i = 0; i < searchResults.size(); i++) {
-                        similarityInfo.append(String.format("%.3f", searchResults.get(i).similarity));
-                        if (i < searchResults.size() - 1) {
-                            similarityInfo.append(", ");
-                        }
-                    }
-                    // Use chat message update for smooth streaming display
-                    updateChatMessage(similarityInfo.toString());
-                    LogManager.logI(TAG, "Retrieval similarity scores: " + similarityInfo.toString());
-                }
-                
-                // Check global stop flag before Graph RAG / reranker stage
-                if (userRequestedStop) {
-                    LogManager.logD(TAG, "Global stop requested, aborting before reranking");
-                    updateProgressOnUiThread("Operation stopped by user");
-                    return;
-                }
-
-                if (graphRagEnabled) {
-                    updateChatMessage("\n[RAG] Graph RAG mode enabled, combining vector and graph results...");
-                    processGraphRagResults(userQuery, searchResults, vectorDb, retrievalCount);
-                } else {
-                    int rerankCount = ConfigManager.getRerankCount(requireContext());
-                    String rerankerModelPath = getRerankerModelPath(vectorDb);
-
-                    if (rerankCount > 0 && rerankerModelPath != null && !rerankerModelPath.isEmpty()) {
-                        LogManager.logI(TAG, "Using reranker model with rerank count: " + rerankCount);
-                        updateChatMessage("\n[RAG] Using reranker model to optimize results...");
-                        try {
-                            LogManager.logI(TAG, "[DEBUG] About to call processWithReranker - query.len=" + userQuery.length() + ", results=" + searchResults.size() + ", path=" + rerankerModelPath + ", vectorDb=" + (vectorDb != null ? "not_null" : "null"));
-                            processWithReranker(userQuery, searchResults, rerankerModelPath, vectorDb);
-                            LogManager.logI(TAG, "[DEBUG] processWithReranker returned successfully");
-                        } catch (InterruptedException ie) {
-                            LogManager.logI(TAG, "Reranker process interrupted: " + ie.getMessage());
-                            throw ie;
-                        }
-                    } else {
-                        if (rerankCount == 0) {
-                            LogManager.logI(TAG, "Rerank count is 0, skipping reranking and using vector search results directly");
-                            updateChatMessage("\n[RAG] Bypassed reranker (rerank count = 0)");
-                        } else {
-                            LogManager.logD(TAG, "No reranker model configured, using vector search results");
-                            updateChatMessage("\n[RAG] Bypassed reranker (no model configured)");
-                        }
-                        processVectorSearchResults(searchResults);
-                    }
-                }
-
-                // MNN embedding handler manages model lifecycle automatically
-                LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
-                
-                // Close database connection after search is complete
-                try {
-                    vectorDb.close();
-                    LogManager.logD(TAG, "Vector database closed successfully after query");
-                } catch (Exception ex) {
-                    LogManager.logE(TAG, "Failed to close vector database: " + ex.getMessage(), ex);
-                }
-                
-                // Get API information
-                String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
-                String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
-                String apiKey = editTextApiKey.getText().toString();
-                String apiModel = spinnerApiModel.getSelectedItem().toString();
-                
-                // No longer directly call API, let executeRagQuery method handle it
-                // This avoids duplicate API calls
-                // callLLMApi(apiUrl, apiKey, apiModel, buildPromptWithKnowledgeBase(editTextSystemPrompt.getText().toString(), userQuery, relevantDocs));
-            } catch (InterruptedException ie) {
-                // Task was interrupted - re-throw to stop the entire flow
-                LogManager.logI(TAG, "Query processing interrupted: " + ie.getMessage());
-                throw ie;
-            } catch (Exception e) {
-                String errorMsg = "Query processing failed: " + e.getMessage();
-                LogManager.logE(TAG, errorMsg, e);
-                updateProgressOnUiThread(errorMsg);
-            }
-        } catch (InterruptedException ie) {
-            // Task was interrupted - re-throw to stop the entire flow
-            LogManager.logI(TAG, "Model loading interrupted: " + ie.getMessage());
-            // Close database before re-throwing
-            try {
-                vectorDb.close();
-                LogManager.logD(TAG, "Vector database closed after interruption");
-            } catch (Exception ex) {
-                LogManager.logE(TAG, "Failed to close vector database: " + ex.getMessage(), ex);
-            }
-            throw ie;
-        } catch (Exception e) {
-            String errorMsg = "Model loading failed: " + e.getMessage();
-            LogManager.logE(TAG, errorMsg, e);
-            updateProgressOnUiThread(errorMsg);
-            
-            // Close database
-            try {
-                vectorDb.close();
-                LogManager.logD(TAG, "Vector database closed");
-            } catch (Exception ex) {
-                LogManager.logE(TAG, "Failed to close vector database: " + ex.getMessage(), ex);
-            }
-        }
-        LogManager.logD(TAG, "[MODEL_OP] Model operation finished, waiting for LLM callback to reset state");
-    }
-    
-    /**
-     * Get reranker model path
-     */
-    private String getRerankerModelPath(KnowledgeGraphDatabase vectorDb) {
-        try {
-            // Get reranker model directory from database metadata
-            String rerankerDir = vectorDb.getMetadata().getRerankerdir();
-            if (rerankerDir == null || rerankerDir.trim().isEmpty()) {
-                LogManager.logD(TAG, "No reranker model directory configured in database metadata");
-                return null;
-            }
-            
-            // Get reranker model root path
-            String rerankerBasePath = ConfigManager.getRerankerModelPath(requireContext());
-            
-            // Build complete reranker model path
-            File rerankerModelDir = new File(rerankerBasePath, rerankerDir);
-            if (!rerankerModelDir.exists() || !rerankerModelDir.isDirectory()) {
-                LogManager.logW(TAG, "Reranker model directory does not exist: " + rerankerModelDir.getAbsolutePath());
-                return null;
-            }
-            
-            // Find MNN reranker model files (config.json or .mnn)
-            File[] modelFiles = rerankerModelDir.listFiles(file -> 
-                file.isFile() && (file.getName().equals("config.json") || file.getName().endsWith(".mnn")));
-            
-            if (modelFiles == null || modelFiles.length == 0) {
-                LogManager.logW(TAG, "No MNN reranker model files found in reranker model directory: " + rerankerModelDir.getAbsolutePath());
-                return null;
-            }
-            
-            // Return the first found model file path
-            String modelPath = modelFiles[0].getAbsolutePath();
-            LogManager.logD(TAG, "Found reranker model: " + modelPath);
-            return modelPath;
-            
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to get reranker model path: " + e.getMessage(), e);
-            return null;
-        }
-    }
-    
-    /**
-     * Process search results using reranker model
-     */
-    private void processWithReranker(String query, List<KnowledgeGraphDatabase.SearchResult> searchResults, 
-                                   String rerankerModelPath, KnowledgeGraphDatabase vectorDb) throws InterruptedException, Exception {
-        LogManager.logI(TAG, "[DEBUG] processWithReranker ENTERED - query.len=" + (query != null ? query.length() : "null"));
-        try {
-            LogManager.logI(TAG, "[DEBUG] Step 1: Checking stop flags");
-            // Check global stop flag and task cancelled flag
-            if (userRequestedStop || isTaskCancelled) {
-                LogManager.logI(TAG, "Task stopped/cancelled, aborting reranking process");
-                updateProgressOnUiThread("Operation stopped by user");
-                throw new InterruptedException("Task stopped/cancelled before reranking");
-            }
-            
-            LogManager.logI(TAG, "[DEBUG] Step 2: About to get RerankerHandler instance");
-            // Get reranker handler
-            RerankerHandler rerankerHandler = RerankerHandler.getInstance(requireContext());
-            LogManager.logI(TAG, "[DEBUG] Step 3: Got RerankerHandler instance - " + (rerankerHandler != null ? "not_null" : "null"));
-            
-            LogManager.logI(TAG, "[DEBUG] Step 4: About to check isModelLoaded()");
-            // Load model if not loaded - MNN one-stop solution
-            boolean modelLoaded = rerankerHandler.isModelLoaded();
-            LogManager.logI(TAG, "[DEBUG] Step 5: isModelLoaded() returned - " + modelLoaded);
-            
-            if (!modelLoaded) {
-                updateProgressOnUiThread("Loading reranker model...");
-                
-                // Check stop flags before loading (no Thread.isInterrupted - graceful stop pattern)
-                if (userRequestedStop || isTaskCancelled) {
-                    LogManager.logI(TAG, "Task stopped before reranker loading, aborting");
-                    throw new InterruptedException("Task stopped before reranker loading");
-                }
-                
-                LogManager.logI(TAG, "[LOCK] About to call rerankerHandler.loadModel() - thread=" + Thread.currentThread().getName());
-                // MNN will auto-detect reranker type from config.json
-                boolean loaded = rerankerHandler.loadModel(rerankerModelPath);
-                LogManager.logI(TAG, "[LOCK] rerankerHandler.loadModel() returned - thread=" + Thread.currentThread().getName());
-                
-                // CRITICAL: Check stop flags after loading
-                // If stopped, DON'T throw exception - model is already loaded and should be kept!
-                // Just return gracefully - setInstruction will be called on next use
-                if (userRequestedStop || isTaskCancelled) {
-                    LogManager.logI(TAG, "Task stopped after reranker loading - model loaded successfully, skipping inference");
-                    updateProgressOnUiThread("Model loaded, operation stopped by user");
-                    return;  // ✅ Graceful return, model ready for next call
-                }
-                
-                if (!loaded) {
-                    LogManager.logE(TAG, "Failed to load reranker model, aborting");
-                    updateProgressOnUiThread("Reranker model loading failed");
-                    throw new Exception("Failed to load reranker model");
-                }
-            }
-            
-            // CRITICAL: Set instruction OUTSIDE the if block
-            // Only set if not already set or different (like demo: set once, use multiple times)
-            String requiredInstruction = "Given a web search query, retrieve relevant passages that answer the query";
-            if (rerankerHandler.getInstruction() == null || !rerankerHandler.getInstruction().equals(requiredInstruction)) {
-                LogManager.logI(TAG, "Setting reranker instruction for the first time or updating");
-                rerankerHandler.setInstruction(requiredInstruction);
-            } else {
-                LogManager.logI(TAG, "Reranker instruction already set, skipping");
-            }
-            
-            // Extract document text
-            List<String> documents = new ArrayList<>();
-            for (KnowledgeGraphDatabase.SearchResult result : searchResults) {
-                documents.add(result.content);
-            }
-            
-            // Calculate topK value
-            int rerankCount = ConfigManager.getRerankCount(requireContext());
-            int retrievalCount = ConfigManager.getSearchDepth(requireContext());
-            int topK = Math.min(searchResults.size(), retrievalCount);
-            
-            LogManager.logI(TAG, "Starting rerank: query=" + query + ", documents.size()=" + documents.size() + ", topK=" + topK + ", rerankCount=" + rerankCount);
-            
-            // CRITICAL FIX: Execute reranking synchronously (like embedding) to prevent state desync
-            // Check stop flag before reranking (graceful stop pattern - no thread interrupt)
-            if (userRequestedStop || isTaskCancelled) {
-                LogManager.logI(TAG, "Stop requested before reranking, aborting");
-                throw new InterruptedException("Task stopped before reranking");
-            }
-            
-            updateChatMessage("\nReranking documents");
-            
-            // Show reranker model name
-            String modelPath = rerankerHandler.getCurrentModelPath();
-            if (modelPath != null) {
-                String modelName = new File(modelPath).getName();
-                updateChatMessage("\nReranker Model: " + modelName);
-            }
-            
-            // Set progress callback to show real-time progress
-            rerankerHandler.setProgressCallback((current, total) -> {
-                // Show progress with dots - simple and intuitive
-                updateChatMessage(".");
-            });
-            
-            // Set score callback to show real-time reranking scores
-            rerankerHandler.setScoreCallback((index, score, text) -> {
-                // Log each score as it's computed for debugging
-                LogManager.logD(TAG, String.format("Rerank progress [%d]: score=%.4f", index + 1, score));
-            });
-            
-            // Perform reranking synchronously (MNN reranker is thread-safe and synchronized)
-            // Now processes one document at a time - can be interrupted and shows progress
-            List<RerankerHandler.RerankResult> rerankedResults = rerankerHandler.rerank(query, documents, topK);
-            
-            // Clear callbacks
-            rerankerHandler.setProgressCallback(null);
-            rerankerHandler.setScoreCallback(null);
-            
-            // Check stop flag after reranking (graceful stop pattern)
-            if (userRequestedStop || isTaskCancelled) {
-                LogManager.logI(TAG, "Stop requested after reranking, aborting result processing");
-                throw new InterruptedException("Task stopped after reranking");
-            }
-            
-            LogManager.logI(TAG, "Reranking successful, result count: " + rerankedResults.size());
-            
-            // Process results synchronously (no need for UI thread switch in worker thread)
-            processRerankedResults(rerankedResults);
-            
-        } catch (InterruptedException ie) {
-            // Task was interrupted - re-throw to stop the entire flow
-            LogManager.logI(TAG, "Reranking interrupted, stopping entire flow: " + ie.getMessage());
-            throw ie;
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Reranking processing exception: " + e.getMessage(), e);
-            updateProgressOnUiThread("Reranking processing exception");
-            // Re-throw to stop the entire flow
-            throw e;
-        }
-    }
-    
-    private synchronized HanLpNerHandler getOrCreateGraphNerHandler() {
-        String dictPath = ConfigManager.getString(requireContext(), ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, null);
-        String valueNone = getString(R.string.common_none);
-        String normalizedPath = null;
-        if (dictPath != null && !dictPath.isEmpty() && !valueNone.equals(dictPath)) {
-            normalizedPath = dictPath;
-        }
-        if (graphNerHandler != null) {
-            boolean samePath = (graphNerDictPath == null && normalizedPath == null)
-                    || (graphNerDictPath != null && graphNerDictPath.equals(normalizedPath));
-            if (samePath) {
-                return graphNerHandler;
-            }
-            graphNerHandler.release();
-            graphNerHandler = null;
-            graphNerDictPath = null;
-        }
-        graphNerHandler = new HanLpNerHandler(normalizedPath);
-        graphNerDictPath = normalizedPath;
-
-        if (normalizedPath == null || normalizedPath.isEmpty()) {
-            String msg = "Dictionary: None";
-            LogManager.logI(TAG, "[GRAPH_RAG] " + msg);
-            updateProgressOnUiThread(msg);
-        } else {
-            String dictFileName = new File(normalizedPath).getName();
-            if (graphNerHandler.isDictionaryLoaded()) {
-                int wordCount = graphNerHandler.getLoadedWordCount();
-                String msg = "Dictionary: " + dictFileName + " (loaded " + wordCount + " words)";
-                LogManager.logI(TAG, "[GRAPH_RAG] " + msg);
-                updateProgressOnUiThread(msg);
-            } else {
-                String baseMsg = "Dictionary: " + dictFileName;
-                LogManager.logI(TAG, "[GRAPH_RAG] " + baseMsg);
-                updateProgressOnUiThread(baseMsg);
-                String err = graphNerHandler.getDictionaryErrorMessage();
-                if (err != null && !err.isEmpty()) {
-                    String errMsg = "Dictionary load error: " + err;
-                    LogManager.logE(TAG, "[GRAPH_RAG] " + errMsg);
-                    updateProgressOnUiThread(errMsg);
-                }
-            }
-        }
-
-        return graphNerHandler;
-    }
-
-    private List<HanLpNerHandler.NerResult.Entity> extractQueryEntities(String userQuery) {
-        List<HanLpNerHandler.NerResult.Entity> entities = new ArrayList<>();
-        if (userQuery == null || userQuery.trim().isEmpty()) {
-            return entities;
-        }
-        try {
-            HanLpNerHandler handler = getOrCreateGraphNerHandler();
-            if (handler == null) {
-                return entities;
-            }
-            HanLpNerHandler.NerResult nerResult = handler.extractEntities(userQuery);
-            if (nerResult != null && nerResult.isSuccess()) {
-                entities = nerResult.getEntities();
-            }
-        } catch (Exception e) {
-            LogManager.logE(TAG, "[GRAPH_RAG] Query NER failed: " + e.getMessage(), e);
-        }
-        return entities;
-    }
-
-    private String normalizeEntityText(String text) {
-        if (text == null) {
-            return null;
-        }
-        String trimmed = text.trim();
-        if (trimmed.isEmpty()) {
-            return null;
-        }
-        return trimmed;
-    }
-
-    private void processGraphRagResults(String userQuery, List<KnowledgeGraphDatabase.SearchResult> searchResults,
-                                        KnowledgeGraphDatabase vectorDb, int retrievalCount) {
-        if (userRequestedStop || isTaskCancelled) {
-            LogManager.logI(TAG, "Task stopped/cancelled, aborting processGraphRagResults");
-            updateProgressOnUiThread("Operation stopped by user");
-            return;
-        }
-        if (searchResults == null || searchResults.isEmpty()) {
-            processVectorSearchResults(searchResults);
-            return;
-        }
-        try {
-            HanLpNerHandler graphNerHandler = null;
-            // Load stopwords matcher for query-time cleaning
-            String stopwordsPath = ConfigManager.getGraphStopwordsPath(requireContext());
-            GraphStopwordsMatcher stopwordsMatcher = null;
-            if (stopwordsPath != null && !stopwordsPath.isEmpty()) {
-                try {
-                    stopwordsMatcher = GraphStopwordsMatcher.loadFromFile(stopwordsPath);
-                    LogManager.logD(TAG, "[GRAPH_RAG][STOPWORDS] Loaded stopwords for query-time cleaning");
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "[GRAPH_RAG][STOPWORDS] Failed to load stopwords file: " + stopwordsPath, e);
-                }
-            }
-
-            // Load hub entities for query-time hub filtering (read-only)
-            int hubThreshold = ConfigManager.getGraphHubThresholdQuery(requireContext());
-            Set<String> protectedEntities = null;
-            try {
-                graphNerHandler = getOrCreateGraphNerHandler();
-                if (graphNerHandler != null) {
-                    protectedEntities = graphNerHandler.getCustomDictionaryWords();
-                }
-            } catch (Exception e) {
-                LogManager.logE(TAG, "[GRAPH_RAG] Failed to load protected entities from custom dictionary: " + e.getMessage(), e);
-            }
-
-            Set<String> hubEntities = vectorDb.getHubEntities(hubThreshold, protectedEntities);
-            if (!hubEntities.isEmpty()) {
-                LogManager.logD(TAG, "[GRAPH_RAG][HUB_QUERY] Query-time hub set size=" + hubEntities.size());
-            }
-
-            List<HanLpNerHandler.NerResult.Entity> queryEntities = extractQueryEntities(userQuery);
-            float confidenceThreshold = ConfigManager.getGraphEntityConfidenceThreshold(requireContext());
-            Set<String> queryEntityTexts = new HashSet<>();
-            List<String> seedOrder = new ArrayList<>();
-            int aliasNormalizedCount = 0;
-            for (HanLpNerHandler.NerResult.Entity e : queryEntities) {
-                if (e == null) continue;
-                String normalized = normalizeEntityText(e.text);
-                if (graphNerHandler != null && normalized != null) {
-                    String canonical = graphNerHandler.normalizeTextForGraph(normalized);
-                    if (canonical == null) {
-                        continue;
-                    }
-                    if (!canonical.equals(normalized)) {
-                        aliasNormalizedCount++;
-                    }
-                    normalized = canonical;
-                }
-                if (normalized == null) continue;
-                if (e.confidence < confidenceThreshold) continue;
-                if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) continue;
-                if (hubEntities.contains(normalized)) continue;
-                if (!queryEntityTexts.contains(normalized)) {
-                    queryEntityTexts.add(normalized);
-                    seedOrder.add(normalized);
-                }
-            }
-
-            List<Long> topChunkIds = new ArrayList<>();
-            int maxEntitySource = Math.min(5, searchResults.size());
-            for (int i = 0; i < maxEntitySource; i++) {
-                topChunkIds.add(searchResults.get(i).id);
-            }
-            Map<Long, List<String>> entitiesForTopChunks = vectorDb.getEntitiesForChunks(topChunkIds);
-            for (List<String> list : entitiesForTopChunks.values()) {
-                if (list == null) continue;
-                for (String t : list) {
-                    String normalized = normalizeEntityText(t);
-                    if (graphNerHandler != null && normalized != null) {
-                        String canonical = graphNerHandler.normalizeTextForGraph(normalized);
-                        if (canonical == null) {
-                            continue;
-                        }
-                        if (!canonical.equals(normalized)) {
-                            aliasNormalizedCount++;
-                        }
-                        normalized = canonical;
-                    }
-                    if (normalized == null) continue;
-                    if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) continue;
-                    if (hubEntities.contains(normalized)) continue;
-                    if (!queryEntityTexts.contains(normalized)) {
-                        queryEntityTexts.add(normalized);
-                        seedOrder.add(normalized);
-                    }
-                }
-            }
-
-            if (userRequestedStop || isTaskCancelled) {
-                LogManager.logI(TAG, "Task stopped/cancelled after seed collection");
-                updateProgressOnUiThread("Operation stopped by user");
-                return;
-            }
-
-            if (aliasNormalizedCount > 0) {
-                LogManager.logD(TAG, String.format("[GRAPH_ALIAS] Query-time alias normalization applied to %d entity texts", aliasNormalizedCount));
-            }
-
-            Set<String> seedEntities = new HashSet<>();
-            for (String text : seedOrder) {
-                seedEntities.add(text);
-                if (seedEntities.size() >= GRAPH_RAG_MAX_SEED_ENTITIES) {
-                    break;
-                }
-            }
-
-            if (seedEntities.isEmpty()) {
-                LogManager.logI(TAG, "[GRAPH_RAG] No valid seed entities after filtering, fallback to vector-only results");
-                processVectorSearchResults(searchResults);
-                return;
-            }
-
-            // Use final seed set for overlap calculation as well
-            queryEntityTexts.clear();
-            queryEntityTexts.addAll(seedEntities);
-            int minEdgeWeight = ConfigManager.getGraphMinEdgeWeight(requireContext());
-            int maxExpandEntities = ConfigManager.getGraphMaxExpandEntities(requireContext());
-            List<KnowledgeGraphDatabase.ConnectedEntity> connectedEntities = vectorDb.getConnectedEntities(seedEntities, minEdgeWeight, maxExpandEntities);
-            Map<String, Integer> graphWeightMap = new HashMap<>();
-            for (KnowledgeGraphDatabase.ConnectedEntity ce : connectedEntities) {
-                if (ce == null || ce.entityText == null) {
-                    continue;
-                }
-                String normalized = normalizeEntityText(ce.entityText);
-                if (graphNerHandler != null && normalized != null) {
-                    String canonical = graphNerHandler.normalizeTextForGraph(normalized);
-                    if (canonical == null) {
-                        continue;
-                    }
-                    if (!canonical.equals(normalized)) {
-                        aliasNormalizedCount++;
-                    }
-                    normalized = canonical;
-                }
-                if (normalized == null) {
-                    continue;
-                }
-                if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) {
-                    continue;
-                }
-                if (hubEntities.contains(normalized)) {
-                    continue;
-                }
-                Integer existing = graphWeightMap.get(normalized);
-                if (existing == null || ce.weight > existing) {
-                    graphWeightMap.put(normalized, ce.weight);
-                }
-            }
-
-            Set<String> allEntityTexts = new HashSet<>(seedEntities);
-            for (KnowledgeGraphDatabase.ConnectedEntity ce : connectedEntities) {
-                if (ce == null || ce.entityText == null) {
-                    continue;
-                }
-                String normalized = normalizeEntityText(ce.entityText);
-                if (graphNerHandler != null && normalized != null) {
-                    String canonical = graphNerHandler.normalizeTextForGraph(normalized);
-                    if (canonical == null) {
-                        continue;
-                    }
-                    if (!canonical.equals(normalized)) {
-                        aliasNormalizedCount++;
-                    }
-                    normalized = canonical;
-                }
-                if (normalized == null) {
-                    continue;
-                }
-                if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) {
-                    continue;
-                }
-                if (hubEntities.contains(normalized)) {
-                    continue;
-                }
-                allEntityTexts.add(normalized);
-            }
-
-            List<String> entityTextList = new ArrayList<>(allEntityTexts);
-            List<Long> graphChunkIds = vectorDb.getChunkIdsByEntities(entityTextList);
-
-            int maxExpandChunks = ConfigManager.getGraphMaxExpandChunks(requireContext());
-            if (maxExpandChunks > 0 && graphChunkIds.size() > maxExpandChunks) {
-                graphChunkIds = graphChunkIds.subList(0, maxExpandChunks);
-            }
-
-            List<KnowledgeGraphDatabase.SearchResult> graphChunks = vectorDb.getChunksByIds(graphChunkIds);
-
-            if (userRequestedStop || isTaskCancelled) {
-                LogManager.logI(TAG, "Task stopped/cancelled after graph expansion");
-                updateProgressOnUiThread("Operation stopped by user");
-                return;
-            }
-
-            Map<Long, GraphRagCandidate> candidateMap = new HashMap<>();
-            for (int i = 0; i < searchResults.size(); i++) {
-                KnowledgeGraphDatabase.SearchResult r = searchResults.get(i);
-                GraphRagCandidate c = new GraphRagCandidate();
-                c.result = r;
-                c.vectorScore = r.similarity;
-                c.graphScore = 0.0f;
-                c.finalScore = r.similarity;
-                c.entityOverlap = 0;
-                c.vectorRank = i; // 记录纯向量检索中的原始排名（从0开始）
-                candidateMap.put(r.id, c);
-            }
-            for (KnowledgeGraphDatabase.SearchResult r : graphChunks) {
-                if (!candidateMap.containsKey(r.id)) {
-                    GraphRagCandidate c = new GraphRagCandidate();
-                    c.result = r;
-                    c.vectorScore = r.similarity;
-                    c.graphScore = 0.0f;
-                    c.finalScore = r.similarity;
-                    c.entityOverlap = 0;
-                    c.vectorRank = -1; // 仅由图扩展引入的候选
-                    candidateMap.put(r.id, c);
-                }
-            }
-
-            List<Long> allChunkIds = new ArrayList<>(candidateMap.keySet());
-            Map<Long, List<String>> entitiesForAll = vectorDb.getEntitiesForChunks(allChunkIds);
-
-            float alpha;
-            float beta;
-            float gamma;
-            int preset = ConfigManager.getGraphRagWeightPreset(requireContext());
-            switch (preset) {
-                case 0: // 向量优先
-                    alpha = 0.9f;
-                    beta = 0.1f;
-                    gamma = 0.0f;
-                    break;
-                case 2: // 图谱增强
-                    alpha = 0.4f;
-                    beta = 0.4f;
-                    gamma = 0.2f;
-                    break;
-                case 1:
-                default: // 平衡
-                    alpha = 0.7f;
-                    beta = 0.2f;
-                    gamma = 0.1f;
-                    break;
-            }
-
-            List<GraphRagCandidate> candidates = new ArrayList<>();
-            float vecMin = Float.MAX_VALUE;
-            float vecMax = -Float.MAX_VALUE;
-            float graphMin = Float.MAX_VALUE;
-            float graphMax = -Float.MAX_VALUE;
-            int overlapMin = Integer.MAX_VALUE;
-            int overlapMax = Integer.MIN_VALUE;
-
-            // First pass: compute raw graph and overlap scores and collect min/max ranges
-            for (Map.Entry<Long, GraphRagCandidate> entry : candidateMap.entrySet()) {
-                Long chunkId = entry.getKey();
-                GraphRagCandidate c = entry.getValue();
-                List<String> ents = entitiesForAll.get(chunkId);
-                if (ents != null) {
-                    int overlap = 0;
-                    float gScore = 0.0f;
-                    for (String t : ents) {
-                        String normalized = normalizeEntityText(t);
-                        if (normalized == null) {
-                            continue;
-                        }
-                        if (stopwordsMatcher != null && stopwordsMatcher.matches(normalized)) {
-                            continue;
-                        }
-                        if (hubEntities.contains(normalized)) {
-                            continue;
-                        }
-                        if (queryEntityTexts.contains(normalized)) {
-                            overlap++;
-                        }
-                        Integer w = graphWeightMap.get(normalized);
-                        if (w != null) {
-                            gScore += w;
-                        }
-                    }
-                    c.entityOverlap = overlap;
-                    if (gScore < 0.0f) {
-                        gScore = 0.0f;
-                    }
-                    // Compress graph score to reduce dominance
-                    c.graphScore = (float) Math.log1p(gScore);
-                } else {
-                    c.entityOverlap = 0;
-                    c.graphScore = 0.0f;
-                }
-
-                if (c.vectorScore < vecMin) vecMin = c.vectorScore;
-                if (c.vectorScore > vecMax) vecMax = c.vectorScore;
-                if (c.graphScore < graphMin) graphMin = c.graphScore;
-                if (c.graphScore > graphMax) graphMax = c.graphScore;
-                if (c.entityOverlap < overlapMin) overlapMin = c.entityOverlap;
-                if (c.entityOverlap > overlapMax) overlapMax = c.entityOverlap;
-
-                candidates.add(c);
-            }
-
-            // Second pass: normalize scores and compute final fused score
-            for (GraphRagCandidate c : candidates) {
-                float vecNorm = 0.0f;
-                if (vecMax > vecMin) {
-                    vecNorm = (c.vectorScore - vecMin) / (vecMax - vecMin);
-                } else if (vecMax > 0.0f) {
-                    vecNorm = 1.0f;
-                }
-
-                float graphNorm = 0.0f;
-                if (graphMax > graphMin) {
-                    graphNorm = (c.graphScore - graphMin) / (graphMax - graphMin);
-                } else if (graphMax > 0.0f) {
-                    graphNorm = 1.0f;
-                }
-
-                float overlapNorm = 0.0f;
-                if (overlapMax > overlapMin) {
-                    overlapNorm = (float) (c.entityOverlap - overlapMin) / (float) (overlapMax - overlapMin);
-                } else if (overlapMax > 0) {
-                    overlapNorm = 1.0f;
-                }
-
-                c.finalScore = alpha * vecNorm + beta * graphNorm + gamma * overlapNorm;
-            }
-
-            candidates.sort((a, b) -> Float.compare(b.finalScore, a.finalScore));
-            int limit = Math.min(retrievalCount, candidates.size());
-            List<String> fusedDocs = new ArrayList<>();
-            StringBuilder scoreDebug = new StringBuilder("\n[RAG][Graph] Fused candidates (top " + limit + "):\n");
-            StringBuilder similarityInfoBuilder = new StringBuilder();
-            for (int i = 0; i < limit; i++) {
-                GraphRagCandidate c = candidates.get(i);
-                fusedDocs.add(c.result.content);
-                scoreDebug.append("#").append(i + 1)
-                        .append(" id=").append(c.result.id)
-                        .append(" vecRank=").append(c.vectorRank)
-                        .append(" vec=").append(String.format("%.3f", c.vectorScore))
-                        .append(" graph=").append(String.format("%.3f", c.graphScore))
-                        .append(" overlap=").append(c.entityOverlap)
-                        .append(" final=").append(String.format("%.3f", c.finalScore))
-                        .append("\n");
-                similarityInfoBuilder.append(String.format("%.3f", c.finalScore));
-                if (i < limit - 1) {
-                    similarityInfoBuilder.append(", ");
-                }
-            }
-
-            String scoreDebugStr = scoreDebug.toString();
-            updateChatMessage(scoreDebugStr);
-            LogManager.logI(TAG, scoreDebugStr);
-            LogManager.logI(TAG, "[GRAPH_RAG] Fused scores: " + similarityInfoBuilder.toString());
-
-            // Build a SearchResult list in fused order so that we can reuse the existing reranker pipeline.
-            List<KnowledgeGraphDatabase.SearchResult> fusedResults = new ArrayList<>();
-            for (int i = 0; i < limit; i++) {
-                GraphRagCandidate c = candidates.get(i);
-                fusedResults.add(c.result);
-            }
-
-            int rerankCount = ConfigManager.getRerankCount(requireContext());
-            String rerankerModelPath = getRerankerModelPath(vectorDb);
-
-            if (rerankCount > 0 && rerankerModelPath != null && !rerankerModelPath.isEmpty()) {
-                // Use reranker for Graph RAG as well: 0 = disabled, N > 0 = rerank and keep top N documents.
-                updateChatMessage("\n[RAG] Using reranker model to optimize Graph RAG results...");
-                try {
-                    processWithReranker(userQuery, fusedResults, rerankerModelPath, vectorDb);
-                } catch (InterruptedException ie) {
-                    LogManager.logI(TAG, "Graph RAG reranker process interrupted: " + ie.getMessage());
-                    throw ie;
-                }
-            } else {
-                // No reranker configured or rerank disabled: keep Graph RAG fused ranking directly.
-                synchronized (this) {
-                    this.similarityInfo = "GraphRAG final scores: " + similarityInfoBuilder.toString();
-                    this.relevantDocuments = fusedDocs;
-                }
-                LogManager.logD(TAG, "Graph RAG fused results processing completed without reranker, document count: " + fusedDocs.size());
-            }
-
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to process Graph RAG results: " + e.getMessage(), e);
-            updateProgressOnUiThread("Failed to process Graph RAG results: " + e.getMessage());
-        }
-    }
-
-    /**
-     * Process vector search results (without reranking)
-     */
-    private void processVectorSearchResults(List<KnowledgeGraphDatabase.SearchResult> searchResults) {
-        // CRITICAL: Check stop flag before processing
-        if (userRequestedStop || isTaskCancelled) {
-            LogManager.logI(TAG, "Task stopped/cancelled, aborting processVectorSearchResults");
-            updateProgressOnUiThread("Operation stopped by user");
-            return;
-        }
-        
-        try {
-            // Extract relevant documents
-            List<String> relevantDocs = new ArrayList<>();
-            StringBuilder similarityInfoBuilder = new StringBuilder();
-            
-            for (int i = 0; i < searchResults.size(); i++) {
-                KnowledgeGraphDatabase.SearchResult result = searchResults.get(i);
-                relevantDocs.add(result.content);
-                
-                // Log detailed information
-                String resultInfo = "Similarity: " + result.similarity + ", Text: " + result.content.substring(0, Math.min(50, result.content.length())) + "...";
-                LogManager.logD(TAG, resultInfo);
-
-
-            }
-
-            // Save similarity information
-            synchronized (this) {
-                this.similarityInfo = similarityInfoBuilder.toString();
-                this.relevantDocuments = relevantDocs;
-            }
-            
-            LogManager.logD(TAG, "Vector search results processing completed, document count: " + relevantDocs.size());
-            
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to process vector search results: " + e.getMessage(), e);
-            updateProgressOnUiThread("Failed to process search results: " + e.getMessage());
-        }
-    }
-    
-    /**
-     * Process reranking results
-     */
-    private void processRerankedResults(List<RerankerHandler.RerankResult> rerankedResults) {
-        // CRITICAL: Check stop flag before processing
-        if (userRequestedStop || isTaskCancelled) {
-            LogManager.logI(TAG, "Task stopped/cancelled, aborting processRerankedResults");
-            updateProgressOnUiThread("Operation stopped by user");
-            return;
-        }
-        
-        try {
-            // Print detailed reranking results - show all results without limiting quantity
-            LogManager.logI(TAG, "=== Reranking Results Details ===");
-            for (int i = 0; i < rerankedResults.size(); i++) {
-                RerankerHandler.RerankResult result = rerankedResults.get(i);
-                LogManager.logI(TAG, String.format("Rerank #%d: score=%.6f, originalIndex=%d, textPreview=%s", 
-                    i + 1, result.score, result.originalIndex, 
-                    result.text.substring(0, Math.min(100, result.text.length())) + "..."));
-            }
-            LogManager.logI(TAG, "=== Reranking Results Details End ===");
-            
-            // Get actual rerank count limit
-            int rerankCount = ConfigManager.getRerankCount(requireContext());
-            int actualResultCount = Math.min(rerankedResults.size(), rerankCount);
-            LogManager.logI(TAG, "Actually using top " + actualResultCount + " reranked results for answer generation");
-            
-            // Extract reranked documents - only use top rerankCount results
-            List<String> relevantDocs = new ArrayList<>();
-            StringBuilder similarityInfoBuilder = new StringBuilder();
-            
-            for (int i = 0; i < actualResultCount; i++) {
-                RerankerHandler.RerankResult result = rerankedResults.get(i);
-                relevantDocs.add(result.text);
-
-                // Add to progress display - show rerank number and score
-                similarityInfoBuilder.append(String.format("%.4f", result.score));
-                if (i < actualResultCount - 1) {
-                    similarityInfoBuilder.append(", ");
-                }
-            }
-
-            // Display reranker results immediately
-            String rerankerScores = "\n[RAG] Reranker Similarity (" + actualResultCount + " results): " + similarityInfoBuilder.toString();
-            updateChatMessage(rerankerScores);
-            LogManager.logI(TAG, "Reranker scores: " + rerankerScores);
-
-            // Save rerank information
-            synchronized (this) {
-                this.similarityInfo = "Reranked Results - " + similarityInfoBuilder.toString();
-                this.relevantDocuments = relevantDocs;
-            }
-            
-            LogManager.logD(TAG, "Reranked results processing completed, actual document count used: " + relevantDocs.size());
-            
-            updateChatMessage("\n[RAG] Reranking optimization completed, found " + relevantDocs.size() + " relevant contents");
-            
-            // Debug section will be closed in callLLMApi, not here
-            
-            // [Fix] No longer call continueRagQueryAfterReranking to avoid duplicate LLM API calls
-            // executeRagQuery method will wait for relevantDocuments to be set and then call callLLMApi itself
-            // continueRagQueryAfterReranking();
-            
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to process reranked results: " + e.getMessage(), e);
-            updateProgressOnUiThread("Failed to process reranked results: " + e.getMessage());
-        }
-    }
-    
-    // Show model selection dialog
-    private void selectModelAndContinueQuery(String originalModel, List<String> availableModels, String knowledgeBase, String embeddingModelPath, KnowledgeGraphDatabase vectorDb) {
-        // Ensure running on UI thread
-        if (Looper.myLooper() != Looper.getMainLooper()) {
-            // If not on UI thread, switch to UI thread
-            Handler mainHandler = new Handler(Looper.getMainLooper());
-            mainHandler.post(() -> selectModelAndContinueQuery(originalModel, availableModels, knowledgeBase, embeddingModelPath, vectorDb));
-            return;
-        }
-        
-        // If no available models, show error message and prompt user to add models
-        if (availableModels.isEmpty()) {
-            android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(requireContext());
-            builder.setTitle(getString(R.string.dialog_title_embedding_model_not_found))
-                   .setMessage(getString(R.string.dialog_message_embedding_model_not_found, embeddingModelPath, originalModel))
-                   .setPositiveButton(getString(R.string.common_ok), null)
-                   .show();
-            return;
-        }
-        
-        // Create dialog layout
-        View dialogView = getLayoutInflater().inflate(R.layout.dialog_model_selection, null);
-        Spinner spinnerModels = dialogView.findViewById(R.id.spinnerModels);
-        CheckBox checkBoxRemember = dialogView.findViewById(R.id.checkBoxRemember);
-        TextView textViewInfo = dialogView.findViewById(R.id.textViewInfo);
-        
-        // Set prompt information
-        String infoText = "Original model not found: " + originalModel + "\nPlease select a replacement model from the available models below:";
-        textViewInfo.setText(infoText);
-        
-        // Set model list
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, availableModels);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinnerModels.setAdapter(adapter);
-        
-        // If original model is in the list, select it
-        int originalModelIndex = availableModels.indexOf(originalModel);
-        if (originalModelIndex >= 0) {
-            spinnerModels.setSelection(originalModelIndex);
-        }
-        
-        // Check if there is a saved model mapping (use unified format)
-        String savedMapping = ConfigManager.getModelMapping(requireContext(), "model_" + originalModel, null);
-        
-        if (savedMapping != null && !savedMapping.isEmpty()) {
-            // Find the position of saved mapping model in the list
-            int savedModelIndex = availableModels.indexOf(savedMapping);
-            if (savedModelIndex >= 0) {
-                spinnerModels.setSelection(savedModelIndex);
-                checkBoxRemember.setChecked(true);
-            }
-        }
-        
-        // Create dialog
-        android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(requireContext());
-        builder.setTitle(getString(R.string.dialog_title_select_embedding_model))
-               .setView(dialogView)
-               .setCancelable(false)
-               .setPositiveButton("OK", (dialog, which) -> {
-                   // Get selected model
-                   String selectedModel = (String) spinnerModels.getSelectedItem();
-                   
-                   // If "Remember this choice" is checked, save mapping
-                   if (checkBoxRemember.isChecked()) {
-                       ConfigManager.setModelMapping(requireContext(), "model_" + originalModel, selectedModel);
-                   }
-                   
-                   // Show loading prompt
-                   updateProgressOnUiThread("Preparing model...");
-                   
-                   // Execute time-consuming operations in background thread to avoid UI freezing
-                   new Thread(() -> {
-                       try {
-                           // Continue executing RAG query task
-                           continueQueryWithSelectedModel(selectedModel, knowledgeBase, embeddingModelPath, vectorDb);
-                       } catch (Exception e) {
-                           LogManager.logE(TAG, "Error processing model selection", e);
-                           updateProgressOnUiThread("Error: Error processing model selection: " + e.getMessage());
-                       }
-                   }).start();
-               })
-               .setNegativeButton(new StateDisplayManager(requireContext()).getButtonDisplay(AppConstants.BUTTON_TEXT_CANCEL), (dialog, which) -> {
-                   // User cancelled model selection, show prompt
-                   updateProgressOnUiThread("Model selection cancelled");
-               });
-        
-        // Show dialog
-        android.app.AlertDialog dialog = builder.create();
-        dialog.show();
-    }
-    
-    // Continue executing RAG query task
-    private void continueQueryWithSelectedModel(String selectedModel, String knowledgeBase, String embeddingModelPath, KnowledgeGraphDatabase vectorDb) {
-        // Get embedding model path
-        String foundModelPath = null;
-        boolean modelFound = false;
-        
-        String rootDirectoryText = getString(R.string.embedding_model_root_directory);
-        if (selectedModel.equals(rootDirectoryText)) {
-            // Search for model files in root directory
-            File embeddingModelDir = new File(embeddingModelPath);
-            File[] files = embeddingModelDir.listFiles();
-            if (files != null) {
-                for (File file : files) {
-                    // MNN models use .mnn format or config.json
-                    if (file.isFile() && (file.getName().endsWith(".mnn") || 
-                                         file.getName().equals("config.json"))) {
-                        foundModelPath = file.getAbsolutePath();
-                        modelFound = true;
-                        
-                        // Update metadata modeldir to empty string (indicating use of root directory)
-                        KnowledgeGraphDatabase.DatabaseMetadata metadata = vectorDb.getMetadata();
-                        metadata.setModeldir("");
-                        vectorDb.updateMetadata(metadata);
-                        LogManager.logD(TAG, "Updated metadata, modeldir set to empty (using root directory)");
-                        break;
-                    }
-                }
-            }
-        } else {
-            // Use selected directory
-            File selectedDir = new File(embeddingModelPath, selectedModel);
-            if (selectedDir.exists() && selectedDir.isDirectory()) {
-                File[] files = selectedDir.listFiles();
-                if (files != null) {
-                    for (File file : files) {
-                        // MNN models use .mnn format or config.json
-                        if (file.isFile() && (file.getName().endsWith(".mnn") || 
-                                             file.getName().equals("config.json"))) {
-                            foundModelPath = file.getAbsolutePath();
-                            modelFound = true;
-                            
-                            // Update metadata modeldir to selected directory
-                            KnowledgeGraphDatabase.DatabaseMetadata metadata = vectorDb.getMetadata();
-                            metadata.setModeldir(selectedModel);
-                            vectorDb.updateMetadata(metadata);
-                            LogManager.logD(TAG, "Updated metadata, modeldir set to: " + selectedModel);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        
-        if (!modelFound) {
-            updateProgressOnUiThread(getString(R.string.error_model_file_not_found));
-            return;
-        }
-        
-        // Save model mapping
-        ConfigManager.setModelMapping(requireContext(), "model_" + vectorDb.getMetadata().getModeldir(), selectedModel);
-        
-        // Display model information
-        String modelInfo = "Using embedding model: " + selectedModel + ", path: " + foundModelPath;
-        LogManager.logD(TAG, modelInfo);
-        updateProgressOnUiThread(getString(R.string.using_embedding_model, selectedModel));
-        
-        // Load embedding model
-        updateProgressOnUiThread(getString(R.string.loading_embedding_model));
-        
-        // Use EmbeddingHandler to load model synchronously (MNN is fast enough)
-        EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(requireContext());
-        
-        try {
-            if (!embeddingHandler.loadModel(foundModelPath)) {
-                throw new Exception("Failed to load embedding model");
-            }
-            
-            updateProgressOnUiThread(getString(R.string.embedding_model_loaded_success, embeddingHandler.getEmbeddingModel()));
-            LogManager.logI(TAG, "Embedding model loaded successfully");
-            
-        } catch (Exception e) {
-            String errorMsg = "Error: Failed to load embedding model: " + e.getMessage();
-            LogManager.logE(TAG, errorMsg, e);
-            updateProgressOnUiThread(errorMsg);
-            return;
-        }
-
-        // Generate query vector
-        try {
-            updateProgressOnUiThread("Generating query vector...");
-            
-            // Get user query
-            String userQuery = editTextUserPrompt.getText().toString().trim();
-            
-            // Generate vector
-            float[] queryVector = embeddingHandler.computeEmbedding(userQuery);
-            
-            // Query vector anomaly handling
-            if (queryVector != null && queryVector.length > 0) {
-                // Detect query vector anomalies
-                VectorAnomalyHandler.AnomalyResult anomalyResult = VectorAnomalyHandler.detectAnomalies(queryVector, -1);
-                
-                if (anomalyResult.isAnomalous) {
-                    LogManager.logW(TAG, String.format("Query vector anomaly detected: %s (severity: %.2f) - %s", 
-                            anomalyResult.type.name(), anomalyResult.severity, anomalyResult.description));
-                    
-                    // Repair query vector anomaly
-                    float[] repairedQueryVector = VectorAnomalyHandler.repairVector(queryVector, anomalyResult.type);
-                    if (repairedQueryVector != null) {
-                        queryVector = repairedQueryVector;
-                        LogManager.logD(TAG, "Query vector anomaly repaired successfully");
-                        updateProgressOnUiThread("Query vector anomaly detected and repaired");
-                    } else {
-                        LogManager.logW(TAG, "Failed to repair query vector anomaly, using original vector");
-                        updateProgressOnUiThread("Query vector anomaly detected but repair failed, using original vector");
-                    }
-                }
-                
-                // Final query vector validation
-                VectorAnomalyHandler.AnomalyResult finalCheck = VectorAnomalyHandler.detectAnomalies(queryVector, -1);
-                if (finalCheck.isAnomalous && finalCheck.severity > 0.8f) {
-                    LogManager.logE(TAG, String.format("Critical query vector anomaly remains after repair: %s", finalCheck.description));
-                    // For critical anomalies, generate a random unit vector as fallback
-                    queryVector = VectorAnomalyHandler.generateRandomUnitVector(queryVector.length);
-                    LogManager.logW(TAG, "Generated random unit vector as fallback for query");
-                    updateProgressOnUiThread("Critical query vector anomaly, using fallback vector");
-                }
-            }
-            
-            // Record vector debug information
-            String vectorDebugInfo = "Query vector generated, dimension: " + queryVector.length;
-            updateProgressOnUiThread(vectorDebugInfo);
-            
-            // Search similar text blocks
-            updateProgressOnUiThread("Searching for similar text blocks...");
-            
-            // Get retrieval count setting
-            int retrievalCount = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
-            
-            // Search similar text blocks
-            List<KnowledgeGraphDatabase.SearchResult> searchResults = vectorDb.searchSimilar(queryVector, retrievalCount);
-            
-            // Extract relevant documents
-            List<String> relevantDocs = new ArrayList<>();
-            StringBuilder similarityInfoBuilder = new StringBuilder("Found similar text blocks:\n");
-            for (int i = 0; i < searchResults.size(); i++) {
-                KnowledgeGraphDatabase.SearchResult result = searchResults.get(i);
-                relevantDocs.add(result.content);
-                
-                // Record detailed information to log
-                String resultInfo = "Similarity: " + result.similarity + ", text: " + result.content.substring(0, Math.min(50, result.content.length())) + "...";
-                LogManager.logD(TAG, resultInfo);
-
-                // Add to progress display - only show match number and similarity value, not text content
-                similarityInfoBuilder.append("Match").append(i + 1).append(": ").append(String.format("%.4f", result.similarity));
-                similarityInfoBuilder.append("\n");
-            }
-
-            // Display similarity information
-            if (!searchResults.isEmpty()) {
-                updateProgressOnUiThread(similarityInfoBuilder.toString());
-            } else {
-                updateProgressOnUiThread("Warning: Knowledge base query returned no relevant documents");
-            }
-
-            // MNN embedding handler manages model lifecycle automatically
-            LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
-            
-            // Get API information
-            String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
-            String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
-            String apiKey = editTextApiKey.getText().toString();
-            String apiModel = spinnerApiModel.getSelectedItem().toString();
-            
-            // No longer directly call API, let executeRagQuery method handle it
-            // This avoids duplicate API calls
-            // callLLMApi(apiUrl, apiKey, apiModel, buildPromptWithKnowledgeBase(editTextSystemPrompt.getText().toString(), userQuery, relevantDocs));
-            
-        } catch (Exception e) {
-            String errorMsg = "Query processing failed: " + e.getMessage();
-            LogManager.logE(TAG, errorMsg, e);
-            updateProgressOnUiThread(errorMsg);
-        }
-    }
-    
-    // Get saved model mapping
-    private String getModelMapping(String originalModel) {
-        try {
-            if (originalModel == null || originalModel.isEmpty()) {
-                return null;
-            }
-            
-            // Get model mapping from ConfigManager
-            return ConfigManager.getModelMapping(requireContext(), "model_" + originalModel, null);
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to get model mapping", e);
-            return null;
-        }
-    }
-    
-    // Save model mapping to database metadata
-    private void saveModelMapping(String originalModel, String selectedModel, String knowledgeBase) {
-        try {
-            if (originalModel == null || originalModel.isEmpty() || selectedModel == null || selectedModel.isEmpty() || knowledgeBase == null || knowledgeBase.isEmpty()) {
-                return;
-            }
-            
-            // Get knowledge base directory
-            String knowledgeBasePath = ConfigManager.getKnowledgeBasePath(requireContext());
-            File knowledgeBaseDir = new File(knowledgeBasePath, knowledgeBase);
-            
-            // Update database metadata
-            KnowledgeGraphDatabase vectorDb = null;
-            try {
-                String dbPath = knowledgeBaseDir.getAbsolutePath() + "/knowledge_graph.db";
-                vectorDb = new KnowledgeGraphDatabase(requireContext(), dbPath, "unknown");
-                // KnowledgeGraphDatabase is auto-loaded on construction
-                
-                // Get selected model file name
-                String selectedModelName = new File(selectedModel).getName();
-                
-                // Update model information in database metadata
-                KnowledgeGraphDatabase.DatabaseMetadata metadata = vectorDb.getMetadata();
-                metadata.setModeldir(selectedModelName);
-                if (vectorDb.updateMetadata(metadata)) {
-                    LogManager.logD(TAG, "Updated model information in database metadata: " + selectedModelName);
-                    LogManager.logD(TAG, "Saved database metadata");
-                } else {
-                    LogManager.logE(TAG, "Failed to update model information in database metadata");
-                }
-            } catch (Exception e) {
-                LogManager.logE(TAG, "Failed to update database metadata", e);
-            } finally {
-                if (vectorDb != null) {
-                    try {
-                        vectorDb.close();
-                    } catch (Exception e) {
-                        LogManager.logE(TAG, "Failed to close database", e);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to save model mapping", e);
-        }
-    }
-    
-    // Get all possible model paths
-    private List<String> getPossibleModelPaths() {
-        List<String> possiblePaths = new ArrayList<>();
-        
-        // Get embedding model path from configuration
-        String configPath = ConfigManager.getEmbeddingModelPath(requireContext());
-        possiblePaths.add(configPath);
-        
-        // Add possible alternative paths
-        File externalStorageDir = android.os.Environment.getExternalStorageDirectory();
-        File downloadDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS);
-        
-        possiblePaths.add(new File(externalStorageDir, "starragdata/embeddings").getAbsolutePath());
-        possiblePaths.add(new File(downloadDir, "starragdata/embeddings").getAbsolutePath());
-        possiblePaths.add(new File(externalStorageDir, "Download/starragdata/embeddings").getAbsolutePath());
-        possiblePaths.add("/storage/emulated/0/Download/starragdata/embeddings");
-        possiblePaths.add("/sdcard/Download/starragdata/embeddings");
-        
-        return possiblePaths;
-    }
-    
-    // Check if spinner is empty
-    private boolean isSpinnerEmpty(Spinner spinner) {
-        if (spinner == null) return true;
-        if (spinner.getAdapter() == null) return true;
-        SpinnerAdapter adapter = spinner.getAdapter();
-        return adapter.getCount() == 0;
-    }
-    
+     
     /**
      * Transfer selected text to knowledge base note
      * @param text Text to be converted to note
@@ -5218,6 +2819,19 @@ public class RagQaFragment extends Fragment {
             isUpdatingUiFromConfig = false;
         }
         
+        // Apply restored debug response text (if any) before replaying new logs
+        applyRestoredResponseTextFromStateIfNeeded();
+        
+        // Lightweight UI state resync based on active background tasks for current chat folder
+        resyncUiStateWithBackgroundTasks();
+
+        // Start buffer poll loop - this is the SINGLE source of truth for streaming UI updates.
+        // Polls buffer every 200ms, handles UI reconstruction automatically.
+        startBufferPollLoop();
+
+        // Start periodic UI state resync loop to keep button state in sync (every 2s)
+        startUiStateResyncLoop();
+        
         // Remove automatic query recovery logic to avoid unexpected query execution when app starts
         // If query recovery function is needed, it should be triggered by explicit user action
         /*
@@ -5248,6 +2862,13 @@ public class RagQaFragment extends Fragment {
             }, 500);
         }
         */
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        stopBufferPollLoop();
+        stopUiStateResyncLoop();
     }
     
     // Setup custom text selection menu
@@ -5318,98 +2939,324 @@ public class RagQaFragment extends Fragment {
         }
     }
     
-    // Continue RAG query process after reranking completion
-    private void continueRagQueryAfterReranking() {
-        try {
-            // Get saved query parameters
-            String apiUrl = lastApiUrl;
-            String apiKey = lastApiKey;
-            String model = lastModel;
-            String systemPrompt = lastSystemPrompt;
-            String userPrompt = lastUserPrompt;
-            
-            // Get reranked relevant documents
-            List<String> relevantDocs = new ArrayList<>();
-            String simInfo = "";
-            synchronized (this) {
-                if (relevantDocuments != null) {
-                    relevantDocs = new ArrayList<>(relevantDocuments);
-                }
-                simInfo = this.similarityInfo;
-            }
-            
-            if (relevantDocs.isEmpty()) {
-                LogManager.logW(TAG, "No relevant documents after reranking, using no-knowledge-base mode");
-                updateProgressOnUiThread("No relevant documents after reranking, generating answer directly");
-                
-                // Build prompt without knowledge base content
-                String fullPrompt = buildPromptWithoutKnowledgeBase(systemPrompt, userPrompt);
-                
-                // Call LLM API to get answer
-                updateProgressOnUiThread(getString(R.string.calling_llm_api));
-                callLLMApi(apiUrl, apiKey, model, fullPrompt);
-            } else {
-                // Display similarity information
-                if (!TextUtils.isEmpty(simInfo)) {
-                    updateProgressOnUiThread(getString(R.string.similarity_info, simInfo));
-                }
-                
-                // Build prompt with knowledge base content
-                String fullPrompt = buildPromptWithKnowledgeBase(systemPrompt, userPrompt, relevantDocs);
-                
-                // Record prompt information
-                int promptLength = fullPrompt.length();
-                String promptInfo = "Built prompt length: " + promptLength + " characters";
-                LogManager.logD(TAG, promptInfo);
-                updateProgressOnUiThread(promptInfo);
-                
-                // Print detailed complete text sent to LLM
-                LogManager.logI(TAG, "=== Complete prompt sent to LLM ===");
-                LogManager.logI(TAG, "Prompt length: " + promptLength + " characters");
-                LogManager.logI(TAG, "Prompt content:");
-                LogManager.logI(TAG, fullPrompt);
-                LogManager.logI(TAG, "=== LLM prompt end ===");
-                
-                // Record warning if prompt is too long
-                if (promptLength > 4000) {
-                    String warnMsg = getString(R.string.warning_prompt_too_long);
-                    LogManager.logW(TAG, warnMsg);
-                    updateProgressOnUiThread(warnMsg);
-                }
-                
-                // Call LLM API to get answer
-                updateProgressOnUiThread(getString(R.string.calling_llm_api));
-                callLLMApi(apiUrl, apiKey, model, fullPrompt);
-            }
-            
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Continue RAG query after reranking failed: " + e.getMessage(), e);
-            updateProgressOnUiThread("Continue query after reranking failed: " + e.getMessage());
-            
-            // Use unified state reset method
-            resetSendingState();
-        } finally {
-            // Reset state whether successful or failed
-            mainHandler.post(() -> {
-                // restore battery optimization settings
-                if (batteryOptimizationDisabled) {
-                    if (getActivity() instanceof MainActivity) {
-                        ((MainActivity) getActivity()).restoreBatteryOptimization();
-                        batteryOptimizationDisabled = false;
-                        LogManager.logD(TAG, "Restored battery optimization settings on task completion");
-                    }
-                }
-
-                // disable keep screen on
-                if (isKeepScreenOn) {
-                    enableKeepScreenOn(false);
-                    LogManager.logD(TAG, "Disabled keep screen on on task completion");
-                }
-
-                // Use unified state reset method
-                resetSendingState();
-            });
+    // ========== UI Helper Methods (Pure UI, no business logic) ==========
+    
+    /**
+     * Update progress message (just logs, buffer writes handled by Manager)
+     */
+    private void updateProgressOnUiThread(String progress) {
+        // Just log for now - buffer writes are handled by Manager
+        LogManager.logD(TAG, "[PROGRESS] " + progress);
+    }
+    
+    /**
+     * Append text to response view
+     */
+    private void appendToResponse(String text) {
+        if (getActivity() == null || !isAdded() || isDetached()) {
+            LogManager.logW(TAG, "Cannot append response, Fragment not attached to Activity");
+            return;
         }
+        mainHandler.post(() -> {
+            try {
+                if (getActivity() == null || !isAdded() || isDetached() || getView() == null) {
+                    return;
+                }
+                TextView tv = getView().findViewById(R.id.textViewResponse);
+                if (tv != null) {
+                    tv.append(text);
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "appendToResponse error: " + e.getMessage(), e);
+            }
+        });
+    }
+    
+    /**
+     * Update result text on UI thread with Markdown rendering
+     */
+    private void updateResultOnUiThread(String result) {
+        if (getActivity() == null || !isAdded() || isDetached()) {
+            LogManager.logW(TAG, "Cannot update result, Fragment not attached to Activity");
+            return;
+        }
+        
+        mainHandler.post(() -> {
+            try {
+                if (getActivity() == null || !isAdded() || isDetached() || getView() == null) {
+                    LogManager.logW(TAG, "Cannot update result in UI thread, Fragment not attached");
+                    return;
+                }
+                
+                TextView textViewResult = getView().findViewById(R.id.textViewResponse);
+                if (textViewResult == null) return;
+                
+                ScrollView scrollView = getView().findViewById(R.id.scrollViewResponse);
+                if (scrollView == null) return;
+                
+                // Render Markdown
+                if (markwon != null && result != null) {
+                    Spanned rendered = markwon.toMarkdown(result);
+                    textViewResult.setText(rendered);
+                } else {
+                    textViewResult.setText(result != null ? result : "");
+                }
+                
+                // Auto scroll to bottom if user hasn't scrolled away
+                if (!userScrolledAway) {
+                    scrollView.post(() -> scrollView.fullScroll(View.FOCUS_DOWN));
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "updateResultOnUiThread error: " + e.getMessage(), e);
+            }
+        });
+    }
+    
+    /**
+     * Update LLM task progress (delegates to Manager)
+     */
+    private void updateLlmTaskProgress(int progress, String message) {
+        if (llmTaskId == null) {
+            return;
+        }
+        try {
+            ragQueryManager.updateLlmTaskProgress(llmTaskId, progress, message);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TASK] Failed to update LLM background task progress: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Finalize LLM task (delegates to Manager)
+     */
+    private void finalizeLlmTask(BackgroundTask.TaskState state, int progress, String message) {
+        if (llmTaskId == null) {
+            return;
+        }
+        try {
+            // Do a final poll to read any remaining buffer data (e.g., <performance> block)
+            // BEFORE clearing llmTaskId
+            doFinalBufferPoll();
+            
+            ragQueryManager.finalizeLlmTask(llmTaskId, state, progress, message);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TASK] Failed to finalize LLM background task: " + e.getMessage(), e);
+        } finally {
+            llmTaskId = null;  // Now safe to clear
+        }
+    }
+    
+    /**
+     * Do a final poll to ensure all buffer data (including <performance>) is read.
+     * Called before clearing llmTaskId.
+     * NOTE: This may be called from Binder thread, so UI updates must be posted to main thread.
+     */
+    private void doFinalBufferPoll() {
+        if (llmTaskId == null || llmTaskId.isEmpty() || ragQueryManager == null) {
+            return;
+        }
+        // Read any remaining data in buffer
+        TaskLogBuffer.ReadResult result = ragQueryManager.readBufferFromPos(llmTaskId, uiBufferReadPos);
+        if (result != null && result.hasData()) {
+            LogManager.logD(TAG, "[POLL][FINAL] Read " + result.data.length() + " chars, pos " + uiBufferReadPos + " -> " + result.newReadPos);
+            uiBufferReadPos = result.newReadPos;
+            
+            // Split data into lines
+            final java.util.List<String> lines = new java.util.ArrayList<>();
+            String data = result.data;
+            int start = 0;
+            for (int i = 0; i < data.length(); i++) {
+                if (data.charAt(i) == '\n') {
+                    String line = data.substring(start, i + 1);
+                    if (!line.isEmpty()) {
+                        lines.add(line);
+                    }
+                    start = i + 1;
+                }
+            }
+            if (start < data.length()) {
+                String line = data.substring(start);
+                if (!line.isEmpty()) {
+                    lines.add(line);
+                }
+            }
+            
+            // Post UI updates to main thread
+            if (mainHandler != null && !lines.isEmpty()) {
+                mainHandler.post(() -> {
+                    if (!isAdded() || getActivity() == null) {
+                        return;
+                    }
+                    ensureAssistantPlaceholderForReplay();
+                    for (String line : lines) {
+                        performUpdateChatMessage(line);
+                    }
+                });
+            }
+        }
+    }
+    
+    /**
+     * Handle new chat button click - clears UI and resets state
+     */
+    private void handleNewChatClick() {
+        // Clear current chat folder setting (new conversation will create new folder)
+        ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+        LogManager.logD(TAG, "[CHAT_HISTORY] Cleared current chat folder setting for new conversation");
+        
+        updateProgressOnUiThread("");
+        editTextUserPrompt.setText("");
+        
+        // Clear chat messages
+        if (chatAdapter != null) {
+            chatAdapter.reset();
+            LogManager.logD(TAG, "Chat messages cleared");
+        }
+        
+        // Clear answer box
+        if (textViewResponse != null) {
+            textViewResponse.setText("");
+        }
+        
+        // Reset send/stop button state
+        if (isSending.get()) {
+            buttonSendStop.setText(getString(R.string.button_send));
+            isSending.set(false);
+            if (isTaskRunning) {
+                isTaskCancelled = true;
+            }
+        }
+        
+        // NOTE: Model memory reset is now handled automatically in child process
+        // when a new conversation starts. No need to explicitly call resetModelMemory()
+        // from main process as it would only affect the main process singleton (useless).
+        LogManager.logD(TAG, "Chat cleared, model memory will be reset on next inference in child process");
+        
+        // Clear media thumbnails
+        if (mediaThumbnailAdapter != null) {
+            mediaThumbnailAdapter.clearMedia();
+        }
+        
+        Toast.makeText(requireContext(), "New chat started", Toast.LENGTH_SHORT).show();
+    }
+    
+    /**
+     * Fetch available models for current API selection
+     */
+    private void fetchModelsForApi() {
+        String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
+        String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
+        String apiKey = editTextApiKey.getText().toString();
+        
+        // Get currently saved model name for restoring selection
+        String savedModelName = ConfigManager.getString(requireContext(), ConfigManager.KEY_MODEL_NAME, "");
+        
+        // Show loading state
+        setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_LOADING)});
+        
+        // If it's a local model, get available model list from local model directory
+        if (AppConstants.ApiUrl.LOCAL.equals(apiUrl)) {
+            
+            // Get model path from configuration
+            String modelPath = ConfigManager.getModelPath(requireContext());
+            File modelDir = new File(modelPath);
+            
+            if (!modelDir.exists() || !modelDir.isDirectory()) {
+                LogManager.logE(TAG, "Model directory does not exist: " + modelPath);
+                setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_DIRECTORY_NOT_EXIST)});
+                Toast.makeText(requireContext(), getString(R.string.toast_model_dir_not_exist, modelPath), Toast.LENGTH_SHORT).show();
+                return;
+            }
+            
+            // Get all subdirectories in the model directory (each subdirectory represents a model)
+            File[] modelDirs = modelDir.listFiles(File::isDirectory);
+            
+            if (modelDirs == null || modelDirs.length == 0) {
+                LogManager.logE(TAG, "No models found in model directory: " + modelPath);
+                setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_NOT_FOUND)});
+                Toast.makeText(requireContext(), getString(R.string.toast_no_model_found, modelPath), Toast.LENGTH_SHORT).show();
+                return;
+            }
+            
+            // Extract model names
+            List<String> modelsList = new ArrayList<>();
+            for (File dir : modelDirs) {
+                String modelName = dir.getName();
+                modelsList.add(modelName);
+            }
+            
+            // Update UI
+            if (modelsList.isEmpty()) {
+                setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_NO_AVAILABLE)});
+            } else {
+                setupSpinner(spinnerApiModel, modelsList.toArray(new String[0]));
+                // Restore user's previous selection
+                if (!savedModelName.isEmpty()) {
+                    setSpinnerSelection(spinnerApiModel, savedModelName);
+                    LogManager.logD(TAG, "Restoring local model selection: " + savedModelName);
+                }
+            }
+            
+            LogManager.logD(TAG, "Successfully got local model list: " + modelsList.size() + " models");
+            return;
+        }
+        
+        // If it's an online model, API Key is required
+        if (apiUrl.isEmpty() || apiKey.isEmpty()) {
+            Toast.makeText(requireContext(), getString(R.string.toast_set_api_first), Toast.LENGTH_SHORT).show();
+            setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_FETCH_FAILED)});
+            return;
+        }
+        
+        // Build request URL for online API
+        String modelsUrl = apiUrl;
+        if (!modelsUrl.endsWith("/")) {
+            modelsUrl += "/";
+        }
+        modelsUrl += "models";
+        
+        // Create request headers
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Authorization", "Bearer " + apiKey);
+        
+        // Use Volley to send request
+        final String finalModelsUrl = modelsUrl;
+        final String finalSavedModelName = savedModelName;
+        JsonObjectRequest request = new JsonObjectRequest(Request.Method.GET, finalModelsUrl, null,
+                response -> {
+                    try {
+                        JSONArray data = response.getJSONArray("data");
+                        List<String> modelsList = new ArrayList<>();
+                        for (int i = 0; i < data.length(); i++) {
+                            JSONObject model = data.getJSONObject(i);
+                            modelsList.add(model.getString("id"));
+                        }
+                        
+                        if (modelsList.isEmpty()) {
+                            setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_NO_AVAILABLE)});
+                        } else {
+                            setupSpinner(spinnerApiModel, modelsList.toArray(new String[0]));
+                            // Restore user's previous selection
+                            if (!finalSavedModelName.isEmpty()) {
+                                setSpinnerSelection(spinnerApiModel, finalSavedModelName);
+                            }
+                        }
+                    } catch (JSONException e) {
+                        LogManager.logE(TAG, "Failed to parse model list response", e);
+                        setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_FETCH_FAILED)});
+                    }
+                },
+                error -> {
+                    LogManager.logE(TAG, "Failed to fetch model list: " + error.getMessage());
+                    setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_FETCH_FAILED)});
+                }) {
+            @Override
+            public Map<String, String> getHeaders() {
+                return headers;
+            }
+        };
+        
+        Volley.newRequestQueue(requireContext()).add(request);
     }
     
     @Override
@@ -6042,12 +3889,27 @@ public class RagQaFragment extends Fragment {
     }
     
     /**
-     * Update chat message with streaming text
-     * This replaces the old appendToResponse for chat UI
+     * Update chat message with streaming text - UI DISPLAY ONLY.
+     * 
+     * CRITICAL ARCHITECTURE:
+     * - Buffer writes are handled EXCLUSIVELY by Manager (emitStreamingChunkFromManager)
+     * - Fragment NEVER writes to buffer
+     * - This ensures buffer integrity when UI is destroyed/recreated
+     * 
+     * @param chunk The text chunk to append
+     * @param writeToBuffer DEPRECATED - always ignored, kept for API compatibility
      */
-    private void updateChatMessage(String chunk) {
+    private void updateChatMessage(String chunk, boolean writeToBuffer) {
+        // CRITICAL: Fragment does NOT write to buffer!
+        // Buffer is written by Manager (emitStreamingChunkFromManager).
+        // The writeToBuffer parameter is deprecated and ignored.
+        if (writeToBuffer) {
+            // Log warning if someone tries to write buffer from Fragment
+            LogManager.logW(TAG, "[ARCH] updateChatMessage called with writeToBuffer=true - IGNORED! Buffer writes must go through Manager.");
+        }
+        
         if (getActivity() == null || !isAdded() || isDetached()) {
-            LogManager.logW(TAG, "Cannot update chat message, Fragment not attached");
+            // Fragment not attached, skip UI update
             return;
         }
         
@@ -6057,6 +3919,13 @@ public class RagQaFragment extends Fragment {
         } else {
             getActivity().runOnUiThread(() -> performUpdateChatMessage(chunk));
         }
+    }
+    
+    /**
+     * Update chat message with streaming text - UI display only, no buffer write.
+     */
+    private void updateChatMessage(String chunk) {
+        updateChatMessage(chunk, false);
     }
     
     private void performUpdateChatMessage(String chunk) {
@@ -6099,27 +3968,45 @@ public class RagQaFragment extends Fragment {
                 int endIdx = newText.indexOf("]", startIdx);
                 if (endIdx > startIdx) {
                     String wavPath = newText.substring(startIdx + 7, endIdx);
-                    
+
+                    // Mark TTS as generating for native Omni TTS so that button stays in TTS state
+                    isTtsGenerating.set(true);
+                    updateButtonText();
+
                     // Check if auto-play is enabled
                     boolean autoPlayEnabled = ConfigManager.getTtsAutoPlay(requireContext());
-                    
-                    if (!autoPlayEnabled) {
-                        // No auto-play: compress immediately
+
+                    if (autoPlayEnabled) {
+                        // Auto-play enabled: play first, then compress/update in completion callback
+                        LogManager.logI(TAG, "[AUDIO] Auto-play enabled, starting auto-play: " + wavPath);
+                        autoPlayAudio(wavPath, lastMsg);
+                    } else {
+                        // No auto-play: compress immediately and attach audio to UI
                         LogManager.logI(TAG, "[AUDIO] No auto-play, compressing immediately");
                         handleTtsAudioComplete(wavPath);
                     }
-                    // If auto-play: will be handled in playAudioDirect's onCompletionListener
-                    
-                    // Remove marker from text
+
+                    // Remove marker from text so that it is never persisted to markdown
                     newText = newText.substring(0, startIdx) + newText.substring(endIdx + 1);
                     LogManager.logI(TAG, "[AUDIO] Marker detected: " + wavPath);
                 }
             }
             
             lastMsg.text = newText;
-            
+
+            // Debug trace before parsing collapsible sections
+            LogManager.logI(TAG, "[DIFF_UI_TRACE] Before parse - hasImage="
+                    + (lastMsg.imageUri != null)
+                    + ", textLen=" + (newText != null ? newText.length() : 0));
+
             // Parse collapsible sections
             CollapsibleTextParser.INSTANCE.parseAndPopulate(newText, lastMsg);
+
+            // Debug trace after parsing collapsible sections
+            LogManager.logI(TAG, "[DIFF_UI_TRACE] After parse - hasDebug="
+                    + (lastMsg.getDebugText() != null)
+                    + ", hasPerformance=" + (lastMsg.getPerformanceText() != null)
+                    + ", hasImage=" + (lastMsg.imageUri != null));
             
             lastMsg.setLoading(false);
             
@@ -6128,6 +4015,10 @@ public class RagQaFragment extends Fragment {
             
             // Smart auto-scroll: only scroll if user is at bottom
             smartScrollToBottom();
+            
+            // Periodically persist streaming content to markdown so that
+            // conversation history is available even if UI is recreated
+            maybeSaveChatHistoryForStreaming();
             
         } catch (Exception e) {
             LogManager.logE(TAG, "Failed to update chat message", e);
@@ -6188,6 +4079,31 @@ public class RagQaFragment extends Fragment {
                 return;
             }
             
+            // Debug trace for last assistant message before saving history
+            ChatDataItem lastAssistant = null;
+            for (int i = chatMessages.size() - 1; i >= 0; i--) {
+                ChatDataItem item = chatMessages.get(i);
+                if (item.getType() == ChatViewHolders.ASSISTANT) {
+                    lastAssistant = item;
+                    break;
+                }
+            }
+            if (lastAssistant != null) {
+                int textLen = lastAssistant.getDisplayText() != null
+                        ? lastAssistant.getDisplayText().length() : 0;
+                LogManager.logI(TAG, "[CHAT_HISTORY_TRACE] Before save - last assistant hasImage="
+                        + (lastAssistant.imageUri != null)
+                        + ", hasDebug=" + (lastAssistant.getDebugText() != null)
+                        + ", hasPerformance=" + (lastAssistant.getPerformanceText() != null)
+                        + ", textLen=" + textLen
+                        + ", messages=" + chatMessages.size()
+                        + ", thread=" + Thread.currentThread().getName());
+            } else {
+                LogManager.logI(TAG, "[CHAT_HISTORY_TRACE] Before save - no assistant message, messages="
+                        + chatMessages.size()
+                        + ", thread=" + Thread.currentThread().getName());
+            }
+
             boolean success = ChatHistoryManager.saveConversation(getContext(), chatMessages, currentFolder);
             if (success) {
                 LogManager.logD(TAG, "[CHAT_HISTORY] Conversation saved successfully");
@@ -6197,6 +4113,15 @@ public class RagQaFragment extends Fragment {
         } catch (Exception e) {
             LogManager.logE(TAG, "[CHAT_HISTORY] Error saving conversation", e);
         }
+    }
+
+    // Throttled autosave used during streaming updates.
+    // NOTE: For local models, manager/handler handles final persistence via append* methods.
+    // This streaming autosave is disabled to avoid conflicts. Fragment only displays.
+    // For remote APIs without backend writer, this could be re-enabled conditionally.
+    private void maybeSaveChatHistoryForStreaming() {
+        // Disabled: manager handles persistence, Fragment only displays
+        // If crash recovery is needed, manager should handle it, not UI
     }
     
     /**
@@ -6237,27 +4162,31 @@ public class RagQaFragment extends Fragment {
                 chatMessages.clear();
                 chatMessages.addAll(history);
                 LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] chatMessages.size() after addAll: " + chatMessages.size());
-                
-                if (chatAdapter != null) {
-                    LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] Calling chatAdapter.updateModelNameAndItems()");
-                    chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
-                    LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] chatAdapter.getItemCount(): " + chatAdapter.getItemCount());
-                } else {
-                    LogManager.logE(TAG, "[CHAT_HISTORY_DEBUG] ❌ chatAdapter is NULL! Cannot update UI!");
-                }
-                
-                LogManager.logI(TAG, "[CHAT_HISTORY] Loaded " + history.size() + " messages from history");
-                
-                // Auto-scroll to bottom after loading history
+
                 if (recyclerViewChat != null) {
                     LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] RecyclerView adapter: " + recyclerViewChat.getAdapter());
                     recyclerViewChat.post(() -> {
-                        recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
-                        LogManager.logD(TAG, "[CHAT_HISTORY] Auto-scrolled to bottom");
+                        try {
+                            if (chatAdapter != null) {
+                                LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] Calling chatAdapter.updateModelNameAndItems() on RecyclerView.post");
+                                chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
+                                LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] chatAdapter.getItemCount(): " + chatAdapter.getItemCount());
+                            } else {
+                                LogManager.logE(TAG, "[CHAT_HISTORY_DEBUG] ❌ chatAdapter is NULL! Cannot update UI!");
+                            }
+
+                            // Auto-scroll to bottom after loading history
+                            recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
+                            LogManager.logD(TAG, "[CHAT_HISTORY] Auto-scrolled to bottom");
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[CHAT_HISTORY] Error updating RecyclerView after history load", e);
+                        }
                     });
                 } else {
                     LogManager.logE(TAG, "[CHAT_HISTORY_DEBUG] ❌ recyclerViewChat is NULL!");
                 }
+
+                LogManager.logI(TAG, "[CHAT_HISTORY] Loaded " + history.size() + " messages from history");
                 // Successfully loaded, no toast needed (silent load for better UX)
             } else {
                 LogManager.logD(TAG, "[CHAT_HISTORY] No messages in history file, maintaining empty UI");
@@ -6269,6 +4198,191 @@ public class RagQaFragment extends Fragment {
             ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
             // Only show toast for real errors
             Toast.makeText(getContext(), R.string.toast_chat_history_load_failed, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    public Bundle saveState() {
+        Bundle state = new Bundle();
+        try {
+            if (editTextUserPrompt != null) {
+                state.putString(STATE_KEY_USER_PROMPT, editTextUserPrompt.getText().toString());
+            }
+
+            if (recyclerViewChat != null && recyclerViewChat.getLayoutManager() != null) {
+                Parcelable layoutState = recyclerViewChat.getLayoutManager().onSaveInstanceState();
+                if (layoutState != null) {
+                    state.putParcelable(STATE_KEY_CHAT_SCROLL, layoutState);
+                }
+            }
+
+            state.putBoolean(STATE_KEY_USER_SCROLLED_AWAY, userScrolledAway);
+
+            if (mediaThumbnailAdapter != null && mediaThumbnailAdapter.getMediaCount() > 0) {
+                java.util.ArrayList<String> imageUris = new java.util.ArrayList<>();
+                java.util.ArrayList<String> audioUris = new java.util.ArrayList<>();
+
+                java.util.List<MediaThumbnailAdapter.MediaItem> items = mediaThumbnailAdapter.getMediaItems();
+                for (MediaThumbnailAdapter.MediaItem item : items) {
+                    android.net.Uri originalUri = item.getOriginalUri();
+                    if (originalUri == null) {
+                        continue;
+                    }
+                    String uriString = originalUri.toString();
+                    if (item instanceof MediaThumbnailAdapter.ImageItem) {
+                        imageUris.add(uriString);
+                    } else if (item instanceof MediaThumbnailAdapter.AudioItem) {
+                        audioUris.add(uriString);
+                    }
+                }
+
+                if (!imageUris.isEmpty()) {
+                    state.putStringArrayList(STATE_KEY_IMAGE_URIS, imageUris);
+                }
+                if (!audioUris.isEmpty()) {
+                    state.putStringArrayList(STATE_KEY_AUDIO_URIS, audioUris);
+                }
+            }
+
+            TextView responseView = textViewResponse;
+            if (responseView == null && getView() != null) {
+                responseView = getView().findViewById(R.id.textViewResponse);
+            }
+            if (responseView != null) {
+                CharSequence resp = responseView.getText();
+                if (resp != null && resp.length() > 0) {
+                    String respText = resp.toString();
+                    int maxLen = 20000;
+                    if (respText.length() > maxLen) {
+                        respText = respText.substring(respText.length() - maxLen);
+                    }
+                    state.putString(STATE_KEY_RESPONSE_TEXT, respText);
+                }
+            }
+            
+            // Save llmTaskId for task restoration after recreation
+            // NOTE: lastFgLogIndex is no longer saved - TaskLogBuffer manages cursor internally
+            if (llmTaskId != null && !llmTaskId.isEmpty()) {
+                state.putString(STATE_KEY_LLM_TASK_ID, llmTaskId);
+            }
+            
+            try {
+                String savedPrompt = state.getString(STATE_KEY_USER_PROMPT, "");
+                String savedResponse = state.getString(STATE_KEY_RESPONSE_TEXT, null);
+                int promptLen = savedPrompt != null ? savedPrompt.length() : 0;
+                int responseLen = savedResponse != null ? savedResponse.length() : 0;
+                boolean hasImageUris = state.containsKey(STATE_KEY_IMAGE_URIS);
+                boolean hasAudioUris = state.containsKey(STATE_KEY_AUDIO_URIS);
+                LogManager.logD(TAG, "[UI_TRACE] saveState - prompt.len=" + promptLen +
+                        ", response.len=" + responseLen +
+                        ", hasImageUris=" + hasImageUris +
+                        ", hasAudioUris=" + hasAudioUris +
+                        ", llmTaskId=" + llmTaskId);
+            } catch (Exception inner) {
+                // Swallow inner logging exceptions to avoid impacting state save
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to save RagQaFragment UI state", e);
+        }
+        return state;
+    }
+
+    @Override
+    public void restoreState(Bundle state) {
+        if (state == null) {
+            LogManager.logD(TAG, "[STATE] restoreState called with null Bundle, skip");
+            return;
+        }
+
+        try {
+            if (editTextUserPrompt != null) {
+                String prompt = state.getString(STATE_KEY_USER_PROMPT, null);
+                if (prompt != null) {
+                    editTextUserPrompt.setText(prompt);
+                    try {
+                        editTextUserPrompt.setSelection(prompt.length());
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Failed to set selection for user prompt", e);
+                    }
+                }
+            }
+
+            if (mediaThumbnailAdapter != null && recyclerViewImageThumbnails != null) {
+                java.util.ArrayList<String> imageUris = state.getStringArrayList(STATE_KEY_IMAGE_URIS);
+                java.util.ArrayList<String> audioUris = state.getStringArrayList(STATE_KEY_AUDIO_URIS);
+
+                mediaThumbnailAdapter.clearMedia();
+
+                boolean hasMedia = false;
+
+                if (imageUris != null) {
+                    for (String uriString : imageUris) {
+                        if (uriString == null || uriString.isEmpty()) {
+                            continue;
+                        }
+                        try {
+                            android.net.Uri uri = android.net.Uri.parse(uriString);
+                            mediaThumbnailAdapter.addImage(uri);
+                            hasMedia = true;
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "Failed to restore image media item: " + uriString, e);
+                        }
+                    }
+                }
+
+                if (audioUris != null) {
+                    for (String uriString : audioUris) {
+                        if (uriString == null || uriString.isEmpty()) {
+                            continue;
+                        }
+                        try {
+                            android.net.Uri uri = android.net.Uri.parse(uriString);
+                            mediaThumbnailAdapter.addAudio(uri);
+                            hasMedia = true;
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "Failed to restore audio media item: " + uriString, e);
+                        }
+                    }
+                }
+
+                if (hasMedia) {
+                    recyclerViewImageThumbnails.setVisibility(View.VISIBLE);
+                } else {
+                    recyclerViewImageThumbnails.setVisibility(View.GONE);
+                }
+            }
+
+            userScrolledAway = state.getBoolean(STATE_KEY_USER_SCROLLED_AWAY, false);
+            if (recyclerViewChat != null && recyclerViewChat.getLayoutManager() != null) {
+                Parcelable layoutState = state.getParcelable(STATE_KEY_CHAT_SCROLL);
+                if (layoutState != null) {
+                    recyclerViewChat.getLayoutManager().onRestoreInstanceState(layoutState);
+                }
+            }
+
+            String responseText = state.getString(STATE_KEY_RESPONSE_TEXT, null);
+            // Defer applying restored response text until onResume, so it does not
+            // override logs replayed from UnifiedForegroundService.
+            restoredResponseTextFromState = responseText;
+            hasAppliedRestoredResponseFromState = false;
+            
+            // Restore llmTaskId for task restoration
+            // NOTE: No need to reset cursor here. The new design:
+            // - Cursor is reset to 0 by RagQueryManager when MD is persisted
+            // - New Fragment uses a new consumerId, so cursor starts at 0 automatically
+            // - replayInferenceLogsFromUnifiedService() will pop all unpersisted content
+            String savedTaskId = state.getString(STATE_KEY_LLM_TASK_ID, null);
+            if (savedTaskId != null && !savedTaskId.isEmpty()) {
+                llmTaskId = savedTaskId;
+                LogManager.logD(TAG, "[FG][RESTORE] Restored llmTaskId=" + llmTaskId);
+            }
+            
+            int responseLen = responseText != null ? responseText.length() : 0;
+            LogManager.logD(TAG, "[UI_TRACE] restoreState - restoredResponseTextFromState.len=" + responseLen +
+                    ", userScrolledAway=" + userScrolledAway +
+                    ", llmTaskId=" + llmTaskId);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to restore RagQaFragment UI state", e);
         }
     }
     
@@ -6499,19 +4613,19 @@ private void sendVoiceMessage() {
     if (!isRecordingVoice) {
         return;
     }
-    
+
     recordingDialog.dismiss();
-    
+
     // Stop recording and get file
     File audioFile = audioRecorder.stopRecording();
     isRecordingVoice = false;
-    
+
     if (audioFile == null || !audioFile.exists()) {
         LogManager.logW(TAG, "Audio file not found after recording");
         Toast.makeText(requireContext(), "录音文件无效", Toast.LENGTH_SHORT).show();
         return;
     }
-    
+
     // Check minimum duration (0.5 seconds)
     long duration = audioRecorder.getCurrentDuration();
     if (duration < 500) {
@@ -6520,21 +4634,21 @@ private void sendVoiceMessage() {
         audioFile.delete();
         return;
     }
-    
-    LogManager.logI(TAG, "Voice message recorded: " + audioFile.getName() + 
-        ", duration: " + duration + "ms, size: " + audioFile.length() + " bytes");
-    
+
+    LogManager.logI(TAG, "Voice message recorded: " + audioFile.getName() +
+            ", duration: " + duration + "ms, size: " + audioFile.length() + " bytes");
+
     // Check if already sending (use compareAndSet to avoid race condition)
     if (!isSending.compareAndSet(false, true)) {
         Toast.makeText(requireContext(), "正在生成中，请稍候", Toast.LENGTH_SHORT).show();
         audioFile.delete();  // Clean up recorded file
         return;
     }
-    
+
     // Now we own the sending lock, update button state
     buttonSendStop.setText(getString(R.string.button_stop_with_icon));
     LogManager.logI(TAG, "[VOICE] Acquired sending lock and updated button to STOP");
-    
+
     // CRITICAL: Read all configuration at send moment (same as handleSendStopClick)
     // This ensures configuration snapshot is taken before any async operations
     String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
@@ -6544,9 +4658,9 @@ private void sendVoiceMessage() {
     String knowledgeBase = spinnerKnowledgeBase.getSelectedItem().toString();
     String systemPrompt = editTextSystemPrompt.getText().toString();
     String userPrompt = editTextUserPrompt.getText().toString().trim();
-    
+
     LogManager.logI(TAG, "[VOICE][PARAM] apiUrl=" + apiUrl + ", model=" + model + ", kb=" + knowledgeBase);
-    
+
     // CRITICAL: Prepare and save user input (move audio file, create message, save markdown)
     UserInput userInput = prepareAndSaveUserInput(userPrompt, audioFile);
     if (userInput == null) {
@@ -6558,285 +4672,11 @@ private void sendVoiceMessage() {
         LogManager.logE(TAG, "[VOICE] Restored state after prepare input failed");
         return;
     }
-    
+
     LogManager.logI(TAG, String.format("[VOICE] User input prepared: text=%s, audio=%d",
-        userInput.hasText() ? "yes" : "no", userInput.audioPaths.size()));
-    
-    // Trigger audio inference
-    // NOTE: isSending already set to true above with compareAndSet
-    // CRITICAL: Use cache WAV for ASR/Omni (M4A in userInput is only for MD/ChatUI)
-    File cacheWav = AudioService.getCacheWavFile(requireContext());
-    if (cacheWav.exists()) {
-        sendAudioToModel(cacheWav.getAbsolutePath(), userPrompt, userInput, 
-                        apiUrl, apiKey, model, knowledgeBase, systemPrompt);
-    } else {
-        LogManager.logE(TAG, "[VOICE] Cache WAV not found after recording");
-        Toast.makeText(requireContext(), "录音文件丢失", Toast.LENGTH_SHORT).show();
-        // Restore state on failure
-        isSending.set(false);
-        buttonSendStop.setText(getString(R.string.button_send));
-    }
-}
+            userInput.hasText() ? "yes" : "no", userInput.audioPaths.size()));
 
-/**
- * Send audio to model for inference
- * Note: User message with audioUri has already been created and added to chat
- * @param audioPath CRITICAL: Must be WAV file path (cache WAV for ASR/Omni), NOT M4A!
- * @param userInput User input structure containing M4A paths (for MD record) and images
- * @param apiUrl API URL (from configuration snapshot)
- * @param apiKey API Key (from configuration snapshot)
- * @param model Model name (from configuration snapshot)
- * @param knowledgeBase Knowledge base name (from configuration snapshot)
- * @param systemPrompt System prompt (from configuration snapshot)
- */
-private void sendAudioToModel(String audioPath, String textPrompt, UserInput userInput,
-                              String apiUrl, String apiKey, String model, 
-                              String knowledgeBase, String systemPrompt) {
-    // CRITICAL: All configuration passed as parameters (snapshot taken at send moment)
-    // Do NOT read from UI controls - configuration may have been modified by user
-    
-    // Only local models support audio for now
-    if (!AppConstants.ApiUrl.LOCAL.equals(apiUrl)) {
-        Toast.makeText(requireContext(), "音频推理目前仅支持本地模型", Toast.LENGTH_LONG).show();
-        // Remove the user message
-        chatMessages.remove(chatMessages.size() - 1);
-        chatAdapter.notifyItemRemoved(chatMessages.size());
-        return;
-    }
-    
-    // Create AI placeholder message (CRITICAL: needed for updateChatMessage to work)
-    ChatDataItem aiMessage = new ChatDataItem(ChatViewHolders.ASSISTANT);
-    aiMessage.setLoading(true);
-    chatMessages.add(aiMessage);
-    chatAdapter.notifyItemInserted(chatMessages.size() - 1);
-    // Immediately scroll to bottom when adding new message (no animation)
-    recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
-    userScrolledAway = false; // Reset flag for new message
-    LogManager.logD(TAG, "[AUDIO] Created AI placeholder message");
-    
-    // Get ASR model selection
-    String asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
-    
-    LogManager.logI(TAG, "[AUDIO] Sending audio to model: " + audioPath + ", selected model: " + model + ", ASR: " + asrModel);
-    
-    if (!"无".equals(asrModel)) {
-        // ASR enabled, convert audio to text
-        // CRITICAL: Pass userInput to preserve image information
-        convertAndSendAsText(audioPath, textPrompt, asrModel, apiUrl, apiKey, model, knowledgeBase, systemPrompt, userInput);
-    } else {
-        // ASR disabled, use <audio> tag (original flow)
-        updateChatMessage("[ASR] Disabled, sending audio tag to model\n");
-        sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
-    }
-}
-
-/**
- * Convert audio to text using ASR and send as text
- * @param userInput User input structure to preserve image information during ASR conversion
- */
-private void convertAndSendAsText(String audioPath, String textPrompt, String asrModel,
-                                   String apiUrl, String apiKey, String model, 
-                                   String knowledgeBase, String systemPrompt, UserInput userInput) {
-    // Submit ASR task
-    ragTaskFuture = ragQueryExecutor.submit(() -> {
-        try {
-            // ============================================
-            // ASR Section: Will be included in debug section opened by executeRagQuery
-            // ============================================
-            LogManager.logI(TAG, "[ASR] Starting ASR conversion task");
-            
-            // Prepare ASR info to be output in executeRagQuery
-            // Get image info from UserInput (adapter is already cleared)
-            String imageInfo = (userInput != null && userInput.hasImages()) 
-                ? userInput.imagePaths.size() + " image(s)" : "none";
-            String audioFileName = new File(audioPath).getName();
-            final String asrInfo = String.format("[ASR] Model: %s; Audio: %s; Image: %s\n", 
-                asrModel, audioFileName, imageInfo);
-            
-            // Load ASR model (lazy loading) - use AsrAdapter (independent of LLM)
-            com.example.offlineai.api.AsrAdapter asrAdapter = 
-                com.example.offlineai.api.AsrAdapter.getInstance(requireContext());
-            
-            if (!asrAdapter.isAsrLoaded() || !asrModel.equals(asrAdapter.getCurrentAsrModel())) {
-                LogManager.logI(TAG, "[ASR] Loading model: " + asrModel);
-                asrAdapter.loadAsrModel(asrModel);
-                LogManager.logI(TAG, "[ASR] Model loaded successfully: " + asrModel);
-            } else {
-                LogManager.logI(TAG, "[ASR] Using loaded model: " + asrModel);
-            }
-            
-            // Transcribe
-            LogManager.logI(TAG, "[ASR] Transcribing audio: " + audioPath);
-            String convertedText = asrAdapter.transcribeAudio(audioPath);
-            
-            // Normalize textPrompt (handle null/empty/whitespace)
-            String normalizedTextPrompt = (textPrompt == null) ? "" : textPrompt.trim();
-            
-            // Check if ASR result is empty - fallback to audio tag instead of error
-            if (convertedText.isEmpty() && normalizedTextPrompt.isEmpty()) {
-                LogManager.logW(TAG, "[ASR] ⚠️ ASR returned empty text, fallback to audio tag mode");
-                mainHandler.post(() -> {
-                    updateChatMessage("<debug>\n");
-                    updateChatMessage("[ASR] Model: " + asrModel + "\n");
-                    updateChatMessage("[ASR] ⚠️ No speech recognized, using audio tag mode\n");
-                    updateChatMessage("</debug>\n");
-                    sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
-                });
-                return; // Exit ASR task, let audio tag flow handle it
-            }
-            
-            // Wrap ASR converted text with [Audio] marker to help model understand it's from speech
-            // Format: [Audio]"converted text" or [Audio0]"text0" [Audio1]"text1" for multiple audios
-            String wrappedAsrText = String.format("[Audio]\"%s\"", convertedText);
-            
-            // Merge with user text
-            String finalText = wrappedAsrText;
-            if (!normalizedTextPrompt.isEmpty()) {
-                finalText = wrappedAsrText + "\n" + normalizedTextPrompt;
-            }
-            
-            LogManager.logI(TAG, "[ASR] Conversion successful, wrapped text length: " + finalText.length());
-            
-            // Prepare ASR result info
-            final String asrResult = String.format("[ASR] Converted text: \"%s\"%s\n", 
-                convertedText, 
-                textPrompt.isEmpty() ? "" : (" + user text: \"" + textPrompt + "\""));
-            
-            // NOTE: Media adapter already cleared by prepareAndSaveUserInput()
-            // Audio file already saved to chat folder, no need to remove from adapter
-            
-            // Continue with RAG flow (text-only)
-            // Pass ASR info to be output in debug section
-            // CRITICAL: Set skipAudioEmbedding=true to prevent re-embedding <audio> tag
-            // CRITICAL: Pass userInput to preserve image information
-            executeRagQueryWithAsr(apiUrl, apiKey, model, knowledgeBase, systemPrompt, finalText, 
-                                  asrInfo + asrResult, true, userInput);
-            
-        } catch (Exception e) {
-            LogManager.logE(TAG, "[ASR] Conversion failed", e);
-            
-            // Fallback to <audio> tag
-            mainHandler.post(() -> {
-                // Open debug section for error info
-                updateChatMessage("<debug>\n");
-                updateChatMessage("[ASR] Model: " + asrModel + "\n");
-                updateChatMessage("[ASR] ❌ Conversion failed: " + e.getMessage() + "\n");
-                updateChatMessage("[ASR] Fallback to audio tag mode\n");
-                updateChatMessage("</debug>\n");
-                sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
-            });
-        }
-    });
-}
-
-/**
- * Internal method for ASR conversion (called from executor, no need to submit again)
- * @param userInput User input structure to preserve image information during ASR conversion
- */
-private void convertAndSendAsTextInternal(String audioPath, String textPrompt, String asrModel,
-                                          String apiUrl, String apiKey, String model, 
-                                          String knowledgeBase, String systemPrompt, UserInput userInput) {
-    try {
-        // ============================================
-        // ASR Section: Will be included in debug section opened by executeRagQuery
-        // ============================================
-        LogManager.logI(TAG, "[ASR] Starting ASR conversion task");
-        
-        // Prepare ASR info to be output in executeRagQuery
-        // Get image info from UserInput (adapter is already cleared)
-        String imageInfo = (userInput != null && userInput.hasImages()) 
-            ? userInput.imagePaths.size() + " image(s)" : "none";
-        String audioFileName = new File(audioPath).getName();
-        final String asrInfo = String.format("[ASR] Model: %s; Audio: %s; Image: %s\n", 
-            asrModel, audioFileName, imageInfo);
-        
-        // Load ASR model (lazy loading) - use AsrAdapter (independent of LLM)
-        com.example.offlineai.api.AsrAdapter asrAdapter = 
-            com.example.offlineai.api.AsrAdapter.getInstance(requireContext());
-        
-        if (!asrAdapter.isAsrLoaded() || !asrModel.equals(asrAdapter.getCurrentAsrModel())) {
-            LogManager.logI(TAG, "[ASR] Loading model: " + asrModel);
-            asrAdapter.loadAsrModel(asrModel);
-            LogManager.logI(TAG, "[ASR] Model loaded successfully: " + asrModel);
-        } else {
-            LogManager.logI(TAG, "[ASR] Using loaded model: " + asrModel);
-        }
-        
-        // Transcribe
-        LogManager.logI(TAG, "[ASR] Transcribing audio: " + audioPath);
-        String convertedText = asrAdapter.transcribeAudio(audioPath);
-        
-        // Normalize textPrompt (handle null/empty/whitespace)
-        String normalizedTextPrompt = (textPrompt == null) ? "" : textPrompt.trim();
-        
-        // Check if ASR result is empty - fallback to audio tag instead of error
-        if (convertedText.isEmpty() && normalizedTextPrompt.isEmpty()) {
-            LogManager.logW(TAG, "[ASR] ⚠️ ASR returned empty text, fallback to audio tag mode");
-            mainHandler.post(() -> {
-                updateChatMessage("<debug>\n");
-                updateChatMessage("[ASR] Model: " + asrModel + "\n");
-                updateChatMessage("[ASR] ⚠️ No speech recognized, using audio tag mode\n");
-                updateChatMessage("</debug>\n");
-                sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
-            });
-            return; // Exit ASR task, let audio tag flow handle it
-        }
-        
-        // Wrap ASR converted text with [Audio] marker to help model understand it's from speech
-        // Format: [Audio]"converted text" or [Audio0]"text0" [Audio1]"text1" for multiple audios
-        String wrappedAsrText = String.format("[Audio]\"%s\"", convertedText);
-        
-        // Merge with user text
-        String finalText = wrappedAsrText;
-        if (!normalizedTextPrompt.isEmpty()) {
-            finalText = wrappedAsrText + "\n" + normalizedTextPrompt;
-        }
-        
-        LogManager.logI(TAG, "[ASR] Conversion successful, wrapped text length: " + finalText.length());
-        
-        // Prepare ASR result info
-        final String asrResult = String.format("[ASR] Converted text: \"%s\"%s\n", 
-            convertedText, 
-            normalizedTextPrompt.isEmpty() ? "" : (" + user text: \"" + normalizedTextPrompt + "\""));
-        
-        // NOTE: Media adapter already cleared by prepareAndSaveUserInput()
-        // Audio file already saved to chat folder, no need to remove from adapter
-        
-        // Continue with RAG flow (text-only)
-        // Pass ASR info to be output in debug section
-        // CRITICAL: Set skipAudioEmbedding=true to prevent re-embedding <audio> tag
-        // CRITICAL: Pass userInput to preserve image information
-        executeRagQueryWithAsr(apiUrl, apiKey, model, knowledgeBase, systemPrompt, finalText, 
-                              asrInfo + asrResult, true, userInput);
-        
-    } catch (Exception e) {
-        LogManager.logE(TAG, "[ASR] Conversion failed", e);
-        
-        // Fallback to <audio> tag
-        mainHandler.post(() -> {
-            // Open debug section for error info
-            updateChatMessage("<debug>\n");
-            updateChatMessage("[ASR] Model: " + asrModel + "\n");
-            updateChatMessage("[ASR] ❌ Conversion failed: " + e.getMessage() + "\n");
-            updateChatMessage("[ASR] Fallback to audio tag mode\n");
-            updateChatMessage("</debug>\n");
-            sendAudioToModelInternal(audioPath, textPrompt, apiUrl, apiKey, model, knowledgeBase, systemPrompt);
-        });
-    }
-}
-
-/**
- * Internal method to send audio after model is confirmed ready (ASR fallback)
- * @param audioPath CRITICAL: Must be WAV file path (cache WAV for Omni), NOT M4A!
- */
-private void sendAudioToModelInternal(String audioPath, String textPrompt, String apiUrl, String apiKey, String model, String knowledgeBase, String systemPrompt) {
-    LogManager.logI(TAG, "[AUDIO] Starting audio inference with model: " + model);
-    
-    // Set sending state
-    isSending.set(true);
-    updateButtonText(); // Update button text based on state machine
-    
-    // Create AI response placeholder
+    // Create AI message placeholder (same as text send path)
     ChatDataItem aiMsg = new ChatDataItem(ChatViewHolders.ASSISTANT);
     aiMsg.setLoading(true);
     chatMessages.add(aiMsg);
@@ -6844,35 +4684,54 @@ private void sendAudioToModelInternal(String audioPath, String textPrompt, Strin
     // Immediately scroll to bottom when adding new message (no animation)
     recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
     userScrolledAway = false; // Reset flag for new message
-    
-    // Create UserInput with audio path (unified approach)
-    java.util.List<String> audioPaths = new java.util.ArrayList<>();
-    audioPaths.add(audioPath);
-    UserInput audioUserInput = new UserInput(textPrompt, null, audioPaths, 0);
-    
-    LogManager.logI(TAG, "[AUDIO] Created UserInput with audio path: " + audioPath);
-    
-    // Submit RAG task (similar to handleSendStopClick flow)
-    LogManager.logI(TAG, "[AUDIO] Submitting audio RAG task to executor");
-    
-    ragTaskFuture = ragQueryExecutor.submit(() -> {
-        LogManager.logI(TAG, "[AUDIO] Audio RAG task started - thread=" + Thread.currentThread().getName());
-        
-        // Reset local LLM stop flag
-        if (AppConstants.ApiUrl.LOCAL.equals(apiUrl)) {
-            try {
-                com.example.offlineai.api.LocalLlmAdapter localAdapter = com.example.offlineai.api.LocalLlmAdapter.getInstance(requireContext());
-                localAdapter.resetStopFlag();
-                LogManager.logD(TAG, "[AUDIO] Reset local LLM stop flag");
-            } catch (Exception e) {
-                LogManager.logE(TAG, "[AUDIO] Error resetting local LLM stop flag", e);
-            }
+
+    // Build QueryRequest snapshot for manager (unified with text path)
+    int searchDepth = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
+    boolean graphRagEnabled = (checkBoxGraphRagMode != null && checkBoxGraphRagMode.isChecked());
+    boolean needsAsr = false;
+    String asrModel = null;
+    if (userInput.hasAudio()) {
+        asrModel = ConfigManager.getString(requireContext(), ConfigManager.KEY_ASR_MODEL, "无");
+        if (!"无".equals(asrModel)) {
+            needsAsr = true;
         }
-        
-        // Execute RAG query with UserInput (audio path will be handled by JNI)
-        executeRagQuery(apiUrl, apiKey, model, knowledgeBase, systemPrompt, textPrompt, audioUserInput);
-    });
+    }
+
+    if (ragQueryManager != null) {
+        RagQueryManager.QueryRequest request = new RagQueryManager.QueryRequest(
+                apiUrl,
+                apiKey,
+                model,
+                knowledgeBase,
+                systemPrompt,
+                userPrompt,
+                userInput.imagePaths,
+                userInput.audioPaths,
+                userInput.audioDuration,
+                searchDepth,
+                graphRagEnabled,
+                needsAsr,
+                asrModel
+        );
+        LogManager.logI(TAG, "[VOICE] Delegating audio query execution to RagQueryManager.startQuery");
+        ragQueryManager.startQuery(request);
+    } else {
+        // CRITICAL: ragQueryManager must always exist. If null, it's a bug.
+        LogManager.logE(TAG, "[VOICE] FATAL: ragQueryManager is null - this is a bug, manager-driven pipeline is required");
+        Toast.makeText(requireContext(), "Internal error: query manager not initialized", Toast.LENGTH_SHORT).show();
+        resetSendingState();
+    }
 }
+
+// ============================================
+// DEPRECATED: convertAndSendAsTextInternal and sendAudioToModelInternal
+// ============================================
+// These legacy ASR methods have been removed. All ASR processing is now
+// handled by RagQueryManager.runAsrAndContinue() which:
+// 1. Runs ASR conversion in the manager executor (UI-free)
+// 2. Calls back to Fragment via onStartQueryWithAsrResult()
+// 3. Continues to runFullRagPipelineFromAsrResult() for LLM call
+// ============================================
 
 /**
  * Prepare and save user input (CRITICAL: called at send button click/release)
@@ -7202,38 +5061,42 @@ private static class UserInput {
      * @return Filtered text suitable for TTS, or empty string if no valid text
      */
     private String filterTtsContent(String chunk) {
+        // Prefer manager implementation to keep business logic centralized
+        if (ragQueryManager != null) {
+            return ragQueryManager.filterTtsContent(chunk);
+        }
+
         if (chunk == null || chunk.isEmpty()) {
             return "";
         }
-        
+
         String filtered = chunk;
-        
+
         // 1. Filter debug tags and content (e.g., <debug>...</debug>)
         filtered = filtered.replaceAll("<debug>.*?</debug>", "");
         filtered = filtered.replaceAll("</?debug>", "");
-        
+
         // 2. Filter performance tags and content (e.g., <performance>...</performance>)
         // Use (?s) flag to enable DOTALL mode (. matches newlines)
         filtered = filtered.replaceAll("(?s)<performance>.*?</performance>", "");
         filtered = filtered.replaceAll("</?performance>", "");
-        
+
         // 3. Filter head markers
         filtered = filtered.replace("[TEXT:]", "");
-        
+
         // 4. Filter image tags and paths (e.g., [IMAGE:path/to/image.jpg])
         filtered = filtered.replaceAll("\\[IMAGE:[^\\]]*\\]", "");
-        
+
         // 5. Filter audio tags and paths (e.g., [AUDIO:path/to/audio.wav])
         filtered = filtered.replaceAll("\\[AUDIO:[^\\]]*\\]", "");
-        
+
         // 6. Filter ASR audio markers (e.g., [Audio]"text" or [Audio0]"text")
-        // CRITICAL: Remove [Audio] prefix but keep the quoted text content
-        filtered = filtered.replaceAll("\\[Audio\\d*\\]\"([^\"]+)\"", "$1");
+        // CRITICAL: Remove [Audio] prefix markers
         filtered = filtered.replaceAll("\\[Audio\\d*\\]", "");
-        
+
         return filtered;
     }
-    
+
     /**
      * Auto-play TTS generated audio
      * Uses direct MediaPlayer playback
@@ -7342,6 +5205,100 @@ private static class UserInput {
             }
         });
     }
+
+    /**
+     * Finalize after all audio compressions complete
+     * 1. After inference completes (no TTS)
+     * 2. After TTS generation completes (no auto-play)
+     * 3. After audio playback completes (with auto-play)
+     *
+     * Only when all compression tasks are done, update UI and save MD to avoid race conditions
+     */
+    private void checkCompressionCompleteAndFinalize() {
+        // If ASR is still running, do NOT reset state - wait for ASR to complete
+        // This prevents premature resetSendingState when user audio compression finishes before ASR
+        if (isAsrRunning.get()) {
+            LogManager.logD(TAG, "[STATE] ASR still running, skipping compression finalization");
+            return;
+        }
+        
+        // If any compression is still in progress, wait
+        if (isUserAudioCompressing.get() || isAiAudioCompressing.get()) {
+            return;
+        }
+
+        // All compressions done, update user message with M4A path if needed
+        if (pendingUserAudioM4aPath != null) {
+            // Find the last user message and update its audioUri
+            for (int i = chatMessages.size() - 1; i >= 0; i--) {
+                ChatDataItem item = chatMessages.get(i);
+                if (item.getType() == ChatViewHolders.USER) {
+                    // CRITICAL: Use Uri.fromFile() to create proper file:// URI with scheme
+                    item.audioUri = Uri.fromFile(new File(pendingUserAudioM4aPath));
+                    chatAdapter.notifyItemChanged(i);
+                    break;
+                }
+            }
+            pendingUserAudioM4aPath = null;
+        }
+
+        // AI audio M4A path is already updated in updateChatMessageWithAudio()
+        if (pendingAiAudioM4aPath != null) {
+            String aiM4aPath = pendingAiAudioM4aPath;
+            pendingAiAudioM4aPath = null;
+
+            // Persist Omni TTS audio by attaching an audio markdown line into the
+            // last assistant message so that audio is available even if the UI
+            // Fragment has been destroyed.
+            try {
+                Context ctx = getContext() != null ? getContext().getApplicationContext() : null;
+                if (ctx != null) {
+                    File audioFile = new File(aiM4aPath);
+                    if (audioFile.exists()) {
+                        String folderPath = audioFile.getParent();
+                        if (folderPath != null && !folderPath.isEmpty()) {
+                            float durationSeconds = AudioService.getAudioDuration(aiM4aPath);
+                            ChatHistoryManager.attachAssistantAudioToLastMessage(
+                                    ctx,
+                                    folderPath,
+                                    aiM4aPath,
+                                    durationSeconds
+                            );
+                            LogManager.logI(TAG, "[TTS][HISTORY] Omni AI audio attached to last assistant message in markdown: " + audioFile.getName());
+                        } else {
+                            LogManager.logW(TAG, "[TTS][HISTORY] Invalid folderPath for Omni AI audio: " + aiM4aPath);
+                        }
+                    } else {
+                        LogManager.logW(TAG, "[TTS][HISTORY] Omni AI audio file does not exist: " + aiM4aPath);
+                    }
+                } else {
+                    LogManager.logW(TAG, "[TTS][HISTORY] Context is null, skip attaching Omni AI audio to markdown");
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TTS][HISTORY] Failed to attach Omni AI audio to markdown: " + e.getMessage(), e);
+            }
+        }
+
+        LogManager.logI(TAG, "[TTS] Audio compression complete, UI updated");
+
+        // Reset TTS state (only if TTS was generating - this is for AI audio compression)
+        if (isTtsGenerating.get()) {
+            isTtsGenerating.set(false);
+            updateButtonText();
+            LogManager.logI(TAG, "[TTS] TTS state reset, button updated");
+
+            // Only reset sending state after TTS audio compression (not user audio compression)
+            // User audio compression finishing should NOT trigger resetSendingState
+            if (isSending.get() || isTaskRunning) {
+                LogManager.logI(TAG, "[STATE] TTS audio compression done, resetting sending state");
+                resetSendingState();
+            }
+        } else {
+            // User audio compression done, but NOT TTS - do NOT reset sending state
+            // LLM/ASR may still be running
+            LogManager.logD(TAG, "[STATE] User audio compression done, NOT resetting state (no TTS)");
+        }
+    }
     
     /**
      * Update chat message with audio file path
@@ -7385,15 +5342,10 @@ private static class UserInput {
                 LogManager.logW(TAG, "[TTS] No messages to update");
             }
             
-            // Save chat history with audio
-            saveChatHistory();
-            LogManager.logI(TAG, "[TTS] Chat history saved with audio");
-            
-            // Reset TTS state
-            isTtsGenerating.set(false);
-            updateButtonText();
-            LogManager.logI(TAG, "[TTS] TTS state reset, button updated");
-            
+            // NOTE: For external TTS, TtsAdapter persists audio via appendAssistantAudioMessage.
+            // For Omni TTS, markdown persistence is handled in checkCompressionCompleteAndFinalize().
+            LogManager.logI(TAG, "[TTS] Audio attached to UI");
+
         } catch (Exception e) {
             LogManager.logE(TAG, "[TTS] Error updating chat message with audio", e);
         }
@@ -7404,9 +5356,20 @@ private static class UserInput {
         super.onDestroyView();
         
         // Release TtsAdapter
-        if (ttsAdapter != null) {
+        if (ttsAdapter != null && !ttsAdapter.isEnabled()) {
             ttsAdapter.release();
             LogManager.logI(TAG, "[TTS] TtsAdapter released");
+        }
+        // Unregister inference status listener
+        if (inferenceStatusListener != null) {
+            try {
+                InferenceClient client = InferenceClient.getInstance(requireContext().getApplicationContext());
+                client.removeStatusListener(inferenceStatusListener);
+                LogManager.logI(TAG, "[STATUS] InferenceClient StatusListener unregistered in RagQaFragment");
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[STATUS] Failed to unregister InferenceClient StatusListener: " + e.getMessage(), e);
+            }
+            inferenceStatusListener = null;
         }
         if (graphNerHandler != null) {
             graphNerHandler.release();
@@ -7429,63 +5392,116 @@ private static class UserInput {
             audioCompressionExecutor.shutdown();
             LogManager.logI(TAG, "[ASYNC_COMPRESS] Audio compression executor shutdown");
         }
+
+        // NOTE: Do NOT call ragQueryManager.shutdown() here!
+        // RagQueryManager is a singleton and its executor should survive Fragment lifecycle.
+        // Calling shutdown() here would terminate the executor, causing RejectedExecutionException
+        // when user re-enters the Fragment and tries to submit a new query.
     }
     
-    /**
-     * Unified checkpoint: Check if all audio compression tasks are complete
-     * Called at key moments:
-     * 1. After inference completes (no TTS)
-     * 2. After TTS generation completes (no auto-play)
-     * 3. After audio playback completes (with auto-play)
-     * 
-     * Only when all compression tasks are done, update UI and save MD to avoid race conditions
-     */
-    private void checkCompressionCompleteAndFinalize() {
-        // If any compression is still in progress, wait
-        if (isUserAudioCompressing.get() || isAiAudioCompressing.get()) {
+    private boolean isDebugSectionOpen() {
+        if (chatMessages == null || chatMessages.isEmpty()) {
+            return false;
+        }
+        ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
+        if (lastMsg == null || lastMsg.getType() != ChatViewHolders.ASSISTANT) {
+            return false;
+        }
+        String text = lastMsg.text;
+        if (text == null || text.isEmpty()) {
+            return false;
+        }
+        int openIdx = text.lastIndexOf("<debug>");
+        int closeIdx = text.lastIndexOf("</debug>");
+        return openIdx >= 0 && openIdx > closeIdx;
+    }
+    
+    private boolean shouldAppendStatusDebugToUi() {
+        if (!isSending.get() && !isTaskRunning) {
+            return false;
+        }
+        return isDebugSectionOpen();
+    }
+    
+    private void handleInferenceModelStateChanged(String component, String modelPath, String state, boolean busy, int threads) {
+        if (getActivity() == null || !isAdded() || isDetached()) {
             return;
         }
         
-        // All compressions done, update user message with M4A path if needed
-        if (pendingUserAudioM4aPath != null) {
-            // Find the last user message and update its audioUri
-            for (int i = chatMessages.size() - 1; i >= 0; i--) {
-                ChatDataItem item = chatMessages.get(i);
-                if (item.getType() == ChatViewHolders.USER) {
-                    // CRITICAL: Use Uri.fromFile() to create proper file:// URI with scheme
-                    item.audioUri = Uri.fromFile(new File(pendingUserAudioM4aPath));
-                    chatAdapter.notifyItemChanged(i);
-                    break;
+        mainHandler.post(() -> {
+            // Handle service disconnect/error to reset UI state
+            if ("SERVICE".equalsIgnoreCase(component)) {
+                if ("DISCONNECTED".equalsIgnoreCase(state) || "ERROR".equalsIgnoreCase(state)) {
+                    updateChatMessage("本地推理服务已中断或出错，已重置发送状态，请稍后重试。\n");
+                    resetSendingState();
                 }
+                return;
             }
-            pendingUserAudioM4aPath = null;
+
+            boolean shouldAppend = shouldAppendStatusDebugToUi();
+
+            // Always track READY model path for reuse detection, even if we do not append to UI
+            if ("READY".equalsIgnoreCase(state) && modelPath != null && !modelPath.isEmpty()) {
+                lastReadyModelPathByComponent.put(component, modelPath);
+            }
+
+            if (!shouldAppend) {
+                return;
+            }
+
+            // Do not show LLM STATUS lines in chat UI, rely on [LLM] logs instead
+            if ("LLM".equalsIgnoreCase(component)) {
+                return;
+            }
+
+            if ("EMBEDDING".equalsIgnoreCase(component) || "RERANKER".equalsIgnoreCase(component)) {
+                // Only show RUNNING state for EMBEDDING / RERANKER, without model path or reuse line
+                if ("RUNNING".equalsIgnoreCase(state)) {
+                    StringBuilder builder = new StringBuilder();
+                    builder.append("[STATUS][").append(component).append("] state=").append(state)
+                            .append(", busy=").append(busy)
+                            .append(", threads=").append(threads)
+                            .append("\n");
+                    updateChatMessage(builder.toString());
+                }
+            } else {
+                // Generic STATUS output for other components (if any)
+                StringBuilder builder = new StringBuilder();
+                builder.append("[STATUS][").append(component).append("] state=").append(state)
+                        .append(", busy=").append(busy)
+                        .append(", threads=").append(threads);
+                if (modelPath != null && !modelPath.isEmpty()) {
+                    builder.append("\nModel: ").append(modelPath);
+                }
+                builder.append("\n");
+                updateChatMessage(builder.toString());
+            }
+        });
+    }
+    
+    private void handleInferenceRerankProgress(String taskId, int current, int total) {
+        if (getActivity() == null || !isAdded() || isDetached()) {
+            return;
         }
         
-        // AI audio M4A path is already updated in updateChatMessageWithAudio()
-        String aiAudioPathForAutoPlay = null;
-        if (pendingAiAudioM4aPath != null) {
-            aiAudioPathForAutoPlay = pendingAiAudioM4aPath;  // Save for auto-play before clearing
-            pendingAiAudioM4aPath = null;
-        }
-        
-        // Save chat history (final step)
-        saveChatHistory();
-        LogManager.logI(TAG, "[COMPRESSION_CHECK] Finalized: chat saved, state reset");
-        
-        // Reset sending state (CRITICAL: must reset after all done)
-        isSending.set(false);
-        updateButtonText();
-        
-        // TODO: Add auto-play feature if needed
-        // if (aiAudioPathForAutoPlay != null) {
-        //     mainHandler.postDelayed(() -> playAudioDirect(aiAudioPathForAutoPlay), 300);
-        // }
+        mainHandler.post(() -> {
+            if (!shouldAppendStatusDebugToUi()) {
+                return;
+            }
+            if (current <= 1) {
+                updateChatMessage("[RERANK] Progress ");
+            }
+            updateChatMessage(".");
+            if (total > 0 && current >= total) {
+                updateChatMessage("\n");
+            }
+        });
     }
     
     @SuppressWarnings("deprecation")
     private void vibrateWithLegacyApi() {
-        android.os.Vibrator vibrator = (android.os.Vibrator) 
-            requireContext().getSystemService(Context.VIBRATOR_SERVICE);
+        android.os.Vibrator vibrator = (android.os.Vibrator)
+                requireContext().getSystemService(Context.VIBRATOR_SERVICE);
         if (vibrator != null) {
             vibrator.vibrate(200);
             LogManager.logD(TAG, "[VOICE] Vibrated (legacy API)");
@@ -7493,5 +5509,7 @@ private static class UserInput {
             LogManager.logW(TAG, "[VOICE] Vibrator service is null");
         }
     }
-
 }  // End of RagQaFragment class
+
+
+

@@ -1272,37 +1272,55 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
         private String modeldir;
         private String rerankerdir;
         private int embeddingDimension = 768;
-        
+        private int hubThreshold;
+        private String runtimeHubEntities;
+
         public DatabaseMetadata(String embeddingModel) {
             this.embeddingModel = embeddingModel;
         }
-        
+
         public String getEmbeddingModel() {
             return embeddingModel;
         }
-        
+
         public String getModeldir() {
             return modeldir;
         }
-        
+
         public void setModeldir(String modeldir) {
             this.modeldir = modeldir;
         }
-        
+
         public String getRerankerdir() {
             return rerankerdir;
         }
-        
+
         public void setRerankerdir(String rerankerdir) {
             this.rerankerdir = rerankerdir;
         }
-        
+
         public int getEmbeddingDimension() {
             return embeddingDimension;
         }
-        
+
         public void setEmbeddingDimension(int dimension) {
             this.embeddingDimension = dimension;
+        }
+
+        public int getHubThreshold() {
+            return hubThreshold;
+        }
+
+        public void setHubThreshold(int hubThreshold) {
+            this.hubThreshold = hubThreshold;
+        }
+
+        public String getRuntimeHubEntities() {
+            return runtimeHubEntities;
+        }
+
+        public void setRuntimeHubEntities(String runtimeHubEntities) {
+            this.runtimeHubEntities = runtimeHubEntities;
         }
     }
     
@@ -1341,6 +1359,16 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
                         } catch (NumberFormatException e) {
                             LogManager.logW(TAG, "Invalid embedding_dimension: " + value);
                         }
+                        break;
+                    case "hub_threshold":
+                        try {
+                            metadata.setHubThreshold(Integer.parseInt(value));
+                        } catch (NumberFormatException e) {
+                            LogManager.logW(TAG, "Invalid hub_threshold: " + value);
+                        }
+                        break;
+                    case "runtime_hub_entities":
+                        metadata.setRuntimeHubEntities(value);
                         break;
                 }
             }
@@ -1401,6 +1429,25 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
             values.put("value", String.valueOf(metadata.getEmbeddingDimension()));
             db.insertWithOnConflict(TABLE_METADATA, null, values, 
                 SQLiteDatabase.CONFLICT_REPLACE);
+
+            // Update hub_threshold
+            if (metadata.getHubThreshold() > 0) {
+                ContentValues valuesHub = new ContentValues();
+                valuesHub.put("key", "hub_threshold");
+                valuesHub.put("value", String.valueOf(metadata.getHubThreshold()));
+                db.insertWithOnConflict(TABLE_METADATA, null, valuesHub,
+                    SQLiteDatabase.CONFLICT_REPLACE);
+            }
+
+            // Update runtime_hub_entities
+            if (metadata.getRuntimeHubEntities() != null &&
+                    !metadata.getRuntimeHubEntities().isEmpty()) {
+                ContentValues valuesRuntime = new ContentValues();
+                valuesRuntime.put("key", "runtime_hub_entities");
+                valuesRuntime.put("value", metadata.getRuntimeHubEntities());
+                db.insertWithOnConflict(TABLE_METADATA, null, valuesRuntime,
+                    SQLiteDatabase.CONFLICT_REPLACE);
+            }
             
             db.setTransactionSuccessful();
             LogManager.logD(TAG, "Metadata updated successfully");

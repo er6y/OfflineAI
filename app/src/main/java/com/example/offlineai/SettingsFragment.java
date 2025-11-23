@@ -8,7 +8,7 @@ import android.os.Bundle;
 import android.os.Environment;
 import android.util.Log;
 import com.example.offlineai.LogManager;
-import com.example.offlineai.api.LocalLlmHandler;
+import com.example.offlineai.ipc.LocalLlmHandler;
 import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuInflater;
@@ -157,6 +157,10 @@ public class SettingsFragment extends Fragment {
     private LinearLayout layoutTtsPitch;
     private SeekBar seekBarTtsPitch;
     private TextView textViewTtsPitchValue;
+    
+    // Flags to avoid writing config during initial spinner binding
+    private boolean isAsrSpinnerInitialized = false;
+    private boolean isTtsSpinnerInitialized = false;
     
     // Activity Result Launchers
     private ActivityResultLauncher<Intent> dataRootPathLauncher;
@@ -476,6 +480,13 @@ public class SettingsFragment extends Fragment {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 String model = parent.getItemAtPosition(position).toString();
+                if (!isAsrSpinnerInitialized) {
+                    // First selection is from initial binding, do not persist
+                    isAsrSpinnerInitialized = true;
+                    LogManager.logD(TAG, "[SETTINGS] ASR spinner initial selection: " + model);
+                    return;
+                }
+                LogManager.logD(TAG, "[SETTINGS] ASR model changed by user: " + model);
                 // Note: ASR model uses setString directly as it's a simple string value
                 ConfigManager.setString(requireContext(), ConfigManager.KEY_ASR_MODEL, model);
             }
@@ -488,6 +499,14 @@ public class SettingsFragment extends Fragment {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 String model = parent.getItemAtPosition(position).toString();
+                if (!isTtsSpinnerInitialized) {
+                    // First selection is from initial binding, do not persist
+                    isTtsSpinnerInitialized = true;
+                    LogManager.logD(TAG, "[SETTINGS] TTS spinner initial selection: " + model);
+                    updateTtsSettingsVisibility(model);
+                    return;
+                }
+                LogManager.logD(TAG, "[SETTINGS] TTS model changed by user: " + model);
                 // Note: TTS model uses setString directly as it's a simple string value
                 ConfigManager.setString(requireContext(), ConfigManager.KEY_TTS_MODEL, model);
                 // Update TTS settings visibility based on selected model

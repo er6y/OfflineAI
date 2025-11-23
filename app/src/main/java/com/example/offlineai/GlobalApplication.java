@@ -19,36 +19,51 @@ public class GlobalApplication extends Application {
     public void onCreate() {
         super.onCreate();
         appContext = getApplicationContext();
-        
-        // 初始化语言设置
+
+        long startMs = System.currentTimeMillis();
+        String processName = getCurrentProcessName();
+        Log.i(TAG, "[STARTUP_TRACE] GlobalApplication.onCreate start, process=" + processName + ", timeMs=" + startMs);
+
+        long stepStart = System.currentTimeMillis();
         initLanguageSettings();
-        
-        // 初始化内存监控
+        Log.i(TAG, "[STARTUP_TRACE] initLanguageSettings finished, costMs=" + (System.currentTimeMillis() - stepStart));
+
+        stepStart = System.currentTimeMillis();
         initMemoryMonitoring();
-        
+        Log.i(TAG, "[STARTUP_TRACE] initMemoryMonitoring finished, costMs=" + (System.currentTimeMillis() - stepStart));
+
         // CRITICAL: Initialize MNN logger AFTER LogManager is ready
         // This redirects MNN_PRINT/MNN_ERROR to LogManager for file logging
+        stepStart = System.currentTimeMillis();
         try {
             com.offlineai.mnn.MnnInference.initMnnLogger();
             Log.i(TAG, "✅ MNN logger initialized - MNN logs will be saved to file");
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize MNN logger: " + e.getMessage());
         }
-        
+        Log.i(TAG, "[STARTUP_TRACE] initMnnLogger finished, costMs=" + (System.currentTimeMillis() - stepStart));
+
         // CRITICAL: Register custom CPU operators (e.g., CPUGroupNorm for Diffusion)
         // Must be called AFTER MNN library is loaded but BEFORE any model loading
         Log.i(TAG, "🔧 About to register CPUGroupNorm...");
+        stepStart = System.currentTimeMillis();
         try {
             com.offlineai.mnn.MnnInference.registerCPUGroupNorm();
             Log.i(TAG, "✅ Custom CPU operators registered (CPUGroupNorm for Diffusion)");
         } catch (UnsatisfiedLinkError e) {
-            Log.e(TAG, "❌ JNI method not found: " + e.getMessage(), e);
+            Log.e(TAG, "❌ JNI method not found: " + e.getMessage());
         } catch (Exception e) {
-            Log.e(TAG, "❌ Failed to register custom CPU operators: " + e.getMessage(), e);
+            Log.e(TAG, "❌ Failed to register custom CPU operators: " + e.getMessage());
         }
-        
+        Log.i(TAG, "[STARTUP_TRACE] registerCPUGroupNorm finished, costMs=" + (System.currentTimeMillis() - stepStart));
+
         // Initialize example dictionary
+        stepStart = System.currentTimeMillis();
         initializeExampleDictionary();
+        Log.i(TAG, "[STARTUP_TRACE] initializeExampleDictionary finished, costMs=" + (System.currentTimeMillis() - stepStart));
+
+        long totalCost = System.currentTimeMillis() - startMs;
+        Log.i(TAG, "[STARTUP_TRACE] GlobalApplication.onCreate end, process=" + processName + ", totalCostMs=" + totalCost);
     }
     
     /**
@@ -251,6 +266,29 @@ public class GlobalApplication extends Application {
     public static long getJVMMaxMemoryMB() {
         Runtime runtime = Runtime.getRuntime();
         return runtime.maxMemory() / (1024 * 1024);
+    }
+
+    private static String getCurrentProcessName() {
+        if (appContext == null) {
+            return null;
+        }
+        try {
+            int pid = android.os.Process.myPid();
+            ActivityManager activityManager = (ActivityManager) appContext.getSystemService(Context.ACTIVITY_SERVICE);
+            if (activityManager != null) {
+                java.util.List<ActivityManager.RunningAppProcessInfo> processes = activityManager.getRunningAppProcesses();
+                if (processes != null) {
+                    for (ActivityManager.RunningAppProcessInfo info : processes) {
+                        if (info.pid == pid) {
+                            return info.processName;
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "getCurrentProcessName failed: " + e.getMessage(), e);
+        }
+        return null;
     }
 }
 

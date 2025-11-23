@@ -112,6 +112,7 @@ namespace = 'com.example.offlineai'
     buildFeatures {
         viewBinding = true // Enable View Binding for easier UI access
         buildConfig = true // Enable BuildConfig for custom fields
+        aidl true // Enable AIDL compilation for IPC interfaces (IInferenceService, ILlmCallback, etc.)
     }
     
     lint {

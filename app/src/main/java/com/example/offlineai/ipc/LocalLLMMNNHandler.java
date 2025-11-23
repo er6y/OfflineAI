@@ -1,4 +1,4 @@
-package com.example.offlineai.api;
+package com.example.offlineai.ipc;
 
 import android.content.Context;
 import android.util.Log;
@@ -9,6 +9,12 @@ import com.example.offlineai.ConfigManager;
 import com.example.offlineai.LogManager;
 import com.example.offlineai.R;
 import com.example.offlineai.SettingsFragment;
+import com.example.offlineai.RuntimeConfigHolder;
+import com.example.offlineai.ipc.RuntimeConfig;
+import com.example.offlineai.BackgroundTask;
+import com.example.offlineai.BackgroundTaskManager;
+import com.example.offlineai.TaskLogBuffer;
+import com.example.offlineai.UnifiedForegroundService;
 import com.example.offlineai.chat.model.ChatDataItem;
 import com.offlineai.mnn.MnnInference;
 import com.taobao.meta.avatar.tts.TtsService;
@@ -105,6 +111,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private LocalLlmHandler.InferenceParams currentParams;
     private LocalLlmHandler.InferenceParams modelFileParams; // Parameters from model config.json
     private String currentModelPath;
+
+    // Diffusion session config tracking (for backend/memory change detection)
+    private String lastDiffusionBackend = null;
+    private int lastDiffusionMemoryMode = -1;
     
     // TTS (Text-to-Speech) support - Omni Native TTS only
     private boolean hasTtsSupport = false;  // Native Omni TTS (talker.mnn)
@@ -296,8 +306,8 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             throw new Exception("Required Diffusion model files not found");
         }
         
-        // Get user-selected backend
-        String backendPreference = SettingsFragment.getBackendPreference(context);
+        // Get user-selected backend from RuntimeConfig (fallback to CPU)
+        String backendPreference = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
         int backendType = mapBackendToMnnForwardType(backendPreference);
         
         LogManager.logI(TAG, "[Diffusion] Creating session with backend: " + backendPreference + " (type=" + backendType + ")");
@@ -307,9 +317,28 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             LogManager.logW(TAG, "[Diffusion] ⚠️ FIRST-TIME GPU LOAD: May take 5-15 minutes to compile kernels!");
         }
         
-        // Get memory mode from config
-        int memoryMode = ConfigManager.getDiffusionMemoryMode(context);
-        LogManager.logI(TAG, "Using memory mode: " + memoryMode + " (" + ConfigManager.getDiffusionMemoryModeString(context) + ")");
+        // Get memory mode from RuntimeConfig snapshot
+        int memoryMode = RuntimeConfigHolder.getDiffusionMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_MEMORY_MODE);
+        String memoryModeStr;
+        switch (memoryMode) {
+            case 0:
+                memoryModeStr = "low";
+                break;
+            case 1:
+                memoryModeStr = "enough";
+                break;
+            case 2:
+                memoryModeStr = "balance";
+                break;
+            default:
+                memoryModeStr = "unknown";
+                break;
+        }
+        LogManager.logI(TAG, "Using memory mode: " + memoryMode + " (" + memoryModeStr + ")");
+
+        // Save current diffusion config snapshot for change detection
+        lastDiffusionBackend = backendPreference;
+        lastDiffusionMemoryMode = memoryMode;
         
         // ========== 创建 App-Specific 后端专用缓存目录 ==========
         // 使用 app-specific 目录避免权限问题，格式:
@@ -596,14 +625,14 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         }
         
         try {
-            // Get history rounds from config
-            int historyRounds = ConfigManager.getInt(context, ConfigManager.KEY_HISTORY_ROUNDS, 5);
+            // Get history rounds and chat folder from RuntimeConfig snapshot
+            int historyRounds = RuntimeConfigHolder.getHistoryRoundsOrDefault(ConfigManager.DEFAULT_HISTORY_ROUNDS);
             LogManager.logI(TAG, "[HISTORY] Starting inference with " + historyRounds + " rounds of history");
             
             // Load current chat history from markdown
-            String chatFolder = ConfigManager.getString(context, ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            String chatFolder = RuntimeConfigHolder.getCurrentChatFolderOrNull();
             List<ChatDataItem> allMessages = new ArrayList<>();
-            if (!chatFolder.isEmpty()) {
+            if (chatFolder != null && !chatFolder.isEmpty()) {
                 allMessages = ChatHistoryManager.loadConversation(context, chatFolder);
                 if (allMessages == null) {
                     allMessages = new ArrayList<>();
@@ -611,12 +640,13 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             }
             LogManager.logI(TAG, "[HISTORY] Loaded " + allMessages.size() + " messages from markdown");
             
-            // Get system prompt from config or params
+            // Get system prompt from params or RuntimeConfig
             String systemPrompt = "";
             if (params != null && params.systemPrompt != null && !params.systemPrompt.isEmpty()) {
                 systemPrompt = params.systemPrompt;
             } else {
-                systemPrompt = ConfigManager.getString(context, ConfigManager.KEY_SYSTEM_PROMPT, "");
+                RuntimeConfig cfg = RuntimeConfigHolder.get();
+                systemPrompt = (cfg != null && cfg.systemPrompt != null) ? cfg.systemPrompt : "";
             }
             
             // Build filtered history using ChatHistoryFilter (removes <img>/<audio> from history)
@@ -848,8 +878,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             if (hasTtsSupport) {
                 // Scenario 2: Omni + Native → Enable native TTS
                 try {
-                    String chatFolderPath = ConfigManager.getString(context, 
-                        ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                    String chatFolderPath = RuntimeConfigHolder.getCurrentChatFolderOrNull();
                     
                     if (chatFolderPath != null && !chatFolderPath.isEmpty()) {
                         File chatFolder = new File(chatFolderPath);
@@ -881,7 +910,8 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // ========== Configure thinking mode (Qwen3 support) ==========
         // Reference: MNN iOS app LLMInferenceEngineWrapper.mm Line 637-643
         // Qwen3 defaults to enable_thinking=true, must explicitly disable if needed
-        boolean thinkingEnabled = !ConfigManager.getNoThinking(context);
+        RuntimeConfig cfgForThinking = RuntimeConfigHolder.get();
+        boolean thinkingEnabled = !(cfgForThinking != null && cfgForThinking.noThinking);
         try {
             String thinkingConfig = String.format(
                 "{\"jinja\":{\"context\":{\"enable_thinking\":%s}}}",
@@ -897,7 +927,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // ========== Configure max_new_tokens (runtime parameter) ==========
         // CRITICAL: C++ layer reads max_new_tokens from config_json_ at inference time
         // Must set this via updateConfig() to override the default 2048
-        int maxNewTokens = ConfigManager.getMaxNewTokens(context);
+        int maxNewTokens = RuntimeConfigHolder.getMaxNewTokensOrDefault(ConfigManager.DEFAULT_MAX_NEW_TOKENS);
         try {
             String maxTokensConfig = String.format("{\"max_new_tokens\":%d}", maxNewTokens);
             MnnInference.updateConfig(llmSessionHandle, maxTokensConfig);
@@ -989,10 +1019,17 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                             // TTS processing removed - now handled by TtsAdapter in RagQaFragment
                             // Mark inference complete and send performance stats
                             isGenerating.set(false);
+                            String perfStats = getPerformanceStats();
+                            
+                            // Build full response: text + performance
+                            // Note: Debug info is accumulated and saved by RagQueryManager in main process
+                            // LocalLLMMNNHandler runs in InferenceService process and cannot access
+                            // main process TaskLogBuffer, so we don't try to get debug info here
+                            String fullResponse = fullResponseBuilder.toString() + perfStats;
+                            
                             if (callback != null) {
-                                String perfStats = getPerformanceStats();
                                 callback.onToken(perfStats);
-                                callback.onComplete(fullResponseBuilder.toString() + perfStats);
+                                callback.onComplete(fullResponse);
                             }
                         }
                         
@@ -1134,25 +1171,26 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     /**
-     * Build MNN configuration JSON from ConfigManager settings and InferenceParams
-     * Priority: User params (runtime) > ConfigManager settings > Model config.json
+     * Build MNN configuration JSON from RuntimeConfig settings and InferenceParams
+     * Priority: User params (runtime) > RuntimeConfig settings > Model config.json
      * @param params Inference parameters (optional, uses defaults if null)
      * @return JSON configuration string
      */
     private String buildMnnConfig(LocalLlmHandler.InferenceParams params) {
-        // Get configuration from ConfigManager
-        int maxSeqLength = ConfigManager.getMaxSequenceLength(context);
-        int threads = ConfigManager.getThreads(context);
-        int maxNewTokens = ConfigManager.getMaxNewTokens(context);
-        String backendPreference = SettingsFragment.getBackendPreference(context);
-        
+        // Get configuration from RuntimeConfig snapshot
+        RuntimeConfig cfg = RuntimeConfigHolder.get();
+        int maxSeqLength = RuntimeConfigHolder.getMaxSequenceLengthOrDefault(ConfigManager.DEFAULT_MAX_SEQUENCE_LENGTH);
+        int threads = RuntimeConfigHolder.getThreadsOrDefault(ConfigManager.DEFAULT_THREADS);
+        int maxNewTokens = RuntimeConfigHolder.getMaxNewTokensOrDefault(ConfigManager.DEFAULT_MAX_NEW_TOKENS);
+        String backendPreference = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
+
         // Map backend preference to MNN backend type
         String mnnBackend = mapBackendToMnn(backendPreference);
-        
+
         // Log the actual backend being used
-        LogManager.logI(TAG, String.format("🔍 Backend resolution: requested=%s, resolved=%s", 
-            backendPreference, mnnBackend));
-        
+        LogManager.logI(TAG, String.format("🔍 Backend resolution: requested=%s, resolved=%s",
+                backendPreference, mnnBackend));
+
         // CRITICAL: Do NOT set chunk size (keep default 0 = no chunking)
         // Reason: Setting chunk > 0 causes vision_pad tokens to be split across chunks,
         // which triggers multiple embedding() calls. After first embedding(), MNN clears
@@ -1160,63 +1198,53 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // ChatMNN also uses default (no chunk) to avoid this issue.
         // Reference: libs/mnn/transformers/llm/engine/src/llm.cpp Line 708
         final int CHUNK_SIZE = 0;  // 0 = no chunking (MNN default behavior)
-        
+
         // KV Cache size limit calculation
         // -1 = unlimited (recommended for best performance)
-        // Or set to bytes: e.g., 10 * 1024 * 1024 = 10MB per layer
-        // Formula: kv_heads × max_tokens × head_dim × bytes_per_element × 2 (key+value)
-        // Example for 2048 tokens: ~4MB per layer (quantized)
         final int KV_CACHE_LIMIT_MB = -1;  // -1 for unlimited, or set MB limit per layer
         int kvcacheLimitBytes = (KV_CACHE_LIMIT_MB == -1) ? -1 : KV_CACHE_LIMIT_MB * 1024 * 1024;
-        
+
         // Auto-detect audio support (Qwen2.5-Omni, etc.)
         File audioModel = new File(currentModelPath, "audio.mnn");
         boolean hasAudioSupport = audioModel.exists();
         if (hasAudioSupport) {
             LogManager.logI(TAG, "AUTO-DETECTED: audio.mnn found, enabling audio support (Omni model)");
         }
-        
+
         // Build configuration using MnnInference.ConfigBuilder
         MnnInference.ConfigBuilder builder = new MnnInference.ConfigBuilder()
-            .backendType(mnnBackend)
-            .threadNum(threads)
-            .precision("low")  // Use FP16 for better performance
-            .memory("low")     // Hardcoded: runtime dequantization to save memory (4B model)
-            .power("high")     // Hardcoded: use big cores for performance
-            .maxAllTokens(maxSeqLength)  // CRITICAL: Total context window (input + output)
-            .maxNewTokens(maxNewTokens)  // Single response generation limit
-            // .chunk() NOT called - use MNN default (0 = no chunking) to avoid vision_pad split
-            .kvcacheLimit(kvcacheLimitBytes)   // CRITICAL: -1 = unlimited, or bytes limit per layer
-            .reuseKv(false)    // CRITICAL: Disable KV cache reuse (like ChatMNN)
-            //.useMmap(true)     // Use mmap for model weights, bug here, android do not open
-            .kvcacheMmap(false); // CRITICAL: Disable KV cache mmap to avoid /tmp crash on Android
-        
+                .backendType(mnnBackend)
+                .threadNum(threads)
+                .precision("low")  // Use FP16 for better performance
+                .memory("low")     // Hardcoded: runtime dequantization to save memory (4B model)
+                .power("high")     // Hardcoded: use big cores for performance
+                .maxAllTokens(maxSeqLength)  // CRITICAL: Total context window (input + output)
+                .maxNewTokens(maxNewTokens)  // Single response generation limit
+                // .chunk() NOT called - use MNN default (0 = no chunking) to avoid vision_pad split
+                .kvcacheLimit(kvcacheLimitBytes)   // CRITICAL: -1 = unlimited, or bytes limit per layer
+                .reuseKv(false)    // CRITICAL: Disable KV cache reuse (like ChatMNN)
+                //.useMmap(true)   // Use mmap for model weights, bug here, android do not open
+                .kvcacheMmap(false); // CRITICAL: Disable KV cache mmap to avoid /tmp crash on Android
+
         // Enable audio support if audio.mnn exists
         if (hasAudioSupport) {
             builder.isAudio(true).audioModel("audio.mnn");
             // Qwen2.5-Omni audio pad token (from official config)
             builder.audioPad(151666);
-            LogManager.logI(TAG, "🎤 Audio support enabled: audio_model=audio.mnn, audio_pad=151666");
         }
-        
-        // Check if TTS (Talker) is supported
+
+        // TTS configuration based on RuntimeConfig (Omni native TTS)
         File talkerModel = new File(currentModelPath, "talker.mnn");
         boolean hasTtsSupport = talkerModel.exists();
-        
-        // Check user's TTS model selection
-        String ttsModelSelection = ConfigManager.getString(context, ConfigManager.KEY_TTS_MODEL, 
-            ConfigManager.DEFAULT_TTS_MODEL);
-        String nativeOmniName = context.getString(R.string.settings_tts_model_native_omni);
-        String systemTtsName = context.getString(R.string.settings_tts_model_system);
-        
-        // Determine TTS mode: Native Omni, System, External, or None
-        this.enableNativeTts = false;
         String noneOption = context.getString(R.string.settings_tts_model_none);
-        
+        String ttsModelSelection = RuntimeConfigHolder.getTtsModelOrDefault(noneOption);
+        String nativeOmniName = context.getString(R.string.settings_tts_model_native_omni);
+
+        this.enableNativeTts = false;
         if (hasTtsSupport && nativeOmniName.equals(ttsModelSelection)) {
             // Native Omni TTS
             this.enableNativeTts = true;
-            int ditSteps = ConfigManager.getTtsDitSteps(context);
+            int ditSteps = RuntimeConfigHolder.getTtsDitStepsOrDefault(ConfigManager.DEFAULT_TTS_DIT_STEPS);
             builder.ditSteps(ditSteps);  // User-configured DiT steps
             builder.ditSolver(1);        // 1=Euler (fast), 4=RK4 (4x slower but better)
             LogManager.logI(TAG, "🔊 Native TTS enabled: dit_steps=" + ditSteps + ", dit_solver=1");
@@ -1224,54 +1252,51 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             // TTS disabled or handled by TtsAdapter (System/External TTS)
             LogManager.logI(TAG, "🔊 Non-Omni TTS selected: " + ttsModelSelection + " (handled by TtsAdapter)");
         }
-        
+
         // Add temp path for weight mmap (not for kvcache)
-        // Reference: libs/mnn/apps/Android/MnnLlmChat/app/src/main/cpp/llm_session.cpp
         File cacheDir = context.getCacheDir();
         builder.tmpPath(cacheDir.getAbsolutePath());
-        
+
         // Parameter priority logic:
-        // 1. If priorityManual=true (手动参数优先): use manual params from ConfigManager
+        // 1. If priorityManual=true (手动参数优先): use manual params from RuntimeConfig
         // 2. If priorityManual=false (非手动参数优先): do NOT set params, let MNN read model config.json
-        // Note: params!=null means buildParamsFromConfig() was called, but we must check priorityManual flag
-        
-        boolean priorityManual = ConfigManager.getPriorityManualParams(context);
-        
+        boolean priorityManual = (cfg != null && cfg.priorityManualParams);
+
         if (priorityManual && params != null) {
             // 手动参数优先模式：设置runtime parameters（覆盖模型config.json）
             float temperature = params.getTemperature();
             float topP = params.getTopP();
             int topK = params.getTopK();
             float repeatPenalty = params.getRepetitionPenalty();
-            
+
             builder.temperature(temperature)
-                   .topP(topP)
-                   .topK(topK);
-            
+                    .topP(topP)
+                    .topK(topK);
+
             LogManager.logI(TAG, String.format(
-                "Using manual params (priority) - temp=%.2f, top_p=%.2f, top_k=%d, repeat_penalty=%.2f",
-                temperature, topP, topK, repeatPenalty));
-            
+                    "Using manual params (priority) - temp=%.2f, top_p=%.2f, top_k=%d, repeat_penalty=%.2f",
+                    temperature, topP, topK, repeatPenalty));
+
             // Note: MNN does not support repeat_penalty in ConfigBuilder, ignored for now
         } else {
             // 非手动参数优先模式：不设置采样参数，让MNN读取模型config.json
             LogManager.logI(TAG, "Using model config.json parameters (not setting runtime params)");
         }
-        
+
         String config = builder.build();
-        
+
         String kvLimitStr = (KV_CACHE_LIMIT_MB == -1) ? "unlimited" : KV_CACHE_LIMIT_MB + "MB/layer";
-        
+
         if (priorityManual && params != null) {
             LogManager.logI(TAG, String.format(
-                "Built MNN config - Backend: %s, Threads: %d, MaxAllTokens: %d, MaxNewTokens: %d, Chunk: %d, KVLimit: %s, SamplingParams: manual_priority",
-                mnnBackend, threads, maxSeqLength, maxNewTokens, CHUNK_SIZE, kvLimitStr));
+                    "Built MNN config - Backend: %s, Threads: %d, MaxAllTokens: %d, MaxNewTokens: %d, Chunk: %d, KVLimit: %s, SamplingParams: manual_priority",
+                    mnnBackend, threads, maxSeqLength, maxNewTokens, CHUNK_SIZE, kvLimitStr));
         } else {
             LogManager.logI(TAG, String.format(
-                "Built MNN config - Backend: %s, Threads: %d, MaxAllTokens: %d, MaxNewTokens: %d, Chunk: %d, KVLimit: %s, SamplingParams: model_default",
-                mnnBackend, threads, maxSeqLength, maxNewTokens, CHUNK_SIZE, kvLimitStr));
+                    "Built MNN config - Backend: %s, Threads: %d, MaxAllTokens: %d, MaxNewTokens: %d, Chunk: %d, KVLimit: %s, SamplingParams: model_default",
+                    mnnBackend, threads, maxSeqLength, maxNewTokens, CHUNK_SIZE, kvLimitStr));
         }
-        
+
         return config;
     }
     
@@ -1373,11 +1398,11 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             jvmUsedMemory / (1024 * 1024)
         ));
         
-        // Configuration info
-        int maxNewTokens = ConfigManager.getMaxNewTokens(context);
-        int maxSeqLength = ConfigManager.getMaxSequenceLength(context);
-        int threads = ConfigManager.getThreads(context);
-        String backendPreference = SettingsFragment.getBackendPreference(context);
+        // Configuration info (from RuntimeConfig snapshot)
+        int maxNewTokens = RuntimeConfigHolder.getMaxNewTokensOrDefault(ConfigManager.DEFAULT_MAX_NEW_TOKENS);
+        int maxSeqLength = RuntimeConfigHolder.getMaxSequenceLengthOrDefault(ConfigManager.DEFAULT_MAX_SEQUENCE_LENGTH);
+        int threads = RuntimeConfigHolder.getThreadsOrDefault(ConfigManager.DEFAULT_THREADS);
+        String backendPreference = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
         
         stats.append(String.format("\n   • maxNewTokens: %d tokens\n", maxNewTokens));
         stats.append(String.format("   • maxSeqLength: %d tokens\n", maxSeqLength));
@@ -1506,6 +1531,57 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             try {
                 isGenerating.set(true);
                 shouldStop.set(false);
+
+                // Create background task snapshot for Diffusion image generation
+                String diffusionTaskId = null;
+                try {
+                    String chatFolder = RuntimeConfigHolder.getCurrentChatFolderOrNull();
+                    java.util.Map<String, String> extras = new java.util.HashMap<>();
+                    extras.put("chatFolder", chatFolder != null ? chatFolder : "");
+                    extras.put("modelPath", currentModelPath != null ? currentModelPath : "");
+                    extras.put("prompt", prompt != null ? prompt : "");
+
+                    BackgroundTask task = BackgroundTaskManager.getInstance().createTask(
+                            BackgroundTask.TaskType.DIFFUSION,
+                            "Diffusion image generation",
+                            true,
+                            extras
+                    );
+                    diffusionTaskId = task.getId();
+                    LogManager.logI(TAG, "[TASK] Created Diffusion background task, id=" + diffusionTaskId);
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[TASK] Failed to create Diffusion background task: " + e.getMessage(), e);
+                }
+                
+                // Detect Diffusion backend/memory changes even when no LLM inference is running
+                // This ensures that changing backend (e.g. OPENCL -> CPU) or diffusion memory mode
+                // via RuntimeConfig will take effect for pure image generation workflows.
+                String currentBackend = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
+                int currentMemoryMode = RuntimeConfigHolder.getDiffusionMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_MEMORY_MODE);
+
+                boolean backendChanged = (lastDiffusionBackend != null
+                        && !lastDiffusionBackend.equalsIgnoreCase(currentBackend));
+                boolean memoryChanged = (lastDiffusionMemoryMode >= 0
+                        && lastDiffusionMemoryMode != currentMemoryMode);
+
+                if (diffusionHandle != 0 && (backendChanged || memoryChanged)) {
+                    LogManager.logI(TAG, String.format(
+                            "[CONFIG][Diffusion] Runtime config changed (backend: %s -> %s, memory: %d -> %d), forcing session reload",
+                            lastDiffusionBackend, currentBackend,
+                            lastDiffusionMemoryMode, currentMemoryMode));
+
+                    try {
+                        MnnInference.releaseDiffusion(diffusionHandle);
+                        LogManager.logI(TAG, "[CONFIG][Diffusion] Old Diffusion session released due to config change");
+                    } catch (Exception e) {
+                        LogManager.logW(TAG, "[CONFIG][Diffusion] Failed to release old session: " + e.getMessage());
+                    }
+
+                    diffusionHandle = 0;
+                    // Update snapshot so next initializeDiffusion() will record the new values
+                    lastDiffusionBackend = currentBackend;
+                    lastDiffusionMemoryMode = currentMemoryMode;
+                }
                 
                 // Check if diffusion handle is valid
                 if (!isInitialized.get() || diffusionHandle == 0) {
@@ -1528,9 +1604,8 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                     LogManager.logI(TAG, "Using existing Diffusion session (handle=" + diffusionHandle + ")");
                 }
                 
-                // Get current chat folder
-                String chatFolderPath = ConfigManager.getString(context, 
-                    ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                // Get current chat folder from RuntimeConfig snapshot
+                String chatFolderPath = RuntimeConfigHolder.getCurrentChatFolderOrNull();
                 
                 if (chatFolderPath == null || chatFolderPath.isEmpty()) {
                     LogManager.logE(TAG, "No chat folder set, cannot save image");
@@ -1548,18 +1623,18 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 String outputPath = new File(outputDir, "diffusion_" + System.currentTimeMillis() + ".jpg").getAbsolutePath();
                 LogManager.logI(TAG, "Output path: " + outputPath);
                 
-                // Get steps and seed from config
-                int steps = ConfigManager.getDiffusionSteps(context);
+                // Get steps and seed from RuntimeConfig snapshot
+                int steps = RuntimeConfigHolder.getDiffusionStepsOrDefault(ConfigManager.DEFAULT_DIFFUSION_STEPS);
                 steps = Math.max(MIN_DIFFUSION_STEPS, Math.min(steps, MAX_DIFFUSION_STEPS));
                 LogManager.logI(TAG, "Using steps from config: " + steps);
                 
                 int seed;
-                boolean useRandomSeed = ConfigManager.getDiffusionSeedRandom(context);
+                boolean useRandomSeed = RuntimeConfigHolder.isDiffusionSeedRandomOrDefault(ConfigManager.DEFAULT_DIFFUSION_SEED_RANDOM);
                 if (useRandomSeed) {
                     seed = -1;
                     LogManager.logI(TAG, "Using random seed");
                 } else {
-                    seed = ConfigManager.getDiffusionSeed(context);
+                    seed = RuntimeConfigHolder.getDiffusionSeedOrDefault(ConfigManager.DEFAULT_DIFFUSION_SEED);
                     LogManager.logI(TAG, "Using fixed seed from config: " + seed);
                 }
                 
@@ -1567,6 +1642,8 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 
                 // Generate image (debug tag already opened at the beginning)
                 final long startTime = System.currentTimeMillis();
+                final String diffusionTaskIdFinal = diffusionTaskId;
+
                 boolean success = MnnInference.generateImage(
                     diffusionHandle,
                     prompt,
@@ -1580,6 +1657,19 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                                 LogManager.logI(TAG, "Image generation cancelled by user");
                                 return false;
                             }
+                            // Update Diffusion background task progress
+                            if (diffusionTaskIdFinal != null) {
+                                try {
+                                    BackgroundTaskManager.getInstance().updateTask(
+                                            diffusionTaskIdFinal,
+                                            BackgroundTask.TaskState.RUNNING,
+                                            progress,
+                                            "Image generation " + progress + "%"
+                                    );
+                                } catch (Exception e) {
+                                    LogManager.logE(TAG, "[TASK] Failed to update Diffusion background task progress: " + e.getMessage(), e);
+                                }
+                            }
                             return true;
                         }
                         
@@ -1592,30 +1682,78 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 );
                 
                 long duration = System.currentTimeMillis() - startTime;
-                
+
                 // JNI layer already closed </debug> tag
-                
+
+                // If user requested stop, treat task as cancelled and skip result handling
+                if (shouldStop.get()) {
+                    LogManager.logI(TAG, "Diffusion generation stopped by user (post-generateImage)");
+                    if (diffusionTaskIdFinal != null) {
+                        try {
+                            BackgroundTaskManager.getInstance().updateTask(
+                                    diffusionTaskIdFinal,
+                                    BackgroundTask.TaskState.CANCELLED,
+                                    0,
+                                    "Image generation cancelled by user"
+                            );
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[TASK] Failed to finalize Diffusion task as CANCELLED: " + e.getMessage(), e);
+                        }
+                    }
+                    return;
+                }
+
                 // Check if generation succeeded
                 if (success && new File(outputPath).exists()) {
                     LogManager.logI(TAG, "Image generated successfully in " + duration + "ms: " + outputPath);
-                    
-                    // Note: Cache is automatically saved by MNN when session is released
-                    // Using app-specific directory, no manual save or JNI callback needed
-                    
-                    // Output image path
-                    callback.onToken("\n\n[IMAGE:" + outputPath + "]");
-                    
+
                     // Output performance stats
                     String perfStats = getDiffusionPerformanceStats(duration, steps, seed, this.currentModelPath);
+
+                    // NOTE: MD persistence is handled by RagQueryManager.onSuccess() for unified architecture.
+                    // Handler only sends data via callback, Manager handles persistence + cursor update.
+                    // This ensures consistent pos management across LLM/Diffusion models.
+
+                    // Output image path to streaming callback
+                    // RagQueryManager will accumulate this and persist to MD
+                    callback.onToken("\n\n[IMAGE:" + outputPath + "]");
+
+                    // Output performance stats to streaming callback
                     callback.onToken("\n\n" + perfStats);
-                    
+
                     callback.onComplete("Image generation completed");
+
+                    if (diffusionTaskIdFinal != null) {
+                        try {
+                            BackgroundTaskManager.getInstance().updateTask(
+                                    diffusionTaskIdFinal,
+                                    BackgroundTask.TaskState.COMPLETED,
+                                    100,
+                                    "Image generation completed"
+                            );
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[TASK] Failed to finalize Diffusion task as COMPLETED: " + e.getMessage(), e);
+                        }
+                    }
                 } else {
                     String errorMsg = "Failed to generate image";
                     LogManager.logE(TAG, errorMsg);
                     callback.onError(errorMsg);
+
+                    if (diffusionTaskIdFinal != null) {
+                        try {
+                            BackgroundTaskManager.getInstance().updateTask(
+                                    diffusionTaskIdFinal,
+                                    BackgroundTask.TaskState.FAILED,
+                                    0,
+                                    errorMsg
+                            );
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[TASK] Failed to finalize Diffusion task as FAILED: " + e.getMessage(), e);
+                        }
+                    }
                 }
-                
+
             } catch (Exception e) {
                 LogManager.logE(TAG, "Error during image generation", e);
                 callback.onError("Image generation error: " + e.getMessage());
@@ -1949,90 +2087,123 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // Note: diffusionSteps and diffusionSeed are runtime params, no reload needed
         
         /**
-         * Create snapshot from current settings
+         * Create snapshot from current RuntimeConfig settings (inference process)
          */
         static ConfigSnapshot fromCurrentSettings(Context context) {
             ConfigSnapshot snapshot = new ConfigSnapshot();
-            
+
+            RuntimeConfig cfg = RuntimeConfigHolder.get();
+
             // LLM Session configuration
-            snapshot.backend = SettingsFragment.getBackendPreference(context);
-            snapshot.threadCount = ConfigManager.getThreads(context);
-            snapshot.maxSequenceLength = ConfigManager.getMaxSequenceLength(context);
-            snapshot.maxNewTokens = ConfigManager.getMaxNewTokens(context);
-            
+            snapshot.backend = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
+            snapshot.threadCount = RuntimeConfigHolder.getThreadsOrDefault(ConfigManager.DEFAULT_THREADS);
+            snapshot.maxSequenceLength = RuntimeConfigHolder.getMaxSequenceLengthOrDefault(ConfigManager.DEFAULT_MAX_SEQUENCE_LENGTH);
+            snapshot.maxNewTokens = RuntimeConfigHolder.getMaxNewTokensOrDefault(ConfigManager.DEFAULT_MAX_NEW_TOKENS);
+
             // TTS configuration
-            snapshot.ttsModel = ConfigManager.getString(context, ConfigManager.KEY_TTS_MODEL, 
-                context.getString(R.string.settings_tts_model_none));
-            snapshot.omniTtsEnabled = context.getString(R.string.settings_tts_model_native_omni)
-                .equals(snapshot.ttsModel);
-            snapshot.ttsDitSteps = ConfigManager.getTtsDitSteps(context);
-            
+            String noneOption = context.getString(R.string.settings_tts_model_none);
+            snapshot.ttsModel = RuntimeConfigHolder.getTtsModelOrDefault(noneOption);
+            String omniName = context.getString(R.string.settings_tts_model_native_omni);
+            snapshot.omniTtsEnabled = omniName.equals(snapshot.ttsModel);
+            snapshot.ttsDitSteps = RuntimeConfigHolder.getTtsDitStepsOrDefault(ConfigManager.DEFAULT_TTS_DIT_STEPS);
+
             // Diffusion configuration
-            snapshot.diffusionMemoryMode = ConfigManager.getDiffusionMemoryMode(context);
-            
+            snapshot.diffusionMemoryMode = RuntimeConfigHolder.getDiffusionMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_MEMORY_MODE);
+
             return snapshot;
         }
         
+        private interface ConfigChangeRule {
+            void apply(ConfigSnapshot previous, ConfigSnapshot current, ReloadPlan plan);
+        }
+
+        private static final ConfigChangeRule[] RULES = new ConfigChangeRule[] {
+            new ConfigChangeRule() {
+                @Override
+                public void apply(ConfigSnapshot previous, ConfigSnapshot current, ReloadPlan plan) {
+                    if (!safeEquals(previous.backend, current.backend)) {
+                        plan.needReloadLlm = true;
+                        plan.needReloadDiffusion = true;
+                        plan.reasons.add("Backend: " + previous.backend + " → " + current.backend);
+                    }
+                }
+            },
+            new ConfigChangeRule() {
+                @Override
+                public void apply(ConfigSnapshot previous, ConfigSnapshot current, ReloadPlan plan) {
+                    if (previous.threadCount != current.threadCount) {
+                        plan.needReloadLlm = true;
+                        plan.reasons.add("Threads: " + previous.threadCount + " → " + current.threadCount);
+                    }
+                }
+            },
+            new ConfigChangeRule() {
+                @Override
+                public void apply(ConfigSnapshot previous, ConfigSnapshot current, ReloadPlan plan) {
+                    if (previous.maxSequenceLength != current.maxSequenceLength) {
+                        plan.needReloadLlm = true;
+                        plan.reasons.add("MaxSeqLen: " + previous.maxSequenceLength + " → " + current.maxSequenceLength);
+                    }
+                }
+            },
+            new ConfigChangeRule() {
+                @Override
+                public void apply(ConfigSnapshot previous, ConfigSnapshot current, ReloadPlan plan) {
+                    if (previous.maxNewTokens != current.maxNewTokens) {
+                        plan.needReloadLlm = true;
+                        plan.reasons.add("MaxNewTokens: " + previous.maxNewTokens + " → " + current.maxNewTokens);
+                    }
+                }
+            },
+            new ConfigChangeRule() {
+                @Override
+                public void apply(ConfigSnapshot previous, ConfigSnapshot current, ReloadPlan plan) {
+                    if (previous.omniTtsEnabled != current.omniTtsEnabled) {
+                        plan.needReloadLlm = true;
+                        String before = previous.omniTtsEnabled ? "enabled" : "disabled";
+                        String after = current.omniTtsEnabled ? "enabled" : "disabled";
+                        plan.reasons.add("Omni TTS: " + before + " → " + after);
+                    }
+                }
+            },
+            new ConfigChangeRule() {
+                @Override
+                public void apply(ConfigSnapshot previous, ConfigSnapshot current, ReloadPlan plan) {
+                    if (!safeEquals(previous.ttsModel, current.ttsModel)
+                            && !previous.omniTtsEnabled && !current.omniTtsEnabled) {
+                        plan.needReloadExternalTts = true;
+                        plan.reasons.add("TTS Model: " + previous.ttsModel + " → " + current.ttsModel);
+                    }
+                }
+            },
+            new ConfigChangeRule() {
+                @Override
+                public void apply(ConfigSnapshot previous, ConfigSnapshot current, ReloadPlan plan) {
+                    if (previous.omniTtsEnabled && previous.ttsDitSteps != current.ttsDitSteps) {
+                        plan.needReloadLlm = true;
+                        plan.reasons.add("TTS DiT Steps: " + previous.ttsDitSteps + " → " + current.ttsDitSteps);
+                    }
+                }
+            },
+            new ConfigChangeRule() {
+                @Override
+                public void apply(ConfigSnapshot previous, ConfigSnapshot current, ReloadPlan plan) {
+                    if (previous.diffusionMemoryMode != current.diffusionMemoryMode) {
+                        plan.needReloadDiffusion = true;
+                        plan.reasons.add("Diffusion Memory Mode: " + previous.diffusionMemoryMode + " → " + current.diffusionMemoryMode);
+                    }
+                }
+            }
+        };
+
         /**
          * Compare with another snapshot and generate reload plan
          */
         ReloadPlan compareWith(ConfigSnapshot current) {
             ReloadPlan plan = new ReloadPlan();
-            
-            // ========== Check LLM Session Configuration ==========
-            // Any of these changes require complete LLM Session reload
-            
-            if (!safeEquals(backend, current.backend)) {
-                plan.needReloadLlm = true;
-                plan.needReloadDiffusion = true;  // Backend affects both LLM and Diffusion!
-                plan.reasons.add("Backend: " + backend + " → " + current.backend);
+            for (ConfigChangeRule rule : RULES) {
+                rule.apply(this, current, plan);
             }
-            
-            if (threadCount != current.threadCount) {
-                plan.needReloadLlm = true;
-                plan.reasons.add("Threads: " + threadCount + " → " + current.threadCount);
-            }
-            
-            if (maxSequenceLength != current.maxSequenceLength) {
-                plan.needReloadLlm = true;
-                plan.reasons.add("MaxSeqLen: " + maxSequenceLength + " → " + current.maxSequenceLength);
-            }
-            
-            if (maxNewTokens != current.maxNewTokens) {
-                plan.needReloadLlm = true;
-                plan.reasons.add("MaxNewTokens: " + maxNewTokens + " → " + current.maxNewTokens);
-            }
-            
-            // Omni TTS enable/disable requires LLM reload (affects Session creation)
-            if (omniTtsEnabled != current.omniTtsEnabled) {
-                plan.needReloadLlm = true;
-                plan.reasons.add("Omni TTS: " + (omniTtsEnabled ? "enabled" : "disabled") + 
-                               " → " + (current.omniTtsEnabled ? "enabled" : "disabled"));
-            }
-            
-            // ========== Check TTS Service Configuration ==========
-            // External TTS model change only requires service reload, not LLM
-            
-            if (!safeEquals(ttsModel, current.ttsModel) && 
-                !omniTtsEnabled && !current.omniTtsEnabled) {
-                plan.needReloadExternalTts = true;
-                plan.reasons.add("TTS Model: " + ttsModel + " → " + current.ttsModel);
-            }
-            
-            // ========== Check TTS DiT Steps ==========
-            // DiT steps change requires LLM reload for Omni native TTS
-            if (omniTtsEnabled && ttsDitSteps != current.ttsDitSteps) {
-                plan.needReloadLlm = true;
-                plan.reasons.add("TTS DiT Steps: " + ttsDitSteps + " → " + current.ttsDitSteps);
-            }
-            
-            // ========== Check Diffusion Configuration ==========
-            // Diffusion memory mode change requires Diffusion Session reload
-            if (diffusionMemoryMode != current.diffusionMemoryMode) {
-                plan.needReloadDiffusion = true;
-                plan.reasons.add("Diffusion Memory Mode: " + diffusionMemoryMode + " → " + current.diffusionMemoryMode);
-            }
-            
             return plan;
         }
         

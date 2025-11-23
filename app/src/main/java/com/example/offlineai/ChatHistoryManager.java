@@ -372,7 +372,7 @@ public class ChatHistoryManager {
             // Support both old separator (---) and new separator (HTML comment)
             // CRITICAL: Only split on separators that appear BEFORE message headers (## 用户 or ## AI助手)
             // This prevents splitting on --- that appears in message content
-            String separatorPattern = "\\n\\n(?:<!\\-\\- MESSAGE_SEPARATOR \\-\\->|\\-\\-\\-)\\n\\n(?=## )";
+            String separatorPattern = "\\n\\n<!\\-\\- MESSAGE_SEPARATOR \\-\\->\\n\\n(?=## )";
             String[] messageParts = content.toString().split(separatorPattern);
             List<ChatDataItem> messages = new ArrayList<>();
             
@@ -618,6 +618,367 @@ public class ChatHistoryManager {
         } catch (Exception e) {
             LogManager.logE(TAG, "Error parsing markdown to ChatDataItem", e);
             return null;
+        }
+    }
+    
+    /**
+     * Append a single assistant image message (e.g. Diffusion result) to the
+     * existing conversation file without overwriting previous messages.
+     *
+     * This is used by background tasks (such as Diffusion image generation)
+     * to persist results even if the UI Fragment has been destroyed.
+     */
+    public static void appendAssistantImageMessage(Context context,
+                                                   String folderPath,
+                                                   String imagePath,
+                                                   String performanceText) {
+        appendAssistantImageMessage(context, folderPath, imagePath, performanceText, null);
+    }
+    
+    /**
+     * Append a single assistant image message with optional debug log.
+     */
+    public static void appendAssistantImageMessage(Context context,
+                                                   String folderPath,
+                                                   String imagePath,
+                                                   String performanceText,
+                                                   String debugLog) {
+        if (TextUtils.isEmpty(folderPath) || TextUtils.isEmpty(imagePath)) {
+            LogManager.logW(TAG, "[APPEND] Invalid folder or image path, skip append");
+            return;
+        }
+        try {
+            File folder = new File(folderPath);
+            if (!folder.exists() || !folder.isDirectory()) {
+                LogManager.logW(TAG, "[APPEND] Chat folder does not exist or is not a directory: " + folderPath);
+                return;
+            }
+
+            File imageFile = new File(imagePath);
+            if (!imageFile.exists()) {
+                LogManager.logW(TAG, "[APPEND] Image file does not exist, skip append: " + imagePath);
+                return;
+            }
+
+            File conversationFile = new File(folder, CONVERSATION_FILE_NAME);
+
+            // Build markdown for a single AI assistant message containing an image
+            StringBuilder markdown = new StringBuilder();
+
+            // Header: ## AI助手 (timestamp)
+            java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault());
+            String timeStr = sdf.format(new java.util.Date());
+            markdown.append("## AI助手 (").append(timeStr).append(")\n\n");
+
+            // Optional debug log block (before image)
+            if (!TextUtils.isEmpty(debugLog)) {
+                String debug = debugLog.trim();
+                // Ensure debug text is wrapped in <debug> tags
+                if (!debug.startsWith("<debug>")) {
+                    markdown.append("<debug>\n");
+                    markdown.append(debug).append("\n");
+                    markdown.append("</debug>\n\n");
+                } else {
+                    markdown.append(debug).append("\n\n");
+                }
+            }
+
+            // Image reference using relative file name
+            markdown.append("![](").append(imageFile.getName()).append(")\n\n");
+
+            // Optional performance block
+            if (!TextUtils.isEmpty(performanceText)) {
+                String perf = performanceText.trim();
+                // Ensure performance text is wrapped in <performance> tags
+                if (!perf.startsWith("<performance>")) {
+                    markdown.append("<performance>\n");
+                    markdown.append(perf).append("\n");
+                    markdown.append("</performance>\n\n");
+                } else {
+                    markdown.append(perf).append("\n\n");
+                }
+            }
+
+            String contentToAppend = markdown.toString().trim();
+
+            boolean needSeparator = conversationFile.exists() && conversationFile.length() > 0;
+
+            java.io.BufferedWriter writer = new java.io.BufferedWriter(new java.io.FileWriter(conversationFile, true));
+            try {
+                if (needSeparator) {
+                    writer.write(SEPARATOR);
+                }
+                writer.write(contentToAppend);
+            } finally {
+                try {
+                    writer.close();
+                } catch (Exception ignored) {
+                }
+            }
+
+            LogManager.logD(TAG, "[APPEND] Assistant image message appended: " + imageFile.getName());
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[APPEND] Failed to append assistant image message", e);
+        }
+    }
+
+    /**
+     * Append a single assistant audio message (e.g. TTS result) to the
+     * existing conversation file without overwriting previous messages.
+     *
+     * This is used by background tasks (such as TTS generation)
+     * to persist results even if the UI Fragment has been destroyed.
+     */
+    public static void appendAssistantAudioMessage(Context context,
+                                                   String folderPath,
+                                                   String audioPath,
+                                                   String performanceText) {
+        if (TextUtils.isEmpty(folderPath) || TextUtils.isEmpty(audioPath)) {
+            LogManager.logW(TAG, "[APPEND] Invalid folder or audio path, skip append");
+            return;
+        }
+        try {
+            File folder = new File(folderPath);
+            if (!folder.exists() || !folder.isDirectory()) {
+                LogManager.logW(TAG, "[APPEND] Chat folder does not exist or is not a directory: " + folderPath);
+                return;
+            }
+
+            File audioFile = new File(audioPath);
+            if (!audioFile.exists()) {
+                LogManager.logW(TAG, "[APPEND] Audio file does not exist, skip append: " + audioPath);
+                return;
+            }
+
+            File conversationFile = new File(folder, CONVERSATION_FILE_NAME);
+
+            // Build markdown for a single AI assistant message containing audio
+            StringBuilder markdown = new StringBuilder();
+
+            // Header: ## AI助手 (timestamp)
+            java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault());
+            String timeStr = sdf.format(new java.util.Date());
+            markdown.append("## AI助手 (").append(timeStr).append(")\n\n");
+
+            // Audio reference using relative file name (same format as chatItemToMarkdown)
+            markdown.append("🎙️ [音频: ").append(audioFile.getName())
+                    .append("](").append(audioFile.getName()).append(")\n\n");
+
+            // Optional performance block
+            if (!TextUtils.isEmpty(performanceText)) {
+                String perf = performanceText.trim();
+                if (!perf.startsWith("<performance>")) {
+                    markdown.append("<performance>\n");
+                    markdown.append(perf).append("\n");
+                    markdown.append("</performance>\n\n");
+                } else {
+                    markdown.append(perf).append("\n\n");
+                }
+            }
+
+            String contentToAppend = markdown.toString().trim();
+
+            boolean needSeparator = conversationFile.exists() && conversationFile.length() > 0;
+
+            java.io.BufferedWriter writer = new java.io.BufferedWriter(new java.io.FileWriter(conversationFile, true));
+            try {
+                if (needSeparator) {
+                    writer.write(SEPARATOR);
+                }
+                writer.write(contentToAppend);
+            } finally {
+                try {
+                    writer.close();
+                } catch (Exception ignored) {
+                }
+            }
+
+            LogManager.logD(TAG, "[APPEND] Assistant audio message appended: " + audioFile.getName());
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[APPEND] Failed to append assistant audio message", e);
+        }
+    }
+
+    /**
+     * Attach an assistant audio markdown line to the last assistant message
+     * block in conversation.md instead of creating a new message.
+     *
+     * The audio markdown will be inserted before the last <performance>
+     * block in that assistant message if present; otherwise it will be
+     * appended to the end of the message body.
+     */
+    public static synchronized void attachAssistantAudioToLastMessage(Context context,
+                                                                       String folderPath,
+                                                                       String audioPath,
+                                                                       float durationSeconds) {
+        if (TextUtils.isEmpty(folderPath) || TextUtils.isEmpty(audioPath)) {
+            LogManager.logW(TAG, "[ATTACH_AUDIO] Invalid folder or audio path, skip");
+            return;
+        }
+
+        try {
+            File folder = new File(folderPath);
+            if (!folder.exists() || !folder.isDirectory()) {
+                LogManager.logW(TAG, "[ATTACH_AUDIO] Chat folder does not exist or is not a directory: " + folderPath);
+                return;
+            }
+
+            File audioFile = new File(audioPath);
+            if (!audioFile.exists()) {
+                LogManager.logW(TAG, "[ATTACH_AUDIO] Audio file does not exist, skip: " + audioPath);
+                return;
+            }
+
+            File conversationFile = new File(folder, CONVERSATION_FILE_NAME);
+            if (!conversationFile.exists() || !conversationFile.isFile()) {
+                LogManager.logW(TAG, "[ATTACH_AUDIO] Conversation file does not exist: " + conversationFile.getAbsolutePath());
+                return;
+            }
+
+            // Read entire conversation content
+            StringBuilder contentBuilder = new StringBuilder();
+            BufferedReader reader = new BufferedReader(new FileReader(conversationFile));
+            try {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    contentBuilder.append(line).append("\n");
+                }
+            } finally {
+                try {
+                    reader.close();
+                } catch (IOException ignored) {
+                }
+            }
+
+            String content = contentBuilder.toString();
+            if (TextUtils.isEmpty(content)) {
+                LogManager.logW(TAG, "[ATTACH_AUDIO] Conversation file is empty, skip");
+                return;
+            }
+
+            // Prefer the assistant message that contains the last <performance> block.
+            int searchEnd = content.length();
+            int perfIndex = content.lastIndexOf("<performance>");
+            if (perfIndex >= 0) {
+                searchEnd = perfIndex;
+            }
+
+            // Find the last assistant message header before searchEnd.
+            int headerIndex = content.lastIndexOf("## AI助手", searchEnd);
+            if (headerIndex < 0) {
+                LogManager.logW(TAG, "[ATTACH_AUDIO] No assistant message found to attach audio");
+                return;
+            }
+
+            // Determine the end of this assistant message (next separator or EOF).
+            int separatorIndex = content.indexOf(SEPARATOR, headerIndex);
+            int messageEnd = (separatorIndex >= 0) ? separatorIndex : content.length();
+
+            String messageBlock = content.substring(headerIndex, messageEnd);
+
+            // Skip if this assistant message already has an audio markdown.
+            if (messageBlock.contains("🎙️ [音频:")) {
+                LogManager.logI(TAG, "[ATTACH_AUDIO] Target assistant message already has audio, skip");
+                return;
+            }
+
+            // Compute insertion position: before <performance> if it belongs to this message;
+            // otherwise at the end of the message block.
+            int insertPos;
+            if (perfIndex >= 0 && perfIndex >= headerIndex && perfIndex <= messageEnd) {
+                insertPos = perfIndex;
+            } else {
+                insertPos = messageEnd;
+            }
+
+            // Build audio markdown line (same format as chatItemToMarkdown)
+            StringBuilder audioMarkdown = new StringBuilder();
+            audioMarkdown.append("🎙️ [音频: ").append(audioFile.getName());
+            if (durationSeconds > 0) {
+                audioMarkdown.append(String.format(java.util.Locale.US, " (%.1fs)", durationSeconds));
+            }
+            audioMarkdown.append("](").append(audioFile.getName()).append(")\n\n");
+
+            StringBuilder newContent = new StringBuilder();
+            newContent.append(content, 0, insertPos);
+            newContent.append(audioMarkdown.toString());
+            newContent.append(content.substring(insertPos));
+
+            // Overwrite conversation file with updated content
+            BufferedWriter writer = new BufferedWriter(new FileWriter(conversationFile, false));
+            try {
+                writer.write(newContent.toString());
+            } finally {
+                try {
+                    writer.close();
+                } catch (IOException ignored) {
+                }
+            }
+
+            LogManager.logI(TAG, "[ATTACH_AUDIO] Audio attached to last assistant message: " + audioFile.getName());
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[ATTACH_AUDIO] Failed to attach audio to last assistant message", e);
+        }
+    }
+    
+    /**
+     * Append a single assistant text message (e.g. LLM response) to the
+     * existing conversation file without overwriting previous messages.
+     *
+     * This is used when Fragment is destroyed during LLM inference to ensure
+     * the response is persisted even if the UI callback fails.
+     * 
+     * @param context Context
+     * @param folderPath Chat folder path
+     * @param responseText The AI response text (may contain debug/performance sections)
+     */
+    public static void appendAssistantTextMessage(Context context,
+                                                   String folderPath,
+                                                   String responseText) {
+        if (TextUtils.isEmpty(folderPath) || TextUtils.isEmpty(responseText)) {
+            LogManager.logW(TAG, "[APPEND] Invalid folder or response text, skip append");
+            return;
+        }
+        try {
+            File folder = new File(folderPath);
+            if (!folder.exists() || !folder.isDirectory()) {
+                LogManager.logW(TAG, "[APPEND] Chat folder does not exist or is not a directory: " + folderPath);
+                return;
+            }
+
+            File conversationFile = new File(folder, CONVERSATION_FILE_NAME);
+
+            // Build markdown for a single AI assistant message containing text
+            StringBuilder markdown = new StringBuilder();
+
+            // Header: ## AI助手 (timestamp)
+            java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault());
+            String timeStr = sdf.format(new java.util.Date());
+            markdown.append("## AI助手 (").append(timeStr).append(")\n\n");
+
+            // Response text (may already contain debug/performance sections)
+            markdown.append(responseText.trim()).append("\n\n");
+
+            String contentToAppend = markdown.toString().trim();
+
+            boolean needSeparator = conversationFile.exists() && conversationFile.length() > 0;
+
+            java.io.BufferedWriter writer = new java.io.BufferedWriter(new java.io.FileWriter(conversationFile, true));
+            try {
+                if (needSeparator) {
+                    writer.write(SEPARATOR);
+                }
+                writer.write(contentToAppend);
+            } finally {
+                try {
+                    writer.close();
+                } catch (Exception ignored) {
+                }
+            }
+
+            LogManager.logD(TAG, "[APPEND] Assistant text message appended, len=" + responseText.length());
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[APPEND] Failed to append assistant text message", e);
         }
     }
     

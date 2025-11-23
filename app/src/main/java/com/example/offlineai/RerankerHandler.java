@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.offlineai.mnn.MnnInference;
 import com.example.offlineai.ConfigManager;
+import com.example.offlineai.RuntimeConfigHolder;
 
 /**
  * MNN Reranker Handler - Unified reranker handler
@@ -42,6 +43,9 @@ public class RerankerHandler {
     private String mCurrentModelType;  // "qwen3" or "gte"
     private String mInstruction;  // Current instruction for Qwen3
     private Context mContext;  // For accessing ConfigManager
+    // Track last runtime config used for reranker session
+    private String mLastBackend = null;
+    private int mLastThreads = -1;
     
     // ========== Thread Management ==========
     private final AtomicBoolean mIsLoading = new AtomicBoolean(false);
@@ -128,6 +132,25 @@ public class RerankerHandler {
         }
         
         LogManager.logI(TAG, "Loading MNN reranker model: " + modelPath + " (memory=low, hardcoded)");
+
+        // Detect runtime config changes (backend/threads) and reload session if needed
+        int currentThreads = RuntimeConfigHolder.getThreadsOrDefault(ConfigManager.DEFAULT_THREADS);
+        String currentBackend = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
+
+        boolean backendChanged = (mLastBackend != null && !mLastBackend.equalsIgnoreCase(currentBackend));
+        boolean threadsChanged = (mLastThreads >= 0 && mLastThreads != currentThreads);
+
+        if (mNativeHandle != 0 && (backendChanged || threadsChanged)) {
+            LogManager.logI(TAG, "[CONFIG][RERANKER] Runtime config changed (backend: "
+                    + mLastBackend + " -> " + currentBackend
+                    + ", threads: " + mLastThreads + " -> " + currentThreads
+                    + "), reloading reranker session");
+            // Use unified release to reset internal state
+            releaseModel();
+        }
+
+        mLastBackend = currentBackend;
+        mLastThreads = currentThreads;
         
         // Check if already loaded
         if (mCurrentModelPath != null && mCurrentModelPath.equals(modelPath)) {
@@ -471,11 +494,11 @@ public class RerankerHandler {
      * Hardcoded for reranker: memory=low, power=high, precision=low, thread_num from settings
      */
     private String buildRuntimeConfig() {
-        // Get thread count from settings
-        int threads = ConfigManager.getThreads(mContext);
+        // Get thread count from RuntimeConfig snapshot
+        int threads = RuntimeConfigHolder.getThreadsOrDefault(ConfigManager.DEFAULT_THREADS);
         
-        // Resolve backend from global settings (same as LLM)
-        String backendPreference = SettingsFragment.getBackendPreference(mContext);
+        // Resolve backend from RuntimeConfig snapshot (same as LLM)
+        String backendPreference = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
         String mnnBackend;
         switch (backendPreference) {
             case "OPENCL":

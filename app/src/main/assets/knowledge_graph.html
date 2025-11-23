@@ -122,6 +122,11 @@
         <div class="sub-title">📊 核心关系 TOP 列表 / Core Relations TOP List</div>
         <div id="relations-table"></div>
     </div>
+
+    <div class="table-wrapper" id="hub-info-container">
+        <div class="sub-title">🧠 Hub 信息 / Hub Info</div>
+        <div class="meta" id="hub-info-body"></div>
+    </div>
 </div>
 
 <script>
@@ -171,6 +176,8 @@
         var nodes = payload.nodes || [];
         var edges = payload.edges || [];
         var relations = payload.relations || [];
+        var hubThreshold = payload.hubThreshold || 0;
+        var runtimeHubEntities = payload.runtimeHubEntities || '';
 
         console.log('[GRAPH_HTML] kbName=' + kbName +
             ', topN=' + topN +
@@ -311,6 +318,7 @@
 
         renderRelationsTable(relations);
         resetNodeDetail();
+        renderHubInfo(hubThreshold, runtimeHubEntities);
     }
 
     function resetNodeDetail() {
@@ -373,6 +381,27 @@
         });
         html += '</tbody></table>';
         container.innerHTML = html;
+    }
+
+    function renderHubInfo(hubThreshold, runtimeHubEntities) {
+        var container = document.getElementById('hub-info-body');
+        if (!container) {
+            return;
+        }
+
+        var parts = [];
+        if (hubThreshold && hubThreshold > 0) {
+            parts.push('Hub threshold: ' + hubThreshold);
+        }
+        if (runtimeHubEntities && runtimeHubEntities.trim().length > 0) {
+            parts.push('Runtime hub entities: ' + runtimeHubEntities);
+        }
+
+        if (parts.length === 0) {
+            container.innerHTML = '<div class="meta">No hub info available.</div>';
+        } else {
+            container.innerHTML = parts.join('<br/>');
+        }
     }
 
     function renderEntityChart(nodes) {

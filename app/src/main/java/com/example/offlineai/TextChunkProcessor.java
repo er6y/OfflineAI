@@ -9,6 +9,8 @@ import android.database.sqlite.SQLiteDatabase;
 import com.example.offlineai.LogManager;
 import com.example.offlineai.KnowledgeGraphDatabase;
 import com.example.offlineai.HanLpNerHandler;
+import com.example.offlineai.EmbeddingHandler;
+import com.example.offlineai.ipc.InferenceClient;
 import com.offlineai.mnn.MnnInference;
 
 import org.json.JSONArray;
@@ -91,9 +93,31 @@ public class TextChunkProcessor {
                                             String knowledgeBaseName,
                                             String embeddingModel,
                                             String rerankerModel,
-                                            int embeddingDimension) {
+                                            int embeddingDimension,
+                                            int hubThreshold,
+                                            Set<String> runtimeHubEntities) {
         try {
             logMessage("Writing knowledge base metadata for: " + knowledgeBaseName);
+
+            // Build a compact space-separated list of runtime hub entities for metadata persistence
+            String runtimeHubString = null;
+            if (runtimeHubEntities != null && !runtimeHubEntities.isEmpty()) {
+                List<String> sorted = new ArrayList<>(runtimeHubEntities);
+                Collections.sort(sorted);
+                StringBuilder sb = new StringBuilder();
+                for (String text : sorted) {
+                    if (text == null || text.isEmpty()) {
+                        continue;
+                    }
+                    if (sb.length() > 0) {
+                        sb.append(' ');
+                    }
+                    sb.append(text);
+                }
+                if (sb.length() > 0) {
+                    runtimeHubString = sb.toString();
+                }
+            }
 
             // 1) Update SQLite metadata via KnowledgeGraphDatabase
             KnowledgeGraphDatabase metaDb = null;
@@ -107,6 +131,12 @@ public class TextChunkProcessor {
                 metadata.setModeldir(embeddingModel);
                 if (rerankerModel != null && !rerankerModel.isEmpty()) {
                     metadata.setRerankerdir(rerankerModel);
+                }
+                if (hubThreshold > 0) {
+                    metadata.setHubThreshold(hubThreshold);
+                }
+                if (runtimeHubString != null && !runtimeHubString.isEmpty()) {
+                    metadata.setRuntimeHubEntities(runtimeHubString);
                 }
 
                 boolean updated = metaDb.updateMetadata(metadata);
@@ -140,6 +170,12 @@ public class TextChunkProcessor {
                     json.put("rerankerModel", rerankerModel);
                 }
                 json.put("embeddingDimension", embeddingDimension);
+                if (hubThreshold > 0) {
+                    json.put("hubThreshold", hubThreshold);
+                }
+                if (runtimeHubString != null && !runtimeHubString.isEmpty()) {
+                    json.put("runtimeHubEntities", runtimeHubString);
+                }
                 json.put("updated", System.currentTimeMillis());
 
                 FileWriter writer = null;
@@ -703,27 +739,23 @@ public class TextChunkProcessor {
             // Get embedding model path
             String embeddingModelPath = ConfigManager.getEmbeddingModelPath(context) + File.separator + embeddingModel;
             LogManager.logD(TAG, "Using embedding model: " + embeddingModelPath);
-            
-            // Use EmbeddingHandler to load model (LOW memory mode) only for dimension probing
-            EmbeddingHandler model = EmbeddingHandler.getInstance(context);
-            if (!model.loadModel(embeddingModelPath, EmbeddingHandler.MemoryMode.LOW)) {
-                throw new Exception("Failed to load embedding model");
-            }
-            logMessage("Loaded embedding model with LOW memory mode");
-            logMessage("Loaded embedding model: " + model.getEmbeddingModel());
-            
-            // Get model's vector dimension
-            int embeddingDimension = model.getEmbeddingDimension();
-            LogManager.logD(TAG, "Model embedding dimension: " + embeddingDimension);
-            logMessage("Model embedding dimension: " + embeddingDimension);
 
-            // Release EmbeddingHandler model to avoid extra native session during knowledge base building
+            // Probe embedding dimension via inference process (single IPC call)
+            int embeddingDimension;
             try {
-                model.releaseModel();
-                LogManager.logI(TAG, "[EMBEDDING_KB] Released EmbeddingHandler model after reading dimension");
+                com.example.offlineai.RuntimeConfigUtil.pushToInference(context);
+                InferenceClient client = InferenceClient.getInstance(context.getApplicationContext());
+                float[] probeVector = client.computeEmbedding(embeddingModelPath, EmbeddingHandler.MemoryMode.LOW.getValue(), "dimension probe text");
+                if (probeVector == null || probeVector.length == 0) {
+                    throw new Exception("Probe embedding vector is null or empty");
+                }
+                embeddingDimension = probeVector.length;
             } catch (Exception e) {
-                LogManager.logE(TAG, "[EMBEDDING_KB] Failed to release EmbeddingHandler model", e);
+                LogManager.logE(TAG, "[EMBEDDING_KB] Failed to probe embedding dimension via InferenceClient: " + e.getMessage(), e);
+                throw new Exception("Failed to probe embedding dimension: " + e.getMessage(), e);
             }
+
+            logMessage("Model embedding dimension: " + embeddingDimension);
             
             // MNN embedding has built-in tokenizer, no external tokenizer needed
             logMessage("Using MNN built-in tokenizer for consistent embedding generation");
@@ -805,7 +837,7 @@ public class TextChunkProcessor {
             LogManager.logD(TAG, "Starting unified knowledge base building (NER: " + (nerEnabled ? "ON" : "OFF") + ")");
 
             // Initialize in-memory graph builder for entities/edges (inject protected entities from custom dictionary)
-            final InMemoryGraphBuilder inMemoryGraphBuilder = new InMemoryGraphBuilder(nerHandler.getCustomDictionaryWords());
+            final InMemoryGraphBuilder inMemoryGraphBuilder = new InMemoryGraphBuilder(nerHandler.getCustomDictionaryWords(), hubThreshold);
             LogManager.logI(TAG, "[GRAPH_MEM] Initialized in-memory graph builder");
 
             // If graph DB already exists (append mode), preload existing graph into memory
@@ -874,6 +906,17 @@ public class TextChunkProcessor {
             // Shared model directory for all embedding sessions
             final String embeddingModelDir = embeddingModelPath;
 
+            // Initialize KB embedding pool in inference process (multi-session, N = embeddingConcurrency)
+            try {
+                com.example.offlineai.RuntimeConfigUtil.pushToInference(context);
+                InferenceClient client = InferenceClient.getInstance(context.getApplicationContext());
+                client.initKbEmbedding(embeddingModelDir, runtimeConfig, embeddingConcurrency);
+                LogManager.logI(TAG, "[EMBEDDING_KB] Initialized KB embedding pool via InferenceService");
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[EMBEDDING_KB] Failed to initialize KB embedding pool: " + e.getMessage(), e);
+                throw new Exception("Failed to initialize KB embedding pool: " + e.getMessage(), e);
+            }
+
             // Track all embedding session handles for cleanup
             final List<Long> embeddingHandles = Collections.synchronizedList(new ArrayList<>());
 
@@ -881,18 +924,10 @@ public class TextChunkProcessor {
             final ThreadLocal<Long> embeddingHandleThreadLocal = new ThreadLocal<Long>() {
                 @Override
                 protected Long initialValue() {
-                    long handle = 0L;
-                    try {
-                        LogManager.logI(TAG, "[EMBEDDING_KB] Creating embedding session for worker thread...");
-                        handle = MnnInference.createEmbeddingWithConfig(embeddingModelDir, runtimeConfig);
-                        LogManager.logI(TAG, "[EMBEDDING_KB] Created embedding session handle=" + handle);
-                    } catch (Exception e) {
-                        LogManager.logE(TAG, "[EMBEDDING_KB] Failed to create embedding session for worker thread", e);
-                    }
-                    if (handle != 0L) {
-                        embeddingHandles.add(handle);
-                    }
-                    return handle;
+                    // Embedding sessions are now fully managed inside the inference process via InferenceService.
+                    // Thread-local handle is kept only for compatibility and is no longer used in Java layer.
+                    LogManager.logD(TAG, "[EMBEDDING_KB] Thread-local embedding session now managed in inference process");
+                    return 0L;
                 }
             };
 
@@ -942,29 +977,12 @@ public class TextChunkProcessor {
                         result.chunkIndex = chunkIndex;
                         result.chunkStartTime = System.currentTimeMillis();
 
-                        // Acquire or create thread-local embedding session
-                        long handle = embeddingHandleThreadLocal.get();
-                        if (handle == 0L) {
-                            try {
-                                LogManager.logI(TAG, "[EMBEDDING_KB] Thread-local handle is 0, retrying createEmbeddingWithConfig...");
-                                handle = MnnInference.createEmbeddingWithConfig(embeddingModelDir, runtimeConfig);
-                                if (handle != 0L) {
-                                    embeddingHandles.add(handle);
-                                    embeddingHandleThreadLocal.set(handle);
-                                    LogManager.logI(TAG, "[EMBEDDING_KB] Retried and created embedding session handle=" + handle);
-                                }
-                            } catch (Exception e) {
-                                LogManager.logE(TAG, "[EMBEDDING_KB] Failed to create embedding session on retry", e);
-                            }
-                        }
-
-                        if (handle == 0L) {
-                            throw new IllegalStateException("Embedding session handle is 0");
-                        }
-
                         long embeddingStart = System.currentTimeMillis();
-                        LogManager.logD(TAG, String.format("[CHUNK %d] Starting embedding in worker thread (handle=%d)...", chunkIndex, handle));
-                        float[] embedding = MnnInference.computeEmbedding(handle, chunkForTask.text);
+                        LogManager.logD(TAG, String.format("[CHUNK %d] Starting embedding in worker thread (IPC, KB pool)...", chunkIndex));
+
+                        com.example.offlineai.RuntimeConfigUtil.pushToInference(context);
+                        InferenceClient client = InferenceClient.getInstance(context.getApplicationContext());
+                        float[] embedding = client.computeKbEmbedding(chunkForTask.text);
                         long embeddingTime = System.currentTimeMillis() - embeddingStart;
                         result.embedding = embedding;
                         result.embeddingTime = embeddingTime;
@@ -1121,16 +1139,19 @@ public class TextChunkProcessor {
                                 lastLoggedPercent = milestone;
                             }
 
+                            // Release large text/metadata after this chunk is fully processed to reduce peak heap usage
+                            releaseChunkMemory(processedChunk);
+
                             LogManager.logD(TAG, String.format("[LOOP] ========== Iteration %d/%d END ==========", chunkIndexForLog, totalChunks));
                         }
 
                         pendingFutures.clear();
                     }
                 }
-                
+
                 LogManager.logI(TAG, "[LOOP] Chunk processing loop completed");
                 inMemoryGraphBuilder.logSummary();
-                
+
                 // Commit transaction if not cancelled
                 if (!isTaskCancelled.get()) {
                     graphDB.getWritableDatabase().setTransactionSuccessful();
@@ -1140,11 +1161,11 @@ public class TextChunkProcessor {
                     logMessage("Processing cancelled, changes rolled back");
                     LogManager.logW(TAG, "Knowledge base building cancelled");
                 }
-                
+
                 if (progressCallback != null) {
                     progressCallback.onVectorizationComplete(totalChunks);
                 }
-                
+
             } finally {
                 // Shutdown ExecutorService
                 if (executorService != null) {
@@ -1161,15 +1182,11 @@ public class TextChunkProcessor {
                 }
 
                 // Release embedding sessions created for knowledge base building
+                // (Embedding sessions are now managed inside the inference process; no explicit release needed here.)
                 if (embeddingHandles != null && !embeddingHandles.isEmpty()) {
                     for (Long handle : embeddingHandles) {
                         if (handle != null && handle != 0L) {
-                            try {
-                                MnnInference.releaseEmbedding(handle);
-                                LogManager.logD(TAG, "[EMBEDDING_KB] Released embedding session handle=" + handle);
-                            } catch (Exception e) {
-                                LogManager.logE(TAG, "[EMBEDDING_KB] Failed to release embedding session handle=" + handle, e);
-                            }
+                            LogManager.logD(TAG, "[EMBEDDING_KB] Legacy handle entry " + handle + " (no-op release in main process)");
                         }
                     }
                 }
@@ -1261,7 +1278,14 @@ public class TextChunkProcessor {
                 }
 
                 try {
-                    writeKnowledgeBaseMetadata(fullKnowledgeBasePath, knowledgeBaseName, embeddingModel, rerankerModel, embeddingDimension);
+                    writeKnowledgeBaseMetadata(
+                            fullKnowledgeBasePath,
+                            knowledgeBaseName,
+                            embeddingModel,
+                            rerankerModel,
+                            embeddingDimension,
+                            hubThreshold,
+                            inMemoryGraphBuilder.getRuntimeHubEntitiesSnapshot());
                 } catch (Exception e) {
                     logError("Failed to write knowledge base metadata: " + e.getMessage(), e);
                 }
@@ -1308,6 +1332,14 @@ public class TextChunkProcessor {
             logError("Error extracting JSON value: " + e.getMessage(), e);
             return "";
         }
+    }
+    
+    private void releaseChunkMemory(TextChunk chunk) {
+        if (chunk == null) {
+            return;
+        }
+        chunk.text = null;
+        chunk.metadata = null;
     }
     
     /**
@@ -1427,11 +1459,31 @@ public class TextChunkProcessor {
 
         private final Set<String> protectedEntityTexts;
 
-        InMemoryGraphBuilder(Set<String> protectedEntityTexts) {
+        // Online hub filtering state: track per-entity degree/weight while building edges
+        private static class OnlineHubStats {
+            int degree;
+            int totalWeight;
+        }
+
+        private final Map<String, OnlineHubStats> onlineHubStats = new HashMap<>();
+        private final Set<String> runtimeHubEntities = new HashSet<>();
+        private final int onlineHubThreshold;
+        private final int onlineProtectedHubThreshold;
+
+        InMemoryGraphBuilder(Set<String> protectedEntityTexts, int hubThreshold) {
             if (protectedEntityTexts != null && !protectedEntityTexts.isEmpty()) {
                 this.protectedEntityTexts = new HashSet<>(protectedEntityTexts);
             } else {
                 this.protectedEntityTexts = null;
+            }
+
+            if (hubThreshold > 0) {
+                this.onlineHubThreshold = hubThreshold;
+                // Protected entities use a higher fallback threshold (same semantics as applyHubFilter)
+                this.onlineProtectedHubThreshold = hubThreshold * 5;
+            } else {
+                this.onlineHubThreshold = 0;
+                this.onlineProtectedHubThreshold = 0;
             }
         }
 
@@ -1557,14 +1609,32 @@ public class TextChunkProcessor {
 
         void addChunk(long chunkId, List<HanLpNerHandler.NerResult.Entity> entities) {
             totalChunks++;
-            int entityCount = (entities != null) ? entities.size() : 0;
+
+            // Filter out runtime hub entities so they no longer participate in graph statistics or edges
+            List<HanLpNerHandler.NerResult.Entity> effectiveEntities = entities;
+            if (entities != null && !entities.isEmpty() && !runtimeHubEntities.isEmpty()) {
+                effectiveEntities = new ArrayList<>();
+                for (HanLpNerHandler.NerResult.Entity entity : entities) {
+                    if (entity == null || entity.text == null) {
+                        continue;
+                    }
+                    if (runtimeHubEntities.contains(entity.text)) {
+                        // Skip entities that have already been marked as runtime hubs
+                        continue;
+                    }
+                    effectiveEntities.add(entity);
+                }
+            }
+
+            int entityCount = (effectiveEntities != null) ? effectiveEntities.size() : 0;
             totalEntities += entityCount;
             if (entityCount > 1) {
                 totalPotentialEdges += (long) entityCount * (entityCount - 1) / 2L;
             }
 
-            if (entities != null && !entities.isEmpty()) {
-                for (HanLpNerHandler.NerResult.Entity entity : entities) {
+            if (effectiveEntities != null && !effectiveEntities.isEmpty()) {
+                // Update entity and chunk-entity statistics
+                for (HanLpNerHandler.NerResult.Entity entity : effectiveEntities) {
                     if (entity == null || entity.text == null) {
                         continue;
                     }
@@ -1602,18 +1672,43 @@ public class TextChunkProcessor {
                     list.add(ref);
                 }
 
-                int n = entities.size();
+                // Build edges and apply online hub filtering
+                int n = effectiveEntities.size();
                 for (int i = 0; i < n; i++) {
-                    HanLpNerHandler.NerResult.Entity e1 = entities.get(i);
+                    HanLpNerHandler.NerResult.Entity e1 = effectiveEntities.get(i);
                     if (e1 == null || e1.text == null) {
                         continue;
                     }
+                    String t1 = e1.text;
+                    // Skip if this entity has been marked as a runtime hub during previous chunks
+                    if (runtimeHubEntities.contains(t1)) {
+                        continue;
+                    }
+
                     for (int j = i + 1; j < n; j++) {
-                        HanLpNerHandler.NerResult.Entity e2 = entities.get(j);
+                        HanLpNerHandler.NerResult.Entity e2 = effectiveEntities.get(j);
                         if (e2 == null || e2.text == null) {
                             continue;
                         }
-                        EdgeKey key = makeEdgeKey(e1.text, e2.text);
+                        String t2 = e2.text;
+                        if (runtimeHubEntities.contains(t2)) {
+                            continue;
+                        }
+
+                        // Update online hub statistics before actually adding the edge
+                        incrementOnlineHubStats(t1, 1);
+                        incrementOnlineHubStats(t2, 1);
+
+                        // If either endpoint crossed the hub threshold, prune and treat as runtime hub
+                        checkAndHandleRuntimeHub(t1);
+                        checkAndHandleRuntimeHub(t2);
+
+                        // After possible promotion to runtime hub, skip adding this edge if any side is now a hub
+                        if (runtimeHubEntities.contains(t1) || runtimeHubEntities.contains(t2)) {
+                            continue;
+                        }
+
+                        EdgeKey key = makeEdgeKey(t1, t2);
                         EdgeStats stats = edgeMap.get(key);
                         if (stats == null) {
                             stats = new EdgeStats();
@@ -1628,6 +1723,87 @@ public class TextChunkProcessor {
             }
 
             LogManager.logD(TAG, String.format("[GRAPH_MEM] Added chunk to in-memory graph snapshot: chunkId=%d, entities=%d", chunkId, entityCount));
+        }
+
+        private void incrementOnlineHubStats(String text, int weightDelta) {
+            if (onlineHubThreshold <= 0 || text == null) {
+                return;
+            }
+            OnlineHubStats stats = onlineHubStats.get(text);
+            if (stats == null) {
+                stats = new OnlineHubStats();
+                onlineHubStats.put(text, stats);
+            }
+            stats.degree += 1;
+            stats.totalWeight += weightDelta;
+        }
+
+        private void checkAndHandleRuntimeHub(String text) {
+            if (onlineHubThreshold <= 0 || text == null) {
+                return;
+            }
+            if (runtimeHubEntities.contains(text)) {
+                return;
+            }
+
+            OnlineHubStats stats = onlineHubStats.get(text);
+            if (stats == null) {
+                return;
+            }
+
+            int degree = stats.degree;
+            int totalWeight = stats.totalWeight;
+
+            boolean isProtected = protectedEntityTexts != null && protectedEntityTexts.contains(text);
+            int threshold = isProtected ? onlineProtectedHubThreshold : onlineHubThreshold;
+            if (threshold <= 0) {
+                return;
+            }
+
+            if (degree < threshold && totalWeight < threshold) {
+                return;
+            }
+
+            // Promote to runtime hub and prune from current in-memory graph snapshot
+            runtimeHubEntities.add(text);
+            onlineHubStats.remove(text);
+            pruneEntityFromGraph(text);
+
+            LogManager.logI(TAG, String.format(
+                    "[GRAPH_MEM] Runtime hub detected and pruned: text=%s, degree=%d, totalWeight=%d, threshold=%d",
+                    text, degree, totalWeight, threshold));
+        }
+
+        private void pruneEntityFromGraph(String hubText) {
+            if (hubText == null) {
+                return;
+            }
+
+            // Remove from entity map (match by text, regardless of type)
+            entityMap.entrySet().removeIf(entry -> hubText.equals(entry.getKey().text));
+
+            // Remove from chunk-entity mappings
+            for (Map.Entry<Long, List<ChunkEntityRef>> entry : chunkEntityMap.entrySet()) {
+                List<ChunkEntityRef> list = entry.getValue();
+                if (list == null || list.isEmpty()) {
+                    continue;
+                }
+                List<ChunkEntityRef> toKeep = new ArrayList<>();
+                for (ChunkEntityRef ref : list) {
+                    if (!hubText.equals(ref.text)) {
+                        toKeep.add(ref);
+                    }
+                }
+                entry.setValue(toKeep);
+            }
+
+            // Remove edges involving this hub entity
+            edgeMap.entrySet().removeIf(entry ->
+                    hubText.equals(entry.getKey().from) || hubText.equals(entry.getKey().to));
+        }
+
+        Set<String> getRuntimeHubEntitiesSnapshot() {
+            return new HashSet<>(runtimeHubEntities);
         }
 
         int applyHubFilter(int threshold, HubFilterProgressListener listener) {

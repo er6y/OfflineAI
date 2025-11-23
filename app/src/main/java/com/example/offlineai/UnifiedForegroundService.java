@@ -19,6 +19,7 @@ import androidx.core.app.NotificationCompat;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
@@ -36,6 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public class UnifiedForegroundService extends Service {
     private static final String TAG = "UnifiedForegroundService";
+    private static UnifiedForegroundService sInstance;
     private static final int NOTIFICATION_ID = 1001;
     private static final String CHANNEL_ID = "unified_foreground_channel";
     private static final String CHANNEL_NAME = "离线AI后台服务";
@@ -44,10 +46,11 @@ public class UnifiedForegroundService extends Service {
      * 任务类型枚举
      */
     public enum TaskType {
-        IDLE("空闲"),              // 空闲状态，只保持进程存活
-        KB_BUILD("知识库构建"),     // 知识库构建任务
-        MODEL_DOWNLOAD("模型下载"), // 模型下载任务
-        INFERENCE("推理中");        // 长时间推理任务
+        IDLE("空闲"),                  // 空闲状态，只保持进程存活
+        KB_BUILD("知识库构建"),         // 知识库构建任务
+        MODEL_DOWNLOAD("模型下载"),     // 模型下载任务
+        NOTE_PROCESSING("知识笔记处理"), // 笔记处理任务
+        INFERENCE("推理中");            // 长时间推理任务
         
         private final String displayName;
         
@@ -82,6 +85,19 @@ public class UnifiedForegroundService extends Service {
     
     // 唤醒锁
     private PowerManager.WakeLock wakeLock;
+
+    // Current KB build task id tracked in BackgroundTaskManager
+    private String kbBuildTaskId;
+
+    // In-memory log buffer for KB build tasks (legacy, kept for backward compatibility)
+    // For inference tasks, use BackgroundTaskManager's unified log buffer
+    private static final int MAX_LOG_LINES = 2000;
+    private static final int MAX_LOG_CHARS = 1024 * 1024;
+    private final List<String> logBuffer = new ArrayList<>();
+    private int currentLogChars = 0;
+    
+    // Current inference task ID for log routing
+    private volatile String currentInferenceTaskId = null;
     
     // 进度回调接口
     public interface ProgressCallback {
@@ -128,6 +144,7 @@ public class UnifiedForegroundService extends Service {
     @Override
     public void onCreate() {
         super.onCreate();
+        sInstance = this;
         LogManager.logD(TAG, "知识库构建服务已创建");
         
         // 创建通知渠道（Android 8.0及以上需要）
@@ -161,6 +178,9 @@ public class UnifiedForegroundService extends Service {
     @Override
     public void onDestroy() {
         super.onDestroy();
+        if (sInstance == this) {
+            sInstance = null;
+        }
         LogManager.logI(TAG, "统一前台服务已销毁");
         
         // 停止前台服务并移除通知
@@ -349,6 +369,190 @@ public class UnifiedForegroundService extends Service {
     public void setProgressCallback(ProgressCallback callback) {
         this.progressCallback = callback;
     }
+
+    public static UnifiedForegroundService getInstance() {
+        return sInstance;
+    }
+
+    /**
+     * Append an inference log line from any client component without depending on UI lifecycle.
+     * Routes to BackgroundTaskManager if a task ID is available, otherwise falls back to local buffer.
+     */
+    public static void appendInferenceLogFromClient(String message) {
+        try {
+            UnifiedForegroundService svc = sInstance;
+            String shortMsg = message;
+            if (shortMsg != null && shortMsg.length() > 80) {
+                shortMsg = shortMsg.substring(0, 80) + "...";
+            }
+            if (svc == null) {
+                LogManager.logD(TAG, "[FG][LOG] UnifiedForegroundService instance is null when trying to append inference log: " + shortMsg);
+                return;
+            }
+            TaskType type = svc.currentTaskType;
+            if (type == TaskType.INFERENCE) {
+                // Route to BackgroundTaskManager if task ID is available
+                String taskId = svc.currentInferenceTaskId;
+                if (taskId != null && !taskId.isEmpty()) {
+                    BackgroundTaskManager.getInstance().appendLog(taskId, message);
+                    LogManager.logD(TAG, "[FG][LOG] Appended inference log to BackgroundTaskManager: taskId=" + taskId + ", msg=" + shortMsg);
+                } else {
+                    // Fallback to local buffer
+                    svc.appendClientLogLine(message);
+                    LogManager.logD(TAG, "[FG][LOG] Appended inference log to local buffer (no taskId): " + shortMsg);
+                }
+            } else {
+                LogManager.logD(TAG, "[FG][LOG] Skip append to UnifiedForegroundService, currentTaskType=" + type + ", msg=" + shortMsg);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[FG] Failed to append inference log to UnifiedForegroundService: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Set the current inference task ID for log routing.
+     * Called by RagQaFragment when starting an LLM task.
+     */
+    public void setCurrentInferenceTaskId(String taskId) {
+        this.currentInferenceTaskId = taskId;
+        LogManager.logD(TAG, "[FG] Set current inference task ID: " + taskId);
+    }
+    
+    /**
+     * Get the current inference task ID.
+     */
+    public String getCurrentInferenceTaskId() {
+        return currentInferenceTaskId;
+    }
+
+    /**
+     * Append important streaming debug/performance chunks for inference tasks.
+     * This method intentionally filters out regular tokens to avoid token-level spam.
+     */
+    public static void appendInferenceDebugChunk(String chunk) {
+        if (chunk == null || chunk.isEmpty()) {
+            return;
+        }
+        // NOTE: Diffusion progress updates are sent as individual chunks like "2..", "3.."
+        // We need to match these step progress patterns as well
+        boolean interesting =
+                chunk.contains("<debug>") ||
+                chunk.contains("</debug>") ||
+                chunk.contains("<performance>") ||
+                chunk.contains("</performance>") ||
+                chunk.contains("[IMAGE:") ||
+                chunk.contains("[DIFF_DEBUG]") ||
+                chunk.contains("[DIFFUSION]") ||
+                chunk.contains("UNet Steps") ||
+                chunk.contains("UNet: done") ||
+                chunk.contains("VAE Decoder") ||
+                chunk.contains("Text Encoder") ||
+                chunk.matches(".*\\d+\\.\\.$") ||  // Match step progress like "2..", "3.."
+                chunk.contains("Completed (");
+        if (!interesting) {
+            return;
+        }
+        String shortChunk = chunk;
+        if (shortChunk.length() > 80) {
+            shortChunk = shortChunk.substring(0, 80) + "...";
+        }
+        LogManager.logD(TAG, "[FG][PUSH] appendInferenceDebugChunk accepted chunk, len="
+                + chunk.length() + ", preview=" + shortChunk);
+        appendInferenceLogFromClient(chunk);
+    }
+
+    /**
+     * Reset in-memory log buffer for current task.
+     */
+    private synchronized void resetLogBuffer() {
+        logBuffer.clear();
+        currentLogChars = 0;
+    }
+
+    /**
+     * Append a single log line into in-memory buffer with simple size cap.
+     */
+    private synchronized void appendLogLineInternal(String message) {
+        if (message == null || message.isEmpty()) {
+            return;
+        }
+        logBuffer.add(message);
+        currentLogChars += message.length();
+        while ((logBuffer.size() > MAX_LOG_LINES) || (currentLogChars > MAX_LOG_CHARS)) {
+            String removed = logBuffer.remove(0);
+            if (removed != null) {
+                currentLogChars -= removed.length();
+            }
+        }
+        if (currentLogChars < 0) {
+            currentLogChars = 0;
+        }
+        int size = logBuffer.size();
+        LogManager.logD(TAG, "[FG][BUF] appendLogLineInternal after append, size="
+                + size + ", chars=" + currentLogChars);
+    }
+
+    /**
+     * Get a snapshot copy of current log buffer for UI reconnection.
+     * For inference tasks with a task ID, returns logs from BackgroundTaskManager.
+     * Otherwise falls back to local buffer.
+     */
+    public synchronized List<String> getLogSnapshot() {
+        // For inference tasks, try to get logs from BackgroundTaskManager first
+        if (currentTaskType == TaskType.INFERENCE && currentInferenceTaskId != null) {
+            List<String> taskLogs = BackgroundTaskManager.getInstance().getLogSnapshot(currentInferenceTaskId);
+            if (taskLogs != null && !taskLogs.isEmpty()) {
+                LogManager.logD(TAG, "[FG][BUF] getLogSnapshot from BackgroundTaskManager, taskId=" + currentInferenceTaskId + ", size=" + taskLogs.size());
+                return taskLogs;
+            }
+        }
+        
+        // Fallback to local buffer
+        int size = logBuffer.size();
+        LogManager.logD(TAG, "[FG][BUF] getLogSnapshot from local buffer, size=" + size
+                + ", chars=" + currentLogChars);
+        return new ArrayList<>(logBuffer);
+    }
+    
+    /**
+     * Get logs from BackgroundTaskManager for a specific task.
+     */
+    public List<String> getLogSnapshotForTask(String taskId) {
+        if (taskId == null || taskId.isEmpty()) {
+            return new ArrayList<>();
+        }
+        return BackgroundTaskManager.getInstance().getLogSnapshot(taskId);
+    }
+
+    /**
+     * Dispatch a log line to both log buffer and UI callback.
+     */
+    private void dispatchLogLine(String message) {
+        appendLogLineInternal(message);
+        try {
+            if (currentTaskType == TaskType.KB_BUILD && kbBuildTaskId != null && !kbBuildTaskId.isEmpty()) {
+                String payload = message;
+                if (payload != null && !payload.endsWith("\n")) {
+                    payload = payload + "\n";
+                }
+                BackgroundTaskManager.getInstance().appendLog(kbBuildTaskId, payload);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[KB][BUF_WRITE] Failed to append KB build log: " + e.getMessage(), e);
+        }
+        if (progressCallback != null) {
+            progressCallback.onLogLine(message);
+        }
+    }
+
+    /**
+     * Append a log line from client components (e.g., Fragments) into the
+     * unified in-memory log buffer. This allows non-KB tasks such as model
+     * download or note processing to reuse the same log replay mechanism.
+     */
+    public void appendClientLogLine(String message) {
+        dispatchLogLine(message);
+    }
     
     /**
      * 通用任务开始方法
@@ -359,6 +563,8 @@ public class UnifiedForegroundService extends Service {
         LogManager.logI(TAG, "开始任务: " + taskType.getDisplayName() + " - " + taskDescription);
         currentTaskType = taskType;
         hasActiveTask = true;
+        // Reset log buffer for each new foreground task session
+        resetLogBuffer();
         
         // 获取唤醒锁
         acquireWakeLock();
@@ -423,8 +629,36 @@ public class UnifiedForegroundService extends Service {
     public void startBuildKnowledgeBase(String knowledgeBaseName, String embeddingModel, String rerankerModel, List<Uri> selectedFiles) {
         // 重置取消标志
         isTaskCancelled.set(false);
+        // Reset log buffer for new KB build session
+        resetLogBuffer();
         
         LogManager.logD(TAG, "开始构建知识库: " + knowledgeBaseName + ", 文件数量: " + selectedFiles.size() + ", 模型: " + embeddingModel);
+
+        // Create a background task snapshot for KB build so that
+        // UI/notifications can observe progress in a unified way.
+        try {
+            BackgroundTaskManager taskManager = BackgroundTaskManager.getInstance();
+            HashMap<String, String> extras = new HashMap<>();
+            extras.put("kbName", knowledgeBaseName);
+            extras.put("embeddingModel", embeddingModel);
+            if (rerankerModel != null && !rerankerModel.isEmpty()) {
+                extras.put("rerankerModel", rerankerModel);
+            }
+            int fileCount = selectedFiles != null ? selectedFiles.size() : 0;
+            extras.put("fileCount", String.valueOf(fileCount));
+
+            BackgroundTask task = taskManager.createTask(
+                BackgroundTask.TaskType.KB_BUILD,
+                "Build knowledge base: " + knowledgeBaseName,
+                true,
+                extras
+            );
+            kbBuildTaskId = task.getId();
+            LogManager.logD(TAG, "Background task created for KB build, id=" + kbBuildTaskId);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to create background task for KB build: " + e.getMessage(), e);
+            kbBuildTaskId = null;
+        }
         
         // 使用通用任务管理
         startTask(TaskType.KB_BUILD, "构建知识库: " + knowledgeBaseName);
@@ -435,7 +669,9 @@ public class UnifiedForegroundService extends Service {
             try {
                 // 执行知识库构建逻辑
                 boolean success = buildKnowledgeBase(knowledgeBaseName, embeddingModel, rerankerModel, selectedFiles);
-                
+
+                boolean cancelledByUser = isTaskCancelled.get();
+
                 // 任务完成回调
                 if (progressCallback != null) {
                     if (success) {
@@ -444,8 +680,50 @@ public class UnifiedForegroundService extends Service {
                         LogManager.logD(TAG, getString(R.string.kb_build_success_log, knowledgeBaseName));
                     } else {
                         progressCallback.onBuildCompleted(false);
-                        progressCallback.onTaskCompleted(false, getString(R.string.kb_build_cancelled));
-                        LogManager.logD(TAG, getString(R.string.kb_build_cancelled_log, knowledgeBaseName));
+                        if (cancelledByUser) {
+                            // User-requested cancellation
+                            String msg = getString(R.string.kb_build_cancelled);
+                            progressCallback.onTaskCompleted(false, msg);
+                            LogManager.logD(TAG, getString(R.string.kb_build_cancelled_log, knowledgeBaseName));
+                        } else {
+                            // Build failed due to error (including OOM); detailed reason is already logged to UI buffer
+                            String msg = getString(R.string.kb_build_failed_log);
+                            progressCallback.onTaskCompleted(false, msg);
+                            LogManager.logD(TAG, msg);
+                        }
+                    }
+                }
+
+                // Update background task state based on final result
+                if (kbBuildTaskId != null) {
+                    try {
+                        if (success) {
+                            String message = getString(R.string.kb_build_completed, knowledgeBaseName);
+                            BackgroundTaskManager.getInstance().updateTask(
+                                    kbBuildTaskId,
+                                    BackgroundTask.TaskState.COMPLETED,
+                                    100,
+                                    message
+                            );
+                        } else if (cancelledByUser) {
+                            String message = getString(R.string.kb_build_cancelled);
+                            BackgroundTaskManager.getInstance().updateTask(
+                                    kbBuildTaskId,
+                                    BackgroundTask.TaskState.CANCELLED,
+                                    currentProgress,
+                                    message
+                            );
+                        } else {
+                            String message = getString(R.string.kb_build_failed_log);
+                            BackgroundTaskManager.getInstance().updateTask(
+                                    kbBuildTaskId,
+                                    BackgroundTask.TaskState.FAILED,
+                                    currentProgress,
+                                    message
+                            );
+                        }
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Failed to update background task on KB build completion: " + e.getMessage(), e);
                     }
                 }
                 
@@ -458,6 +736,21 @@ public class UnifiedForegroundService extends Service {
                 // 错误回调
                 if (progressCallback != null) {
                     progressCallback.onTaskCompleted(false, "知识库构建失败: " + e.getMessage());
+                }
+
+                // Update background task state as FAILED
+                if (kbBuildTaskId != null) {
+                    try {
+                        String message = getString(R.string.kb_build_failed_log);
+                        BackgroundTaskManager.getInstance().updateTask(
+                                kbBuildTaskId,
+                                BackgroundTask.TaskState.FAILED,
+                                currentProgress,
+                                message
+                        );
+                    } catch (Exception inner) {
+                        LogManager.logE(TAG, "Failed to update background task on KB build failure: " + inner.getMessage(), inner);
+                    }
                 }
                 
                 // 结束任务
@@ -479,6 +772,37 @@ public class UnifiedForegroundService extends Service {
         isTaskCancelled.set(true);
         LogManager.logD(TAG, "已请求取消知识库构建任务");
         // updateNotification("正在取消知识库构建...", 0);
+
+        // Update background task state to CANCELLED
+        try {
+            if (kbBuildTaskId != null) {
+                BackgroundTaskManager.getInstance().updateTask(
+                    kbBuildTaskId,
+                    BackgroundTask.TaskState.CANCELLED,
+                    currentProgress,
+                    "Knowledge base build cancelled by user"
+                );
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to update background task on cancel: " + e.getMessage(), e);
+        }
+
+        // For long-running KB build tasks, also schedule a hard stop
+        // for the inference process in case cooperative cancellation
+        // (isTaskCancelled + executor shutdown) is not sufficient.
+        if (currentTaskType == TaskType.KB_BUILD) {
+            try {
+                com.example.offlineai.ipc.InferenceClient client =
+                        com.example.offlineai.ipc.InferenceClient.getInstance(getApplicationContext());
+                LogManager.logD(TAG, "Scheduling forced inference process kill after KB cancel timeout");
+                // Use a conservative timeout (10 seconds) to allow
+                // in-flight embedding calls to finish gracefully
+                // before killing the child process.
+                client.requestForceKillAfterTimeout(10_000L);
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to schedule forced inference stop for KB cancel: " + e.getMessage(), e);
+            }
+        }
     }
     
     /**
@@ -486,18 +810,19 @@ public class UnifiedForegroundService extends Service {
      * @return 是否成功完成（未被取消）
      */
     private boolean buildKnowledgeBase(String knowledgeBaseName, String embeddingModel, String rerankerModel, List<Uri> selectedFiles) {
-        LogManager.logD(TAG, "开始构建知识库: " + knowledgeBaseName + ", 模型: " + embeddingModel + ", 文件数: " + selectedFiles.size());
-        
-        // 清理旧的临时文件，避免累积占用存储空间
-        cleanupTempFiles();
-        
-        // 这里实现知识库构建的核心逻辑
-        // 1. 初始化文本处理器
-        TextChunkProcessor textChunkProcessor = new TextChunkProcessor(this, isTaskCancelled);
-        
-        // 2. Initialize progress manager
-        progressManager = ProgressManager.getInstance();
-        progressManager.reset();
+        try {
+            LogManager.logD(TAG, "开始构建知识库: " + knowledgeBaseName + ", 模型: " + embeddingModel + ", 文件数: " + selectedFiles.size());
+            
+            // 清理旧的临时文件，避免累积占用存储空间
+            cleanupTempFiles();
+            
+            // 这里实现知识库构建的核心逻辑
+            // 1. 初始化文本处理器
+            TextChunkProcessor textChunkProcessor = new TextChunkProcessor(this, isTaskCancelled);
+            
+            // 2. Initialize progress manager
+            progressManager = ProgressManager.getInstance();
+            progressManager.reset();
 
         // 2.1 Initialize build configuration snapshot for UI display
         int chunkSize = ConfigManager.getChunkSize(this);
@@ -514,22 +839,20 @@ public class UnifiedForegroundService extends Service {
         }
         progressManager.setBuildConfig(knowledgeBaseName, embeddingModel, rerankerModel, dictFileName, chunkSize, chunkOverlap);
 
-        // 2.2 Emit initial configuration lines to UI (if callback already attached)
-        if (progressCallback != null) {
-            try {
-                String kbLine = "Knowledge base: " + knowledgeBaseName;
-                String embedLine = "Embedding model: " + embeddingModel;
-                String rerankLine = "Reranker model: " + (rerankerModel == null || rerankerModel.isEmpty() ? "None" : rerankerModel);
-                String chunkLine = "Chunk size: " + chunkSize + ", overlap: " + chunkOverlap;
-                String dictLine = "Dictionary (configured): " + (dictFileName.isEmpty() ? "None" : dictFileName);
-                progressCallback.onLogLine(kbLine);
-                progressCallback.onLogLine(embedLine);
-                progressCallback.onLogLine(rerankLine);
-                progressCallback.onLogLine(chunkLine);
-                progressCallback.onLogLine(dictLine);
-            } catch (Exception e) {
-                LogManager.logE(TAG, "Failed to emit build configuration lines", e);
-            }
+        // 2.2 Emit initial configuration lines to log buffer and UI
+        try {
+            String kbLine = "Knowledge base: " + knowledgeBaseName;
+            String embedLine = "Embedding model: " + embeddingModel;
+            String rerankLine = "Reranker model: " + (rerankerModel == null || rerankerModel.isEmpty() ? "None" : rerankerModel);
+            String chunkLine = "Chunk size: " + chunkSize + ", overlap: " + chunkOverlap;
+            String dictLine = "Dictionary (configured): " + (dictFileName.isEmpty() ? "None" : dictFileName);
+            dispatchLogLine(kbLine);
+            dispatchLogLine(embedLine);
+            dispatchLogLine(rerankLine);
+            dispatchLogLine(chunkLine);
+            dispatchLogLine(dictLine);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to emit build configuration lines", e);
         }
         
         // 3. Set progress callback
@@ -552,6 +875,28 @@ public class UnifiedForegroundService extends Service {
                 // Log progress
                 LogManager.logD(TAG, "Text extraction progress: " + processedFiles + "/" + totalFiles + ", current file: " + currentFile +
                         ", overall=" + overall + "%");
+
+                // Sync background task snapshot for KB build
+                if (kbBuildTaskId != null) {
+                    try {
+                        String message = String.format(
+                                Locale.getDefault(),
+                                "%s (%d/%d): %s",
+                                getString(R.string.progress_text_extraction_keyword),
+                                processedFiles,
+                                totalFiles,
+                                currentFile
+                        );
+                        BackgroundTaskManager.getInstance().updateTask(
+                                kbBuildTaskId,
+                                BackgroundTask.TaskState.RUNNING,
+                                overall,
+                                message
+                        );
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Failed to update background task (text extraction): " + e.getMessage(), e);
+                    }
+                }
             }
             
             @Override
@@ -568,6 +913,21 @@ public class UnifiedForegroundService extends Service {
 
                 LogManager.logD(TAG, "Vectorization progress: " + processedChunks + "/" + totalChunks + " (" + percentage + "%)" +
                         ", overall=" + overall + "%");
+
+                // Sync background task snapshot for KB build
+                if (kbBuildTaskId != null) {
+                    try {
+                        String message = "Vectorizing chunks: " + processedChunks + "/" + totalChunks;
+                        BackgroundTaskManager.getInstance().updateTask(
+                                kbBuildTaskId,
+                                BackgroundTask.TaskState.RUNNING,
+                                overall,
+                                message
+                        );
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Failed to update background task (vectorization): " + e.getMessage(), e);
+                    }
+                }
             }
             
             @Override
@@ -584,6 +944,20 @@ public class UnifiedForegroundService extends Service {
                 ProgressManager.ProgressData progressData = progressManager.getCurrentProgress();
                 int overall = Math.round(progressData.getOverallProgressPercentage());
                 updateProgress(overall, null);
+
+                // Sync background task snapshot for KB build (stage transition)
+                if (kbBuildTaskId != null) {
+                    try {
+                        BackgroundTaskManager.getInstance().updateTask(
+                                kbBuildTaskId,
+                                BackgroundTask.TaskState.RUNNING,
+                                overall,
+                                status
+                        );
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Failed to update background task (text extraction complete): " + e.getMessage(), e);
+                    }
+                }
             }
             
             @Override
@@ -596,13 +970,25 @@ public class UnifiedForegroundService extends Service {
                     AppConstants.PROCESSING_STATUS_VECTORIZATION_COMPLETE) + ", " + 
                     getString(R.string.vectorization_complete_vectors, vectorCount);
                 LogManager.logD(TAG, "Vectorization completed, total vectors: " + vectorCount);
-                if (progressCallback != null) {
-                    progressCallback.onLogLine(status);
-                }
+                dispatchLogLine(status);
                 // Update numeric progress using unified overall percentage
                 ProgressManager.ProgressData progressData = progressManager.getCurrentProgress();
                 int overall = Math.round(progressData.getOverallProgressPercentage());
                 updateProgress(overall, null);
+
+                // Sync background task snapshot for KB build (vectorization stage complete, may continue with graph building)
+                if (kbBuildTaskId != null) {
+                    try {
+                        BackgroundTaskManager.getInstance().updateTask(
+                                kbBuildTaskId,
+                                BackgroundTask.TaskState.RUNNING,
+                                overall,
+                                status
+                        );
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Failed to update background task (vectorization complete): " + e.getMessage(), e);
+                    }
+                }
             }
             
             @Override
@@ -616,11 +1002,23 @@ public class UnifiedForegroundService extends Service {
 
                 String status = "Building knowledge graph: " + processedChunks + "/" + totalChunks +
                     " (" + String.format("%.1f%%", percentage) + ")";
-                if (progressCallback != null) {
-                    progressCallback.onLogLine(status);
-                }
+                dispatchLogLine(status);
                 // Use unified overall progress instead of hard-coded 100%
                 updateProgress(overall, null);
+
+                // Sync background task snapshot for KB build (graph building stage)
+                if (kbBuildTaskId != null) {
+                    try {
+                        BackgroundTaskManager.getInstance().updateTask(
+                                kbBuildTaskId,
+                                BackgroundTask.TaskState.RUNNING,
+                                overall,
+                                status
+                        );
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Failed to update background task (graph building): " + e.getMessage(), e);
+                    }
+                }
             }
             
             @Override
@@ -629,53 +1027,72 @@ public class UnifiedForegroundService extends Service {
                 LogManager.logE(TAG, "错误: " + errorMessage);
                 String uiMessage = getString(R.string.error_message, errorMessage);
                 // Send error text via onLogLine only; numeric progress resets to 0 without status text
-                if (progressCallback != null) {
-                    progressCallback.onLogLine(uiMessage);
-                }
+                dispatchLogLine(uiMessage);
                 updateProgress(0, null);
+
+                // Sync background task snapshot for KB build (error state)
+                if (kbBuildTaskId != null) {
+                    try {
+                        BackgroundTaskManager.getInstance().updateTask(
+                                kbBuildTaskId,
+                                BackgroundTask.TaskState.FAILED,
+                                0,
+                                uiMessage
+                        );
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Failed to update background task (error): " + e.getMessage(), e);
+                    }
+                }
             }
             
             @Override
             public void onLog(String message) {
                 // 记录日志
                 LogManager.logD(TAG, message);
-                if (progressCallback != null) {
-                    progressCallback.onLogLine(message);
-                }
+                dispatchLogLine(message);
             }
         });
         
-        // 设置通知进度回调
+        // 设置通知进度回调（目前仅作为占位，不更新通知栏进度）
         textChunkProcessor.setNotificationProgressCallback(new TextChunkProcessor.NotificationProgressCallback() {
             @Override
             public void onNotificationProgressUpdate(int processedChunks, int totalChunks, float percentage) {
+                // Intentionally left blank. Notification progress is driven by
+                // unified overall percentage in updateTextExtractionProgress/updateProgress.
                 // updateNotificationProgress(processedChunks, totalChunks, percentage);
             }
         });
-        
-        try {
-            // 3. 处理文件并构建知识库
-            boolean result = textChunkProcessor.processFilesAndBuildKnowledgeBase(
+
+        // 4. Start processing and return result
+        // Use the same chunkSize and chunkOverlap configuration that were
+        // computed above and recorded into ProgressManager, so that
+        // TextChunkProcessor has a consistent view of chunking settings.
+        return textChunkProcessor.processFilesAndBuildKnowledgeBase(
                 knowledgeBaseName,
                 embeddingModel,
                 rerankerModel,
                 selectedFiles,
                 chunkSize,
                 chunkOverlap
-            );
-            
-            // 4. 返回结果
-            return result && !isTaskCancelled.get();
-            
-        } catch (Exception e) {
-            LogManager.logE(TAG, "知识库构建过程中发生错误", e);
-            throw e;
-        } finally {
-            // 确保在任何情况下都释放资源
-            LogManager.logD(TAG, "知识库构建过程结束，释放资源");
-            
-            // MNN embedding handler manages model lifecycle automatically
-            LogManager.logD(TAG, "Model lifecycle managed by MNN embedding handler");
+        );
+        } catch (OutOfMemoryError oom) {
+            LogManager.logE(TAG, "[KB_BUILD] OutOfMemoryError during knowledge base build: " + oom.getMessage(), oom);
+            try {
+                String uiMessage = "构建知识库时内存不足，请减少文件数量或拆分为多个知识库后重试。";
+                dispatchLogLine(uiMessage);
+                updateProgress(0, null);
+                if (kbBuildTaskId != null) {
+                    BackgroundTaskManager.getInstance().updateTask(
+                            kbBuildTaskId,
+                            BackgroundTask.TaskState.FAILED,
+                            0,
+                            uiMessage
+                    );
+                }
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[KB_BUILD] Failed to handle OOM state: " + e.getMessage(), e);
+            }
+            return false;
         }
     }
     

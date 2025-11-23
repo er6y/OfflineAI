@@ -37,8 +37,7 @@ import android.os.PowerManager;
 import android.provider.Settings;
 import android.util.Log;
 import com.example.offlineai.LogManager;
-import com.example.offlineai.EmbeddingHandler;
-import com.example.offlineai.api.LocalLlmAdapter;
+import com.example.offlineai.ipc.LocalLlmAdapter;
 import com.example.offlineai.AcceleratorDiagnostics;
 import android.view.LayoutInflater;
 import android.view.Menu;
@@ -1010,28 +1009,11 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         String backendPreference = ConfigManager.getString(this, ConfigManager.KEY_USE_GPU, "CPU");
         LogManager.logI(TAG, "Backend preference change notification: " + backendPreference);
         
-        // 更新LocalLlmAdapter的后端设置
-        try {
-            LocalLlmAdapter localLlmAdapter = LocalLlmAdapter.getInstance(this);
-            if (localLlmAdapter != null) {
-                localLlmAdapter.updateGpuSetting(backendPreference);
-            } else {
-                LogManager.logW(TAG, "Backend setting change: LocalLlmAdapter instance is null, cannot update backend settings");
-            }
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Backend setting change: Failed to update LocalLlmAdapter backend settings: " + e.getMessage(), e);
-        }
+        // NOTE: Backend settings are now pushed to child process via RuntimeConfig IPC.
+        // No need to update LocalLlmAdapter in main process as it's a separate instance.
+        // RuntimeConfigUtil.pushToInference() is called before each inference request.
+        LogManager.logD(TAG, "Backend setting will be applied via RuntimeConfig on next inference");
         
-        // 更新EmbeddingHandler的后端设置（MNN不需要单独设置后端，已在模型加载时处理）
-        try {
-            EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(this);
-            if (embeddingHandler != null && embeddingHandler.isModelLoaded()) {
-                // MNN embedding uses built-in backend, no need to update separately
-                LogManager.logI(TAG, "Backend setting change: EmbeddingHandler using MNN built-in backend");
-            }
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Backend setting change: Failed to access EmbeddingHandler: " + e.getMessage(), e);
-        }
         
         // [FIX] Do NOT recreate fragments to preserve user state (selected model, browsed images, etc.)
         // Only notify fragments to apply new settings (e.g., font size) via onResume()
@@ -1222,13 +1204,10 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         // 先解绑服务
         unbindKnowledgeBaseBuilderService();
         
-        // 释放LocalLlmAdapter资源（保存kernel cache）
-        try {
-            LocalLlmAdapter.getInstance(this).onDestroy();
-            LogManager.logI(TAG, "LocalLlmAdapter resources released (kernel cache saved)");
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to release LocalLlmAdapter", e);
-        }
+        // NOTE: LocalLlmAdapter resources are managed in child process.
+        // Main process singleton doesn't hold any model resources.
+        // Kernel cache is saved automatically by child process on service destroy.
+        LogManager.logD(TAG, "MainActivity destroyed, child process resources managed independently");
         
         // 如果是用户主动退出（isFinishing()为true），停止服务并清除通知
         if (isFinishing()) {

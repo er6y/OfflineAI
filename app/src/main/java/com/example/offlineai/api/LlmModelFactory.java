@@ -7,6 +7,7 @@ import com.example.offlineai.AppConstants;
 import com.example.offlineai.R;
 
 import com.example.offlineai.ConfigManager;
+import com.example.offlineai.ipc.LocalLlmAdapter;
 
 import java.io.File;
 import java.util.HashMap;

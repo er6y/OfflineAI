@@ -283,6 +283,14 @@ public class ConfigManager {
     public static final String DEFAULT_LANGUAGE = "CHN"; // 默认中文
 
     private static JSONObject configCache = null;
+    // Track last modified time of config file used for the current cache
+    private static long configCacheLastModified = 0L;
+
+    // Invalidate in-memory config cache (used by multi-process components to force reload from disk)
+    public static synchronized void invalidateConfigCache() {
+        configCache = null;
+        configCacheLastModified = 0L;
+    }
     
     /**
      * 检查是否为需要多语言处理的配置键
@@ -395,18 +403,24 @@ public class ConfigManager {
      * @return 配置JSON对象
      */
     public static JSONObject loadConfig(Context context) {
-        // 如果缓存存在，直接返回缓存
-        if (configCache != null) {
-            return configCache;
-        }
-        
         try {
             // 获取配置文件
             File configFile = getConfigFile(context);
+
+            // If we already have a cached config, only reuse it when the
+            // underlying file has not changed. This makes cache safe across
+            // multiple processes that may update the same .config file.
+            if (configCache != null && configFile.exists()) {
+                long lastModified = configFile.lastModified();
+                if (lastModified == configCacheLastModified) {
+                    return configCache;
+                }
+            }
             
             // 如果配置文件不存在，创建默认配置
             if (!configFile.exists()) {
                 LogManager.logD(TAG, getLogString(context, R.string.config_not_exist));
+                LogManager.logD(TAG, "[CFG] Config file does not exist, creating default config");
                 JSONObject defaultConfig = createDefaultConfig();
                 saveConfig(context, defaultConfig);
                 return defaultConfig;
@@ -421,8 +435,8 @@ public class ConfigManager {
                 }
             } catch (IOException e) {
                 LogManager.logE(TAG, getLogString(context, R.string.config_read_failed), e);
+                LogManager.logE(TAG, "[CFG] Failed to read config file, returning in-memory default config only");
                 JSONObject defaultConfig = createDefaultConfig();
-                saveConfig(context, defaultConfig);
                 return defaultConfig;
             }
             
@@ -432,8 +446,8 @@ public class ConfigManager {
                 config = new JSONObject(content.toString());
             } catch (JSONException e) {
                 LogManager.logE(TAG, getLogString(context, R.string.config_parse_failed), e);
+                LogManager.logE(TAG, "[CFG] Failed to parse config file, returning in-memory default config only");
                 JSONObject defaultConfig = createDefaultConfig();
-                saveConfig(context, defaultConfig);
                 return defaultConfig;
             }
             
@@ -484,25 +498,18 @@ public class ConfigManager {
                 if (defaultConfig == null) {
                     defaultConfig = createDefaultConfig();
                 }
-                saveConfig(context, defaultConfig);
+                LogManager.logE(TAG, "[CFG] Config marked as corrupted, returning default config without writing to disk");
                 return defaultConfig;
             }
             
-            // 保存更新后的配置
-            saveConfig(context, config);
-            
-            // 缓存配置
-            configCache = config;
-            
-            return config;
+            // 更新内存缓存，但此处不写回磁盘，避免多进程间不必要的写冲突
+            configCache = new JSONObject(config.toString());
+            configCacheLastModified = configFile.lastModified();
+            return configCache;
         } catch (Exception e) {
             LogManager.logE(TAG, getLogString(context, R.string.config_load_failed), e);
+            LogManager.logE(TAG, "[CFG] Unexpected error while loading config, returning in-memory default config only");
             JSONObject defaultConfig = createDefaultConfig();
-            try {
-                saveConfig(context, defaultConfig);
-            } catch (Exception ex) {
-                LogManager.logE(TAG, getLogString(context, R.string.config_save_default_failed), ex);
-            }
             return defaultConfig;
         }
     }
@@ -542,18 +549,32 @@ public class ConfigManager {
             
             // 获取配置文件
             File configFile = getConfigFile(context);
+            File tempFile = new File(configFile.getAbsolutePath() + ".tmp");
             
-            // 写入配置文件
-            try (FileWriter writer = new FileWriter(configFile)) {
+            // 写入配置文件（使用临时文件 + 原子重命名，避免读取到半写入状态）
+            try (FileWriter writer = new FileWriter(tempFile)) {
                 writer.write(config.toString(2));
+                writer.flush();
+                
+                if (!tempFile.renameTo(configFile)) {
+                    LogManager.logE(TAG, "[CFG] Failed to rename temp config file to target");
+                    return;
+                }
                 
                 // 更新缓存
                 configCache = new JSONObject(config.toString());
+                configCacheLastModified = configFile.lastModified();
                 
                 LogManager.logD(TAG, getLogString(context, R.string.config_saved, configFile.getAbsolutePath()));
                 //LogManager.logD(TAG, "保存的配置内容: " + config.toString(2));
             } catch (IOException e) {
                 LogManager.logE(TAG, getLogString(context, R.string.config_save_failed), e);
+            } finally {
+                if (tempFile.exists() && !tempFile.equals(configFile)) {
+                    // Best-effort cleanup of temp file
+                    //noinspection ResultOfMethodCallIgnored
+                    tempFile.delete();
+                }
             }
         } catch (Exception e) {
             LogManager.logE(TAG, getLogString(context, LOG_SAVE_CONFIG_FAILED), e);
@@ -1463,6 +1484,20 @@ public class ConfigManager {
     public static void setString(Context context, String key, String value) {
         try {
             JSONObject config = loadConfig(context);
+            String oldValue = null;
+            if (config.has(key)) {
+                oldValue = config.optString(key, "<none>");
+            }
+            if (KEY_ASR_MODEL.equals(key) ||
+                KEY_TTS_MODEL.equals(key) ||
+                KEY_MODEL_NAME.equals(key) ||
+                KEY_NO_THINKING.equals(key) ||
+                KEY_DIFFUSION_STEPS.equals(key) ||
+                KEY_DIFFUSION_MEMORY_MODE.equals(key) ||
+                KEY_DIFFUSION_SEED.equals(key) ||
+                KEY_CURRENT_CHAT_FOLDER.equals(key)) {
+                LogManager.logD(TAG, "[CFG] setString key=" + key + ", old=" + (oldValue == null ? "<none>" : oldValue) + ", new=" + value);
+            }
             
             // 对于特定的多语言配置项，存储资源键而非显示文本
             if (isMultiLanguageConfigKey(key)) {
@@ -2179,6 +2214,7 @@ public class ConfigManager {
                 apiKeys.put("https://api.moonshot.cn/v1", "");
                 apiKeys.put("https://dashscope.aliyuncs.com/compatible-mode/v1", "");
                 apiKeys.put("https://ark.cn-beijing.volces.com/api/v3", "");
+                apiKeys.put("https://maas-api.cn-huabei-1.xf-yun.com/v1", "");
                 
                 config.put("api_keys", apiKeys);
                 
@@ -2591,6 +2627,8 @@ public class ConfigManager {
             apiKeys.put("https://api.moonshot.cn/v1", "");
             apiKeys.put("https://dashscope.aliyuncs.com/compatible-mode/v1", "");
             apiKeys.put("https://ark.cn-beijing.volces.com/api/v3", "");
+            apiKeys.put("https://api.openai.com/v1", "");
+            apiKeys.put("https://maas-api.cn-huabei-1.xf-yun.com/v1", "");
             
             config.put("api_keys", apiKeys);
             

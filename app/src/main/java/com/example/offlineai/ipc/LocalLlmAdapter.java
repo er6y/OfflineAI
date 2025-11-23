@@ -1,10 +1,12 @@
-package com.example.offlineai.api;
+package com.example.offlineai.ipc;
 
 import android.content.Context;
 import android.util.Log;
 import com.example.offlineai.LogManager;
-
 import com.example.offlineai.ConfigManager;
+import com.example.offlineai.RuntimeConfigHolder;
+import com.example.offlineai.ipc.RuntimeConfig;
+import com.example.offlineai.api.LlmApiAdapter;
 
 import java.io.File;
 
@@ -123,10 +125,14 @@ public class LocalLlmAdapter {
                 case READY:
                     // 模型已就绪，检查是否为目标模型
                     if (modelName.equals(currentModelName)) {
-                        LogManager.logI(TAG, "DEBUG: Model ready and matches, execute inference directly: " + modelName);
+                        LogManager.logI(TAG, "✓ REUSING loaded model: " + modelName + " (no reload needed)");
+                        // Send debug info to UI: reusing model
+                        callback.onStreamingData("[LLM] Reusing local model: " + modelName + "\n");
                         executeInference(prompt, finalImagePaths, finalAudioPaths, callback);
                     } else {
-                        LogManager.logI(TAG, "DEBUG: Model mismatch, need to load target model: " + modelName + " (current: " + currentModelName + ")");
+                        LogManager.logI(TAG, "⚠ SWITCHING model: " + currentModelName + " → " + modelName + " (will unload and reload)");
+                        // Send debug info to UI: loading model
+                        callback.onStreamingData("[LLM] Loading local model: " + modelName + "\n");
                         loadModelAndInference(modelName, prompt, finalImagePaths, finalAudioPaths, callback);
                     }
                     break;
@@ -163,7 +169,9 @@ public class LocalLlmAdapter {
                 case UNLOADED:
                 default:
                     // 模型未加载，直接加载
-                    LogManager.logI(TAG, "DEBUG: Model unloaded, start loading: " + modelName);
+                    LogManager.logI(TAG, "⏳ LOADING model from scratch: " + modelName);
+                    // Send debug info to UI: loading model
+                    callback.onStreamingData("[LLM] Loading local model: " + modelName + "\n");
                     loadModelAndInference(modelName, prompt, finalImagePaths, finalAudioPaths, callback);
                     break;
             }
@@ -396,8 +404,8 @@ public class LocalLlmAdapter {
         boolean useHistory = false;
         
         if (engine instanceof LocalLLMMNNHandler) {
-            // Get history rounds setting
-            int historyRounds = ConfigManager.getInt(context, ConfigManager.KEY_HISTORY_ROUNDS, 3);
+            // Get history rounds setting from RuntimeConfig (fallback to default)
+            int historyRounds = RuntimeConfigHolder.getHistoryRoundsOrDefault(ConfigManager.DEFAULT_HISTORY_ROUNDS);
             // Use history if historyRounds > 0, regardless of current images/audio
             // (User images will be filtered in history, AI images will be skipped)
             useHistory = historyRounds > 0;
@@ -413,13 +421,14 @@ public class LocalLlmAdapter {
             // Build inference params
             LocalLlmHandler.InferenceParams params = new LocalLlmHandler.InferenceParams();
             
-            // Get system prompt from config
-            String systemPrompt = ConfigManager.getString(context, ConfigManager.KEY_SYSTEM_PROMPT, "");
+            // Get system prompt from RuntimeConfig
+            RuntimeConfig cfg = RuntimeConfigHolder.get();
+            String systemPrompt = (cfg != null && cfg.systemPrompt != null) ? cfg.systemPrompt : "";
             params.systemPrompt = systemPrompt;
             
             // Set TTS output path if supported
             if (mnnHandler.hasTtsSupport()) {
-                String chatFolder = ConfigManager.getString(context, ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                String chatFolder = RuntimeConfigHolder.getCurrentChatFolderOrNull();
                 if (!chatFolder.isEmpty()) {
                     long timestamp = System.currentTimeMillis();
                     params.ttsOutputPath = new java.io.File(chatFolder, "audio_" + timestamp + "_ai.wav").getAbsolutePath();

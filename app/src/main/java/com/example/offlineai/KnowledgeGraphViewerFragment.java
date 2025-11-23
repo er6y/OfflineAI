@@ -347,9 +347,17 @@ public class KnowledgeGraphViewerFragment extends Fragment {
                     LogManager.logI(TAG, "[GRAPH] No edges found for knowledge base: " + currentKbName);
                 }
 
+                KnowledgeGraphDatabase.DatabaseMetadata metadata = graphDb.getMetadata();
+                int hubThreshold = metadata.getHubThreshold();
+                String runtimeHubs = metadata.getRuntimeHubEntities();
+
                 graphDb.close();
 
-                JSONObject payload = buildGraphPayload(currentKbName, currentTopN, stats, topEntities, topEdges);
+                final int hubThresholdFinal = hubThreshold;
+                final String runtimeHubsFinal = runtimeHubs;
+
+                JSONObject payload = buildGraphPayload(currentKbName, currentTopN, stats,
+                        topEntities, topEdges, hubThresholdFinal, runtimeHubsFinal);
                 final String payloadJson = payload.toString();
                 LogManager.logI(TAG, "[GRAPH] Payload JSON length=" + payloadJson.length());
 
@@ -381,7 +389,9 @@ public class KnowledgeGraphViewerFragment extends Fragment {
                                          int topN,
                                          KnowledgeGraphExporter.GraphStats stats,
                                          List<KnowledgeGraphExporter.EntityInfo> entities,
-                                         List<KnowledgeGraphExporter.EdgeInfo> edges) throws Exception {
+                                         List<KnowledgeGraphExporter.EdgeInfo> edges,
+                                         int hubThreshold,
+                                         String runtimeHubEntities) throws Exception {
         JSONObject root = new JSONObject();
         root.put("kbName", kbName);
         root.put("topN", topN);
@@ -460,6 +470,8 @@ public class KnowledgeGraphViewerFragment extends Fragment {
         root.put("nodes", nodesArray);
         root.put("edges", edgesArray);
         root.put("relations", relationsArray);
+        root.put("hubThreshold", hubThreshold);
+        root.put("runtimeHubEntities", runtimeHubEntities != null ? runtimeHubEntities : "");
 
         return root;
     }

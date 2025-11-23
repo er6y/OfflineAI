@@ -858,7 +858,11 @@
     <!-- API URLs 字符串数组 -->
     <string-array name="api_urls">
         <item>http://localhost:11434/v1/</item>
-        <item>https://api.openai.com/v1/</item>
+        <item>https://api.deepseek.com</item>
+        <item>https://api.moonshot.cn/v1</item>
+        <item>https://dashscope.aliyuncs.com/compatible-mode/v1</item>
+        <item>https://ark.cn-beijing.volces.com/api/v3</item>
+        <item>https://maas-api.cn-huabei-1.xf-yun.com/v1</item>
     </string-array>
     
     <!-- Settings Fragment -->

@@ -68,6 +68,7 @@ public class ModelDownloadFragment extends Fragment {
     private ExecutorService downloadExecutor;
     private Handler mainHandler;
     private boolean isDownloading = false;
+    private String downloadTaskId;
     
     // 进度显示
     private StringBuilder progressText = new StringBuilder();
@@ -256,6 +257,9 @@ public class ModelDownloadFragment extends Fragment {
             ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setDisplayHomeAsUpEnabled(true);
             ((androidx.appcompat.app.AppCompatActivity) getActivity()).getSupportActionBar().setTitle(R.string.title_model_download);
         }
+        // Lightweight UI state resync based on active MODEL_DOWNLOAD background tasks
+        resyncDownloadUiStateWithBackgroundTasks();
+        replayDownloadLogsFromUnifiedService();
     }
     
     @Override
@@ -465,24 +469,101 @@ public class ModelDownloadFragment extends Fragment {
         
         // 清空进度文本，开始新的下载
         progressText.setLength(0);
+        final int totalCount = selectedModels != null ? selectedModels.size() : 0;
+
+        // Mark model download as a foreground task to keep app process alive during long downloads
+        notifyForegroundServiceDownloadStart(totalCount);
         
         // 获取电源锁
         acquireWakeLocks();
+        
+        try {
+            Map<String, String> extras = new HashMap<>();
+            extras.put("modelCount", String.valueOf(totalCount));
+            BackgroundTask task = BackgroundTaskManager.getInstance().createTask(
+                    BackgroundTask.TaskType.MODEL_DOWNLOAD,
+                    "Download models",
+                    true,
+                    extras
+            );
+            downloadTaskId = task.getId();
+            LogManager.logD(TAG, "[TASK] Created background task for model download, id=" + downloadTaskId);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TASK] Failed to create background task for model download: " + e.getMessage(), e);
+            downloadTaskId = null;
+        }
         
         appendProgress(getString(R.string.log_download_selected_models) + "\n");
         
         downloadExecutor.execute(() -> {
             boolean allSuccess = true;
+            int completedCount = 0;
             try {
                 for (String modelKey : selectedModels) {
                     // 检查是否已被中断
                     if (!isDownloading) {
+                        if (downloadTaskId != null) {
+                            try {
+                                BackgroundTaskManager.getInstance().updateTask(
+                                        downloadTaskId,
+                                        BackgroundTask.TaskState.CANCELLED,
+                                        0,
+                                        "Model download cancelled"
+                                );
+                            } catch (Exception e) {
+                                LogManager.logE(TAG, "[TASK] Failed to update model download task as cancelled: " + e.getMessage(), e);
+                            } finally {
+                                downloadTaskId = null;
+                            }
+                        }
                         mainHandler.post(() -> appendProgress("\n" + getString(R.string.log_download_was_interrupted) + "\n"));
                         return;
                     }
                     boolean success = downloadModel(modelKey);
+                    completedCount++;
                     if (!success) {
                         allSuccess = false;
+                    }
+                    if (downloadTaskId != null && totalCount > 0) {
+                        try {
+                            int progress = (completedCount * 100) / totalCount;
+                            String message = "Downloading models: " + completedCount + "/" + totalCount;
+                            BackgroundTaskManager.getInstance().updateTask(
+                                    downloadTaskId,
+                                    BackgroundTask.TaskState.RUNNING,
+                                    progress,
+                                    message
+                            );
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[TASK] Failed to update model download task progress: " + e.getMessage(), e);
+                        }
+                    }
+                }
+                
+                if (downloadTaskId != null) {
+                    try {
+                        BackgroundTask.TaskState finalState;
+                        String finalMessage;
+                        if (isDownloading && allSuccess) {
+                            finalState = BackgroundTask.TaskState.COMPLETED;
+                            finalMessage = "Model download completed";
+                        } else if (!isDownloading) {
+                            finalState = BackgroundTask.TaskState.CANCELLED;
+                            finalMessage = "Model download cancelled";
+                        } else {
+                            finalState = BackgroundTask.TaskState.FAILED;
+                            finalMessage = "Model download completed with errors";
+                        }
+                        BackgroundTaskManager.getInstance().updateTask(
+                                downloadTaskId,
+                                finalState,
+                                100,
+                                finalMessage
+                        );
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[TASK] Failed to update model download task final state: " + e.getMessage(), e);
+                    } finally {
+                        downloadTaskId = null;
                     }
                 }
                 
@@ -498,6 +579,20 @@ public class ModelDownloadFragment extends Fragment {
                 
             } catch (Exception e) {
                 LogManager.logE(TAG, "下载错误", e);
+                if (downloadTaskId != null && isDownloading) {
+                    try {
+                        BackgroundTaskManager.getInstance().updateTask(
+                                downloadTaskId,
+                                BackgroundTask.TaskState.FAILED,
+                                0,
+                                "Model download failed: " + e.getMessage()
+                        );
+                    } catch (Exception inner) {
+                        LogManager.logE(TAG, "[TASK] Failed to update model download task on error: " + inner.getMessage(), inner);
+                    } finally {
+                        downloadTaskId = null;
+                    }
+                }
                 mainHandler.post(() -> {
                     appendProgress("\n" + getString(R.string.log_download_error) + ": " + e.getMessage() + "\n");
                     finishDownload();
@@ -1242,28 +1337,92 @@ public class ModelDownloadFragment extends Fragment {
     }
     
     private void appendProgress(String text) {
-        // Append text to progress buffer
+        appendProgressInternal(text, false);
+    }
+
+    private void appendProgressInternal(String text, boolean fromServiceReplay) {
         progressText.append(text);
-        
-        // Update TextView content
         textViewProgress.setText(progressText.toString());
-        
-        // Auto-scroll to bottom: try both ScrollView and TextView scrolling
         textViewProgress.post(() -> {
-            // Scroll TextView itself to bottom
-            int scrollAmount = textViewProgress.getLayout().getLineTop(textViewProgress.getLineCount()) 
+            int scrollAmount = textViewProgress.getLayout().getLineTop(textViewProgress.getLineCount())
                              - textViewProgress.getHeight();
             if (scrollAmount > 0) {
                 textViewProgress.scrollTo(0, scrollAmount);
             }
-            
-            // Also scroll the parent ScrollView to bottom if available
             if (scrollViewProgress != null) {
                 scrollViewProgress.fullScroll(ScrollView.FOCUS_DOWN);
             }
         });
+
+        if (!fromServiceReplay) {
+            try {
+                if (!isAdded() || getActivity() == null) {
+                    return;
+                }
+                if (!(getActivity() instanceof MainActivity)) {
+                    return;
+                }
+                MainActivity activity = (MainActivity) getActivity();
+                UnifiedForegroundService service = activity.getUnifiedForegroundService();
+                if (service == null) {
+                    return;
+                }
+                if (service.getCurrentTaskType() != UnifiedForegroundService.TaskType.MODEL_DOWNLOAD) {
+                    return;
+                }
+                service.appendClientLogLine(text);
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[FG] Failed to append model download log to UnifiedForegroundService: " + e.getMessage(), e);
+            }
+        }
     }
     
+    private void notifyForegroundServiceDownloadStart(int totalModels) {
+        try {
+            if (!isAdded() || getActivity() == null) {
+                return;
+            }
+            if (!(getActivity() instanceof MainActivity)) {
+                return;
+            }
+            MainActivity activity = (MainActivity) getActivity();
+            UnifiedForegroundService service = activity.getUnifiedForegroundService();
+            if (service != null) {
+                String description;
+                if (totalModels > 0) {
+                    description = "Downloading models (" + totalModels + ")";
+                } else {
+                    description = "Downloading models";
+                }
+                service.startTask(UnifiedForegroundService.TaskType.MODEL_DOWNLOAD, description);
+                LogManager.logD(TAG, "[FG] Started MODEL_DOWNLOAD foreground task: " + description);
+            } else {
+                LogManager.logW(TAG, "[FG] UnifiedForegroundService not available when starting model download");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[FG] Failed to start MODEL_DOWNLOAD foreground task: " + e.getMessage(), e);
+        }
+    }
+
+    private void notifyForegroundServiceDownloadEnd() {
+        try {
+            if (!isAdded() || getActivity() == null) {
+                return;
+            }
+            if (!(getActivity() instanceof MainActivity)) {
+                return;
+            }
+            MainActivity activity = (MainActivity) getActivity();
+            UnifiedForegroundService service = activity.getUnifiedForegroundService();
+            if (service != null && service.getCurrentTaskType() == UnifiedForegroundService.TaskType.MODEL_DOWNLOAD) {
+                service.endTask();
+                LogManager.logD(TAG, "[FG] Ended MODEL_DOWNLOAD foreground task");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[FG] Failed to end MODEL_DOWNLOAD foreground task: " + e.getMessage(), e);
+        }
+    }
+
     private void acquireWakeLocks() {
         try {
             PowerManager powerManager = (PowerManager) requireContext().getSystemService(Context.POWER_SERVICE);
@@ -1288,12 +1447,89 @@ public class ModelDownloadFragment extends Fragment {
     private void finishDownload() {
         isDownloading = false;
         buttonDownload.setText(R.string.button_download_selected_models);
+        notifyForegroundServiceDownloadEnd();
         releaseWakeLocks();
+    }
+
+    // Lightweight UI state resync for model download: restore button state based on active background tasks
+    private void resyncDownloadUiStateWithBackgroundTasks() {
+        try {
+            java.util.List<BackgroundTask> activeTasks = BackgroundTaskManager.getInstance().getActiveTasks();
+            if (activeTasks == null || activeTasks.isEmpty()) {
+                return;
+            }
+
+            boolean hasDownloadTask = false;
+            for (BackgroundTask task : activeTasks) {
+                if (task.getType() == BackgroundTask.TaskType.MODEL_DOWNLOAD) {
+                    hasDownloadTask = true;
+                    break;
+                }
+            }
+
+            if (!hasDownloadTask) {
+                return;
+            }
+
+            isDownloading = true;
+            if (buttonDownload != null) {
+                buttonDownload.setText(R.string.button_interrupt);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TASK] Failed to resync model download UI state: " + e.getMessage(), e);
+        }
+    }
+
+    private void replayDownloadLogsFromUnifiedService() {
+        try {
+            if (!isAdded() || getActivity() == null) {
+                return;
+            }
+            if (!(getActivity() instanceof MainActivity)) {
+                return;
+            }
+            MainActivity activity = (MainActivity) getActivity();
+            UnifiedForegroundService service = activity.getUnifiedForegroundService();
+            if (service == null) {
+                return;
+            }
+            if (service.getCurrentTaskType() != UnifiedForegroundService.TaskType.MODEL_DOWNLOAD) {
+                return;
+            }
+            java.util.List<String> logs = service.getLogSnapshot();
+            if (logs == null || logs.isEmpty()) {
+                return;
+            }
+            if (textViewProgress == null) {
+                return;
+            }
+            progressText.setLength(0);
+            textViewProgress.setText("");
+            for (String line : logs) {
+                appendProgressInternal(line, true);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[FG] Failed to replay model download logs from UnifiedForegroundService: " + e.getMessage(), e);
+        }
     }
     
     private void stopDownload() {
         if (isDownloading) {
             isDownloading = false;
+            if (downloadTaskId != null) {
+                try {
+                    BackgroundTaskManager.getInstance().updateTask(
+                            downloadTaskId,
+                            BackgroundTask.TaskState.CANCELLED,
+                            0,
+                            "Model download cancelled by user"
+                    );
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[TASK] Failed to update model download task on cancel: " + e.getMessage(), e);
+                } finally {
+                    downloadTaskId = null;
+                }
+            }
             
             // 中断下载线程
             if (downloadExecutor != null) {
@@ -1304,6 +1540,7 @@ public class ModelDownloadFragment extends Fragment {
             mainHandler.post(() -> {
                 appendProgress("\nDownload interrupted\n");
                 buttonDownload.setText(R.string.button_download_selected_models);
+                notifyForegroundServiceDownloadEnd();
                 releaseWakeLocks();
             });
         }

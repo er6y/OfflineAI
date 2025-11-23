@@ -1,11 +1,11 @@
-package com.example.offlineai.api;
+package com.example.offlineai.ipc;
 
 import android.content.Context;
 import com.k2fsa.sherpa.mnn.*;
 import org.json.JSONObject;
 import org.json.JSONException;
-import com.example.offlineai.ConfigManager;
 import com.example.offlineai.LogManager;
+import com.example.offlineai.RuntimeConfigHolder;
 import com.k2fsa.sherpa.mnn.EndpointConfig;
 import com.k2fsa.sherpa.mnn.EndpointRule;
 import com.k2fsa.sherpa.mnn.FeatureConfig;
@@ -57,6 +57,7 @@ public class AsrAdapter {
     // Sherpa-MNN recognizer
     private OnlineRecognizer asrRecognizer;
     private String currentAsrModel;
+    private String currentAsrBasePath;
     
     /**
      * Private constructor for singleton
@@ -86,12 +87,30 @@ public class AsrAdapter {
      * @throws Exception if model loading fails
      */
     public synchronized void loadAsrModel(String modelName) throws Exception {
-        // Check if already loaded
-        if (asrRecognizer != null && modelName.equals(currentAsrModel)) {
-            LogManager.logI(TAG, "[ASR] Model already loaded: " + modelName);
+        // Resolve ASR model base path from RuntimeConfig snapshot
+        String asrBasePath = null;
+        com.example.offlineai.ipc.RuntimeConfig cfg = RuntimeConfigHolder.get();
+        if (cfg != null && cfg.asrModelBasePath != null && !cfg.asrModelBasePath.isEmpty()) {
+            asrBasePath = cfg.asrModelBasePath;
+        }
+
+        if (asrBasePath == null) {
+            throw new Exception("RuntimeConfig.asrModelBasePath is empty. Please configure ASR model path in the main process.");
+        }
+
+        // Check if already loaded with same model and base path
+        if (asrRecognizer != null && modelName.equals(currentAsrModel)
+                && asrBasePath.equals(currentAsrBasePath)) {
+            LogManager.logI(TAG, "[ASR] Model already loaded: " + modelName + " (basePath=" + asrBasePath + ")");
             return;
         }
-        
+
+        // If model name is the same but base path changed, log and reload
+        if (asrRecognizer != null && modelName.equals(currentAsrModel)
+                && !asrBasePath.equals(currentAsrBasePath)) {
+            LogManager.logI(TAG, "[ASR] Base path changed from " + currentAsrBasePath + " to " + asrBasePath + ", reloading ASR model");
+        }
+
         LogManager.logI(TAG, "[ASR] Loading model: " + modelName);
         
         try {
@@ -101,8 +120,6 @@ public class AsrAdapter {
                 asrRecognizer = null;
             }
             
-            // Get ASR model path
-            String asrBasePath = ConfigManager.getAsrModelPath(context);
             String modelDir = new File(asrBasePath, modelName).getAbsolutePath();
             
             // Check model directory exists
@@ -120,6 +137,7 @@ public class AsrAdapter {
             asrRecognizer = new OnlineRecognizer(null, config);
             
             currentAsrModel = modelName;
+            currentAsrBasePath = asrBasePath;
             
             LogManager.logI(TAG, "[ASR] ✅ Model loaded successfully: " + modelName);
             
@@ -411,7 +429,7 @@ public class AsrAdapter {
     public String getCurrentAsrModel() {
         return currentAsrModel;
     }
-    
+
     /**
      * Release ASR resources
      */
@@ -426,5 +444,6 @@ public class AsrAdapter {
             asrRecognizer = null;
         }
         currentAsrModel = null;
+        currentAsrBasePath = null;
     }
 }

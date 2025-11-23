@@ -94,18 +94,19 @@
             </intent-filter>
         </activity>
         
-        <!-- 知识库构建服务 -->
-        <service
-            android:name=".KnowledgeBaseService"
-            android:enabled="true"
-            android:exported="false" />
-            
         <!-- 统一前台服务 - 保持app存活和支持长时间任务 -->
         <service
             android:name=".UnifiedForegroundService"
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        
+        <!-- Inference service running in a dedicated process for MNN/LLM tasks -->
+        <service
+            android:name=".ipc.InferenceService"
+            android:enabled="true"
+            android:exported="false"
+            android:process=":inference" />
             
         <!-- 文件提供者，用于分享日志文件 -->
         <provider

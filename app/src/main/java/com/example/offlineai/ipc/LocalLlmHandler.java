@@ -1,4 +1,4 @@
-package com.example.offlineai.api;
+package com.example.offlineai.ipc;
 
 import android.app.ActivityManager;
 import android.content.Context;
@@ -7,6 +7,8 @@ import android.os.Looper;
 import android.util.Log;
 
 import com.example.offlineai.ConfigManager;
+import com.example.offlineai.RuntimeConfigHolder;
+import com.example.offlineai.ipc.RuntimeConfig;
 import com.example.offlineai.LogManager;
 import com.example.offlineai.R;
 
@@ -384,8 +386,8 @@ public class LocalLlmHandler {
         
         LogManager.logD(TAG, "LocalLlmHandler初始化: 模型状态设置为 " + ModelState.UNLOADED);
         
-        // 初始化GPU设置
-        this.useGpu = ConfigManager.getString(context, ConfigManager.KEY_USE_GPU, "CPU");
+        // 初始化GPU设置（使用RuntimeConfig中的backendPreference，默认为CPU）
+        this.useGpu = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
         LogManager.logD(TAG, "LocalLlmHandler初始化: 后端偏好设置为 " + this.useGpu);
 
         // Note: Thinking mode is now controlled by MNN's enable_thinking parameter
@@ -697,21 +699,29 @@ public class LocalLlmHandler {
      */
     private InferenceParams buildParamsFromConfig() {
         InferenceParams params = new InferenceParams();
+
+        // 从RuntimeConfig读取最新配置快照，避免子进程直接访问ConfigManager
+        RuntimeConfig cfg = RuntimeConfigHolder.get();
+
         // 思考模式：no_thinking=true 表示禁用思考，因此需要取反
-        boolean noThinking = ConfigManager.getNoThinking(context);
+        boolean noThinking = (cfg != null) && cfg.noThinking;
         params.setThinkingMode(!noThinking);
 
-        // 统一从ConfigManager读取所有推理参数，确保设置即时生效
         // 优先顺序：如果开启“优先手动参数”则使用手动参数；否则读取全局LLM/LlamaCpp配置
-        boolean priorityManual = ConfigManager.getPriorityManualParams(context);
+        boolean priorityManual = cfg != null && cfg.priorityManualParams;
         if (priorityManual) {
             // 手动参数区域（Manual Inference Params）
-            int maxNewTokens = ConfigManager.getMaxNewTokens(context);
-            float temperature = ConfigManager.getManualTemperature(context);
-            int topK = ConfigManager.getManualTopK(context);
-            float topP = ConfigManager.getManualTopP(context);
-            float repetitionPenalty = ConfigManager.getManualRepeatPenalty(context);
-            int seed = -1; // 手动参数暂不提供seed配置，使用默认随机
+            int maxNewTokens = (cfg != null && cfg.maxNewTokens > 0)
+                    ? cfg.maxNewTokens
+                    : ConfigManager.DEFAULT_MAX_NEW_TOKENS;
+            float temperature = (cfg != null) ? cfg.manualTemperature : ConfigManager.DEFAULT_MANUAL_TEMPERATURE;
+            int topK = (cfg != null) ? cfg.manualTopK : ConfigManager.DEFAULT_MANUAL_TOP_K;
+            float topP = (cfg != null) ? cfg.manualTopP : ConfigManager.DEFAULT_MANUAL_TOP_P;
+            float repetitionPenalty = (cfg != null)
+                    ? cfg.manualRepeatPenalty
+                    : ConfigManager.DEFAULT_MANUAL_REPEAT_PENALTY;
+            // 手动参数暂不提供seed配置，保持原语义：使用默认随机
+            int seed = -1;
 
             params.setMaxTokens(maxNewTokens);
             params.setTemperature(temperature);
@@ -720,13 +730,17 @@ public class LocalLlmHandler {
             params.setRepetitionPenalty(repetitionPenalty);
             params.setSeed(seed);
         } else {
-            // MNN/LLM common parameters (centralized management for all engines)
-            int maxNewTokens = ConfigManager.getMaxNewTokens(context);
-            float temperature = ConfigManager.getLlamaCppTemperature(context);
-            int topK = ConfigManager.getLlamaCppTopK(context);
-            float topP = ConfigManager.getLlamaCppTopP(context);
-            float repetitionPenalty = ConfigManager.getLlamaCppRepetitionPenalty(context);
-            int seed = ConfigManager.getLlamaCppSeed(context);
+            // 全局LLM/LlamaCpp配置（集中管理）
+            int maxNewTokens = (cfg != null && cfg.maxNewTokens > 0)
+                    ? cfg.maxNewTokens
+                    : ConfigManager.DEFAULT_MAX_NEW_TOKENS;
+            float temperature = (cfg != null) ? cfg.llamaTemperature : ConfigManager.DEFAULT_LLAMACPP_TEMPERATURE;
+            int topK = (cfg != null) ? cfg.llamaTopK : ConfigManager.DEFAULT_LLAMACPP_TOP_K;
+            float topP = (cfg != null) ? cfg.llamaTopP : ConfigManager.DEFAULT_LLAMACPP_TOP_P;
+            float repetitionPenalty = (cfg != null)
+                    ? cfg.llamaRepeatPenalty
+                    : ConfigManager.DEFAULT_LLAMACPP_REPEAT_PENALTY;
+            int seed = (cfg != null) ? cfg.llamaSeed : ConfigManager.DEFAULT_LLAMACPP_SEED;
 
             params.setMaxTokens(maxNewTokens);
             params.setTemperature(temperature);

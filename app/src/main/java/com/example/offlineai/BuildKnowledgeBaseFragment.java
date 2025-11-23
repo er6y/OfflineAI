@@ -57,12 +57,20 @@ import com.example.offlineai.TextChunkProcessor.ProgressCallback;
 import com.example.offlineai.Utils;
 import com.example.offlineai.AppConstants;
 import com.example.offlineai.StateDisplayManager;
+import com.example.offlineai.BackgroundTaskManager;
+import com.example.offlineai.BackgroundTask;
+import com.example.offlineai.TaskLogBuffer;
 
 @SuppressWarnings("deprecation")
-public class BuildKnowledgeBaseFragment extends Fragment {
+public class BuildKnowledgeBaseFragment extends Fragment implements StatefulFragment {
 
     private static final String TAG = "OfflineAI_Build";
     private static final int REQUEST_OPEN_DOCUMENT = 1;
+
+    private static final String STATE_KEY_BUILD_STATE = "kb_build_state";
+    private static final String STATE_VALUE_BUILDING = "building";
+    private static final String STATE_VALUE_IDLE = "idle";
+    private static final String STATE_KEY_SELECTED_FILE_URIS = "kb_selected_file_uris";
 
     // ActivityResultLauncher替代startActivityForResult
     private ActivityResultLauncher<Intent> documentPickerLauncher;
@@ -71,6 +79,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
     private Button buttonClearFiles;
     private Spinner spinnerEmbeddingModel;
     private Spinner spinnerRerankerModel;
+    private boolean isInitializingRerankerSpinner = false;
     private TextView textViewFileList;
     private TextView textViewProgress;
     private Button buttonCreateKnowledgeBase;
@@ -149,7 +158,19 @@ public class BuildKnowledgeBaseFragment extends Fragment {
     
     // 状态显示管理器
     private StateDisplayManager stateDisplayManager;
-    
+
+    private boolean shouldRestoreLogsFromLastBuildOnResume = false;
+    private boolean hasRestoredLogsFromTaskBuffer = false;
+
+    // KB 构建日志 buffer 读取状态
+    private String kbLogTaskId = null;
+    // -1 表示尚未初始化，将在第一次轮询时从 buffer 的 persistedPos 开始
+    private long kbUiBufferReadPos = -1;
+    // buffer 轮询任务
+    private Runnable kbBufferPollRunnable = null;
+    // KB 构建日志轮询间隔（毫秒）
+    private static final long KB_BUFFER_POLL_INTERVAL_MS = 200L;
+
     // 统一前台服务
     private UnifiedForegroundService builderService;
     private boolean isServiceBound = false;
@@ -229,46 +250,10 @@ public class BuildKnowledgeBaseFragment extends Fragment {
 
                 @Override
                 public void onLogLine(String message) {
-                    if (message == null || message.isEmpty()) {
-                        return;
+                    // KB 构建日志 UI 统一从 TaskLogBuffer 轮询获取，这里仅保留日志
+                    if (message != null && !message.isEmpty()) {
+                        LogManager.logD(TAG, "[KB][FG_CALLBACK] onLogLine received (UI uses buffer polling only)");
                     }
-                    // Handle compact vectorization progress rendering on a single line
-                    if (message.startsWith("Starting unified processing: ")) {
-                        resetVectorizationProgressLine();
-                        appendToProgress(message);
-                        return;
-                    }
-
-                    if (".".equals(message)) {
-                        updateVectorizationProgressLine(".");
-                        return;
-                    }
-
-                    if (message.startsWith("Vectorization progress: ")) {
-                        updateVectorizationProgressLine(message);
-                        return;
-                    }
-
-                    if (message.startsWith("Unified processing completed: ")) {
-                        // Finalize current vectorization line then append completion message
-                        resetVectorizationProgressLine();
-                        appendToProgress(message);
-                        return;
-                    }
-
-                    if (message.startsWith("Graph hub filtering started: ")) {
-                        resetGraphProgressLine();
-                        appendToProgress(message);
-                        return;
-                    }
-
-                    if (message.startsWith("Building knowledge graph: ")) {
-                        updateGraphProgressLine(message);
-                        return;
-                    }
-
-                    // Default: append message as normal log line
-                    appendToProgress(message);
                 }
                 
                 @Override
@@ -393,6 +378,11 @@ public class BuildKnowledgeBaseFragment extends Fragment {
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 String selectedModel = parent.getItemAtPosition(position).toString();
                 LogManager.logD(TAG, "选择了重排模型: " + selectedModel);
+
+                if (isInitializingRerankerSpinner) {
+                    LogManager.logD(TAG, "[RERANKER_SPINNER] Ignore selection during initialization: " + selectedModel);
+                    return;
+                }
                 
                 // 保存用户选择的重排模型到ConfigManager（排除加载状态和错误状态）
                 if (!StateDisplayManager.isModelStatusDisplayText(requireContext(), selectedModel)) {
@@ -565,6 +555,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
     // 初始化重排模型下拉框（仅用于用户选择）
     private void initializeRerankerSpinner() {
         LogManager.logD(TAG, "初始化重排模型选择器");
+        isInitializingRerankerSpinner = true;
         
         // 显示加载状态
         String[] loadingState = {getString(R.string.common_loading)};
@@ -603,6 +594,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                 // 检查Fragment是否仍然附加到Context，避免崩溃
                 if (!isAdded() || getContext() == null) {
                     LogManager.logD(TAG, "Fragment已分离，跳过重排模型UI更新");
+                    isInitializingRerankerSpinner = false;
                     return;
                 }
                 
@@ -647,6 +639,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                 }
                 
                 LogManager.logD(TAG, "重排模型选择器初始化完成，找到 " + (optionsArray.length - 1) + " 个模型");
+                isInitializingRerankerSpinner = false;
             });
         });
     }
@@ -921,31 +914,9 @@ public class BuildKnowledgeBaseFragment extends Fragment {
             return;
         }
         
-        // 如果已经在处理中，则取消当前任务
+        // 如果已经在处理中，则触发统一的取消流程
         if (isProcessing) {
-            // 更改按钮文本
-            buttonCreateKnowledgeBase.setText(StateDisplayManager.getButtonDisplayText(requireContext(), AppConstants.BUTTON_TEXT_CREATE_KB));
-            
-            // 设置取消标志
-            isTaskCancelledAtomic.set(true);
-            
-            // 如果服务已绑定，通知服务取消任务
-            if (isServiceBound && builderService != null) {
-                builderService.cancelTask();
-            }
-            
-            // 如果之前禁用了电池优化，现在恢复
-            if (batteryOptimizationDisabled) {
-                MainActivity activity = (MainActivity) getActivity();
-                if (activity != null) {
-                    activity.restoreBatteryOptimization();
-                    batteryOptimizationDisabled = false;
-                }
-            }
-            
-            Utils.showToastSafely(requireContext(), getString(R.string.toast_task_cancelled), Toast.LENGTH_SHORT);
-            isProcessing = false;
-            
+            cancelProcessing();
             return;
         }
         
@@ -956,13 +927,6 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         
         // Reset all stop flags at the beginning of knowledge base building
         // This ensures previous stop states don't affect the current build
-        try {
-            EmbeddingHandler embeddingHandler = EmbeddingHandler.getInstance(requireContext());
-            embeddingHandler.resetStopFlag();
-            LogManager.logI(TAG, "[BUILD] Reset embedding stop flag at user action");
-        } catch (Exception e) {
-            LogManager.logE(TAG, "[BUILD] Failed to reset embedding stop flag", e);
-        }
         
         // 更改按钮文本
         buttonCreateKnowledgeBase.setText(StateDisplayManager.getButtonDisplayText(requireContext(), AppConstants.BUTTON_TEXT_CANCEL));
@@ -997,10 +961,13 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         String embeddingModelPath = ConfigManager.getEmbeddingModelPath(requireContext()) + File.separator + embeddingModel;
         
         try {
-            // 加载模型以获取维度信息（使用 NORMAL 内存模式，与批量构建保持一致）
-            EmbeddingHandler model = EmbeddingHandler.getInstance(requireContext()).getModel(
-                    embeddingModelPath, EmbeddingHandler.MemoryMode.NORMAL);
-            int modelDimension = model.getEmbeddingDimension();
+            // 通过推理子进程探测模型向量维度（使用 NORMAL 内存模式，与批量构建保持一致）
+            com.example.offlineai.ipc.InferenceClient client = com.example.offlineai.ipc.InferenceClient.getInstance(requireContext().getApplicationContext());
+            float[] dimProbe = client.computeEmbedding(embeddingModelPath, EmbeddingHandler.MemoryMode.NORMAL.getValue(), "dimension probe text");
+            if (dimProbe == null || dimProbe.length == 0) {
+                throw new Exception("Failed to probe embedding dimension");
+            }
+            int modelDimension = dimProbe.length;
             LogManager.logD(TAG, "当前模型向量维度: " + modelDimension);
             
             // 检查知识库是否已存在（统一使用 knowledge_graph.db）
@@ -1276,6 +1243,8 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                     
                     // Restore button state
                     buttonCreateKnowledgeBase.setText("Create Knowledge Base");
+                    buttonCreateKnowledgeBase.setEnabled(true);
+                    buttonCreateKnowledgeBase.setAlpha(1.0f);
                     
                     // Refresh knowledge base list
                     loadKnowledgeBaseNames();
@@ -1300,6 +1269,8 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                     
                     // Restore button state
                     buttonCreateKnowledgeBase.setText("Create Knowledge Base");
+                    buttonCreateKnowledgeBase.setEnabled(true);
+                    buttonCreateKnowledgeBase.setAlpha(1.0f);
                     
                     // Restore battery optimization settings
                     if (batteryOptimizationDisabled) {
@@ -1330,7 +1301,68 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         // 更新进度标签
         updateProgressLabel();
     }
-    
+
+    private void handleServiceLogLine(String message) {
+        if (message == null || message.isEmpty()) {
+            return;
+        }
+        if (message.startsWith("Starting unified processing: ")) {
+            resetVectorizationProgressLine();
+            appendToProgress(message);
+            return;
+        }
+        if (".".equals(message)) {
+            updateVectorizationProgressLine(".");
+            return;
+        }
+        if (message.startsWith("Vectorization progress: ")) {
+            updateVectorizationProgressLine(message);
+            return;
+        }
+        if (message.startsWith("Unified processing completed: ")) {
+            resetVectorizationProgressLine();
+            appendToProgress(message);
+            return;
+        }
+        if (message.startsWith("Graph hub filtering started: ")) {
+            resetGraphProgressLine();
+            appendToProgress(message);
+            return;
+        }
+        if (message.startsWith("Building knowledge graph: ")) {
+            updateGraphProgressLine(message);
+            return;
+        }
+        appendToProgress(message);
+    }
+
+    private void replayServiceLogsFromService() {
+        try {
+            if (!isAdded() || getContext() == null) {
+                return;
+            }
+            if (builderService == null) {
+                return;
+            }
+            java.util.List<String> logs = builderService.getLogSnapshot();
+            if (logs == null || logs.isEmpty()) {
+                return;
+            }
+
+            if (textViewProgress != null) {
+                textViewProgress.setText("");
+            }
+            resetVectorizationProgressLine();
+            resetGraphProgressLine();
+
+            for (String line : logs) {
+                handleServiceLogLine(line);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[KB] Failed to replay logs from UnifiedForegroundService: " + e.getMessage(), e);
+        }
+    }
+
     // 中断正在进行的处理
     private void cancelProcessing() {
         if (isProcessing) {
@@ -1357,14 +1389,14 @@ public class BuildKnowledgeBaseFragment extends Fragment {
                 enableKeepScreenOn(false);
             }
             
-            // 更新按钮状态
+            // 更新按钮状态：显示正在取消/停止，并禁用点击，等待后台任务真正结束回调
             mainHandler.post(() -> {
                 if (isAdded() && getActivity() != null) {
-                    buttonCreateKnowledgeBase.setText(StateDisplayManager.getButtonDisplayText(requireContext(), AppConstants.BUTTON_TEXT_NEW_KB));
+                    buttonCreateKnowledgeBase.setText(StateDisplayManager.getButtonDisplayText(requireContext(), AppConstants.BUTTON_TEXT_CANCEL));
+                    buttonCreateKnowledgeBase.setEnabled(false);
+                    buttonCreateKnowledgeBase.setAlpha(0.5f);
                 }
             });
-            
-            isProcessing = false;
         }
     }
     
@@ -1374,6 +1406,8 @@ public class BuildKnowledgeBaseFragment extends Fragment {
             // 检查Fragment是否仍然附加到Context
             if (isAdded() && getActivity() != null) {
                 buttonCreateKnowledgeBase.setText(StateDisplayManager.getButtonDisplayText(getActivity(), AppConstants.BUTTON_TEXT_NEW_KB));
+                buttonCreateKnowledgeBase.setEnabled(true);
+                buttonCreateKnowledgeBase.setAlpha(1.0f);
                 Utils.showToastSafely(getActivity(), isTaskCancelled ? getString(R.string.toast_task_interrupted) : getString(R.string.toast_kb_creation_complete), Toast.LENGTH_SHORT);
             } else {
                 LogManager.logW(TAG, "Fragment未附加到Context，无法更新UI");
@@ -1497,14 +1531,27 @@ public class BuildKnowledgeBaseFragment extends Fragment {
             }
             
             if (textViewProgress != null) {
+                // 统一去掉 message 末尾的换行，避免与 TextView 自己追加的换行叠加
+                String normalized = message;
+                if (normalized != null && !normalized.isEmpty()) {
+                    if (normalized.endsWith("\r\n")) {
+                        normalized = normalized.substring(0, normalized.length() - 2);
+                    } else if (normalized.endsWith("\n") || normalized.endsWith("\r")) {
+                        normalized = normalized.substring(0, normalized.length() - 1);
+                    }
+                }
+                if (normalized == null) {
+                    normalized = "";
+                }
+
                 // 获取当前文本
                 String currentText = textViewProgress.getText().toString();
                 
                 // 追加新消息
                 if (currentText.isEmpty()) {
-                    textViewProgress.setText(message);
+                    textViewProgress.setText(normalized);
                 } else {
-                    textViewProgress.append("\n" + message);
+                    textViewProgress.append("\n" + normalized);
                 }
 
                 // Always keep progress view scrolled to bottom
@@ -1787,6 +1834,263 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         super.onResume();
         // 在页面恢复时重新应用字体大小，以便在设置页面修改后能够立即生效
         applyGlobalTextSize();
+        // Lightweight UI state resync based on active KB_BUILD background tasks
+        resyncUiStateWithBackgroundTasks();
+
+        // 启动 KB 构建日志 buffer 轮询
+        startKbBufferPollLoop();
+    }
+    
+    // Lightweight UI state resync for KB build: restore basic flags and button state based on active background tasks
+    private void resyncUiStateWithBackgroundTasks() {
+        try {
+            java.util.List<BackgroundTask> activeTasks = BackgroundTaskManager.getInstance().getActiveTasks();
+            if (activeTasks == null || activeTasks.isEmpty()) {
+                // No active KB build task, keep button in idle state
+                isProcessing = false;
+                if (buttonCreateKnowledgeBase != null) {
+                    buttonCreateKnowledgeBase.setText(getString(R.string.create_knowledge_base));
+                    buttonCreateKnowledgeBase.setEnabled(true);
+                    buttonCreateKnowledgeBase.setAlpha(1.0f);
+                }
+                return;
+            }
+
+            boolean hasKbBuildTask = false;
+            BackgroundTask kbTask = null;
+            for (BackgroundTask task : activeTasks) {
+                if (task.getType() == BackgroundTask.TaskType.KB_BUILD) {
+                    hasKbBuildTask = true;
+                    kbTask = task;
+                    break;
+                }
+            }
+
+            if (!hasKbBuildTask) {
+                // No active KB build task, keep button in idle state
+                isProcessing = false;
+                if (buttonCreateKnowledgeBase != null) {
+                    buttonCreateKnowledgeBase.setText(getString(R.string.create_knowledge_base));
+                    buttonCreateKnowledgeBase.setEnabled(true);
+                    buttonCreateKnowledgeBase.setAlpha(1.0f);
+                }
+                return;
+            }
+
+            // Restore processing state
+            isProcessing = true;
+            isTaskCancelledAtomic.set(false);
+
+            // 记录当前 KB_BUILD 任务 ID，供 buffer 轮询使用
+            if (kbTask != null) {
+                kbLogTaskId = kbTask.getId();
+            }
+
+            // Restore button state to "Cancel" while build is running
+            if (buttonCreateKnowledgeBase != null) {
+                buttonCreateKnowledgeBase.setText(StateDisplayManager.getButtonDisplayText(requireContext(), AppConstants.BUTTON_TEXT_CANCEL));
+                buttonCreateKnowledgeBase.setEnabled(true);
+                buttonCreateKnowledgeBase.setAlpha(1.0f);
+            }
+
+            // Ensure we are (re)bound to the foreground service so that
+            // progress callbacks and log replay are available after
+            // fragment recreation.
+            if (!isServiceBound) {
+                bindBuilderService();
+            }
+
+            // Ensure timer is running so progress label keeps updating
+            if (startTime <= 0) {
+                startTime = System.currentTimeMillis();
+            }
+            timerHandler.removeCallbacks(timerRunnable);
+            timerHandler.post(timerRunnable);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TASK] Failed to resync KB build UI state: " + e.getMessage(), e);
+        }
+    }
+
+    // 启动 KB 构建日志 buffer 轮询
+    private void startKbBufferPollLoop() {
+        if (kbBufferPollRunnable != null) {
+            return;
+        }
+        if (mainHandler == null) {
+            // mainHandler 在类中已初始化，这里为安全起见再次检查
+            return;
+        }
+
+        kbBufferPollRunnable = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (!isAdded() || getActivity() == null || isDetached()) {
+                        kbBufferPollRunnable = null;
+                        return;
+                    }
+
+                    pollKbBufferAndUpdateUi();
+
+                    if (kbBufferPollRunnable != null && mainHandler != null) {
+                        mainHandler.postDelayed(kbBufferPollRunnable, KB_BUFFER_POLL_INTERVAL_MS);
+                    }
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[KB][POLL] Buffer poll loop error: " + e.getMessage(), e);
+                }
+            }
+        };
+
+        mainHandler.post(kbBufferPollRunnable);
+    }
+
+    // 停止 KB 构建日志 buffer 轮询
+    private void stopKbBufferPollLoop() {
+        if (mainHandler != null && kbBufferPollRunnable != null) {
+            mainHandler.removeCallbacks(kbBufferPollRunnable);
+        }
+        kbBufferPollRunnable = null;
+    }
+
+    // 从 TaskLogBuffer 读取增量日志并更新 UI
+    private void pollKbBufferAndUpdateUi() {
+        // 先检查是否存在活动的 KB_BUILD 任务，并记录当前活动任务 ID
+        boolean hasActiveKbBuild = false;
+        String activeKbTaskId = null;
+        try {
+            java.util.List<BackgroundTask> activeTasks = BackgroundTaskManager.getInstance().getActiveTasks();
+            if (activeTasks != null && !activeTasks.isEmpty()) {
+                for (BackgroundTask task : activeTasks) {
+                    if (task.getType() == BackgroundTask.TaskType.KB_BUILD && task.isActive()) {
+                        hasActiveKbBuild = true;
+                        activeKbTaskId = task.getId();
+                        break;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[KB][POLL] Failed to check active KB_BUILD tasks: " + e.getMessage(), e);
+        }
+
+        // 如果有活动的 KB_BUILD 任务，始终跟随最新的活动任务 ID
+        if (hasActiveKbBuild && activeKbTaskId != null && !activeKbTaskId.isEmpty()) {
+            if (kbLogTaskId == null || !activeKbTaskId.equals(kbLogTaskId)) {
+                // 切换到新的任务时，从该任务当前 persistedPos 开始读取
+                kbLogTaskId = activeKbTaskId;
+                kbUiBufferReadPos = -1;
+                LogManager.logD(TAG, "[KB][POLL] Switch to active KB_BUILD task, taskId=" + kbLogTaskId);
+            }
+        }
+
+        // 如果没有活动的 KB_BUILD 任务，且上次保存的 UI 状态不是 building，则不恢复/轮询日志
+        if (!hasActiveKbBuild && !shouldRestoreLogsFromLastBuildOnResume) {
+            return;
+        }
+
+        if (kbLogTaskId == null || kbLogTaskId.isEmpty()) {
+            // 如果当前没有记录的 KB_BUILD 任务 ID，则尝试查找最近一个任务用于回放
+            BackgroundTask latest = BackgroundTaskManager.getInstance().findLatestTaskByType(BackgroundTask.TaskType.KB_BUILD);
+            if (latest == null) {
+                return;
+            }
+            kbLogTaskId = latest.getId();
+        }
+
+        TaskLogBuffer buffer = BackgroundTaskManager.getInstance().getLogBuffer(kbLogTaskId);
+        if (buffer == null) {
+            return;
+        }
+
+        // 第一次轮询：从 persistedPos 开始读
+        if (kbUiBufferReadPos < 0) {
+            kbUiBufferReadPos = buffer.getPersistedPos();
+            LogManager.logD(TAG, "[KB][POLL] Initialized kbUiBufferReadPos=" + kbUiBufferReadPos + ", taskId=" + kbLogTaskId);
+        }
+
+        TaskLogBuffer.ReadResult result = buffer.getDataFromPos(kbUiBufferReadPos);
+        if (result == null || !result.hasData()) {
+            return;
+        }
+
+        long oldPos = kbUiBufferReadPos;
+        kbUiBufferReadPos = result.newReadPos;
+        LogManager.logD(TAG, "[KB][POLL] Read " + result.data.length() + " chars, pos " + oldPos + " -> " + kbUiBufferReadPos + ", taskId=" + kbLogTaskId);
+
+        String data = result.data;
+        int start = 0;
+        for (int i = 0; i < data.length(); i++) {
+            if (data.charAt(i) == '\n') {
+                String line = data.substring(start, i + 1);
+                if (line != null && !line.isEmpty()) {
+                    handleServiceLogLine(line);
+                }
+                start = i + 1;
+            }
+        }
+        if (start < data.length()) {
+            String line = data.substring(start);
+            if (line != null && !line.isEmpty()) {
+                handleServiceLogLine(line);
+            }
+        }
+
+        // 一旦通过 buffer 成功回放/读取过一次日志，下次 UI 保存状态时就会记录为 idle
+        // 因此这里可以安全地清除 shouldRestoreLogsFromLastBuildOnResume 标志，避免后续重复判定
+        if (!hasActiveKbBuild && shouldRestoreLogsFromLastBuildOnResume) {
+            shouldRestoreLogsFromLastBuildOnResume = false;
+            hasRestoredLogsFromTaskBuffer = true;
+        }
+    }
+
+    private void restoreLogsFromLastBuildIfNeeded() {
+        try {
+            BackgroundTaskManager taskManager = BackgroundTaskManager.getInstance();
+            BackgroundTask latestKbTask = taskManager.findLatestTaskByType(BackgroundTask.TaskType.KB_BUILD);
+            if (latestKbTask == null) {
+                LogManager.logD(TAG, "[KB][STATE] No KB_BUILD task found, skip TaskLogBuffer restore");
+                shouldRestoreLogsFromLastBuildOnResume = false;
+                hasRestoredLogsFromTaskBuffer = false;
+                return;
+            }
+
+            String taskId = latestKbTask.getId();
+            TaskLogBuffer buffer = taskManager.getLogBuffer(taskId);
+            if (buffer == null) {
+                LogManager.logD(TAG, "[KB][STATE] No TaskLogBuffer for KB_BUILD task, taskId=" + taskId);
+                shouldRestoreLogsFromLastBuildOnResume = false;
+                hasRestoredLogsFromTaskBuffer = false;
+                return;
+            }
+
+            TaskLogBuffer.TaskLogSnapshot snapshot = buffer.getSnapshot();
+            if (snapshot == null || snapshot.logs == null || snapshot.logs.isEmpty()) {
+                LogManager.logD(TAG, "[KB][STATE] Empty TaskLogBuffer snapshot for KB_BUILD, taskId=" + taskId);
+                shouldRestoreLogsFromLastBuildOnResume = false;
+                hasRestoredLogsFromTaskBuffer = false;
+                return;
+            }
+
+            if (textViewProgress != null) {
+                textViewProgress.setText("");
+            }
+            resetVectorizationProgressLine();
+            resetGraphProgressLine();
+
+            for (String line : snapshot.logs) {
+                if (line != null && !line.isEmpty()) {
+                    handleServiceLogLine(line);
+                }
+            }
+
+            hasRestoredLogsFromTaskBuffer = true;
+            shouldRestoreLogsFromLastBuildOnResume = false;
+            LogManager.logD(TAG, "[KB][STATE] Restored KB build logs from TaskLogBuffer, taskId=" + taskId +
+                    ", lines=" + snapshot.logs.size());
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[KB][STATE] Failed to restore logs from TaskLogBuffer: " + e.getMessage(), e);
+            shouldRestoreLogsFromLastBuildOnResume = false;
+            hasRestoredLogsFromTaskBuffer = false;
+        }
     }
     
     /**
@@ -1915,6 +2219,88 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         executor.shutdown();
     }
 
+    @Override
+    public void onPause() {
+        super.onPause();
+        // 暂停时停止日志轮询，避免内存泄漏
+        stopKbBufferPollLoop();
+    }
+
+    @Override
+    public Bundle saveState() {
+        Bundle state = new Bundle();
+        try {
+            String buildState = isProcessing ? STATE_VALUE_BUILDING : STATE_VALUE_IDLE;
+            state.putString(STATE_KEY_BUILD_STATE, buildState);
+
+            if (selectedFiles != null && !selectedFiles.isEmpty()) {
+                ArrayList<String> uriStrings = new ArrayList<>();
+                for (Uri uri : selectedFiles) {
+                    if (uri != null) {
+                        uriStrings.add(uri.toString());
+                    }
+                }
+                if (!uriStrings.isEmpty()) {
+                    state.putStringArrayList(STATE_KEY_SELECTED_FILE_URIS, uriStrings);
+                }
+            }
+
+            // 当 UI 认为处于构建中时，记录当前 KB_BUILD 任务 ID
+            if (STATE_VALUE_BUILDING.equals(buildState) && kbLogTaskId != null && !kbLogTaskId.isEmpty()) {
+                state.putString("kb_log_task_id", kbLogTaskId);
+                state.putLong("kb_log_read_pos", kbUiBufferReadPos);
+            }
+
+            LogManager.logD(TAG, "[KB][STATE] saveState - buildState=" + buildState +
+                    ", selectedFiles=" + (selectedFiles != null ? selectedFiles.size() : 0) +
+                    ", kbLogTaskId=" + kbLogTaskId + ", kbUiBufferReadPos=" + kbUiBufferReadPos);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[KB][STATE] Failed to save BuildKnowledgeBaseFragment state: " + e.getMessage(), e);
+        }
+        return state;
+    }
+
+    @Override
+    public void restoreState(Bundle state) {
+        if (state == null) {
+            LogManager.logD(TAG, "[KB][STATE] restoreState called with null state, skip");
+            return;
+        }
+
+        try {
+            String buildState = state.getString(STATE_KEY_BUILD_STATE, STATE_VALUE_IDLE);
+            shouldRestoreLogsFromLastBuildOnResume = STATE_VALUE_BUILDING.equals(buildState);
+
+            // 恢复 KB_BUILD 任务 ID 和 buffer 读取位置（如果存在）
+            kbLogTaskId = state.getString("kb_log_task_id", null);
+            kbUiBufferReadPos = state.getLong("kb_log_read_pos", -1L);
+
+            ArrayList<String> uriStrings = state.getStringArrayList(STATE_KEY_SELECTED_FILE_URIS);
+            selectedFiles.clear();
+            if (uriStrings != null && !uriStrings.isEmpty()) {
+                for (String s : uriStrings) {
+                    if (s == null || s.isEmpty()) {
+                        continue;
+                    }
+                    try {
+                        Uri uri = Uri.parse(s);
+                        selectedFiles.add(uri);
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[KB][STATE] Failed to parse saved file uri: " + s, e);
+                    }
+                }
+                updateFileListDisplay();
+            }
+
+            LogManager.logD(TAG, "[KB][STATE] restoreState - buildState=" + buildState +
+                    ", selectedFiles=" + selectedFiles.size() +
+                    ", shouldRestoreLogs=" + shouldRestoreLogsFromLastBuildOnResume +
+                    ", kbLogTaskId=" + kbLogTaskId + ", kbUiBufferReadPos=" + kbUiBufferReadPos);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[KB][STATE] Failed to restore BuildKnowledgeBaseFragment state: " + e.getMessage(), e);
+        }
+    }
+
     /**
      * 处理任务完成
      */
@@ -1934,6 +2320,7 @@ public class BuildKnowledgeBaseFragment extends Fragment {
         if (buttonCreateKnowledgeBase != null) {
             buttonCreateKnowledgeBase.setText(getString(R.string.create_knowledge_base));
             buttonCreateKnowledgeBase.setEnabled(true);
+            buttonCreateKnowledgeBase.setAlpha(1.0f);
         }
         
         // 显示完成消息
