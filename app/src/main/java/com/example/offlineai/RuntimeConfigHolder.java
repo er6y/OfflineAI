@@ -92,12 +92,28 @@ public final class RuntimeConfigHolder {
         return (cfg != null && cfg.diffusionMemoryMode >= 0) ? cfg.diffusionMemoryMode : defaultValue;
     }
 
+    public static int getDiffusionImageSizeOrDefault(int defaultValue) {
+        RuntimeConfig cfg;
+        synchronized (LOCK) {
+            cfg = current;
+        }
+        return (cfg != null && cfg.diffusionImageSize >= 0) ? cfg.diffusionImageSize : defaultValue;
+    }
+
     public static int getDiffusionStepsOrDefault(int defaultValue) {
         RuntimeConfig cfg;
         synchronized (LOCK) {
             cfg = current;
         }
         return (cfg != null && cfg.diffusionSteps > 0) ? cfg.diffusionSteps : defaultValue;
+    }
+
+    public static float getDiffusionCfgOrDefault(float defaultValue) {
+        RuntimeConfig cfg;
+        synchronized (LOCK) {
+            cfg = current;
+        }
+        return (cfg != null && cfg.diffusionCfg >= 0) ? cfg.diffusionCfg : defaultValue;
     }
 
     public static boolean isDiffusionSeedRandomOrDefault(boolean defaultValue) {
@@ -133,5 +149,29 @@ public final class RuntimeConfigHolder {
             cfg = current;
         }
         return (cfg != null && cfg.ttsDitSteps > 0) ? cfg.ttsDitSteps : defaultValue;
+    }
+
+    public static boolean getDiffusionTextEncoderOnCPUOrDefault(boolean defaultValue) {
+        RuntimeConfig cfg;
+        synchronized (LOCK) {
+            cfg = current;
+        }
+        return (cfg != null) ? cfg.diffusionTextEncoderOnCPU : defaultValue;
+    }
+
+    public static int getDiffusionGpuMemoryModeOrDefault(int defaultValue) {
+        RuntimeConfig cfg;
+        synchronized (LOCK) {
+            cfg = current;
+        }
+        return (cfg != null && cfg.diffusionGpuMemoryMode >= 0) ? cfg.diffusionGpuMemoryMode : defaultValue;
+    }
+
+    public static int getDiffusionPrecisionModeOrDefault(int defaultValue) {
+        RuntimeConfig cfg;
+        synchronized (LOCK) {
+            cfg = current;
+        }
+        return (cfg != null && cfg.diffusionPrecisionMode >= 0) ? cfg.diffusionPrecisionMode : defaultValue;
     }
 }

@@ -1,6 +1,6 @@
 [submodule "libs/mnn"]
 	path = libs/mnn
-	url = git@github.com:alibaba/MNN.git
+	url = git@github.com:er6y/MNN.git
 [submodule "libs/mnn/apps/frameworks/sherpa-mnn/kaldifst"]
 	path = libs/mnn/apps/frameworks/sherpa-mnn/kaldifst
 	url = git@github.com:k2-fsa/kaldifst.git

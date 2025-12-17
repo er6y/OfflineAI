@@ -96,12 +96,21 @@ public class StreamingApiClient {
             requestBody.put("messages", messages);
             requestBody.put("stream", true);
             
-            // 构建请求
-            Request request = new Request.Builder()
+            // 构建请求 - Use cached auth method if available, default to Bearer
+            Request.Builder requestBuilder = new Request.Builder()
                 .url(apiUrl)
-                .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
-                .header("Accept", "text/event-stream")
+                .header("Accept", "text/event-stream");
+            
+            String cachedMethod = AuthMethodCache.getCachedMethod(context, apiUrl);
+            if (cachedMethod != null) {
+                AuthMethodCache.applyAuthHeader(requestBuilder, apiKey, cachedMethod);
+            } else {
+                // Default to Bearer, will be updated after successful model fetch
+                requestBuilder.header("Authorization", "Bearer " + apiKey);
+            }
+            
+            Request request = requestBuilder
                 .post(RequestBody.create(requestBody.toString(), MediaType.parse("application/json")))
                 .build();
                 

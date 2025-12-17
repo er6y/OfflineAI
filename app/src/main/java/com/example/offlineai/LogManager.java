@@ -191,7 +191,7 @@ public class LogManager {
                 writer.write(logMessage);
             }
         } catch (IOException e) {
-            LogManager.logE(TAG, "Failed to write to log file: " + e.getMessage(), e);
+            Log.e(TAG, "Failed to write to log file: " + e.getMessage(), e);
         }
     }
     
@@ -218,7 +218,7 @@ public class LogManager {
                     writer.write(logMessage);
                 }
             } catch (IOException e) {
-                LogManager.logE(TAG, "Failed to clear log file: " + e.getMessage(), e);
+                Log.e(TAG, "Failed to clear log file: " + e.getMessage(), e);
             }
         }
     }
@@ -248,10 +248,10 @@ public class LogManager {
                     }
                 }
             } catch (IOException e) {
-                LogManager.logE(TAG, "Failed to read log file: " + e.getMessage(), e);
+                Log.e(TAG, "Failed to read log file: " + e.getMessage(), e);
                 return "Failed to read log file: " + e.getMessage();
             } catch (InterruptedException | ExecutionException e) {
-                LogManager.logE(TAG, "Failed to wait for write operations to complete: " + e.getMessage(), e);
+                Log.e(TAG, "Failed to wait for write operations to complete: " + e.getMessage(), e);
                 // 继续尝试读取文件
             }
         } else {
@@ -585,7 +585,7 @@ public class LogManager {
                 writer.write(message);
             }
         } catch (IOException e) {
-            LogManager.logE(TAG, "写入原始内容到日志文件失败: " + e.getMessage(), e);
+            Log.e(TAG, "Failed to write raw content to log file: " + e.getMessage(), e);
         }
     }
 

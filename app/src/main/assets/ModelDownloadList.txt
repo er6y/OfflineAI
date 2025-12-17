@@ -171,6 +171,19 @@
       "vocab.json": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/vocab.json",
       "alphas.txt": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/alphas.txt",
       "comments": "Stable Diffusion v1.5 Text2Image (OpenCL optimized, int8 quantized; 只能选OPENCL后端！！！/OpenCL is a mandatory, to be crashing on other backends!)"
+    },
+    "Z-Image-Turbo-MNN-int4": {
+      "configuration.json": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/configuration.json",
+      "text_encoder.mnn": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/text_encoder.mnn",
+      "text_encoder.mnn.weight": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/text_encoder.mnn.weight",
+      "unet.mnn": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/unet.mnn",
+      "unet.mnn.weight": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/unet.mnn.weight",
+      "vae_decoder.mnn": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/vae_decoder.mnn",
+      "vae_encoder.mnn": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/vae_encoder.mnn",
+      "config.json": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/config.json",
+      "scheduler_config.json": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/scheduler_config.json",
+      "tokenizer.txt": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/tokenizer.txt",
+      "comments": "Z-Image Turbo Text2Image, 512/768/1024，for OpenCL，Precision Mode=high is a mandatory"
     }
   },
   "asr": {

@@ -58,8 +58,12 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private static final int DEFAULT_DIFFUSION_STEPS = 20;  // 快速模式
     private static final int MAX_DIFFUSION_STEPS = 50;      // 标准模式
     private static final int MIN_DIFFUSION_STEPS = 1;       // 允许最小1步（快速预览，质量差）
-    private static final float CFG_SCALE = 7.5f;
-    private static final String SCHEDULER = "PLMS";
+    // CFG_SCALE removed - now user-configurable via ConfigManager.getDiffusionCfg()
+    private static final String SCHEDULER = "PLMS";  // Note: ZImage uses FlowMatch-Euler
+
+    // Diffusion model type for native engine (must match MNN upstream DiffusionModelType)
+    private static final int DIFFUSION_MODEL_SD15 = 0;
+    private static final int DIFFUSION_MODEL_ZIMAGE = 2;
     
     // Context reference
     private final Context context;
@@ -115,6 +119,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     // Diffusion session config tracking (for backend/memory change detection)
     private String lastDiffusionBackend = null;
     private int lastDiffusionMemoryMode = -1;
+    private int lastDiffusionImageSize = -1;
+    private int lastDiffusionModelType = -1;
+    private int lastDiffusionGpuMemoryMode = -1;  // BUFFER(1) / IMAGE(2)
+    private int lastDiffusionPrecisionMode = -1;  // LOW(1) / NORMAL(2) / HIGH(3)
     
     // TTS (Text-to-Speech) support - Omni Native TTS only
     private boolean hasTtsSupport = false;  // Native Omni TTS (talker.mnn)
@@ -141,16 +149,41 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         if (modelDir == null || !modelDir.exists() || !modelDir.isDirectory()) {
             return null;
         }
-        
-        // Check for Diffusion model (Text-to-Image)
-        File textEncoder = new File(modelDir, "text_encoder.mnn");
-        if (textEncoder.exists()) {
-            LogManager.logI(TAG, "Found MNN Diffusion model directory: " + modelDir.getAbsolutePath());
-            currentModelType = ModelType.DIFFUSION;
-            return modelDir.getAbsolutePath();
+
+        // Step 0: Try configuration.json.task for model type detection
+        File configurationFile = new File(modelDir, "configuration.json");
+        if (configurationFile.exists()) {
+            try {
+                String content = new String(java.nio.file.Files.readAllBytes(configurationFile.toPath()));
+                org.json.JSONObject configuration = new org.json.JSONObject(content);
+                String task = configuration.optString("task", "").toLowerCase();
+                if (!task.isEmpty()) {
+                    LogManager.logI(TAG, "[MNN] configuration.json task=" + task);
+                    if (task.contains("text-to-image")) {
+                        LogManager.logI(TAG, "[MNN] configuration.json indicates Diffusion model");
+                        currentModelType = ModelType.DIFFUSION;
+                        return modelDir.getAbsolutePath();
+                    }
+                }
+            } catch (Exception e) {
+                LogManager.logW(TAG, "[MNN] Failed to parse configuration.json in findModelFile: " + e.getMessage());
+            }
+        }
+
+        // Step 1: Heuristic Diffusion detection based on text_encoder*.mnn presence
+        File[] allFiles = modelDir.listFiles();
+        if (allFiles != null) {
+            for (File file : allFiles) {
+                String name = file.getName().toLowerCase();
+                if (name.startsWith("text_encoder") && name.endsWith(".mnn")) {
+                    LogManager.logI(TAG, "Found MNN Diffusion model directory (text_encoder*.mnn): " + modelDir.getAbsolutePath());
+                    currentModelType = ModelType.DIFFUSION;
+                    return modelDir.getAbsolutePath();
+                }
+            }
         }
         
-        // Check for LLM model - smart detection with priority
+        // Step 2: Check for LLM model - smart detection with priority
         String mainModelFile = findMainModelFile(modelDir);
         if (mainModelFile != null) {
             LogManager.logI(TAG, "Found MNN LLM model directory: " + modelDir.getAbsolutePath());
@@ -287,23 +320,86 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         }
         
         File modelDir = new File(modelPath);
+
+        // Determine diffusion subtype (SD1.5 vs ZImage) from config.json
+        int diffusionModelType = detectDiffusionModelTypeFromConfig(modelDir);
+
+        // Map component filenames from config.json to canonical names expected by native Diffusion
+        // This allows custom models (e.g. Z-Image-Turbo) with non-standard filenames to work
+        try {
+            mapDiffusionComponentFilesFromConfig(modelDir);
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[Diffusion] Failed to map component filenames from config.json: " + e.getMessage());
+        }
         
-        // Check for required Diffusion files
+        // Check for required Diffusion files (exact filenames for SD1.5-style models)
         File textEncoder = new File(modelDir, "text_encoder.mnn");
         File unet = new File(modelDir, "unet.mnn");
         File vaeDecoder = new File(modelDir, "vae_decoder.mnn");
         File vocabJson = new File(modelDir, "vocab.json");
         File mergesTxt = new File(modelDir, "merges.txt");
+        File tokenizerTxt = new File(modelDir, "tokenizer.txt");
         
         LogManager.logI(TAG, "Checking Diffusion required files:");
         LogManager.logI(TAG, "  text_encoder.mnn: " + (textEncoder.exists() ? "✓" : "✗ NOT FOUND"));
         LogManager.logI(TAG, "  unet.mnn: " + (unet.exists() ? "✓" : "✗ NOT FOUND"));
         LogManager.logI(TAG, "  vae_decoder.mnn: " + (vaeDecoder.exists() ? "✓" : "✗ NOT FOUND"));
-        LogManager.logI(TAG, "  vocab.json: " + (vocabJson.exists() ? "✓" : "✗ NOT FOUND"));
-        LogManager.logI(TAG, "  merges.txt: " + (mergesTxt.exists() ? "✓" : "✗ NOT FOUND"));
-        
-        if (!textEncoder.exists() || !unet.exists() || !vaeDecoder.exists()) {
-            throw new Exception("Required Diffusion model files not found");
+        if (diffusionModelType == DIFFUSION_MODEL_ZIMAGE) {
+            LogManager.logI(TAG, "  tokenizer.txt: " + (tokenizerTxt.exists() ? "✓" : "✗ NOT FOUND"));
+        } else {
+            LogManager.logI(TAG, "  vocab.json: " + (vocabJson.exists() ? "✓" : "✗ NOT FOUND"));
+            LogManager.logI(TAG, "  merges.txt: " + (mergesTxt.exists() ? "✓" : "✗ NOT FOUND"));
+        }
+
+        if (diffusionModelType == DIFFUSION_MODEL_ZIMAGE) {
+            if (!tokenizerTxt.exists()) {
+                throw new Exception("[Diffusion] Missing tokenizer.txt for ZImage diffusion model (model_type=zimage_diffusion_mnn)");
+            }
+        } else {
+            if (!vocabJson.exists() || !mergesTxt.exists()) {
+                throw new Exception("[Diffusion] Missing vocab.json/merges.txt for SD1.5 diffusion. If this is a ZImage model, set config.json model_type=zimage_diffusion_mnn and provide tokenizer.txt.");
+            }
+        }
+
+        boolean exactEncoderOk = textEncoder.exists();
+        boolean exactUnetOk = unet.exists();
+        boolean exactVaeOk = vaeDecoder.exists();
+
+        if (!exactEncoderOk || !exactUnetOk || !exactVaeOk) {
+            // Try flexible detection for non-SD1.5 models (e.g. Z-Image-Turbo)
+            LogManager.logW(TAG, "[Diffusion] Exact filenames missing, trying flexible detection for encoder/unet/vae components");
+
+            File[] mnnFiles = modelDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".mnn"));
+            File flexTextEncoder = null;
+            File flexUnet = null;
+            File flexVaeDecoder = null;
+
+            if (mnnFiles != null) {
+                for (File f : mnnFiles) {
+                    String n = f.getName().toLowerCase();
+                    if (flexTextEncoder == null && n.startsWith("text_encoder")) {
+                        flexTextEncoder = f;
+                    }
+                    if (flexUnet == null && (n.contains("unet") || n.contains("transformer") || n.contains("dit"))) {
+                        flexUnet = f;
+                    }
+                    if (flexVaeDecoder == null && (n.contains("vae") || n.contains("decoder"))) {
+                        flexVaeDecoder = f;
+                    }
+                }
+            }
+
+            LogManager.logI(TAG, "[Diffusion][flex] text_encoder candidate: " + (flexTextEncoder != null ? flexTextEncoder.getName() : "NONE"));
+            LogManager.logI(TAG, "[Diffusion][flex] unet/transformer/dit candidate: " + (flexUnet != null ? flexUnet.getName() : "NONE"));
+            LogManager.logI(TAG, "[Diffusion][flex] vae/decoder candidate: " + (flexVaeDecoder != null ? flexVaeDecoder.getName() : "NONE"));
+
+            if (flexTextEncoder == null || flexUnet == null || flexVaeDecoder == null) {
+                throw new Exception("Required Diffusion model components not found (encoder/unet/vae)");
+            } else {
+                LogManager.logI(TAG, "[Diffusion] Flexible component detection succeeded, proceeding with model directory: " + modelDir.getAbsolutePath());
+            }
+        } else {
+            LogManager.logI(TAG, "[Diffusion] Exact encoder/unet/vae filenames are present");
         }
         
         // Get user-selected backend from RuntimeConfig (fallback to CPU)
@@ -336,9 +432,26 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         }
         LogManager.logI(TAG, "Using memory mode: " + memoryMode + " (" + memoryModeStr + ")");
 
+        // Get GPU memory mode and precision mode from RuntimeConfig snapshot
+        int gpuMemoryMode = RuntimeConfigHolder.getDiffusionGpuMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_GPU_MEMORY_MODE);
+        int precisionMode = RuntimeConfigHolder.getDiffusionPrecisionModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_PRECISION_MODE);
+        String gpuMemModeStr = (gpuMemoryMode == 0) ? "AUTO" : (gpuMemoryMode == 1) ? "BUFFER" : "IMAGE";
+        String precisionStr = (precisionMode == 0) ? "AUTO" : (precisionMode == 1) ? "LOW(FP16)" : (precisionMode == 2) ? "NORMAL(FP32)" : "HIGH(FP32)";
+        LogManager.logI(TAG, "Using GPU memory mode: " + gpuMemoryMode + " (" + gpuMemModeStr + ")");
+        LogManager.logI(TAG, "Using precision mode: " + precisionMode + " (" + precisionStr + ")");
+
+        int diffusionImageSize = RuntimeConfigHolder.getDiffusionImageSizeOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_SIZE);
+        if (diffusionModelType == DIFFUSION_MODEL_ZIMAGE) {
+            LogManager.logI(TAG, "[Diffusion] Using image size (ZImage): " + (diffusionImageSize == 0 ? "default(model)" : String.valueOf(diffusionImageSize)));
+        }
+
         // Save current diffusion config snapshot for change detection
         lastDiffusionBackend = backendPreference;
         lastDiffusionMemoryMode = memoryMode;
+        lastDiffusionImageSize = diffusionImageSize;
+        lastDiffusionModelType = diffusionModelType;
+        lastDiffusionGpuMemoryMode = gpuMemoryMode;
+        lastDiffusionPrecisionMode = precisionMode;
         
         // ========== 创建 App-Specific 后端专用缓存目录 ==========
         // 使用 app-specific 目录避免权限问题，格式:
@@ -349,12 +462,17 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         File appCacheRoot = new File(context.getExternalFilesDir(null), "cache/mnn");
         File modelCacheDir = new File(appCacheRoot, modelName);
         File backendCacheDir = new File(modelCacheDir, backendName.toLowerCase());
-        
-        if (!backendCacheDir.exists()) {
-            backendCacheDir.mkdirs();
-            LogManager.logI(TAG, "[Diffusion] Created app-specific cache directory: " + backendCacheDir.getAbsolutePath());
+
+        File finalCacheDir = backendCacheDir;
+        if (diffusionModelType == DIFFUSION_MODEL_ZIMAGE && diffusionImageSize > 0) {
+            finalCacheDir = new File(backendCacheDir, String.valueOf(diffusionImageSize));
         }
-        String cachePath = backendCacheDir.getAbsolutePath();
+        
+        if (!finalCacheDir.exists()) {
+            finalCacheDir.mkdirs();
+            LogManager.logI(TAG, "[Diffusion] Created app-specific cache directory: " + finalCacheDir.getAbsolutePath());
+        }
+        String cachePath = finalCacheDir.getAbsolutePath();
         LogManager.logI(TAG, "[Diffusion] Cache path: " + cachePath);
         
         // All printing is now done in JNI layer
@@ -377,13 +495,26 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             };
         }
         
-        diffusionHandle = MnnInference.createDiffusion(
+        boolean textEncoderOnCPU = RuntimeConfigHolder.getDiffusionTextEncoderOnCPUOrDefault(true);
+        LogManager.logI(TAG, "[Diffusion] textEncoderOnCPU: " + textEncoderOnCPU);
+        
+        // Get CPU thread count from LLM settings (shared with Diffusion)
+        int numThreads = ConfigManager.getThreads(context);
+        LogManager.logI(TAG, "[Diffusion] numThreads: " + numThreads);
+        
+        // Use createDiffusionAdvanced to pass GPU memory mode and precision mode
+        diffusionHandle = MnnInference.createDiffusionAdvanced(
             modelPath,
-            0, // STABLE_DIFFUSION_1_5
+            diffusionModelType,
             backendType,
             memoryMode,
-            cachePath,  // 传递缓存目录路径
-            diffusionCallback    // 传递 callback 到 JNI 层进行打印
+            diffusionImageSize,
+            textEncoderOnCPU,
+            gpuMemoryMode,   // GPU memory mode: 0=AUTO, 1=BUFFER, 2=IMAGE
+            precisionMode,   // Precision mode: 0=AUTO, 1=LOW(FP16), 2=NORMAL(FP32), 3=HIGH(FP32)
+            numThreads,      // CPU thread count from settings
+            cachePath,
+            diffusionCallback
         );
         
         if (diffusionHandle == 0) {
@@ -394,6 +525,32 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         
         LogManager.logI(TAG, "[Diffusion] Session created successfully, handle=" + diffusionHandle);
         // JNI layer already printed "Models loaded successfully!"
+    }
+
+    private int detectDiffusionModelTypeFromConfig(File modelDir) {
+        try {
+            if (modelDir == null || !modelDir.isDirectory()) {
+                return DIFFUSION_MODEL_SD15;
+            }
+            File configFile = new File(modelDir, "config.json");
+            if (!configFile.exists()) {
+                return DIFFUSION_MODEL_SD15;
+            }
+            String content = new String(java.nio.file.Files.readAllBytes(configFile.toPath()));
+            org.json.JSONObject config = new org.json.JSONObject(content);
+            String modelTypeRaw = config.optString("model_type", "");
+            String modelType = modelTypeRaw == null ? "" : modelTypeRaw.trim();
+            if (!modelType.isEmpty()) {
+                LogManager.logI(TAG, "[Diffusion] config.json model_type(raw)='" + modelTypeRaw + "', normalized='" + modelType + "'");
+            }
+            if (!modelType.isEmpty() && modelType.equalsIgnoreCase("zimage_diffusion_mnn")) {
+                LogManager.logI(TAG, "[Diffusion] Detected ZImage diffusion model from config.json (model_type=zimage_diffusion_mnn)");
+                return DIFFUSION_MODEL_ZIMAGE;
+            }
+        } catch (Throwable t) {
+            LogManager.logW(TAG, "[Diffusion] Failed to detect diffusion model type from config.json, fallback to SD1.5: " + t.getMessage());
+        }
+        return DIFFUSION_MODEL_SD15;
     }
     
     @Override
@@ -1420,6 +1577,152 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         
         return stats.toString();
     }
+
+    /**
+     * Map Diffusion component filenames from config.json to canonical names expected by native Diffusion
+     * This allows custom models (e.g. Z-Image-Turbo) where components are named like
+     * text_encoder_int4.mnn / transformer_int8.mnn / vae_decoder_int8.mnn
+     * while native code still loads text_encoder.mnn / unet.mnn / vae_decoder.mnn.
+     */
+    private void mapDiffusionComponentFilesFromConfig(File modelDir) throws Exception {
+        if (modelDir == null || !modelDir.isDirectory()) {
+            return;
+        }
+
+        File configFile = new File(modelDir, "config.json");
+        if (!configFile.exists()) {
+            // No config.json, nothing to map
+            return;
+        }
+
+        LogManager.logI(TAG, "[Diffusion] Trying to map component filenames from config.json: " + configFile.getAbsolutePath());
+
+        StringBuilder content = new StringBuilder();
+        java.io.BufferedReader reader = null;
+        try {
+            reader = new java.io.BufferedReader(new java.io.FileReader(configFile));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                content.append(line);
+            }
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[Diffusion] Failed to read config.json for mapping: " + e.getMessage());
+            return;
+        } finally {
+            if (reader != null) {
+                try { reader.close(); } catch (Exception ignore) {}
+            }
+        }
+
+        org.json.JSONObject config;
+        try {
+            config = new org.json.JSONObject(content.toString());
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[Diffusion] Invalid JSON in config.json, skip mapping: " + e.getMessage());
+            return;
+        }
+
+        // text_encoder section
+        try {
+            if (config.has("text_encoder")) {
+                org.json.JSONObject te = config.getJSONObject("text_encoder");
+                String modelName = te.optString("model", null);
+                String weightName = te.optString("weight", null);
+                mapSingleComponent(modelDir, modelName, weightName,
+                        "text_encoder.mnn", "text_encoder.mnn.weight");
+            }
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[Diffusion] Failed to map text_encoder from config.json: " + e.getMessage());
+        }
+
+        // unet section
+        try {
+            if (config.has("unet")) {
+                org.json.JSONObject unet = config.getJSONObject("unet");
+                String modelName = unet.optString("model", null);
+                String weightName = unet.optString("weight", null);
+                mapSingleComponent(modelDir, modelName, weightName,
+                        "unet.mnn", "unet.mnn.weight");
+            }
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[Diffusion] Failed to map unet from config.json: " + e.getMessage());
+        }
+
+        // vae section (focus on decoder model)
+        try {
+            if (config.has("vae")) {
+                org.json.JSONObject vae = config.getJSONObject("vae");
+                String decoderModelName = vae.optString("decoder_model", null);
+                String decoderWeightName = vae.optString("decoder_weight", null);
+                mapSingleComponent(modelDir, decoderModelName, decoderWeightName,
+                        "vae_decoder.mnn", "vae_decoder.mnn.weight");
+            }
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[Diffusion] Failed to map vae from config.json: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Map a single component by copying actual model/weight files to canonical names if needed.
+     * If canonical files already exist, nothing will be done.
+     */
+    private void mapSingleComponent(File modelDir,
+                                    String sourceModelName,
+                                    String sourceWeightName,
+                                    String canonicalModelName,
+                                    String canonicalWeightName) {
+        if (sourceModelName == null || sourceModelName.isEmpty()) {
+            return;
+        }
+
+        File canonicalModel = new File(modelDir, canonicalModelName);
+        if (canonicalModel.exists()) {
+            // Already mapped or provided by user
+            LogManager.logI(TAG, "[Diffusion] Canonical model already exists: " + canonicalModel.getName());
+        } else {
+            File sourceModel = new File(modelDir, sourceModelName);
+            if (!sourceModel.exists()) {
+                LogManager.logW(TAG, "[Diffusion] Source model file not found for mapping: " + sourceModel.getAbsolutePath());
+            } else {
+                try {
+                    copyFile(sourceModel, canonicalModel);
+                    LogManager.logI(TAG, "[Diffusion] Mapped model file: " + sourceModel.getName()
+                            + " -> " + canonicalModel.getName());
+                } catch (Exception e) {
+                    LogManager.logW(TAG, "[Diffusion] Failed to copy model file for mapping: " + e.getMessage());
+                }
+            }
+        }
+
+        if (sourceWeightName == null || sourceWeightName.isEmpty() || canonicalWeightName == null) {
+            return;
+        }
+
+        File canonicalWeight = new File(modelDir, canonicalWeightName);
+        if (canonicalWeight.exists()) {
+            LogManager.logI(TAG, "[Diffusion] Canonical weight already exists: " + canonicalWeight.getName());
+        } else {
+            File sourceWeight = new File(modelDir, sourceWeightName);
+            if (!sourceWeight.exists()) {
+                LogManager.logW(TAG, "[Diffusion] Source weight file not found for mapping: " + sourceWeight.getAbsolutePath());
+            } else {
+                try {
+                    copyFile(sourceWeight, canonicalWeight);
+                    LogManager.logI(TAG, "[Diffusion] Mapped weight file: " + sourceWeight.getName()
+                            + " -> " + canonicalWeight.getName());
+                } catch (Exception e) {
+                    LogManager.logW(TAG, "[Diffusion] Failed to copy weight file for mapping: " + e.getMessage());
+                }
+            }
+        }
+    }
+
+    /**
+     * Utility to copy a file (small wrapper to keep logging and exception handling in one place).
+     */
+    private void copyFile(File source, File target) throws java.io.IOException {
+        java.nio.file.Files.copy(source.toPath(), target.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+    }
     
     /**
      * Get statistics
@@ -1558,17 +1861,30 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 // via RuntimeConfig will take effect for pure image generation workflows.
                 String currentBackend = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
                 int currentMemoryMode = RuntimeConfigHolder.getDiffusionMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_MEMORY_MODE);
+                int currentImageSize = RuntimeConfigHolder.getDiffusionImageSizeOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_SIZE);
+                int currentGpuMemoryMode = RuntimeConfigHolder.getDiffusionGpuMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_GPU_MEMORY_MODE);
+                int currentPrecisionMode = RuntimeConfigHolder.getDiffusionPrecisionModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_PRECISION_MODE);
 
                 boolean backendChanged = (lastDiffusionBackend != null
                         && !lastDiffusionBackend.equalsIgnoreCase(currentBackend));
                 boolean memoryChanged = (lastDiffusionMemoryMode >= 0
                         && lastDiffusionMemoryMode != currentMemoryMode);
+                boolean sizeChanged = (lastDiffusionModelType == DIFFUSION_MODEL_ZIMAGE
+                        && lastDiffusionImageSize >= 0
+                        && lastDiffusionImageSize != currentImageSize);
+                boolean gpuMemModeChanged = (lastDiffusionGpuMemoryMode >= 0
+                        && lastDiffusionGpuMemoryMode != currentGpuMemoryMode);
+                boolean precisionChanged = (lastDiffusionPrecisionMode >= 0
+                        && lastDiffusionPrecisionMode != currentPrecisionMode);
 
-                if (diffusionHandle != 0 && (backendChanged || memoryChanged)) {
+                if (diffusionHandle != 0 && (backendChanged || memoryChanged || sizeChanged || gpuMemModeChanged || precisionChanged)) {
                     LogManager.logI(TAG, String.format(
-                            "[CONFIG][Diffusion] Runtime config changed (backend: %s -> %s, memory: %d -> %d), forcing session reload",
+                            "[CONFIG][Diffusion] Runtime config changed (backend: %s -> %s, memory: %d -> %d, size: %d -> %d, gpuMemMode: %d -> %d, precision: %d -> %d), forcing session reload",
                             lastDiffusionBackend, currentBackend,
-                            lastDiffusionMemoryMode, currentMemoryMode));
+                            lastDiffusionMemoryMode, currentMemoryMode,
+                            lastDiffusionImageSize, currentImageSize,
+                            lastDiffusionGpuMemoryMode, currentGpuMemoryMode,
+                            lastDiffusionPrecisionMode, currentPrecisionMode));
 
                     try {
                         MnnInference.releaseDiffusion(diffusionHandle);
@@ -1581,6 +1897,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                     // Update snapshot so next initializeDiffusion() will record the new values
                     lastDiffusionBackend = currentBackend;
                     lastDiffusionMemoryMode = currentMemoryMode;
+                    lastDiffusionImageSize = currentImageSize;
+                    lastDiffusionGpuMemoryMode = currentGpuMemoryMode;
+                    lastDiffusionPrecisionMode = currentPrecisionMode;
                 }
                 
                 // Check if diffusion handle is valid
@@ -1623,26 +1942,38 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 String outputPath = new File(outputDir, "diffusion_" + System.currentTimeMillis() + ".jpg").getAbsolutePath();
                 LogManager.logI(TAG, "Output path: " + outputPath);
                 
-                // Get steps and seed from RuntimeConfig snapshot
+                // Get steps, CFG, and seed from RuntimeConfig snapshot
                 int steps = RuntimeConfigHolder.getDiffusionStepsOrDefault(ConfigManager.DEFAULT_DIFFUSION_STEPS);
                 steps = Math.max(MIN_DIFFUSION_STEPS, Math.min(steps, MAX_DIFFUSION_STEPS));
                 LogManager.logI(TAG, "Using steps from config: " + steps);
                 
+                // Get CFG scale from config
+                float cfgScale = RuntimeConfigHolder.getDiffusionCfgOrDefault(ConfigManager.DEFAULT_DIFFUSION_CFG);
+                LogManager.logI(TAG, "Using CFG from config: " + cfgScale);
+                
+                // Generate seed: if random mode, generate in Java layer so we can display the actual value
                 int seed;
                 boolean useRandomSeed = RuntimeConfigHolder.isDiffusionSeedRandomOrDefault(ConfigManager.DEFAULT_DIFFUSION_SEED_RANDOM);
                 if (useRandomSeed) {
-                    seed = -1;
-                    LogManager.logI(TAG, "Using random seed");
+                    // Generate random seed in Java layer (positive int for reproducibility)
+                    seed = new java.util.Random().nextInt(Integer.MAX_VALUE);
+                    LogManager.logI(TAG, "Generated random seed: " + seed);
                 } else {
                     seed = RuntimeConfigHolder.getDiffusionSeedOrDefault(ConfigManager.DEFAULT_DIFFUSION_SEED);
                     LogManager.logI(TAG, "Using fixed seed from config: " + seed);
                 }
+                final int actualSeed = seed;  // Final for use in callbacks
+                final float actualCfg = cfgScale;  // Final for use in callbacks
                 
-                LogManager.logI(TAG, "Diffusion params: steps=" + steps + ", cfg=" + CFG_SCALE + ", scheduler=" + SCHEDULER + ", seed=" + seed);
+                LogManager.logI(TAG, "Diffusion params: steps=" + steps + ", cfg=" + cfgScale + ", scheduler=" + SCHEDULER + ", seed=" + actualSeed);
                 
                 // Generate image (debug tag already opened at the beginning)
                 final long startTime = System.currentTimeMillis();
                 final String diffusionTaskIdFinal = diffusionTaskId;
+                
+                // Capture memory stats from JNI layer
+                final float[] capturedPeakMemMB = {-1.0f};
+                final float[] capturedRssMB = {-1.0f};
 
                 boolean success = MnnInference.generateImage(
                     diffusionHandle,
@@ -1650,6 +1981,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                     outputPath,
                     steps,
                     seed,
+                    cfgScale,
                     new MnnInference.DiffusionCallback() {
                         @Override
                         public boolean onProgress(int progress) {
@@ -1675,6 +2007,28 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                         
                         @Override
                         public boolean onToken(String message) {
+                            // Intercept memory stats marker from JNI layer
+                            if (message != null && message.startsWith("[MEMORY_STATS:")) {
+                                // Parse [MEMORY_STATS:peak=xxx,rss=yyy]
+                                try {
+                                    String data = message.substring(14, message.length() - 1); // Remove prefix and ]
+                                    String[] parts = data.split(",");
+                                    for (String part : parts) {
+                                        String[] kv = part.split("=");
+                                        if (kv.length == 2) {
+                                            if ("peak".equals(kv[0])) {
+                                                capturedPeakMemMB[0] = Float.parseFloat(kv[1]);
+                                            } else if ("rss".equals(kv[0])) {
+                                                capturedRssMB[0] = Float.parseFloat(kv[1]);
+                                            }
+                                        }
+                                    }
+                                } catch (Exception e) {
+                                    LogManager.logE(TAG, "Failed to parse memory stats: " + message, e);
+                                }
+                                // Don't forward this marker to UI
+                                return !shouldStop.get();
+                            }
                             callback.onToken(message);
                             return !shouldStop.get();
                         }
@@ -1707,8 +2061,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 if (success && new File(outputPath).exists()) {
                     LogManager.logI(TAG, "Image generated successfully in " + duration + "ms: " + outputPath);
 
-                    // Output performance stats
-                    String perfStats = getDiffusionPerformanceStats(duration, steps, seed, this.currentModelPath);
+                    // Output performance stats with captured memory info (use actualSeed for reproducibility)
+                    int imageSize = RuntimeConfigHolder.getDiffusionImageSizeOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_SIZE);
+                    String perfStats = getDiffusionPerformanceStats(duration, steps, actualSeed, this.currentModelPath, capturedPeakMemMB[0], capturedRssMB[0], imageSize);
 
                     // NOTE: MD persistence is handled by RagQueryManager.onSuccess() for unified architecture.
                     // Handler only sends data via callback, Manager handles persistence + cursor update.
@@ -1765,8 +2120,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     
     /**
      * Generate performance statistics for Diffusion
+     * @param peakMemMB Peak memory in MB (from native layer), -1 if not available
+     * @param rssMB Current RSS memory in MB (from native layer), -1 if not available
      */
-    private String getDiffusionPerformanceStats(long duration, int steps, int seed, String modelPath) {
+    private String getDiffusionPerformanceStats(long duration, int steps, int seed, String modelPath, float peakMemMB, float rssMB, int imageSize) {
         float totalSec = duration / 1000.0f;
         float secPerStep = totalSec / steps;
 
@@ -1784,19 +2141,40 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             stats.append(String.format("Model: %s\n", modelName));
         }
 
-        // Performance metrics
-        stats.append(String.format("Time: %.1fs • Speed: %.2fs/step • JVMUsedMem: %dMB\n",
-            totalSec, secPerStep, jvmUsedMemory / (1024 * 1024)));
+        // Performance metrics with native memory stats
+        if (peakMemMB > 0 && rssMB > 0) {
+            stats.append(String.format("Time: %.1fs • Speed: %.2fs/step\n",
+                totalSec, secPerStep));
+            stats.append(String.format("   • Peak RSS: %.1f MB (inference process)\n", peakMemMB));
+        } else {
+            stats.append(String.format("Time: %.1fs • Speed: %.2fs/step • JVMUsedMem: %dMB\n",
+                totalSec, secPerStep, jvmUsedMemory / (1024 * 1024)));
+        }
 
         // Configuration parameters
         String backendPreference = SettingsFragment.getBackendPreference(context);
         String memoryModeStr = ConfigManager.getDiffusionMemoryModeString(context);
+        int gpuMemMode = RuntimeConfigHolder.getDiffusionGpuMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_GPU_MEMORY_MODE);
+        int precisionMode = RuntimeConfigHolder.getDiffusionPrecisionModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_PRECISION_MODE);
+        String gpuMemModeStr = (gpuMemMode == 2) ? "IMAGE" : "BUFFER";
+        String precisionStr = "AUTO";
+        switch (precisionMode) {
+            case 1: precisionStr = "LOW(FP16)"; break;
+            case 2: precisionStr = "NORMAL"; break;
+            case 3: precisionStr = "HIGH(FP32)"; break;
+        }
         stats.append(String.format("   • Backend: %s\n", backendPreference));
         stats.append(String.format("   • Memory Mode: %s\n", memoryModeStr));
+        stats.append(String.format("   • GPU: MemMode=%s, Precision=%s\n", gpuMemModeStr, precisionStr));
 
-        // Diffusion specific parameters
-        stats.append(String.format("   • diffusionParam: steps=%d, cfg=7.5, scheduler=PLMS, seed=%s, size=512x512\n",
-            steps, seed < 0 ? "Random" : String.valueOf(seed)));
+        // Diffusion specific parameters (seed is always actual value for reproducibility)
+        // Get actual CFG from config (user-configurable now)
+        float cfgValue = RuntimeConfigHolder.getDiffusionCfgOrDefault(ConfigManager.DEFAULT_DIFFUSION_CFG);
+        boolean isZImage = (lastDiffusionModelType == DIFFUSION_MODEL_ZIMAGE);
+        String scheduler = isZImage ? "FlowMatch-Euler" : "PLMS";
+        String sizeStr = (imageSize == 0) ? "default" : (imageSize + "x" + imageSize);
+        stats.append(String.format("   • diffusionParam: steps=%d, cfg=%.2f, scheduler=%s, seed=%d, size=%s\n",
+            steps, cfgValue, scheduler, seed, sizeStr));
 
         stats.append("</performance>\n");
 

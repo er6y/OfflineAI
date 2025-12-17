@@ -977,6 +977,71 @@
                 android:layout_height="wrap_content"
                 android:minWidth="120dp" />
         </LinearLayout>
+
+        <!-- Precision Mode -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/label_diffusion_precision_mode"
+                android:textSize="16sp" />
+
+            <Spinner
+                android:id="@+id/spinnerDiffusionPrecisionMode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="120dp" />
+        </LinearLayout>
+
+        <!-- GPU Memory Mode -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/label_diffusion_gpu_memory_mode"
+                android:textSize="16sp" />
+
+            <Spinner
+                android:id="@+id/spinnerDiffusionGpuMemoryMode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="120dp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/label_diffusion_image_size"
+                android:textSize="16sp" />
+
+            <Spinner
+                android:id="@+id/spinnerDiffusionImageSize"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:minWidth="120dp" />
+        </LinearLayout>
         
         <!-- Steps滑块 -->
         <LinearLayout
@@ -1012,6 +1077,40 @@
                 android:layout_marginStart="0dp" />
         </LinearLayout>
         
+        <!-- CFG滑块 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_diffusion_cfg"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarDiffusionCfg"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="40"
+                android:progress="4" />
+
+            <TextView
+                android:id="@+id/textViewDiffusionCfgValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="1.0"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+        
         <!-- Seed设置 -->
         <LinearLayout
             android:layout_width="match_parent"
@@ -1041,6 +1140,28 @@
                 android:layout_height="wrap_content"
                 android:text="@string/label_random"
                 android:layout_marginStart="8dp"
+                android:checked="true" />
+        </LinearLayout>
+
+        <!-- Text Encoder on CPU Switch -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/label_diffusion_te_on_cpu"
+                android:textSize="16sp" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/switchDiffusionTeOnCpu"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
                 android:checked="true" />
         </LinearLayout>
 

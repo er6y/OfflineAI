@@ -154,9 +154,14 @@ public class ConfigManager {
     
     // Diffusion扩散模型配置键
     public static final String KEY_DIFFUSION_MEMORY_MODE = "diffusion_memory_mode"; // 内存模式 (0=low, 1=enough, 2=balance)
+    public static final String KEY_DIFFUSION_PRECISION_MODE = "diffusion_precision_mode"; // 精度模式 (0=auto, 1=low, 2=normal, 3=high)
+    public static final String KEY_DIFFUSION_GPU_MEMORY_MODE = "diffusion_gpu_memory_mode"; // GPU内存模式 (0=auto, 1=buffer, 2=image)
+    public static final String KEY_DIFFUSION_IMAGE_SIZE = "diffusion_image_size";
     public static final String KEY_DIFFUSION_STEPS = "diffusion_steps"; // 推理步数 (1-50)
+    public static final String KEY_DIFFUSION_CFG = "diffusion_cfg"; // CFG scale (0.0-10.0, step 0.25)
     public static final String KEY_DIFFUSION_SEED = "diffusion_seed"; // 随机种子 (-1=随机)
     public static final String KEY_DIFFUSION_SEED_RANDOM = "diffusion_seed_random"; // 是否使用随机种子
+    public static final String KEY_DIFFUSION_TE_ON_CPU = "diffusion_te_on_cpu"; // 文本编码器固定CPU
     
     // ASR语音识别配置键
     public static final String KEY_ASR_MODEL = "asr_model"; // ASR模型选择
@@ -229,9 +234,14 @@ public class ConfigManager {
     
     // Diffusion扩散模型默认值
     public static final int DEFAULT_DIFFUSION_MEMORY_MODE = 0; // 0=low (省内存)
+    public static final int DEFAULT_DIFFUSION_PRECISION_MODE = 0; // 0=auto (OpenCL默认FP32)
+    public static final int DEFAULT_DIFFUSION_GPU_MEMORY_MODE = 0; // 0=auto (OpenCL默认IMAGE)
+    public static final int DEFAULT_DIFFUSION_IMAGE_SIZE = 0;
     public static final int DEFAULT_DIFFUSION_STEPS = 20; // 默认20步（平衡质量和速度）
+    public static final float DEFAULT_DIFFUSION_CFG = 1.0f; // 默认CFG=1.0 (ZImage推荐值)
     public static final int DEFAULT_DIFFUSION_SEED = -1; // -1表示随机
     public static final boolean DEFAULT_DIFFUSION_SEED_RANDOM = true; // 默认使用随机种子
+    public static final boolean DEFAULT_DIFFUSION_TE_ON_CPU = true; // 默认文本编码器固定CPU（避免GPU内存限制）
     
     // ASR语音识别默认值
     public static final String DEFAULT_ASR_MODEL = "无"; // 默认无（不使用ASR）
@@ -1665,6 +1675,58 @@ public class ConfigManager {
     public static void setDiffusionMemoryMode(Context context, int mode) {
         setInt(context, KEY_DIFFUSION_MEMORY_MODE, mode);
     }
+
+    /**
+     * Get Diffusion precision mode
+     * @param context Context
+     * @return Precision mode (0=auto, 1=low, 2=normal, 3=high)
+     */
+    public static int getDiffusionPrecisionMode(Context context) {
+        return getInt(context, KEY_DIFFUSION_PRECISION_MODE, DEFAULT_DIFFUSION_PRECISION_MODE);
+    }
+    
+    /**
+     * Set Diffusion precision mode
+     * @param context Context
+     * @param mode Precision mode (0=auto, 1=low, 2=normal, 3=high)
+     */
+    public static void setDiffusionPrecisionMode(Context context, int mode) {
+        setInt(context, KEY_DIFFUSION_PRECISION_MODE, mode);
+    }
+
+    /**
+     * Get Diffusion GPU memory mode
+     * @param context Context
+     * @return GPU memory mode (0=auto, 1=buffer, 2=image)
+     */
+    public static int getDiffusionGpuMemoryMode(Context context) {
+        return getInt(context, KEY_DIFFUSION_GPU_MEMORY_MODE, DEFAULT_DIFFUSION_GPU_MEMORY_MODE);
+    }
+    
+    /**
+     * Set Diffusion GPU memory mode
+     * @param context Context
+     * @param mode GPU memory mode (0=auto, 1=buffer, 2=image)
+     */
+    public static void setDiffusionGpuMemoryMode(Context context, int mode) {
+        setInt(context, KEY_DIFFUSION_GPU_MEMORY_MODE, mode);
+    }
+
+    public static int getDiffusionImageSize(Context context) {
+        int value = getInt(context, KEY_DIFFUSION_IMAGE_SIZE, DEFAULT_DIFFUSION_IMAGE_SIZE);
+        if (value == 0 || value == 512 || value == 640 || value == 768 || value == 896 || value == 1024) {
+            return value;
+        }
+        return DEFAULT_DIFFUSION_IMAGE_SIZE;
+    }
+
+    public static void setDiffusionImageSize(Context context, int imageSize) {
+        int value = imageSize;
+        if (!(value == 0 || value == 512 || value == 640 || value == 768 || value == 896 || value == 1024)) {
+            value = DEFAULT_DIFFUSION_IMAGE_SIZE;
+        }
+        setInt(context, KEY_DIFFUSION_IMAGE_SIZE, value);
+    }
     
     /**
      * 获取Diffusion内存模式描述文本
@@ -1697,6 +1759,24 @@ public class ConfigManager {
      */
     public static void setDiffusionSteps(Context context, int steps) {
         setInt(context, KEY_DIFFUSION_STEPS, steps);
+    }
+    
+    /**
+     * Get Diffusion CFG scale
+     * @param context Context
+     * @return CFG scale (0.0-10.0)
+     */
+    public static float getDiffusionCfg(Context context) {
+        return getFloat(context, KEY_DIFFUSION_CFG, DEFAULT_DIFFUSION_CFG);
+    }
+    
+    /**
+     * Set Diffusion CFG scale
+     * @param context Context
+     * @param cfg CFG scale (0.0-10.0)
+     */
+    public static void setDiffusionCfg(Context context, float cfg) {
+        setFloat(context, KEY_DIFFUSION_CFG, cfg);
     }
     
     /**
@@ -1733,6 +1813,24 @@ public class ConfigManager {
      */
     public static void setDiffusionSeedRandom(Context context, boolean random) {
         setBoolean(context, KEY_DIFFUSION_SEED_RANDOM, random);
+    }
+    
+    /**
+     * 获取Diffusion文本编码器是否固定在CPU上运行
+     * @param context 上下文
+     * @return true=固定CPU，false=跟随主后端
+     */
+    public static boolean getDiffusionTextEncoderOnCPU(Context context) {
+        return getBoolean(context, KEY_DIFFUSION_TE_ON_CPU, DEFAULT_DIFFUSION_TE_ON_CPU);
+    }
+    
+    /**
+     * 设置Diffusion文本编码器是否固定在CPU上运行
+     * @param context 上下文
+     * @param onCPU true=固定CPU，false=跟随主后端
+     */
+    public static void setDiffusionTextEncoderOnCPU(Context context, boolean onCPU) {
+        setBoolean(context, KEY_DIFFUSION_TE_ON_CPU, onCPU);
     }
     
     /**

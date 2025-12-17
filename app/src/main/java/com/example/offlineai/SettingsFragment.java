@@ -135,10 +135,16 @@ public class SettingsFragment extends Fragment {
     
     // Diffusion扩散设置
     private Spinner spinnerDiffusionMemoryMode;
+    private Spinner spinnerDiffusionPrecisionMode;
+    private Spinner spinnerDiffusionGpuMemoryMode;
+    private Spinner spinnerDiffusionImageSize;
     private SeekBar seekBarDiffusionSteps;
     private TextView textViewDiffusionStepsValue;
+    private SeekBar seekBarDiffusionCfg;
+    private TextView textViewDiffusionCfgValue;
     private EditText editTextDiffusionSeed;
     private SwitchCompat switchDiffusionSeedRandom;
+    private SwitchCompat switchDiffusionTeOnCpu;
     
     // ASR语音识别设置
     private Spinner spinnerAsrModel;
@@ -161,6 +167,8 @@ public class SettingsFragment extends Fragment {
     // Flags to avoid writing config during initial spinner binding
     private boolean isAsrSpinnerInitialized = false;
     private boolean isTtsSpinnerInitialized = false;
+    private boolean isDiffusionMemoryModeSpinnerInitialized = false;
+    private boolean isDiffusionImageSizeSpinnerInitialized = false;
     
     // Activity Result Launchers
     private ActivityResultLauncher<Intent> dataRootPathLauncher;
@@ -276,10 +284,14 @@ public class SettingsFragment extends Fragment {
         
         // Diffusion扩散设置控件
         spinnerDiffusionMemoryMode = view.findViewById(R.id.spinnerDiffusionMemoryMode);
+        spinnerDiffusionImageSize = view.findViewById(R.id.spinnerDiffusionImageSize);
         seekBarDiffusionSteps = view.findViewById(R.id.seekBarDiffusionSteps);
         textViewDiffusionStepsValue = view.findViewById(R.id.textViewDiffusionStepsValue);
+        seekBarDiffusionCfg = view.findViewById(R.id.seekBarDiffusionCfg);
+        textViewDiffusionCfgValue = view.findViewById(R.id.textViewDiffusionCfgValue);
         editTextDiffusionSeed = view.findViewById(R.id.editTextDiffusionSeed);
         switchDiffusionSeedRandom = view.findViewById(R.id.switchDiffusionSeedRandom);
+        switchDiffusionTeOnCpu = view.findViewById(R.id.switchDiffusionTeOnCpu);
         
         // ASR/TTS设置控件
         spinnerAsrModel = view.findViewById(R.id.spinnerAsrModel);
@@ -308,6 +320,25 @@ public class SettingsFragment extends Fragment {
             R.array.diffusion_memory_modes, android.R.layout.simple_spinner_item);
         memoryModeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinnerDiffusionMemoryMode.setAdapter(memoryModeAdapter);
+
+        // 设置Diffusion精度模式Spinner适配器
+        spinnerDiffusionPrecisionMode = view.findViewById(R.id.spinnerDiffusionPrecisionMode);
+        ArrayAdapter<CharSequence> precisionModeAdapter = ArrayAdapter.createFromResource(requireContext(),
+            R.array.diffusion_precision_modes, android.R.layout.simple_spinner_item);
+        precisionModeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerDiffusionPrecisionMode.setAdapter(precisionModeAdapter);
+
+        // 设置Diffusion GPU内存模式Spinner适配器
+        spinnerDiffusionGpuMemoryMode = view.findViewById(R.id.spinnerDiffusionGpuMemoryMode);
+        ArrayAdapter<CharSequence> gpuMemoryModeAdapter = ArrayAdapter.createFromResource(requireContext(),
+            R.array.diffusion_gpu_memory_modes, android.R.layout.simple_spinner_item);
+        gpuMemoryModeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerDiffusionGpuMemoryMode.setAdapter(gpuMemoryModeAdapter);
+
+        ArrayAdapter<CharSequence> diffusionImageSizeAdapter = ArrayAdapter.createFromResource(requireContext(),
+            R.array.diffusion_image_sizes, android.R.layout.simple_spinner_item);
+        diffusionImageSizeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerDiffusionImageSize.setAdapter(diffusionImageSizeAdapter);
         
         // 设置ASR/TTS模型Spinner适配器
         setupAsrTtsSpinners();
@@ -412,6 +443,24 @@ public class SettingsFragment extends Fragment {
             }
         });
         
+        // Diffusion CFG滑块监听器 (0~10, step 0.25, max=40 means 0~10 with 0.25 step)
+        seekBarDiffusionCfg.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                float cfg = progress * 0.25f; // progress 0-40 -> cfg 0.0-10.0
+                textViewDiffusionCfgValue.setText(String.format(java.util.Locale.US, "%.2f", cfg));
+            }
+            
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                float cfg = seekBar.getProgress() * 0.25f;
+                ConfigManager.setDiffusionCfg(requireContext(), cfg);
+            }
+        });
+        
         // Diffusion Seed随机复选框监听器
         switchDiffusionSeedRandom.setOnCheckedChangeListener((buttonView, isChecked) -> {
             editTextDiffusionSeed.setEnabled(!isChecked);
@@ -425,9 +474,42 @@ public class SettingsFragment extends Fragment {
                     editTextDiffusionSeed.setText(String.valueOf(randomSeed));
                 }
             }
-            boolean isRandom = isChecked;
-            int seed = isRandom ? -1 : Integer.parseInt(editTextDiffusionSeed.getText().toString().trim());
-            ConfigManager.setDiffusionSeed(requireContext(), seed);
+            // Save both the random flag and the seed value
+            ConfigManager.setDiffusionSeedRandom(requireContext(), isChecked);
+            if (!isChecked) {
+                // Fixed seed mode: save the seed value
+                String seedText = editTextDiffusionSeed.getText().toString().trim();
+                if (!seedText.isEmpty()) {
+                    try {
+                        int seed = Integer.parseInt(seedText);
+                        ConfigManager.setDiffusionSeed(requireContext(), seed);
+                    } catch (NumberFormatException e) {
+                        // Invalid number, use default
+                        ConfigManager.setDiffusionSeed(requireContext(), 42);
+                    }
+                }
+            }
+        });
+        
+        // Diffusion Seed EditText focus change listener - save value when focus is lost
+        editTextDiffusionSeed.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus && !switchDiffusionSeedRandom.isChecked()) {
+                // Lost focus and not in random mode, save the seed value
+                String seedText = editTextDiffusionSeed.getText().toString().trim();
+                if (!seedText.isEmpty()) {
+                    try {
+                        int seed = Integer.parseInt(seedText);
+                        ConfigManager.setDiffusionSeed(requireContext(), seed);
+                    } catch (NumberFormatException e) {
+                        // Invalid number, ignore
+                    }
+                }
+            }
+        });
+        
+        // Diffusion Text Encoder on CPU switch listener
+        switchDiffusionTeOnCpu.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            ConfigManager.setDiffusionTextEncoderOnCPU(requireContext(), isChecked);
         });
         
         // 设置所有SeekBar监听器
@@ -463,15 +545,111 @@ public class SettingsFragment extends Fragment {
             @Override
             public void onNothingSelected(AdapterView<?> parent) {}
         });
+
+        spinnerDiffusionImageSize.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (!isDiffusionImageSizeSpinnerInitialized) {
+                    isDiffusionImageSizeSpinnerInitialized = true;
+                    int currentSize = ConfigManager.getDiffusionImageSize(requireContext());
+                    LogManager.logD(TAG, "[SETTINGS] Diffusion image size spinner initial selection: position=" + position + ", currentSize=" + currentSize);
+                    return;
+                }
+
+                int size;
+                switch (position) {
+                    case 0:
+                        size = 0;
+                        break;
+                    case 1:
+                        size = 512;
+                        break;
+                    case 2:
+                        size = 640;
+                        break;
+                    case 3:
+                        size = 768;
+                        break;
+                    case 4:
+                        size = 896;
+                        break;
+                    case 5:
+                        size = 1024;
+                        break;
+                    default:
+                        size = 0;
+                        break;
+                }
+
+                LogManager.logD(TAG, "[SETTINGS] Diffusion image size changed by user: position=" + position + ", size=" + size);
+                ConfigManager.setDiffusionImageSize(requireContext(), size);
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
         
         spinnerDiffusionMemoryMode.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                // Use ConfigManager API: 0=low, 1=enough, 2=balance/normal
-                int mode = (position == 0) ? 0 : 2; // 0=low, 2=balance(normal)
+                if (!isDiffusionMemoryModeSpinnerInitialized) {
+                    isDiffusionMemoryModeSpinnerInitialized = true;
+                    int currentMode = ConfigManager.getDiffusionMemoryMode(requireContext());
+                    LogManager.logD(TAG, "[SETTINGS] Diffusion memory mode spinner initial selection: position=" + position + ", currentMode=" + currentMode);
+                    return;
+                }
+	
+                int mode;
+                switch (position) {
+                    case 0:
+                        mode = 0;
+                        break;
+                    case 1:
+                        mode = 1;
+                        break;
+                    case 2:
+                        mode = 2;
+                        break;
+                    default:
+                        mode = 0;
+                        break;
+                }
+                LogManager.logD(TAG, "[SETTINGS] Diffusion memory mode changed by user: position=" + position + ", mode=" + mode);
                 ConfigManager.setDiffusionMemoryMode(requireContext(), mode);
             }
             
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        
+        // Diffusion precision mode listener
+        spinnerDiffusionPrecisionMode.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            private boolean isInitialized = false;
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (!isInitialized) {
+                    isInitialized = true;
+                    return;
+                }
+                LogManager.logD(TAG, "[SETTINGS] Diffusion precision mode changed: " + position);
+                ConfigManager.setDiffusionPrecisionMode(requireContext(), position);
+            }
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        
+        // Diffusion GPU memory mode listener
+        spinnerDiffusionGpuMemoryMode.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            private boolean isInitialized = false;
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (!isInitialized) {
+                    isInitialized = true;
+                    return;
+                }
+                LogManager.logD(TAG, "[SETTINGS] Diffusion GPU memory mode changed: " + position);
+                ConfigManager.setDiffusionGpuMemoryMode(requireContext(), position);
+            }
             @Override
             public void onNothingSelected(AdapterView<?> parent) {}
         });
@@ -1314,12 +1492,68 @@ public class SettingsFragment extends Fragment {
         
         // Diffusion settings
         int memMode = ConfigManager.getDiffusionMemoryMode(ctx); // 0=low, 1=enough, 2=balance
-        spinnerDiffusionMemoryMode.setSelection(memMode == 0 ? 0 : 1); // Spinner: 0=low, 1=normal
+        int memModeSelection;
+        switch (memMode) {
+            case 0:
+                memModeSelection = 0;
+                break;
+            case 1:
+                memModeSelection = 1;
+                break;
+            case 2:
+                memModeSelection = 2;
+                break;
+            default:
+                memModeSelection = 0;
+                break;
+        }
+        spinnerDiffusionMemoryMode.setSelection(memModeSelection);
+
+        // Load Diffusion precision mode
+        int precisionMode = ConfigManager.getDiffusionPrecisionMode(ctx);
+        spinnerDiffusionPrecisionMode.setSelection(precisionMode);
+
+        // Load Diffusion GPU memory mode
+        int gpuMemoryMode = ConfigManager.getDiffusionGpuMemoryMode(ctx);
+        spinnerDiffusionGpuMemoryMode.setSelection(gpuMemoryMode);
+
+        int diffusionImageSize = ConfigManager.getDiffusionImageSize(ctx);
+        int imageSizeSelection;
+        switch (diffusionImageSize) {
+            case 0:
+                imageSizeSelection = 0;
+                break;
+            case 512:
+                imageSizeSelection = 1;
+                break;
+            case 640:
+                imageSizeSelection = 2;
+                break;
+            case 768:
+                imageSizeSelection = 3;
+                break;
+            case 896:
+                imageSizeSelection = 4;
+                break;
+            case 1024:
+                imageSizeSelection = 5;
+                break;
+            default:
+                imageSizeSelection = 0;
+                break;
+        }
+        spinnerDiffusionImageSize.setSelection(imageSizeSelection);
         
         int diffSteps = ConfigManager.getDiffusionSteps(ctx);
         int diffStepsProgress = diffSteps - 1;
         seekBarDiffusionSteps.setProgress(diffStepsProgress);
         textViewDiffusionStepsValue.setText(String.valueOf(diffSteps));
+        
+        // CFG setting (0~10, step 0.25)
+        float diffCfg = ConfigManager.getDiffusionCfg(ctx);
+        int cfgProgress = Math.round(diffCfg / 0.25f); // cfg 0.0-10.0 -> progress 0-40
+        seekBarDiffusionCfg.setProgress(cfgProgress);
+        textViewDiffusionCfgValue.setText(String.format(java.util.Locale.US, "%.2f", diffCfg));
         
         int diffSeed = ConfigManager.getDiffusionSeed(ctx);
         boolean isRandom = (diffSeed == -1);
@@ -1327,6 +1561,10 @@ public class SettingsFragment extends Fragment {
         editTextDiffusionSeed.setText(isRandom ? "" : String.valueOf(diffSeed));
         editTextDiffusionSeed.setEnabled(!isRandom);
         editTextDiffusionSeed.setAlpha(isRandom ? 0.5f : 1.0f);
+        
+        // Text Encoder on CPU setting
+        boolean teOnCpu = ConfigManager.getDiffusionTextEncoderOnCPU(ctx);
+        switchDiffusionTeOnCpu.setChecked(teOnCpu);
         
         // RAG settings
         int chunkSize = ConfigManager.getChunkSize(ctx);

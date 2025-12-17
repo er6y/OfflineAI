@@ -32,9 +32,14 @@ public class RuntimeConfig implements Parcelable {
 
     // Diffusion settings
     public int diffusionMemoryMode;
+    public int diffusionImageSize;
     public int diffusionSteps;
+    public float diffusionCfg;  // CFG scale (0.0-10.0)
     public int diffusionSeed;
     public boolean diffusionSeedRandom;
+    public boolean diffusionTextEncoderOnCPU = true; // Force text_encoder on CPU to avoid GPU buffer size limit
+    public int diffusionGpuMemoryMode;  // 0=AUTO, 1=BUFFER, 2=IMAGE
+    public int diffusionPrecisionMode;  // 0=AUTO, 1=LOW(FP16), 2=NORMAL(FP32), 3=HIGH(FP32)
 
     // Prompting / chat folder
     public String systemPrompt;
@@ -74,9 +79,14 @@ public class RuntimeConfig implements Parcelable {
         llamaSeed = in.readInt();
 
         diffusionMemoryMode = in.readInt();
+        diffusionImageSize = in.readInt();
         diffusionSteps = in.readInt();
+        diffusionCfg = in.readFloat();
         diffusionSeed = in.readInt();
         diffusionSeedRandom = in.readByte() != 0;
+        diffusionTextEncoderOnCPU = in.readByte() != 0;
+        diffusionGpuMemoryMode = in.readInt();
+        diffusionPrecisionMode = in.readInt();
 
         systemPrompt = in.readString();
         currentChatFolder = in.readString();
@@ -112,9 +122,14 @@ public class RuntimeConfig implements Parcelable {
         dest.writeInt(llamaSeed);
 
         dest.writeInt(diffusionMemoryMode);
+        dest.writeInt(diffusionImageSize);
         dest.writeInt(diffusionSteps);
+        dest.writeFloat(diffusionCfg);
         dest.writeInt(diffusionSeed);
         dest.writeByte((byte) (diffusionSeedRandom ? 1 : 0));
+        dest.writeByte((byte) (diffusionTextEncoderOnCPU ? 1 : 0));
+        dest.writeInt(diffusionGpuMemoryMode);
+        dest.writeInt(diffusionPrecisionMode);
 
         dest.writeString(systemPrompt);
         dest.writeString(currentChatFolder);

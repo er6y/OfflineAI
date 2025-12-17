@@ -3141,6 +3141,107 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     }
     
     /**
+     * Show dialog for manual model name input when /models endpoint is not available
+     */
+    private void showManualModelInputDialog(String apiUrl, String savedModelName) {
+        if (!isAdded() || getContext() == null) return;
+        
+        android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(requireContext());
+        builder.setTitle("Manual Model Input");
+        builder.setMessage("Cannot fetch model list from API.\nPlease enter model name manually:");
+        
+        final android.widget.EditText input = new android.widget.EditText(requireContext());
+        input.setHint("e.g. mimo-v2-flash");
+        if (!savedModelName.isEmpty() && !savedModelName.startsWith("[")) {
+            input.setText(savedModelName);
+        }
+        builder.setView(input);
+        
+        builder.setPositiveButton("OK", (dialog, which) -> {
+            String modelName = input.getText().toString().trim();
+            if (!modelName.isEmpty()) {
+                setupSpinner(spinnerApiModel, new String[]{modelName});
+                ConfigManager.setString(requireContext(), ConfigManager.KEY_MODEL_NAME, modelName);
+                // Cache api-key auth method for APIs that don't support /models endpoint
+                // Most such APIs use api-key header (like MiMo)
+                com.example.offlineai.api.AuthMethodCache.cacheMethod(requireContext(), apiUrl, 
+                        com.example.offlineai.api.AuthMethodCache.AUTH_API_KEY);
+                LogManager.logD(TAG, "Manual model name set: " + modelName + ", cached api-key auth for " + apiUrl);
+            } else {
+                setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_FETCH_FAILED)});
+            }
+        });
+        
+        builder.setNegativeButton("Cancel", (dialog, which) -> {
+            setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_FETCH_FAILED)});
+        });
+        
+        builder.show();
+    }
+    
+    /**
+     * Try to fetch models with a specific auth method, and try next method if it fails
+     */
+    private void tryFetchModelsWithAuth(String modelsUrl, String apiUrl, String apiKey, 
+            String savedModelName, String authMethod, boolean tryNextOnFail) {
+        
+        Map<String, String> headers = com.example.offlineai.api.AuthMethodCache.getAuthHeaders(apiKey, authMethod);
+        
+        JsonObjectRequest request = new JsonObjectRequest(Request.Method.GET, modelsUrl, null,
+                response -> {
+                    try {
+                        JSONArray data = response.getJSONArray("data");
+                        List<String> modelsList = new ArrayList<>();
+                        for (int i = 0; i < data.length(); i++) {
+                            JSONObject model = data.getJSONObject(i);
+                            modelsList.add(model.getString("id"));
+                        }
+                        
+                        // Success! Cache this auth method
+                        com.example.offlineai.api.AuthMethodCache.cacheMethod(requireContext(), apiUrl, authMethod);
+                        LogManager.logD(TAG, "Auth method " + authMethod + " succeeded, cached for " + apiUrl);
+                        
+                        if (modelsList.isEmpty()) {
+                            setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_NO_AVAILABLE)});
+                        } else {
+                            setupSpinner(spinnerApiModel, modelsList.toArray(new String[0]));
+                            if (!savedModelName.isEmpty()) {
+                                setSpinnerSelection(spinnerApiModel, savedModelName);
+                            }
+                        }
+                    } catch (JSONException e) {
+                        LogManager.logE(TAG, "Failed to parse model list response", e);
+                        setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_FETCH_FAILED)});
+                    }
+                },
+                error -> {
+                    LogManager.logW(TAG, "Auth method " + authMethod + " failed: " + error.getMessage());
+                    
+                    if (tryNextOnFail) {
+                        // Try next auth method
+                        int currentIndex = com.example.offlineai.api.AuthMethodCache.ALL_AUTH_METHODS.indexOf(authMethod);
+                        if (currentIndex >= 0 && currentIndex < com.example.offlineai.api.AuthMethodCache.ALL_AUTH_METHODS.size() - 1) {
+                            String nextMethod = com.example.offlineai.api.AuthMethodCache.ALL_AUTH_METHODS.get(currentIndex + 1);
+                            LogManager.logD(TAG, "Trying next auth method: " + nextMethod);
+                            tryFetchModelsWithAuth(modelsUrl, apiUrl, apiKey, savedModelName, nextMethod, true);
+                            return;
+                        }
+                    }
+                    
+                    // All methods failed or not trying next - show manual input option
+                    LogManager.logE(TAG, "All auth methods failed for " + apiUrl);
+                    showManualModelInputDialog(apiUrl, savedModelName);
+                }) {
+            @Override
+            public Map<String, String> getHeaders() {
+                return headers;
+            }
+        };
+        
+        Volley.newRequestQueue(requireContext()).add(request);
+    }
+    
+    /**
      * Fetch available models for current API selection
      */
     private void fetchModelsForApi() {
@@ -3215,48 +3316,23 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         }
         modelsUrl += "models";
         
-        // Create request headers
-        Map<String, String> headers = new HashMap<>();
-        headers.put("Authorization", "Bearer " + apiKey);
-        
-        // Use Volley to send request
+        // Try cached auth method first, or try all methods
         final String finalModelsUrl = modelsUrl;
         final String finalSavedModelName = savedModelName;
-        JsonObjectRequest request = new JsonObjectRequest(Request.Method.GET, finalModelsUrl, null,
-                response -> {
-                    try {
-                        JSONArray data = response.getJSONArray("data");
-                        List<String> modelsList = new ArrayList<>();
-                        for (int i = 0; i < data.length(); i++) {
-                            JSONObject model = data.getJSONObject(i);
-                            modelsList.add(model.getString("id"));
-                        }
-                        
-                        if (modelsList.isEmpty()) {
-                            setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_NO_AVAILABLE)});
-                        } else {
-                            setupSpinner(spinnerApiModel, modelsList.toArray(new String[0]));
-                            // Restore user's previous selection
-                            if (!finalSavedModelName.isEmpty()) {
-                                setSpinnerSelection(spinnerApiModel, finalSavedModelName);
-                            }
-                        }
-                    } catch (JSONException e) {
-                        LogManager.logE(TAG, "Failed to parse model list response", e);
-                        setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_FETCH_FAILED)});
-                    }
-                },
-                error -> {
-                    LogManager.logE(TAG, "Failed to fetch model list: " + error.getMessage());
-                    setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_FETCH_FAILED)});
-                }) {
-            @Override
-            public Map<String, String> getHeaders() {
-                return headers;
-            }
-        };
+        final String finalApiUrl = apiUrl;
+        final String finalApiKey = apiKey;
         
-        Volley.newRequestQueue(requireContext()).add(request);
+        String cachedMethod = com.example.offlineai.api.AuthMethodCache.getCachedMethod(requireContext(), apiUrl);
+        if (cachedMethod != null) {
+            // Use cached method
+            LogManager.logD(TAG, "Using cached auth method: " + cachedMethod + " for " + apiUrl);
+            tryFetchModelsWithAuth(finalModelsUrl, finalApiUrl, finalApiKey, finalSavedModelName, cachedMethod, false);
+        } else {
+            // Try all methods starting with first one
+            LogManager.logD(TAG, "No cached auth method, trying all methods for " + apiUrl);
+            tryFetchModelsWithAuth(finalModelsUrl, finalApiUrl, finalApiKey, finalSavedModelName, 
+                    com.example.offlineai.api.AuthMethodCache.ALL_AUTH_METHODS.get(0), true);
+        }
     }
     
     @Override

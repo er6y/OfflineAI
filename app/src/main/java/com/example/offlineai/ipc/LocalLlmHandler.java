@@ -1152,12 +1152,31 @@ public class LocalLlmHandler {
     
     /**
      * Check if directory contains Diffusion model (Text-to-Image)
-     * Strategy: 1. Check config.json  2. Check file names (regex)
+     * Strategy: 0. Check configuration.json.task  1. Check config.json  2. Check file names (regex)
      */
     private boolean isDiffusionModel(File modelDir) {
         if (!modelDir.isDirectory()) return false;
         
         boolean hasUnet = false, hasVae = false, hasDit = false;
+
+        // Step 0: Try configuration.json.task (ModelScope style metadata)
+        File configurationFile = new File(modelDir, "configuration.json");
+        if (configurationFile.exists()) {
+            try {
+                String content = readFileContent(configurationFile);
+                org.json.JSONObject configuration = new org.json.JSONObject(content);
+                String task = configuration.optString("task", "").toLowerCase();
+                if (!task.isEmpty()) {
+                    LogManager.logI(TAG, "configuration.json task=" + task);
+                    if (task.contains("text-to-image")) {
+                        LogManager.logI(TAG, "configuration.json indicates Diffusion model");
+                        return true;
+                    }
+                }
+            } catch (Exception e) {
+                LogManager.logD(TAG, "configuration.json parse failed, using other detection: " + e.getMessage());
+            }
+        }
         
         // Step 1: Try config.json
         File configFile = new File(modelDir, "config.json");
@@ -1167,7 +1186,7 @@ public class LocalLlmHandler {
                 org.json.JSONObject config = new org.json.JSONObject(content);
                 String modelType = config.optString("model_type", "").toLowerCase();
                 if (modelType.contains("diffusion") || modelType.contains("stable_diffusion")) {
-                    LogManager.logI(TAG, "✓ config.json indicates Diffusion model");
+                    LogManager.logI(TAG, "config.json indicates Diffusion model");
                     return true;
                 }
             } catch (Exception e) {
@@ -1188,20 +1207,39 @@ public class LocalLlmHandler {
         
         boolean isDiffusion = hasUnet && hasVae;
         if (isDiffusion) {
-            LogManager.logI(TAG, "✓ DIFFUSION model (unet + vae" + (hasDit ? " + dit" : "") + ")");
+            LogManager.logI(TAG, "DIFFUSION model (unet + vae" + (hasDit ? " + dit" : "") + ")");
         }
         return isDiffusion;
     }
     
     /**
      * Check if directory contains MNN LLM model
-     * Strategy: 1. Check config.json  2. Check file names (regex)
+     * Strategy: 0. Check configuration.json.task  1. Check config.json  2. Check file names (regex)
      */
     private boolean isMnnModel(File modelDir) {
         if (!modelDir.isDirectory()) return false;
         
         boolean hasLlm = false, hasVisual = false, hasAudio = false, hasTalker = false;
         boolean hasTokenizer = false, hasConfig = false;
+
+        // Step 0: Try configuration.json.task (ModelScope style metadata)
+        File configurationFileForLlm = new File(modelDir, "configuration.json");
+        if (configurationFileForLlm.exists()) {
+            try {
+                String content = readFileContent(configurationFileForLlm);
+                org.json.JSONObject configuration = new org.json.JSONObject(content);
+                String task = configuration.optString("task", "").toLowerCase();
+                if (!task.isEmpty()) {
+                    LogManager.logI(TAG, "configuration.json task=" + task);
+                    if (task.contains("text-generation")) {
+                        LogManager.logI(TAG, "configuration.json indicates LLM model");
+                        return true;
+                    }
+                }
+            } catch (Exception e) {
+                LogManager.logD(TAG, "configuration.json parse failed in isMnnModel: " + e.getMessage());
+            }
+        }
         
         // Step 1: Try config.json
         File configFile = new File(modelDir, "config.json");
@@ -1250,7 +1288,7 @@ public class LocalLlmHandler {
             else if (hasAudio) type += "_AUDIO (text+audio)";
             else type += "_TEXT";
             if (hasTalker) type += " +TTS";
-            LogManager.logI(TAG, "✓ " + type);
+            LogManager.logI(TAG, type);
         }
         
         return isLlm;

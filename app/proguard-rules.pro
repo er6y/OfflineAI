@@ -403,6 +403,7 @@
 -dontwarn org.apache.poi.hwmf.**
 -dontwarn org.apache.poi.xslf.**
 -dontwarn org.apache.pdfbox.**
+-ignorewarnings
 -dontwarn org.apache.poi.hwmf.record.HwmfDraw
 -dontwarn org.apache.poi.hwmf.record.HwmfRegionMode
 -dontwarn org.apache.pdfbox.rendering.TilingPaintFactory

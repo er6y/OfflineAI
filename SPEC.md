@@ -156,6 +156,34 @@ flowchart TB
 
 ### 2.3 推理与原生层
 - **LocalLLMMNNHandler**：MNN 推理枢纽，需求是对不同模型类型（纯文本 LLM、视觉-语言、Diffusion、TTS）进行统一探测、配置构建、推理调度，并处理流式回调与停止控制。设计：通过检测模型目录内文件（llm.mnn、visual.mnn、text_encoder.mnn、audio.mnn、talker.mnn）判定功能，使用 MnnInference.ConfigBuilder 构建 runtime config，注册回调处理文本 token、图像/音频输出，支持 dit_steps/dit_solver、KV Cache 等高级参数。**主要 API**：`findModelFile()`、`initialize()`、`generate()`、`stopGeneration()`、`buildMnnConfig()`、`handleStreamingToken()`。**关键数据结构**：`LocalLlmHandler.InferenceParams`、`MnnInference.ConfigBuilder`、`StreamingCallback`。
+  - **Diffusion（MNN upstream）模型类型**：
+    - `0`：Stable Diffusion 1.5 / chilloutmix（CLIP tokenizer，CFG + PNDM/PLMS）。
+    - `1`：Taiyi Stable Diffusion Chinese（BERT tokenizer，CFG + PNDM/PLMS）。
+    - `2`：ZImage（FlowMatch Euler；依赖 `MNN_BUILD_LLM=ON`；text encoder 输入 `input_ids` + `attention_mask`；latent 形状 `[1,16,128,128]`；无 CFG；timestep 为 float，使用 `t = 1 - sigma`）。
+    - **识别约定（OfflineAI）**：当模型目录 `config.json` 中 `model_type` 为 `zimage_diffusion_mnn` 时，Java 层创建 Diffusion session 会传 `modelType=2`；否则兜底按 `modelType=0`（SD1.5）。
+    - **ZImage 图片大小（imageSize）配置（OfflineAI）**：
+      - 配置键：`ConfigManager.KEY_DIFFUSION_IMAGE_SIZE` / `RuntimeConfig.diffusionImageSize`。
+      - 可选值（正方形输出）：`0(模型默认) / 512 / 640 / 768 / 896 / 1024`，默认 `0`。
+      - 生效方式：创建 Diffusion session 时将 `imageSize` 透传到 MNN Diffusion 引擎（仅对 `modelType=2` 生效）。当 `imageSize>0` 时按用户选择生效；当 `imageSize=0` 时不覆盖，行为与旧版（未提供 imageSize 配置）保持一致。
+      - latent 映射：
+        - `imageSize=0`：使用引擎默认 latent（旧版一致）。
+        - `imageSize>0`：latent 的 `H/W = imageSize/8`（例如 512->64，640->80，768->96，896->112，1024->128）。
+      - 稳定性策略：当 `backend/memoryMode/imageSize` 变化时强制重建 Diffusion session；cache 目录按 `<model>/<backend>/<imageSize>` 分桶，避免不同分辨率共用 kernel cache。
+      - 内存关系：峰值内存与计算量随像素面积近似成比例变化，降低 `imageSize` 可显著降低 `:inference` 进程被 LMKD/OOM kill 的风险。
+  - **ZImage scheduler 配置**：优先读取 `${model_path}/scheduler/scheduler_config.json`，其次 `${model_path}/scheduler_config.json`；支持字段 `num_train_timesteps`、`shift`、`use_dynamic_shifting`（默认 shift=3.0）。
+  - **ZImage prompt 约定**：Diffusion 侧会在 tokenizer 前包装 chat template：`<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n`，用于对齐 Python pipeline 的 `apply_chat_template` 行为。
+  - **CFG Scale 配置**：
+    - 配置键：`ConfigManager.KEY_DIFFUSION_CFG` / `RuntimeConfig.diffusionCfg`。
+    - 默认值：`1.0`（ZImage 推荐值）；SD1.5/Taiyi 推荐 `7.5`。
+    - 生效范围：`0.0 ~ 10.0`，步进 `0.25`。
+    - **重要**：CFG 过高会导致图像过度饱和、细节丢失；ZImage 模型最佳范围为 `1.0 ~ 1.5`。
+  - **diffusion_demo.cpp 与 mnn_jni.cpp 对比（2025-12-19）**：
+    - **相同点**：两者都调用 `diffusion->run(prompt, outputPath, iterNum, seed, cfg, callback)`，核心推理逻辑完全一致。
+    - **差异点**：
+      - `diffusion_demo.cpp` 默认 CFG=7.5（已修复为根据 model_type 自动选择：ZImage=1.0，SD1.5=7.5）。
+      - 手机 App 默认 CFG=1.0（通过 ConfigManager 配置）。
+    - **潜在问题**：Windows 命令行运行时若未显式传递 CFG 参数，可能使用错误默认值导致生成质量差异。
+    - **正确调用示例**：`./diffusion_demo <model_path> 2 0 0 4 42 output.jpg 512 1.25 0 0 1 "prompt"`（ZImage 模型）。
 - **MnnInference JNI（libs/mnn-jni）**：Java 层调用 MNN C++ 引擎的唯一桥梁。需求：对外提供 createSession、generate、embedding、reranker 等接口，维持线程安全、日志输出与错误返回。设计：在 mnn_jni.cpp 中统一管理 Session 生命周期（含 ExecutorScope 创建）、音频数据缓冲、Wavform 回调、错误码打印，使 Java 层只需关注高层业务。**主要 API**：`createSession()`、`generate()`、`createEmbeddingWithConfig()`、`createRerankerWithConfig()`、`setWavformCallback()`、`releaseSession()`。**关键数据结构**：`MnnLlmSession`（JNI 持有的会话对象）、音频缓冲 `tts_audio_buffer_`。
   - 优化与注意事项：
     - Android 构建强制 native 使用 `-DCMAKE_BUILD_TYPE=Release`（O3），避免 JNI/MNN 被 Debug 构建拖慢。
@@ -360,6 +388,69 @@ flowchart TB
 - **配置构建**：通过 MnnInference.ConfigBuilder 设置后端、线程、精度、内存模式、功耗策略、max_all_tokens、max_new_tokens 等关键参数；根据模型内文件自动启用视觉/音频模块，TTS 默认设置 dit_steps=5、dit_solver=1。需求：确保配置优先级为运行时参数 > ConfigManager > 模型 config.json。
 - **特性实现**：LLM 流式输出、KV Cache 管控、手动/默认采样切换；视觉模型支持多轮图像追问，需避免 chunk>0 导致的 mVisionEmbeddings 崩溃；Diffusion 在本地执行文本转图并输出进度；TTS 通过 Talker Diffusion 输出音频文件并将路径传回 UI。
 - **JNI 实现**：mnn_jni.cpp 中封装 Session 生命周期、创建 ExecutorScope、绑定流式回调与音频回调，处理停止标志。需求：日志需英文输出，关键路径（加载、推理、回调）均保留调试信息，错误需抛回 Java 层处理。
+- **Diffusion OpenCL 后端配置（2025-12-16 修复，2025-12-16 增强可配置性）**：针对 Adreno GPU 上 Diffusion 模型推理出现黑图/NaN 问题的修复方案。
+  - **问题根因**：Diffusion 模型的 Text Encoder 使用 `-inf` 常量作为 attention mask，FP16 精度下 Adreno OpenCL 无法正确处理该常量，导致 Op[37] (Raster) 输出 `-inf`，后续 LayerNorm 产生 NaN，最终图像全黑。
+  - **测试矩阵**：
+    | 方案 | 内存模式 | 精度 | 结果 |
+    |------|----------|------|------|
+    | A (基线) | IMAGE | FP32 | ✅ 出图 |
+    | B | IMAGE | FP16 | ❌ 黑图 |
+    | C | BUFFER | FP32 | ✅ 出图 |
+    | 原始 | BUFFER | FP16 | ❌ 黑图 |
+  - **结论**：FP32 精度是必要条件，内存模式（BUFFER/IMAGE）均可工作。推荐使用 IMAGE 模式以获得更好的 Adreno 纹理单元优化。
+  - **可配置参数**（通过 `createDiffusionAdvanced` JNI 接口）：
+    - `gpuMemoryMode`：GPU 内存模式
+      - `0` = AUTO（默认，OpenCL 使用 IMAGE 模式）
+      - `1` = BUFFER（通用计算模式）
+      - `2` = IMAGE（纹理优化模式，推荐 Adreno）
+    - `precisionMode`：精度模式
+      - `0` = AUTO（默认，OpenCL 强制 FP32，其他使用 FP16）
+      - `1` = LOW（FP16，不推荐 OpenCL）
+      - `2` = NORMAL（FP32）
+      - `3` = HIGH（FP32）
+  - **代码修改位置**：
+    - 头文件：`libs/mnn/transformers/diffusion/engine/include/diffusion/diffusion.hpp`（新增 `DiffusionGpuMemoryMode` 和 `DiffusionPrecisionMode` 枚举）
+    - 实现：`libs/mnn/transformers/diffusion/engine/src/diffusion.cpp` 的 `Diffusion::load()` 方法
+    - JNI：`libs/mnn-jni/src/main/cpp/mnn_jni.cpp` 的 `createDiffusionAdvanced` 函数
+    - Java：`libs/mnn-jni/src/main/java/com/offlineai/mnn/MnnInference.java` 的 `createDiffusionAdvanced` 方法
+  - **性能影响**：FP32 比 FP16 慢约 2-4 倍，内存占用增加约 2 倍。
+  - **Debug 代码清理**：已禁用 `MNN_DEBUG_NAN_CHECK` 和 `MNN_DIFFUSION_DEBUG_STATS` 宏，移除 `OpenCLBackend.cpp` 中的 debug 打印，避免性能损失。
+  - **悬空指针修复**：保留 `RasterBufExecution.cpp` 中的 tensor 指针修复，避免 OpenCL Buffer 模式下的潜在崩溃。
+  - **设置 UI（2025-12-16 新增）**：在设置页面扩散设置区域添加精度模式和 GPU 内存模式下拉选择器：
+    - **精度模式 Spinner**：`spinnerDiffusionPrecisionMode`，选项 auto/low(FP16)/normal(FP32)/high(FP32)
+    - **GPU 内存模式 Spinner**：`spinnerDiffusionGpuMemoryMode`，选项 auto/buffer/image
+    - **ConfigManager 配置键**：`KEY_DIFFUSION_PRECISION_MODE`（默认 0=auto）、`KEY_DIFFUSION_GPU_MEMORY_MODE`（默认 0=auto）
+    - **中英文资源**：`strings.xml` 和 `values-en/strings.xml` 中添加对应标签和选项数组
+  - **性能统计（2025-12-16 新增）**：Diffusion 生成完成后显示峰值内存和当前 RSS 内存统计，通过读取 `/proc/self/status` 的 VmPeak 和 VmRSS 实现。
+  - **模型特定参数显示**：ZImage 模型显示 `Scheduler=FlowMatch-Euler`，SD1.5/Taiyi 显示 `Scheduler=PLMS`。
+  - **CFG 用户可配置（2025-12-17 新增）**：
+    - **设置 UI**：在扩散步数下方添加 CFG 滑动条，范围 0~10，步长 0.25，默认值 1.0
+    - **ConfigManager**：`KEY_DIFFUSION_CFG`（float），`DEFAULT_DIFFUSION_CFG = 1.0f`
+    - **RuntimeConfig**：新增 `diffusionCfg` 字段，通过 IPC 传递到推理进程
+    - **JNI 接口**：`MnnInference.generateImage()` 新增 `cfgScale` 参数
+    - **MNN Diffusion 实现**：
+      - SD1.5/Taiyi：CFG 应用于 `noise_pred = cfgScale * (noise_pred_text - noise_pred_uncond) + noise_pred_uncond`
+      - ZImage（Flow Matching）：当 CFG != 1.0 时，对 noise_pred 应用缩放 `noise_pred = cfgScale * noise_pred`
+    - **最佳实践**：
+      - ZImage 推荐 CFG=1.0（无引导），更高值可能导致过饱和
+      - SD1.5 推荐 CFG=7.5（标准值），范围 5~15 可调
+      - CFG=0 会完全忽略文本引导，生成随机噪声
+  - **SD1.5 模型重新加载崩溃修复（2025-12-17）**：
+    - **问题现象**：SD1.5 在 Low/Balance 内存模式下第二次推理时崩溃，出现大量 `Map error biasPtrCL == nullptr`、`OpenCL enqueue write error:-14`，最终 SIGSEGV。ZImage 正常工作。
+    - **根本原因**：`mnn_jni.cpp` 中 `generateImage()` 函数在 Low/Balance 模式下需要重新加载模型时，使用了简化版 `Diffusion` 构造函数，缺少 `textEncoderOnCPU`、`gpuMemoryMode`、`precisionMode`、`numThreads` 参数，导致重新加载的模型使用默认配置而非原始创建时的配置。
+    - **修复方案**：
+      1. 在 `DiffusionParams` 结构体中添加 `numThreads` 字段
+      2. 在 `createDiffusionAdvanced` 中保存 `numThreads` 到 params
+      3. 在 `generateImage` 重新加载模型时使用完整构造函数，传递所有保存的参数
+    - **代码修改位置**：`libs/mnn-jni/src/main/cpp/mnn_jni.cpp`
+      - Line 3133: `DiffusionParams` 结构体添加 `numThreads` 字段
+      - Line 3375: `createDiffusionAdvanced` 保存 `numThreads`
+      - Line 3552-3563: `generateImage` 使用完整构造函数重新创建 Diffusion 对象
+    - **影响范围**：仅影响 JNI 层模型重新加载逻辑，不影响 MNN 引擎代码，ZImage 和 SD1.5 均使用相同路径，修复后两者都能正常工作。
+  - **后续优化方向**：
+    1. 混合精度：仅对包含 `-inf` 的 Text Encoder 使用 FP32，UNet/VAE 使用 FP16；
+    2. 模型层面：将 attention mask 的 `-inf` 替换为 FP16 可表示的最小负数（如 -65504）；
+    3. MNN 层面：修复 OpenCL Raster 算子对 `-inf` 常量的处理。
 
 ### 4.2 在线推理适配
 - **StreamingApiClient / LlmApiAdapter**：面向在线 API 的统一接入层。需求：兼容 OpenAI/Claude 风格接口，支持 SSE/流式输出、错误重试、请求超时、API Key 管理。设计：内部对不同厂商适配各自参数（model、temperature 等），并与 RagQueryManager 共用回调接口，以统一 UI 展示逻辑。

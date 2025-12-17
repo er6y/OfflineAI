@@ -51,6 +51,7 @@ public class LlmApiAdapter {
         DOUBAO,      // 豆包 API
         QIANWEN,     // 千问 API
         OLLAMA,      // Ollama API
+        MIMO,        // 小米 MiMo API (uses api-key header)
         LOCAL        // 本地模型
     }
     
@@ -92,10 +93,13 @@ public class LlmApiAdapter {
             return ApiType.DOUBAO;
         } else if (apiUrl.contains("dashscope") || apiUrl.contains("aliyun")) {
             return ApiType.QIANWEN;
+        } else if (apiUrl.contains("xiaomimimo")) {
+            return ApiType.MIMO;
         } else {
             return ApiType.OPENAI;
         }
     }
+    
     
     /**
      * 统一的API调用入口
@@ -277,6 +281,7 @@ public class LlmApiAdapter {
             case OPENAI:
             case DEEPSEEK:
             case MOONSHOT:
+            case MIMO:
                 // 这些API使用messages数组
                 JSONArray messages = new JSONArray();
                 messages.put(new JSONObject().put("role", "user").put("content", prompt));

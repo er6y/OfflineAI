@@ -572,14 +572,33 @@ public class MnnInference {
     /**
      * Create MNN Diffusion session for text-to-image generation
      * @param modelDir Path to model directory containing text_encoder.mnn, unet.mnn, vae_decoder.mnn, vocab.json, merges.txt
-     * @param modelType Model type: 0=SD1.5, 1=Taiyi Chinese
+     * @param modelType Model type: 0=SD1.5, 1=Taiyi Chinese, 2=ZImage
      * @param backendType Backend type: 0=CPU, 1=Metal, 3=OpenCL, 7=Vulkan
      * @param memoryMode Memory mode: 0=saving (slower), 1=enough (faster), 2=balance
+     * @param imageSize Output image size (512, 640, 768, 896, 1024)
+     * @param textEncoderOnCPU Force text_encoder to run on CPU to avoid GPU buffer size limit
      * @param cachePath Path to cache directory where .tempcache will be saved (backend-specific)
      * @param callback Callback for progress updates during model loading
      * @return Diffusion handle (pointer)
      */
-    public static native long createDiffusion(String modelDir, int modelType, int backendType, int memoryMode, String cachePath, DiffusionCallback callback);
+    public static native long createDiffusion(String modelDir, int modelType, int backendType, int memoryMode, int imageSize, boolean textEncoderOnCPU, String cachePath, DiffusionCallback callback);
+    
+    /**
+     * Create MNN Diffusion session with advanced GPU configuration
+     * @param modelDir Path to model directory
+     * @param modelType Model type: 0=SD1.5, 1=Taiyi Chinese, 2=ZImage
+     * @param backendType Backend type: 0=CPU, 1=Metal, 3=OpenCL, 7=Vulkan
+     * @param memoryMode Memory mode: 0=saving (slower), 1=enough (faster), 2=balance
+     * @param imageSize Output image size (512, 640, 768, 896, 1024)
+     * @param textEncoderOnCPU Force text_encoder to run on CPU
+     * @param gpuMemoryMode GPU memory mode: 0=AUTO, 1=BUFFER, 2=IMAGE
+     * @param precisionMode Precision mode: 0=AUTO, 1=LOW(FP16), 2=NORMAL(FP32), 3=HIGH(FP32)
+     * @param numThreads CPU thread count for inference (from settings)
+     * @param cachePath Path to cache directory
+     * @param callback Callback for progress updates
+     * @return Diffusion handle (pointer)
+     */
+    public static native long createDiffusionAdvanced(String modelDir, int modelType, int backendType, int memoryMode, int imageSize, boolean textEncoderOnCPU, int gpuMemoryMode, int precisionMode, int numThreads, String cachePath, DiffusionCallback callback);
     
     /**
      * Generate image from text prompt
@@ -588,6 +607,7 @@ public class MnnInference {
      * @param outputPath Output image file path (e.g., /sdcard/output.jpg)
      * @param iterNum Number of denoising iterations (recommended: 10-20)
      * @param randomSeed Random seed for reproducibility (use -1 for random)
+     * @param cfgScale CFG (Classifier-Free Guidance) scale (0.0-10.0, default 1.0 for ZImage, 7.5 for SD1.5)
      * @param callback Progress callback (receives progress percentage 0-100)
      * @return true if generation succeeded, false otherwise
      */
@@ -597,6 +617,7 @@ public class MnnInference {
         String outputPath, 
         int iterNum, 
         int randomSeed,
+        float cfgScale,
         DiffusionCallback callback
     );
     

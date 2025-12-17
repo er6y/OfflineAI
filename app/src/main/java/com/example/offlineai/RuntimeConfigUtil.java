@@ -46,9 +46,14 @@ public final class RuntimeConfigUtil {
 
         // Diffusion settings
         config.diffusionMemoryMode = ConfigManager.getDiffusionMemoryMode(appCtx);
+        config.diffusionImageSize = ConfigManager.getDiffusionImageSize(appCtx);
         config.diffusionSteps = ConfigManager.getDiffusionSteps(appCtx);
+        config.diffusionCfg = ConfigManager.getDiffusionCfg(appCtx);
         config.diffusionSeed = ConfigManager.getDiffusionSeed(appCtx);
         config.diffusionSeedRandom = ConfigManager.getDiffusionSeedRandom(appCtx);
+        config.diffusionTextEncoderOnCPU = ConfigManager.getDiffusionTextEncoderOnCPU(appCtx);
+        config.diffusionGpuMemoryMode = ConfigManager.getDiffusionGpuMemoryMode(appCtx);
+        config.diffusionPrecisionMode = ConfigManager.getDiffusionPrecisionMode(appCtx);
 
         // Prompting and chat folder
         config.systemPrompt = ConfigManager.getSystemPrompt(appCtx);

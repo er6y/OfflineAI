@@ -916,11 +916,16 @@
     <!-- Diffusion Settings -->
     <string name="title_diffusion_settings">Diffusion Settings</string>
     <string name="label_diffusion_memory_mode">Memory Mode:</string>
+    <string name="label_diffusion_image_size">Image Size (ZImage):</string>
     <string name="label_diffusion_steps">Steps(1~50):</string>
+    <string name="label_diffusion_cfg">CFG(0~10):</string>
     <string name="label_diffusion_seed">Seed:</string>
     <string name="hint_diffusion_seed">Enter seed value</string>
     <string name="label_random">Random</string>
     <string name="text_diffusion_steps_value">Steps: %d</string>
+    <string name="label_diffusion_te_on_cpu">Text Encoder on CPU (avoid GPU memory limit)</string>
+    <string name="label_diffusion_precision_mode">Precision Mode:</string>
+    <string name="label_diffusion_gpu_memory_mode">GPU Memory Mode:</string>
     
     <!-- Diffusion Memory Mode Options (Order must match MNN: 0=low, 1=enough, 2=balance) -->
     <string-array name="diffusion_memory_modes">
@@ -928,12 +933,37 @@
         <item>enough (fast)</item>
         <item>balance (balanced)</item>
     </string-array>
+
+    <string-array name="diffusion_image_sizes">
+        <item>Default (Model)</item>
+        <item>512</item>
+        <item>640</item>
+        <item>768</item>
+        <item>896</item>
+        <item>1024</item>
+    </string-array>
+    
+    <!-- Diffusion Precision Mode Options (Order must match MNN: 0=auto, 1=low, 2=normal, 3=high) -->
+    <string-array name="diffusion_precision_modes">
+        <item>auto</item>
+        <item>low (FP16)</item>
+        <item>normal (FP32)</item>
+        <item>high (FP32)</item>
+    </string-array>
+    
+    <!-- Diffusion GPU Memory Mode Options (Order must match MNN: 0=auto, 1=buffer, 2=image) -->
+    <string-array name="diffusion_gpu_memory_modes">
+        <item>auto</item>
+        <item>buffer (general)</item>
+        <item>image (texture optimized)</item>
+    </string-array>
     
     <string name="title_global_settings">Global Settings</string>
     <string name="label_show_debug_performance">Show Debug &amp; Performance</string>
     <string name="label_debug_mode">Debug Mode</string>
     <string name="label_backend_preference">Backend:</string>
 
+    <!-- ... -->
     <string name="label_font_size">Font Size</string>
     <string name="text_font_size_value">Font Size: 16sp</string>
     <string name="button_select">Select</string>
