@@ -551,38 +551,64 @@ public class SettingsFragment extends Fragment {
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 if (!isDiffusionImageSizeSpinnerInitialized) {
                     isDiffusionImageSizeSpinnerInitialized = true;
-                    int currentSize = ConfigManager.getDiffusionImageSize(requireContext());
-                    LogManager.logD(TAG, "[SETTINGS] Diffusion image size spinner initial selection: position=" + position + ", currentSize=" + currentSize);
+                    int currentWidth = ConfigManager.getDiffusionImageWidth(requireContext());
+                    int currentHeight = ConfigManager.getDiffusionImageHeight(requireContext());
+                    LogManager.logD(TAG, "[SETTINGS] Diffusion image size spinner initial selection: position=" + position + ", currentSize=" + currentWidth + "x" + currentHeight);
                     return;
                 }
 
-                int size;
+                // Preset sizes: index -> (width, height)
+                // Sorted by pixel count from small to large, default is 512x512 (index 8)
+                // 0: 256x256 (1:1 Fast)
+                // 1: 320x320 (1:1 Fast)
+                // 2: 384x384 (1:1 Fast)
+                // 3: 288x512 (9:16 Small Tall)
+                // 4: 512x288 (16:9 Small Wide)
+                // 5: 448x448 (1:1 Medium Fast)
+                // 6: 384x640 (3:5 Portrait)
+                // 7: 640x384 (5:3 Widescreen)
+                // 8: 512x512 (1:1 Default)
+                // 9: 512x768 (2:3 Portrait)
+                // 10: 768x512 (3:2 Widescreen)
+                // 11: 640x640 (1:1 Medium)
+                // 12: 768x768 (1:1)
+                // 13: 512x896 (4:7 Ultra-tall)
+                // 14: 896x512 (7:4 Ultra-wide)
+                // 15: 896x896 (1:1 High Quality)
+                // 16: 768x1024 (3:4 Portrait)
+                // 17: 1024x768 (4:3 Landscape)
+                // 18: 720x1280 (9:16 Mobile)
+                // 19: 1280x720 (16:9 Widescreen)
+                // 20: 1024x1024 (1:1)
+                int width, height;
                 switch (position) {
-                    case 0:
-                        size = 0;
-                        break;
-                    case 1:
-                        size = 512;
-                        break;
-                    case 2:
-                        size = 640;
-                        break;
-                    case 3:
-                        size = 768;
-                        break;
-                    case 4:
-                        size = 896;
-                        break;
-                    case 5:
-                        size = 1024;
-                        break;
-                    default:
-                        size = 0;
-                        break;
+                    case 0: width = 256; height = 256; break;
+                    case 1: width = 320; height = 320; break;
+                    case 2: width = 384; height = 384; break;
+                    case 3: width = 288; height = 512; break;
+                    case 4: width = 512; height = 288; break;
+                    case 5: width = 448; height = 448; break;
+                    case 6: width = 384; height = 640; break;
+                    case 7: width = 640; height = 384; break;
+                    case 8: width = 512; height = 512; break;
+                    case 9: width = 512; height = 768; break;
+                    case 10: width = 768; height = 512; break;
+                    case 11: width = 640; height = 640; break;
+                    case 12: width = 768; height = 768; break;
+                    case 13: width = 512; height = 896; break;
+                    case 14: width = 896; height = 512; break;
+                    case 15: width = 896; height = 896; break;
+                    case 16: width = 768; height = 1024; break;
+                    case 17: width = 1024; height = 768; break;
+                    case 18: width = 720; height = 1280; break;
+                    case 19: width = 1280; height = 720; break;
+                    case 20: width = 1024; height = 1024; break;
+                    default: width = 512; height = 512; break;
                 }
 
-                LogManager.logD(TAG, "[SETTINGS] Diffusion image size changed by user: position=" + position + ", size=" + size);
-                ConfigManager.setDiffusionImageSize(requireContext(), size);
+                LogManager.logD(TAG, "[SETTINGS] Diffusion image size changed by user: position=" + position + ", size=" + width + "x" + height);
+                ConfigManager.setDiffusionImageWidth(requireContext(), width);
+                ConfigManager.setDiffusionImageHeight(requireContext(), height);
             }
 
             @Override
@@ -1517,31 +1543,33 @@ public class SettingsFragment extends Fragment {
         int gpuMemoryMode = ConfigManager.getDiffusionGpuMemoryMode(ctx);
         spinnerDiffusionGpuMemoryMode.setSelection(gpuMemoryMode);
 
-        int diffusionImageSize = ConfigManager.getDiffusionImageSize(ctx);
-        int imageSizeSelection;
-        switch (diffusionImageSize) {
-            case 0:
-                imageSizeSelection = 0;
-                break;
-            case 512:
-                imageSizeSelection = 1;
-                break;
-            case 640:
-                imageSizeSelection = 2;
-                break;
-            case 768:
-                imageSizeSelection = 3;
-                break;
-            case 896:
-                imageSizeSelection = 4;
-                break;
-            case 1024:
-                imageSizeSelection = 5;
-                break;
-            default:
-                imageSizeSelection = 0;
-                break;
-        }
+        // Get saved width and height, map to preset index
+        int savedWidth = ConfigManager.getDiffusionImageWidth(ctx);
+        int savedHeight = ConfigManager.getDiffusionImageHeight(ctx);
+        int imageSizeSelection = 8; // Default: 512x512 (index 8)
+        // Match against presets: (width, height) -> index
+        // Sorted by pixel count from small to large
+        if (savedWidth == 256 && savedHeight == 256) imageSizeSelection = 0;
+        else if (savedWidth == 320 && savedHeight == 320) imageSizeSelection = 1;
+        else if (savedWidth == 384 && savedHeight == 384) imageSizeSelection = 2;
+        else if (savedWidth == 288 && savedHeight == 512) imageSizeSelection = 3;
+        else if (savedWidth == 512 && savedHeight == 288) imageSizeSelection = 4;
+        else if (savedWidth == 448 && savedHeight == 448) imageSizeSelection = 5;
+        else if (savedWidth == 384 && savedHeight == 640) imageSizeSelection = 6;
+        else if (savedWidth == 640 && savedHeight == 384) imageSizeSelection = 7;
+        else if (savedWidth == 512 && savedHeight == 512) imageSizeSelection = 8;
+        else if (savedWidth == 512 && savedHeight == 768) imageSizeSelection = 9;
+        else if (savedWidth == 768 && savedHeight == 512) imageSizeSelection = 10;
+        else if (savedWidth == 640 && savedHeight == 640) imageSizeSelection = 11;
+        else if (savedWidth == 768 && savedHeight == 768) imageSizeSelection = 12;
+        else if (savedWidth == 512 && savedHeight == 896) imageSizeSelection = 13;
+        else if (savedWidth == 896 && savedHeight == 512) imageSizeSelection = 14;
+        else if (savedWidth == 896 && savedHeight == 896) imageSizeSelection = 15;
+        else if (savedWidth == 768 && savedHeight == 1024) imageSizeSelection = 16;
+        else if (savedWidth == 1024 && savedHeight == 768) imageSizeSelection = 17;
+        else if (savedWidth == 720 && savedHeight == 1280) imageSizeSelection = 18;
+        else if (savedWidth == 1280 && savedHeight == 720) imageSizeSelection = 19;
+        else if (savedWidth == 1024 && savedHeight == 1024) imageSizeSelection = 20;
         spinnerDiffusionImageSize.setSelection(imageSizeSelection);
         
         int diffSteps = ConfigManager.getDiffusionSteps(ctx);

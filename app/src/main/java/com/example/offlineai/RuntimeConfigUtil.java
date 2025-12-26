@@ -47,6 +47,8 @@ public final class RuntimeConfigUtil {
         // Diffusion settings
         config.diffusionMemoryMode = ConfigManager.getDiffusionMemoryMode(appCtx);
         config.diffusionImageSize = ConfigManager.getDiffusionImageSize(appCtx);
+        config.diffusionImageWidth = ConfigManager.getDiffusionImageWidth(appCtx);
+        config.diffusionImageHeight = ConfigManager.getDiffusionImageHeight(appCtx);
         config.diffusionSteps = ConfigManager.getDiffusionSteps(appCtx);
         config.diffusionCfg = ConfigManager.getDiffusionCfg(appCtx);
         config.diffusionSeed = ConfigManager.getDiffusionSeed(appCtx);

@@ -161,15 +161,32 @@ flowchart TB
     - `1`：Taiyi Stable Diffusion Chinese（BERT tokenizer，CFG + PNDM/PLMS）。
     - `2`：ZImage（FlowMatch Euler；依赖 `MNN_BUILD_LLM=ON`；text encoder 输入 `input_ids` + `attention_mask`；latent 形状 `[1,16,128,128]`；无 CFG；timestep 为 float，使用 `t = 1 - sigma`）。
     - **识别约定（OfflineAI）**：当模型目录 `config.json` 中 `model_type` 为 `zimage_diffusion_mnn` 时，Java 层创建 Diffusion session 会传 `modelType=2`；否则兜底按 `modelType=0`（SD1.5）。
-    - **ZImage 图片大小（imageSize）配置（OfflineAI）**：
-      - 配置键：`ConfigManager.KEY_DIFFUSION_IMAGE_SIZE` / `RuntimeConfig.diffusionImageSize`。
-      - 可选值（正方形输出）：`0(模型默认) / 512 / 640 / 768 / 896 / 1024`，默认 `0`。
-      - 生效方式：创建 Diffusion session 时将 `imageSize` 透传到 MNN Diffusion 引擎（仅对 `modelType=2` 生效）。当 `imageSize>0` 时按用户选择生效；当 `imageSize=0` 时不覆盖，行为与旧版（未提供 imageSize 配置）保持一致。
-      - latent 映射：
-        - `imageSize=0`：使用引擎默认 latent（旧版一致）。
-        - `imageSize>0`：latent 的 `H/W = imageSize/8`（例如 512->64，640->80，768->96，896->112，1024->128）。
-      - 稳定性策略：当 `backend/memoryMode/imageSize` 变化时强制重建 Diffusion session；cache 目录按 `<model>/<backend>/<imageSize>` 分桶，避免不同分辨率共用 kernel cache。
-      - 内存关系：峰值内存与计算量随像素面积近似成比例变化，降低 `imageSize` 可显著降低 `:inference` 进程被 LMKD/OOM kill 的风险。
+    - **ZImage 图片尺寸配置（OfflineAI，2025-12-26 扩展支持非正方形比例）**：
+      - **配置键**：
+        - 旧版（正方形）：`ConfigManager.KEY_DIFFUSION_IMAGE_SIZE` / `RuntimeConfig.diffusionImageSize`（保留兼容）。
+        - 新版（任意比例）：`ConfigManager.KEY_DIFFUSION_IMAGE_WIDTH` / `KEY_DIFFUSION_IMAGE_HEIGHT` / `RuntimeConfig.diffusionImageWidth` / `diffusionImageHeight`。
+      - **预设尺寸（UI 下拉选择）**：
+        - `0×0`：模型默认（1024×1024）
+        - **快速预览（小尺寸）**：`256×256` / `320×320` / `384×384`（1:1 快速）、`512×288`（16:9 小宽屏）、`288×512`（9:16 小竖屏）
+        - **标准尺寸**：`512×512` / `768×768` / `1024×1024`（1:1 正方形）
+        - **横竖屏**：`1024×768`（4:3 横屏）、`768×1024`（3:4 竖屏）
+        - **宽屏/手机**：`1280×720`（16:9 宽屏）、`720×1280`（9:16 手机竖屏）
+        - **超宽/超长**：`896×512`（7:4 超宽）、`512×896`（4:7 超长）
+      - **尺寸约束**：宽高必须为 8 的倍数，范围 256~1280。MNN 引擎会自动对齐到最近的 8 倍数。
+      - **生效方式**：创建 Diffusion session 时调用 `MnnInference.createDiffusionWithSize(imageWidth, imageHeight, ...)`，MNN 引擎根据 `mImageWidth/mImageHeight` 计算 `mLatentW = width/8`、`mLatentH = height/8`。
+      - **latent 映射**：
+        - `width=0 && height=0`：使用引擎默认 latent（1024×1024 → 128×128）。
+        - `width>0 && height>0`：`mLatentW = width/8`，`mLatentH = height/8`。
+      - **稳定性策略**：当 `backend/memoryMode/imageWidth/imageHeight` 变化时强制重建 Diffusion session；cache 目录按 `<model>/<backend>/<width>x<height>` 分桶，避免不同分辨率共用 kernel cache。
+      - **内存关系**：峰值内存与计算量随像素面积近似成比例变化，降低尺寸可显著降低 `:inference` 进程被 LMKD/OOM kill 的风险。非正方形比例（如 1280×720）总像素少于 1024×1024，内存占用更低。
+      - **GPU 内存管理优化（2025-12-26）**：
+        - **问题**：OpenCL 后端在 UNet 循环中每个 step 创建新的 VARP 对象，导致 GPU 内存累积，最终卡住或 OOM。
+        - **修复**：
+          1. 为 ZImage 创建独立的 `mSampleVar` 和 `plms` buffer，避免与 `mLatentVar` 共享。
+          2. 每个 step 结束后显式释放中间变量（`output`、`noise_pred`、`outputs`）。
+          3. 使用 `memcpy` 复制 latent 数据到复用的 buffer，而非创建新 VARP。
+          4. SD1.5 路径同样添加中间变量释放。
+        - **效果**：避免 GPU 内存累积，防止 OpenCL 后端卡住。
   - **ZImage scheduler 配置**：优先读取 `${model_path}/scheduler/scheduler_config.json`，其次 `${model_path}/scheduler_config.json`；支持字段 `num_train_timesteps`、`shift`、`use_dynamic_shifting`（默认 shift=3.0）。
   - **ZImage prompt 约定**：Diffusion 侧会在 tokenizer 前包装 chat template：`<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n<think>\n`，用于对齐 Python pipeline 的 `apply_chat_template` 行为。
   - **CFG Scale 配置**：

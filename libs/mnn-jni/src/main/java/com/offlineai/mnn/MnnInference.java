@@ -601,6 +601,24 @@ public class MnnInference {
     public static native long createDiffusionAdvanced(String modelDir, int modelType, int backendType, int memoryMode, int imageSize, boolean textEncoderOnCPU, int gpuMemoryMode, int precisionMode, int numThreads, String cachePath, DiffusionCallback callback);
     
     /**
+     * Create MNN Diffusion session with separate width and height for non-square aspect ratios
+     * @param modelDir Path to model directory
+     * @param modelType Model type: 0=SD1.5, 1=Taiyi Chinese, 2=ZImage
+     * @param backendType Backend type: 0=CPU, 1=Metal, 3=OpenCL, 7=Vulkan
+     * @param memoryMode Memory mode: 0=saving (slower), 1=enough (faster), 2=balance
+     * @param imageWidth Output image width (must be multiple of 8, e.g., 1280, 1024, 768, 720, 512)
+     * @param imageHeight Output image height (must be multiple of 8, e.g., 720, 1024, 768, 1280, 512)
+     * @param textEncoderOnCPU Force text_encoder to run on CPU
+     * @param gpuMemoryMode GPU memory mode: 0=AUTO, 1=BUFFER, 2=IMAGE
+     * @param precisionMode Precision mode: 0=AUTO, 1=LOW(FP16), 2=NORMAL(FP32), 3=HIGH(FP32)
+     * @param numThreads CPU thread count for inference (from settings)
+     * @param cachePath Path to cache directory
+     * @param callback Callback for progress updates
+     * @return Diffusion handle (pointer)
+     */
+    public static native long createDiffusionWithSize(String modelDir, int modelType, int backendType, int memoryMode, int imageWidth, int imageHeight, boolean textEncoderOnCPU, int gpuMemoryMode, int precisionMode, int numThreads, String cachePath, DiffusionCallback callback);
+    
+    /**
      * Generate image from text prompt
      * @param diffusionHandle Diffusion handle returned by createDiffusion
      * @param prompt Text prompt describing the image to generate

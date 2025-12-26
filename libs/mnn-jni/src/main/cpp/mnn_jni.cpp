@@ -3126,7 +3126,9 @@ struct DiffusionParams {
     DiffusionModelType modelType;
     MNNForwardType backendType;
     int memoryMode;
-    int imageSize;
+    int imageSize;       // Legacy: single size for square images
+    int imageWidth;      // Output image width (for non-square)
+    int imageHeight;     // Output image height (for non-square)
     bool textEncoderOnCPU;
     int gpuMemoryMode;   // 0=AUTO, 1=BUFFER, 2=IMAGE
     int precisionMode;   // 0=AUTO, 1=LOW(FP16), 2=NORMAL, 3=HIGH(FP32)
@@ -3381,6 +3383,112 @@ Java_com_offlineai_mnn_MnnInference_createDiffusionAdvanced(
         }
         
         LOGI("[DIFFUSION] Diffusion session created (advanced): %lld", (long long)handle);
+        return handle;
+        
+    } catch (const std::exception& e) {
+        LOGE("[DIFFUSION] Failed to create diffusion session: %s", e.what());
+        return 0;
+    } catch (...) {
+        LOGE("[DIFFUSION] Failed to create diffusion session: unknown error");
+        return 0;
+    }
+}
+
+// New JNI method with separate width and height for non-square aspect ratios
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_offlineai_mnn_MnnInference_createDiffusionWithSize(
+    JNIEnv* env, jclass clazz, 
+    jstring jModelDir, jint modelType, jint backendType, jint memoryMode, 
+    jint imageWidth, jint imageHeight, jboolean textEncoderOnCPU,
+    jint gpuMemoryMode, jint precisionMode, jint numThreads, jstring jCachePath, jobject callback) {
+    
+    try {
+        const char* modelDir = env->GetStringUTFChars(jModelDir, nullptr);
+        const char* cachePath = env->GetStringUTFChars(jCachePath, nullptr);
+        std::string modelDirStr(modelDir ? modelDir : "");
+        std::string cachePathStr(cachePath ? cachePath : "");
+        
+        LOGI("[DIFFUSION] Creating diffusion session (with size): modelDir=%s, modelType=%d, backend=%d, memory=%d, size=%dx%d, textEncoderOnCPU=%d, gpuMemMode=%d, precision=%d, numThreads=%d",
+             modelDirStr.c_str(), modelType, backendType, memoryMode, imageWidth, imageHeight, (int)textEncoderOnCPU, gpuMemoryMode, precisionMode, numThreads);
+        
+        jmethodID onTokenMethod = nullptr;
+        if (callback != nullptr) {
+            jclass callbackClass = env->GetObjectClass(callback);
+            onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+        }
+        
+        int chdirResult = chdir(cachePathStr.c_str());
+        if (chdirResult == 0) {
+            LOGI("[DIFFUSION] Changed working directory to: %s", cachePathStr.c_str());
+        } else {
+            LOGE("[DIFFUSION] Failed to chdir to: %s (errno=%d)", cachePathStr.c_str(), errno);
+        }
+        
+        MNNForwardType actualBackend = static_cast<MNNForwardType>(backendType);
+        
+        if (onTokenMethod) {
+            jstring jmsg = env->NewStringUTF("\nLoading models...");
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        
+        // Create Diffusion instance with separate width and height
+        auto diffusion = std::make_unique<Diffusion>(
+            modelDirStr,
+            static_cast<DiffusionModelType>(modelType),
+            actualBackend,
+            memoryMode,
+            imageWidth,
+            imageHeight,
+            (bool)textEncoderOnCPU,
+            static_cast<DiffusionGpuMemoryMode>(gpuMemoryMode),
+            static_cast<DiffusionPrecisionMode>(precisionMode),
+            numThreads
+        );
+        
+        env->ReleaseStringUTFChars(jModelDir, modelDir);
+        env->ReleaseStringUTFChars(jCachePath, cachePath);
+        
+        LOGI("[DIFFUSION] Starting diffusion->load() (backend=%d, size=%dx%d)...", actualBackend, imageWidth, imageHeight);
+        
+        auto start_time = std::chrono::high_resolution_clock::now();
+        if (!diffusion->load()) {
+            LOGE("[DIFFUSION] Failed to load diffusion model");
+            if (onTokenMethod) {
+                jstring jmsg = env->NewStringUTF("\nFailed to load model");
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+            }
+            return 0;
+        }
+        
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto load_duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count();
+        LOGI("[DIFFUSION] Model loaded in %lld ms", (long long)load_duration);
+        
+        jlong handle = reinterpret_cast<jlong>(diffusion.get());
+        {
+            std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+            g_diffusion_sessions[handle] = std::move(diffusion);
+            g_diffusion_memory_modes[handle] = memoryMode;
+            
+            DiffusionParams params;
+            params.modelPath = modelDirStr;
+            params.modelType = static_cast<DiffusionModelType>(modelType);
+            params.backendType = actualBackend;
+            params.memoryMode = memoryMode;
+            params.imageSize = 0;  // Not used for non-square
+            params.imageWidth = imageWidth;
+            params.imageHeight = imageHeight;
+            params.textEncoderOnCPU = (bool)textEncoderOnCPU;
+            params.gpuMemoryMode = gpuMemoryMode;
+            params.precisionMode = precisionMode;
+            params.numThreads = numThreads;
+            g_diffusion_params[handle] = params;
+            g_diffusion_first_run[handle] = true;
+        }
+        
+        LOGI("[DIFFUSION] Diffusion session created (with size %dx%d): %lld", imageWidth, imageHeight, (long long)handle);
         return handle;
         
     } catch (const std::exception& e) {

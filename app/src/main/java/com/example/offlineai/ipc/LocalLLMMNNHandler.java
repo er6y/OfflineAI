@@ -119,7 +119,8 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     // Diffusion session config tracking (for backend/memory change detection)
     private String lastDiffusionBackend = null;
     private int lastDiffusionMemoryMode = -1;
-    private int lastDiffusionImageSize = -1;
+    private int lastDiffusionImageWidth = -1;   // Output image width (for non-square)
+    private int lastDiffusionImageHeight = -1;  // Output image height (for non-square)
     private int lastDiffusionModelType = -1;
     private int lastDiffusionGpuMemoryMode = -1;  // BUFFER(1) / IMAGE(2)
     private int lastDiffusionPrecisionMode = -1;  // LOW(1) / NORMAL(2) / HIGH(3)
@@ -440,15 +441,19 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         LogManager.logI(TAG, "Using GPU memory mode: " + gpuMemoryMode + " (" + gpuMemModeStr + ")");
         LogManager.logI(TAG, "Using precision mode: " + precisionMode + " (" + precisionStr + ")");
 
-        int diffusionImageSize = RuntimeConfigHolder.getDiffusionImageSizeOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_SIZE);
+        // Get image width and height for non-square aspect ratio support
+        int diffusionImageWidth = RuntimeConfigHolder.getDiffusionImageWidthOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_WIDTH);
+        int diffusionImageHeight = RuntimeConfigHolder.getDiffusionImageHeightOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_HEIGHT);
         if (diffusionModelType == DIFFUSION_MODEL_ZIMAGE) {
-            LogManager.logI(TAG, "[Diffusion] Using image size (ZImage): " + (diffusionImageSize == 0 ? "default(model)" : String.valueOf(diffusionImageSize)));
+            String sizeStr = (diffusionImageWidth == 0 && diffusionImageHeight == 0) ? "default(model)" : (diffusionImageWidth + "x" + diffusionImageHeight);
+            LogManager.logI(TAG, "[Diffusion] Using image size (ZImage): " + sizeStr);
         }
 
         // Save current diffusion config snapshot for change detection
         lastDiffusionBackend = backendPreference;
         lastDiffusionMemoryMode = memoryMode;
-        lastDiffusionImageSize = diffusionImageSize;
+        lastDiffusionImageWidth = diffusionImageWidth;
+        lastDiffusionImageHeight = diffusionImageHeight;
         lastDiffusionModelType = diffusionModelType;
         lastDiffusionGpuMemoryMode = gpuMemoryMode;
         lastDiffusionPrecisionMode = precisionMode;
@@ -464,8 +469,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         File backendCacheDir = new File(modelCacheDir, backendName.toLowerCase());
 
         File finalCacheDir = backendCacheDir;
-        if (diffusionModelType == DIFFUSION_MODEL_ZIMAGE && diffusionImageSize > 0) {
-            finalCacheDir = new File(backendCacheDir, String.valueOf(diffusionImageSize));
+        if (diffusionModelType == DIFFUSION_MODEL_ZIMAGE && (diffusionImageWidth > 0 || diffusionImageHeight > 0)) {
+            // Use WxH format for cache directory to support different aspect ratios
+            finalCacheDir = new File(backendCacheDir, diffusionImageWidth + "x" + diffusionImageHeight);
         }
         
         if (!finalCacheDir.exists()) {
@@ -502,13 +508,14 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         int numThreads = ConfigManager.getThreads(context);
         LogManager.logI(TAG, "[Diffusion] numThreads: " + numThreads);
         
-        // Use createDiffusionAdvanced to pass GPU memory mode and precision mode
-        diffusionHandle = MnnInference.createDiffusionAdvanced(
+        // Use createDiffusionWithSize to pass separate width and height for non-square aspect ratios
+        diffusionHandle = MnnInference.createDiffusionWithSize(
             modelPath,
             diffusionModelType,
             backendType,
             memoryMode,
-            diffusionImageSize,
+            diffusionImageWidth,   // Image width (0 for model default)
+            diffusionImageHeight,  // Image height (0 for model default)
             textEncoderOnCPU,
             gpuMemoryMode,   // GPU memory mode: 0=AUTO, 1=BUFFER, 2=IMAGE
             precisionMode,   // Precision mode: 0=AUTO, 1=LOW(FP16), 2=NORMAL(FP32), 3=HIGH(FP32)
@@ -1861,7 +1868,8 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 // via RuntimeConfig will take effect for pure image generation workflows.
                 String currentBackend = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
                 int currentMemoryMode = RuntimeConfigHolder.getDiffusionMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_MEMORY_MODE);
-                int currentImageSize = RuntimeConfigHolder.getDiffusionImageSizeOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_SIZE);
+                int currentImageWidth = RuntimeConfigHolder.getDiffusionImageWidthOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_WIDTH);
+                int currentImageHeight = RuntimeConfigHolder.getDiffusionImageHeightOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_HEIGHT);
                 int currentGpuMemoryMode = RuntimeConfigHolder.getDiffusionGpuMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_GPU_MEMORY_MODE);
                 int currentPrecisionMode = RuntimeConfigHolder.getDiffusionPrecisionModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_PRECISION_MODE);
 
@@ -1870,8 +1878,8 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 boolean memoryChanged = (lastDiffusionMemoryMode >= 0
                         && lastDiffusionMemoryMode != currentMemoryMode);
                 boolean sizeChanged = (lastDiffusionModelType == DIFFUSION_MODEL_ZIMAGE
-                        && lastDiffusionImageSize >= 0
-                        && lastDiffusionImageSize != currentImageSize);
+                        && (lastDiffusionImageWidth >= 0 || lastDiffusionImageHeight >= 0)
+                        && (lastDiffusionImageWidth != currentImageWidth || lastDiffusionImageHeight != currentImageHeight));
                 boolean gpuMemModeChanged = (lastDiffusionGpuMemoryMode >= 0
                         && lastDiffusionGpuMemoryMode != currentGpuMemoryMode);
                 boolean precisionChanged = (lastDiffusionPrecisionMode >= 0
@@ -1879,10 +1887,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
 
                 if (diffusionHandle != 0 && (backendChanged || memoryChanged || sizeChanged || gpuMemModeChanged || precisionChanged)) {
                     LogManager.logI(TAG, String.format(
-                            "[CONFIG][Diffusion] Runtime config changed (backend: %s -> %s, memory: %d -> %d, size: %d -> %d, gpuMemMode: %d -> %d, precision: %d -> %d), forcing session reload",
+                            "[CONFIG][Diffusion] Runtime config changed (backend: %s -> %s, memory: %d -> %d, size: %dx%d -> %dx%d, gpuMemMode: %d -> %d, precision: %d -> %d), forcing session reload",
                             lastDiffusionBackend, currentBackend,
                             lastDiffusionMemoryMode, currentMemoryMode,
-                            lastDiffusionImageSize, currentImageSize,
+                            lastDiffusionImageWidth, lastDiffusionImageHeight, currentImageWidth, currentImageHeight,
                             lastDiffusionGpuMemoryMode, currentGpuMemoryMode,
                             lastDiffusionPrecisionMode, currentPrecisionMode));
 
@@ -1897,7 +1905,8 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                     // Update snapshot so next initializeDiffusion() will record the new values
                     lastDiffusionBackend = currentBackend;
                     lastDiffusionMemoryMode = currentMemoryMode;
-                    lastDiffusionImageSize = currentImageSize;
+                    lastDiffusionImageWidth = currentImageWidth;
+                    lastDiffusionImageHeight = currentImageHeight;
                     lastDiffusionGpuMemoryMode = currentGpuMemoryMode;
                     lastDiffusionPrecisionMode = currentPrecisionMode;
                 }
@@ -2062,8 +2071,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                     LogManager.logI(TAG, "Image generated successfully in " + duration + "ms: " + outputPath);
 
                     // Output performance stats with captured memory info (use actualSeed for reproducibility)
-                    int imageSize = RuntimeConfigHolder.getDiffusionImageSizeOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_SIZE);
-                    String perfStats = getDiffusionPerformanceStats(duration, steps, actualSeed, this.currentModelPath, capturedPeakMemMB[0], capturedRssMB[0], imageSize);
+                    int imageWidth = RuntimeConfigHolder.getDiffusionImageWidthOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_WIDTH);
+                    int imageHeight = RuntimeConfigHolder.getDiffusionImageHeightOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_HEIGHT);
+                    String perfStats = getDiffusionPerformanceStats(duration, steps, actualSeed, this.currentModelPath, capturedPeakMemMB[0], capturedRssMB[0], imageWidth, imageHeight);
 
                     // NOTE: MD persistence is handled by RagQueryManager.onSuccess() for unified architecture.
                     // Handler only sends data via callback, Manager handles persistence + cursor update.
@@ -2123,7 +2133,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
      * @param peakMemMB Peak memory in MB (from native layer), -1 if not available
      * @param rssMB Current RSS memory in MB (from native layer), -1 if not available
      */
-    private String getDiffusionPerformanceStats(long duration, int steps, int seed, String modelPath, float peakMemMB, float rssMB, int imageSize) {
+    private String getDiffusionPerformanceStats(long duration, int steps, int seed, String modelPath, float peakMemMB, float rssMB, int imageWidth, int imageHeight) {
         float totalSec = duration / 1000.0f;
         float secPerStep = totalSec / steps;
 
@@ -2172,7 +2182,7 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         float cfgValue = RuntimeConfigHolder.getDiffusionCfgOrDefault(ConfigManager.DEFAULT_DIFFUSION_CFG);
         boolean isZImage = (lastDiffusionModelType == DIFFUSION_MODEL_ZIMAGE);
         String scheduler = isZImage ? "FlowMatch-Euler" : "PLMS";
-        String sizeStr = (imageSize == 0) ? "default" : (imageSize + "x" + imageSize);
+        String sizeStr = (imageWidth == 0 && imageHeight == 0) ? "default" : (imageWidth + "x" + imageHeight);
         stats.append(String.format("   • diffusionParam: steps=%d, cfg=%.2f, scheduler=%s, seed=%d, size=%s\n",
             steps, cfgValue, scheduler, seed, sizeStr));
 

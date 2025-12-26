@@ -156,7 +156,9 @@ public class ConfigManager {
     public static final String KEY_DIFFUSION_MEMORY_MODE = "diffusion_memory_mode"; // 内存模式 (0=low, 1=enough, 2=balance)
     public static final String KEY_DIFFUSION_PRECISION_MODE = "diffusion_precision_mode"; // 精度模式 (0=auto, 1=low, 2=normal, 3=high)
     public static final String KEY_DIFFUSION_GPU_MEMORY_MODE = "diffusion_gpu_memory_mode"; // GPU内存模式 (0=auto, 1=buffer, 2=image)
-    public static final String KEY_DIFFUSION_IMAGE_SIZE = "diffusion_image_size";
+    public static final String KEY_DIFFUSION_IMAGE_SIZE = "diffusion_image_size"; // Legacy: single size for square images
+    public static final String KEY_DIFFUSION_IMAGE_WIDTH = "diffusion_image_width"; // Output image width (for non-square)
+    public static final String KEY_DIFFUSION_IMAGE_HEIGHT = "diffusion_image_height"; // Output image height (for non-square)
     public static final String KEY_DIFFUSION_STEPS = "diffusion_steps"; // 推理步数 (1-50)
     public static final String KEY_DIFFUSION_CFG = "diffusion_cfg"; // CFG scale (0.0-10.0, step 0.25)
     public static final String KEY_DIFFUSION_SEED = "diffusion_seed"; // 随机种子 (-1=随机)
@@ -236,7 +238,9 @@ public class ConfigManager {
     public static final int DEFAULT_DIFFUSION_MEMORY_MODE = 0; // 0=low (省内存)
     public static final int DEFAULT_DIFFUSION_PRECISION_MODE = 0; // 0=auto (OpenCL默认FP32)
     public static final int DEFAULT_DIFFUSION_GPU_MEMORY_MODE = 0; // 0=auto (OpenCL默认IMAGE)
-    public static final int DEFAULT_DIFFUSION_IMAGE_SIZE = 0;
+    public static final int DEFAULT_DIFFUSION_IMAGE_SIZE = 0; // Legacy: 0 means use model default
+    public static final int DEFAULT_DIFFUSION_IMAGE_WIDTH = 0; // 0 means use model default (1024)
+    public static final int DEFAULT_DIFFUSION_IMAGE_HEIGHT = 0; // 0 means use model default (1024)
     public static final int DEFAULT_DIFFUSION_STEPS = 20; // 默认20步（平衡质量和速度）
     public static final float DEFAULT_DIFFUSION_CFG = 1.0f; // 默认CFG=1.0 (ZImage推荐值)
     public static final int DEFAULT_DIFFUSION_SEED = -1; // -1表示随机
@@ -1726,6 +1730,62 @@ public class ConfigManager {
             value = DEFAULT_DIFFUSION_IMAGE_SIZE;
         }
         setInt(context, KEY_DIFFUSION_IMAGE_SIZE, value);
+    }
+    
+    /**
+     * Get Diffusion image width for non-square aspect ratios
+     * @param context Context
+     * @return Image width (0 means use model default, otherwise must be multiple of 8)
+     */
+    public static int getDiffusionImageWidth(Context context) {
+        int value = getInt(context, KEY_DIFFUSION_IMAGE_WIDTH, DEFAULT_DIFFUSION_IMAGE_WIDTH);
+        // Validate: must be 0 or multiple of 8 between 256 and 1280
+        if (value == 0) return 0;
+        if (value >= 256 && value <= 1280 && value % 8 == 0) {
+            return value;
+        }
+        return DEFAULT_DIFFUSION_IMAGE_WIDTH;
+    }
+    
+    /**
+     * Set Diffusion image width for non-square aspect ratios
+     * @param context Context
+     * @param width Image width (0 for model default, or multiple of 8 between 256-1280)
+     */
+    public static void setDiffusionImageWidth(Context context, int width) {
+        int value = width;
+        if (value != 0 && (value < 256 || value > 1280 || value % 8 != 0)) {
+            value = DEFAULT_DIFFUSION_IMAGE_WIDTH;
+        }
+        setInt(context, KEY_DIFFUSION_IMAGE_WIDTH, value);
+    }
+    
+    /**
+     * Get Diffusion image height for non-square aspect ratios
+     * @param context Context
+     * @return Image height (0 means use model default, otherwise must be multiple of 8)
+     */
+    public static int getDiffusionImageHeight(Context context) {
+        int value = getInt(context, KEY_DIFFUSION_IMAGE_HEIGHT, DEFAULT_DIFFUSION_IMAGE_HEIGHT);
+        // Validate: must be 0 or multiple of 8 between 256 and 1280
+        if (value == 0) return 0;
+        if (value >= 256 && value <= 1280 && value % 8 == 0) {
+            return value;
+        }
+        return DEFAULT_DIFFUSION_IMAGE_HEIGHT;
+    }
+    
+    /**
+     * Set Diffusion image height for non-square aspect ratios
+     * @param context Context
+     * @param height Image height (0 for model default, or multiple of 8 between 256-1280)
+     */
+    public static void setDiffusionImageHeight(Context context, int height) {
+        int value = height;
+        if (value != 0 && (value < 256 || value > 1280 || value % 8 != 0)) {
+            value = DEFAULT_DIFFUSION_IMAGE_HEIGHT;
+        }
+        setInt(context, KEY_DIFFUSION_IMAGE_HEIGHT, value);
     }
     
     /**

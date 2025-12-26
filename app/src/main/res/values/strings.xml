@@ -924,13 +924,30 @@
         <item>balance (平衡)</item>
     </string-array>
 
+    <!-- Diffusion image size presets with aspect ratios (index matches DiffusionSizePreset enum) -->
+    <!-- Sorted by pixel count from small to large, default is 512×512 -->
     <string-array name="diffusion_image_sizes">
-        <item>默认(模型)</item>
-        <item>512</item>
-        <item>640</item>
-        <item>768</item>
-        <item>896</item>
-        <item>1024</item>
+        <item>256×256 (1:1 快速)</item>
+        <item>320×320 (1:1 快速)</item>
+        <item>384×384 (1:1 快速)</item>
+        <item>288×512 (9:16 小竖屏)</item>
+        <item>512×288 (16:9 小宽屏)</item>
+        <item>448×448 (1:1 中等快速)</item>
+        <item>384×640 (3:5 竖屏)</item>
+        <item>640×384 (5:3 宽屏)</item>
+        <item>512×512 (1:1 默认)</item>
+        <item>512×768 (2:3 竖屏)</item>
+        <item>768×512 (3:2 宽屏)</item>
+        <item>640×640 (1:1 中等)</item>
+        <item>768×768 (1:1)</item>
+        <item>512×896 (4:7 超长)</item>
+        <item>896×512 (7:4 超宽)</item>
+        <item>896×896 (1:1 高质)</item>
+        <item>768×1024 (3:4 竖)</item>
+        <item>1024×768 (4:3 横)</item>
+        <item>720×1280 (9:16 手机)</item>
+        <item>1280×720 (16:9 宽屏)</item>
+        <item>1024×1024 (1:1)</item>
     </string-array>
     
     <!-- 扩散精度模式选项（顺序必须和 MNN 定义一致：0=auto, 1=low, 2=normal, 3=high） -->

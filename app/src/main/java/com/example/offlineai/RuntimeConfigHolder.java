@@ -100,6 +100,22 @@ public final class RuntimeConfigHolder {
         return (cfg != null && cfg.diffusionImageSize >= 0) ? cfg.diffusionImageSize : defaultValue;
     }
 
+    public static int getDiffusionImageWidthOrDefault(int defaultValue) {
+        RuntimeConfig cfg;
+        synchronized (LOCK) {
+            cfg = current;
+        }
+        return (cfg != null && cfg.diffusionImageWidth >= 0) ? cfg.diffusionImageWidth : defaultValue;
+    }
+
+    public static int getDiffusionImageHeightOrDefault(int defaultValue) {
+        RuntimeConfig cfg;
+        synchronized (LOCK) {
+            cfg = current;
+        }
+        return (cfg != null && cfg.diffusionImageHeight >= 0) ? cfg.diffusionImageHeight : defaultValue;
+    }
+
     public static int getDiffusionStepsOrDefault(int defaultValue) {
         RuntimeConfig cfg;
         synchronized (LOCK) {

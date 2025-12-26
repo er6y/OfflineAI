@@ -934,13 +934,30 @@
         <item>balance (balanced)</item>
     </string-array>
 
+    <!-- Diffusion image size presets with aspect ratios (index matches DiffusionSizePreset enum) -->
+    <!-- Sorted by pixel count from small to large, default is 512×512 -->
     <string-array name="diffusion_image_sizes">
-        <item>Default (Model)</item>
-        <item>512</item>
-        <item>640</item>
-        <item>768</item>
-        <item>896</item>
-        <item>1024</item>
+        <item>256×256 (1:1 Fast)</item>
+        <item>320×320 (1:1 Fast)</item>
+        <item>384×384 (1:1 Fast)</item>
+        <item>288×512 (9:16 Small Tall)</item>
+        <item>512×288 (16:9 Small Wide)</item>
+        <item>448×448 (1:1 Medium Fast)</item>
+        <item>384×640 (3:5 Portrait)</item>
+        <item>640×384 (5:3 Widescreen)</item>
+        <item>512×512 (1:1 Default)</item>
+        <item>512×768 (2:3 Portrait)</item>
+        <item>768×512 (3:2 Widescreen)</item>
+        <item>640×640 (1:1 Medium)</item>
+        <item>768×768 (1:1)</item>
+        <item>512×896 (4:7 Ultra-tall)</item>
+        <item>896×512 (7:4 Ultra-wide)</item>
+        <item>896×896 (1:1 High Quality)</item>
+        <item>768×1024 (3:4 Portrait)</item>
+        <item>1024×768 (4:3 Landscape)</item>
+        <item>720×1280 (9:16 Mobile)</item>
+        <item>1280×720 (16:9 Widescreen)</item>
+        <item>1024×1024 (1:1)</item>
     </string-array>
     
     <!-- Diffusion Precision Mode Options (Order must match MNN: 0=auto, 1=low, 2=normal, 3=high) -->

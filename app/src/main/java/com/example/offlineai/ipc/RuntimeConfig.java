@@ -32,7 +32,9 @@ public class RuntimeConfig implements Parcelable {
 
     // Diffusion settings
     public int diffusionMemoryMode;
-    public int diffusionImageSize;
+    public int diffusionImageSize;  // Legacy: single size for square images
+    public int diffusionImageWidth;  // Output image width (for non-square)
+    public int diffusionImageHeight; // Output image height (for non-square)
     public int diffusionSteps;
     public float diffusionCfg;  // CFG scale (0.0-10.0)
     public int diffusionSeed;
@@ -80,6 +82,8 @@ public class RuntimeConfig implements Parcelable {
 
         diffusionMemoryMode = in.readInt();
         diffusionImageSize = in.readInt();
+        diffusionImageWidth = in.readInt();
+        diffusionImageHeight = in.readInt();
         diffusionSteps = in.readInt();
         diffusionCfg = in.readFloat();
         diffusionSeed = in.readInt();
@@ -123,6 +127,8 @@ public class RuntimeConfig implements Parcelable {
 
         dest.writeInt(diffusionMemoryMode);
         dest.writeInt(diffusionImageSize);
+        dest.writeInt(diffusionImageWidth);
+        dest.writeInt(diffusionImageHeight);
         dest.writeInt(diffusionSteps);
         dest.writeFloat(diffusionCfg);
         dest.writeInt(diffusionSeed);
