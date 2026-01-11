@@ -428,6 +428,17 @@ public class MnnInference {
             return this;
         }
         
+        /**
+         * Set image size for VL models (vision-language models)
+         * @param size Image size in pixels (e.g., 420, 504, 672, 800)
+         *             0 = Auto mode (use model's llm_config.json image_size, default 448)
+         * @return ConfigBuilder for chaining
+         */
+        public ConfigBuilder imageSize(int size) {
+            addField("image_size", size);
+            return this;
+        }
+        
         private void addField(String key, String value) {
             if (!first) json.append(",");
             json.append("\"").append(key).append("\":\"").append(value).append("\"");
@@ -636,6 +647,29 @@ public class MnnInference {
         int iterNum, 
         int randomSeed,
         float cfgScale,
+        DiffusionCallback callback
+    );
+    
+    /**
+     * Generate image from text prompt with optional input image (for image editing)
+     * @param diffusionHandle Diffusion handle returned by createDiffusion
+     * @param prompt Text prompt describing the image to generate
+     * @param outputPath Output image file path (e.g., /sdcard/output.jpg)
+     * @param iterNum Number of denoising iterations (recommended: 10-20)
+     * @param randomSeed Random seed for reproducibility (use -1 for random)
+     * @param cfgScale CFG (Classifier-Free Guidance) scale (0.0-10.0, default 1.0 for ZImage, 7.5 for SD1.5)
+     * @param inputImagePath Input image path for image editing (empty string for T2I mode)
+     * @param callback Progress callback (receives progress percentage 0-100)
+     * @return true if generation succeeded, false otherwise
+     */
+    public static native boolean generateImageWithInput(
+        long diffusionHandle, 
+        String prompt, 
+        String outputPath, 
+        int iterNum, 
+        int randomSeed,
+        float cfgScale,
+        String inputImagePath,
         DiffusionCallback callback
     );
     

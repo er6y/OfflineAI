@@ -521,6 +521,175 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
     }
     
     /**
+     * Add entities and build co-occurrence graph in a single transaction.
+     * Encapsulates: addEntity + linkChunkToEntity + addEdge (bidirectional).
+     * Callers: KnowledgeNoteFragment, AgentAccessibilityService.
+     *
+     * @param chunkId       The chunk/document ID returned by addChunk()
+     * @param entities      NER entity list (already filtered by stopwords / alias-normalized)
+     * @param nerHandler    HanLpNerHandler for alias normalization (nullable, skips normalization if null)
+     * @return number of entities actually written
+     */
+    public int addEntitiesAndBuildGraph(long chunkId,
+                                        java.util.List<HanLpNerHandler.NerResult.Entity> entities,
+                                        HanLpNerHandler nerHandler) {
+        if (entities == null || entities.isEmpty()) {
+            return 0;
+        }
+
+        long startTime = System.currentTimeMillis();
+        int entityCount = 0;
+        int edgeCount = 0;
+
+        synchronized (DB_WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                java.util.List<Long> entityIds = new java.util.ArrayList<>();
+
+                for (HanLpNerHandler.NerResult.Entity entity : entities) {
+                    if (entity == null || entity.text == null) {
+                        continue;
+                    }
+                    String normalizedText = (nerHandler != null)
+                            ? nerHandler.normalizeTextForGraph(entity.text)
+                            : entity.text;
+                    if (normalizedText == null) {
+                        continue;
+                    }
+
+                    // Inline addEntity logic (avoid nested synchronized)
+                    long entityId = -1;
+                    Cursor cursor = db.query(TABLE_ENTITIES,
+                            new String[]{"id", "frequency", "avg_confidence"},
+                            "collection=? AND entity_text=? AND entity_type=?",
+                            new String[]{collection, normalizedText, entity.type},
+                            null, null, null);
+                    if (cursor.moveToFirst()) {
+                        entityId = cursor.getLong(0);
+                        int oldFreq = cursor.getInt(1);
+                        float oldConf = cursor.getFloat(2);
+                        int newFreq = oldFreq + 1;
+                        float newConf = (oldConf * oldFreq + entity.confidence) / newFreq;
+                        ContentValues uv = new ContentValues();
+                        uv.put("frequency", newFreq);
+                        uv.put("avg_confidence", newConf);
+                        uv.put("last_seen", System.currentTimeMillis() / 1000);
+                        db.update(TABLE_ENTITIES, uv, "id=?", new String[]{String.valueOf(entityId)});
+                    } else {
+                        ContentValues iv = new ContentValues();
+                        iv.put("collection", collection);
+                        iv.put("entity_text", normalizedText);
+                        iv.put("entity_type", entity.type);
+                        iv.put("language", "zh");
+                        iv.put("frequency", 1);
+                        iv.put("avg_confidence", entity.confidence);
+                        iv.put("first_seen", System.currentTimeMillis() / 1000);
+                        iv.put("last_seen", System.currentTimeMillis() / 1000);
+                        entityId = db.insert(TABLE_ENTITIES, null, iv);
+                    }
+                    cursor.close();
+
+                    if (entityId > 0) {
+                        entityIds.add(entityId);
+                        // Inline linkChunkToEntity
+                        ContentValues lv = new ContentValues();
+                        lv.put("chunk_id", chunkId);
+                        lv.put("entity_text", normalizedText);
+                        lv.put("entity_type", entity.type);
+                        lv.put("confidence", entity.confidence);
+                        db.insertWithOnConflict(TABLE_CHUNK_ENTITIES, null, lv,
+                                SQLiteDatabase.CONFLICT_IGNORE);
+                    }
+                }
+
+                entityCount = entityIds.size();
+
+                // Build bidirectional co-occurrence edges
+                for (int j = 0; j < entityIds.size(); j++) {
+                    for (int k = j + 1; k < entityIds.size(); k++) {
+                        addEdgeInternal(db, entityIds.get(j), entityIds.get(k), 1.0f);
+                        addEdgeInternal(db, entityIds.get(k), entityIds.get(j), 1.0f);
+                        edgeCount++;
+                    }
+                }
+
+                db.setTransactionSuccessful();
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[ADD_ENTITIES_GRAPH] Failed", e);
+            } finally {
+                db.endTransaction();
+            }
+        }
+
+        long duration = System.currentTimeMillis() - startTime;
+        LogManager.logI(TAG, String.format("[ADD_ENTITIES_GRAPH] chunkId=%d, entities=%d, edges=%d, time=%dms",
+                chunkId, entityCount, edgeCount, duration));
+        return entityCount;
+    }
+
+    /**
+     * Internal addEdge without synchronized block (caller must hold DB_WRITE_LOCK and transaction).
+     */
+    private void addEdgeInternal(SQLiteDatabase db, long fromEntityId, long toEntityId, float weight) {
+        String fromText = getEntityTextInternal(db, fromEntityId);
+        String toText = getEntityTextInternal(db, toEntityId);
+        if (fromText == null || toText == null) {
+            return;
+        }
+
+        // Ensure consistent ordering
+        if (fromEntityId > toEntityId) {
+            long temp = fromEntityId;
+            fromEntityId = toEntityId;
+            toEntityId = temp;
+            String tempText = fromText;
+            fromText = toText;
+            toText = tempText;
+        }
+
+        Cursor cursor = db.query(TABLE_EDGES,
+                new String[]{"id", "weight"},
+                "collection=? AND from_entity=? AND to_entity=?",
+                new String[]{collection, fromText, toText},
+                null, null, null);
+
+        if (cursor.moveToFirst()) {
+            long id = cursor.getLong(0);
+            float oldWeight = cursor.getFloat(1);
+            ContentValues values = new ContentValues();
+            values.put("weight", oldWeight + weight);
+            db.update(TABLE_EDGES, values, "id=?", new String[]{String.valueOf(id)});
+        } else {
+            ContentValues values = new ContentValues();
+            values.put("collection", collection);
+            values.put("from_entity", fromText);
+            values.put("to_entity", toText);
+            values.put("weight", weight);
+            db.insert(TABLE_EDGES, null, values);
+        }
+        cursor.close();
+    }
+
+    /**
+     * Internal getEntityText without synchronized block (caller must hold DB_WRITE_LOCK).
+     */
+    private String getEntityTextInternal(SQLiteDatabase db, long entityId) {
+        Cursor cursor = db.query(TABLE_ENTITIES,
+                new String[]{"entity_text"},
+                "id=?",
+                new String[]{String.valueOf(entityId)},
+                null, null, null);
+        if (cursor.moveToFirst()) {
+            String text = cursor.getString(0);
+            cursor.close();
+            return text;
+        }
+        cursor.close();
+        return null;
+    }
+
+    /**
      * Get entity text by ID
      */
     private String getEntityText(long entityId) {

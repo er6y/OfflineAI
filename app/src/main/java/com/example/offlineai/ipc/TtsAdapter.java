@@ -735,49 +735,71 @@ public class TtsAdapter {
                     return false;
                 }
 
-                // Check for .mnn files
-                File[] mnnFiles = ttsModelDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".mnn"));
-                if (mnnFiles == null || mnnFiles.length == 0) {
-                    LogManager.logE(TAG, "[TTS] No .mnn files found in: " + ttsModelDir);
-                    externalTtsLoadFailed = true;
-                    currentExternalModelPath = modelPath;
-                    return false;
-                }
-
-                LogManager.logI(TAG, String.format("[TTS] Found %d .mnn file(s)", mnnFiles.length));
-
-                // Create TtsService instance
-                Class<?> ttsClass = Class.forName("com.taobao.meta.avatar.tts.TtsService");
-                externalTtsService = ttsClass.getDeclaredConstructor().newInstance();
-
-                // Build cache path
+                // Build cache path first
                 String modelName = ttsModelDir.getName();
                 File cacheDir = new File(context.getCacheDir(), "mnn/" + modelName + "/tts");
                 if (!cacheDir.exists()) {
                     cacheDir.mkdirs();
                 }
 
-                // Update config.json with cache path and read sample_rate
+                // Read config.json to get actual model path (read-only, don't modify)
+                File actualModelDir = ttsModelDir;  // Default: use root directory
                 File configFile = new File(ttsModelDir, "config.json");
                 if (configFile.exists()) {
                     try {
                         String configContent = new String(java.nio.file.Files.readAllBytes(configFile.toPath()));
                         org.json.JSONObject config = new org.json.JSONObject(configContent);
+                        
+                        // Get model_dir and precision from config
+                        String modelDir = config.optString("model_dir", "");
+                        String precision = config.optString("precision", "");
+                        
+                        if (!modelDir.isEmpty()) {
+                            File subDir = new File(ttsModelDir, modelDir);
+                            if (!precision.isEmpty()) {
+                                subDir = new File(subDir, precision);
+                            }
+                            
+                            if (subDir.exists() && subDir.isDirectory()) {
+                                actualModelDir = subDir;
+                                LogManager.logI(TAG, "[TTS] Using model path from config: " + actualModelDir.getAbsolutePath());
+                            } else {
+                                LogManager.logW(TAG, "[TTS] Config specifies non-existent path: " + subDir + ", fallback to root");
+                            }
+                        }
 
-                        config.put("cache_folder", cacheDir.getAbsolutePath());
-
+                        // Read sample_rate
                         if (config.has("sample_rate")) {
                             ttsSampleRate = config.getInt("sample_rate");
                             LogManager.logI(TAG, "[TTS] Read sample_rate from config: " + ttsSampleRate + " Hz");
                         }
 
+                        // CRITICAL: Write cache_folder back to config.json (required for TTS to work properly)
+                        config.put("cache_folder", cacheDir.getAbsolutePath());
                         java.nio.file.Files.write(configFile.toPath(),
                                 config.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
                         LogManager.logI(TAG, "[TTS] Updated config.json: cache_folder=" + cacheDir.getAbsolutePath());
                     } catch (Exception e) {
-                        LogManager.logW(TAG, "[TTS] Failed to update config.json", e);
+                        LogManager.logW(TAG, "[TTS] Failed to parse config.json, using root directory", e);
                     }
+                } else {
+                    LogManager.logI(TAG, "[TTS] No config.json found, using root directory");
                 }
+
+                // Check for .mnn files in actual model directory
+                File[] mnnFiles = actualModelDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".mnn"));
+                if (mnnFiles == null || mnnFiles.length == 0) {
+                    LogManager.logE(TAG, "[TTS] No .mnn files found in: " + actualModelDir);
+                    externalTtsLoadFailed = true;
+                    currentExternalModelPath = modelPath;
+                    return false;
+                }
+
+                LogManager.logI(TAG, String.format("[TTS] Found %d .mnn file(s) in: %s", mnnFiles.length, actualModelDir.getAbsolutePath()));
+
+                // Create TtsService instance
+                Class<?> ttsClass = Class.forName("com.taobao.meta.avatar.tts.TtsService");
+                externalTtsService = ttsClass.getDeclaredConstructor().newInstance();
 
                 // Initialize TtsService via reflection
                 try {
@@ -788,6 +810,7 @@ public class TtsAdapter {
                     java.lang.reflect.Method loadMethod = ttsClass.getDeclaredMethod(
                             "nativeLoadResourcesFromFile", long.class, String.class, String.class, String.class);
                     loadMethod.setAccessible(true);
+                    // Pass empty strings to let C++ layer use config.json defaults (this is the working version)
                     boolean result = (Boolean) loadMethod.invoke(externalTtsService,
                             nativePtr, ttsModelDir.getAbsolutePath(), "", "");
 

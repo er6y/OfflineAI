@@ -117,6 +117,9 @@ public class ConfigManager {
     // LLM 推理相关的键
     public static final String KEY_MAX_SEQUENCE_LENGTH = "maxSequenceLength"; // 最大序列长度
     public static final String KEY_NO_THINKING = "no_thinking"; // 是否禁用思考模式
+    public static final String KEY_AGENT_MODE_ENABLED = "agent_mode_enabled"; // Agent模式是否启用
+    public static final String KEY_AGENT_ACTION_FORMAT = "agent_action_format"; // Agent动作格式选择 (Auto/MAI-UI/AutoGLM-Phone/Doubao-1.5-UI-TARS)
+    public static final String KEY_AGENT_EXPERIENCE_SUMMARY = "agent_experience_summary"; // Agent经验总结开关
     public static final String KEY_THREADS = "threads"; // ONNX推理线程数
     public static final String KEY_EMBEDDING_CONCURRENCY = "embedding_concurrency"; // Embedding session concurrency for knowledge base building
     public static final String KEY_EMBEDDING_THREADS = "embedding_threads"; // MNN threads per embedding session for knowledge base building
@@ -273,22 +276,29 @@ public class ConfigManager {
     public static final int DEFAULT_LLAMACPP_EMBEDDING_BATCH_SIZE = 32;
     public static final boolean DEFAULT_USE_LLAMACPP = false;
     
-    // Image preprocessing size presets (all multiples of 28 for VL models)
-    public static final int IMAGE_SIZE_MIN = 112;      // 28×4, ~16 tokens
-    public static final int IMAGE_SIZE_SMALL = 280;    // 28×10, ~100 tokens
-    public static final int IMAGE_SIZE_MEDIUM = 392;   // 28×14, ~196 tokens
-    public static final int IMAGE_SIZE_DEFAULT = 504;  // 28×18, ~324 tokens (recommended)
-    public static final int IMAGE_SIZE_LARGE = 672;    // 28×24, ~576 tokens
-    public static final int IMAGE_SIZE_XLARGE = 896;   // 28×32, ~1024 tokens
-    public static final int IMAGE_SIZE_MAX_RESIZE = 1008; // 28×36, ~1296 tokens
-    public static final int IMAGE_SIZE_ORIGINAL = 0;   // No resize (MAX mode)
+    // Image preprocessing size presets for VL models (controlled by MNN API)
+    // Range: 420-800, aligned to multiples of 28 for optimal VL model performance
+    public static final int IMAGE_SIZE_420 = 420;      // 28×15, ~225 tokens
+    public static final int IMAGE_SIZE_504 = 504;      // 28×18, ~324 tokens
+    public static final int IMAGE_SIZE_560 = 560;      // 28×20, ~400 tokens
+    public static final int IMAGE_SIZE_616 = 616;      // 28×22, ~484 tokens
+    public static final int IMAGE_SIZE_672 = 672;      // 28×24, ~576 tokens
+    public static final int IMAGE_SIZE_728 = 728;      // 28×26, ~676 tokens
+    public static final int IMAGE_SIZE_784 = 784;      // 28×28, ~784 tokens
+    public static final int IMAGE_SIZE_800 = 800;      // 28×28.57, ~814 tokens (max manual)
+    public static final int IMAGE_SIZE_AUTO = 0;       // Auto mode: use model's llm_config.json image_size (default 448)
+    
+    // Agent screenshot preprocessing constants (for online API models)
+    public static final int AGENT_SCREENSHOT_WIDTH = 612;     // 50% of 1224 (common device width)
+    public static final int AGENT_SCREENSHOT_HEIGHT = 1388;   // 50% of 2776 (common device height)
+    public static final int AGENT_SCREENSHOT_JPEG_QUALITY = 85; // JPEG quality for Agent screenshots
     
     // 手动推理参数默认值
     public static final float DEFAULT_MANUAL_TEMPERATURE = 0.8f;
     public static final float DEFAULT_MANUAL_TOP_P = 0.95f;
     public static final int DEFAULT_MANUAL_TOP_K = 40;
     public static final float DEFAULT_MANUAL_REPEAT_PENALTY = 1.1f;
-    public static final int DEFAULT_IMAGE_PREPROCESS_SIZE = IMAGE_SIZE_ORIGINAL; // 图片预处理尺寸默认值（0=MAX模式，让MNN自己处理）
+    public static final int DEFAULT_IMAGE_PREPROCESS_SIZE = IMAGE_SIZE_AUTO; // 图片预处理尺寸默认值（0=Auto模式，使用模型 llm_config.json 的 image_size，默认 448）
     public static final int DEFAULT_HISTORY_ROUNDS = 5; // 默认保留5轮对话历史
     public static final boolean DEFAULT_DEBUG_MODE = false; // 默认关闭调试模式
     public static final boolean DEFAULT_PRIORITY_MANUAL_PARAMS = false; // 默认不优先使用手动参数
@@ -578,9 +588,6 @@ public class ConfigManager {
                 // 更新缓存
                 configCache = new JSONObject(config.toString());
                 configCacheLastModified = configFile.lastModified();
-                
-                LogManager.logD(TAG, getLogString(context, R.string.config_saved, configFile.getAbsolutePath()));
-                //LogManager.logD(TAG, "保存的配置内容: " + config.toString(2));
             } catch (IOException e) {
                 LogManager.logE(TAG, getLogString(context, R.string.config_save_failed), e);
             } finally {
@@ -2786,6 +2793,7 @@ public class ConfigManager {
             apiKeys.put("https://dashscope.aliyuncs.com/compatible-mode/v1", "");
             apiKeys.put("https://ark.cn-beijing.volces.com/api/v3", "");
             apiKeys.put("https://api.openai.com/v1", "");
+            apiKeys.put("https://open.bigmodel.cn/api/paas/v4/", "");
             apiKeys.put("https://maas-api.cn-huabei-1.xf-yun.com/v1", "");
             
             config.put("api_keys", apiKeys);
@@ -2898,6 +2906,148 @@ public class ConfigManager {
      */
     public static void setTtsPitch(Context context, float pitch) {
         setFloat(context, KEY_TTS_PITCH, pitch);
+    }
+
+    // ==================== 用户自定义模型列表管理 ====================
+    
+    private static final String KEY_CUSTOM_MODELS_PREFIX = "custom_models_"; // 前缀 + API URL hash
+    private static final String KEY_LAST_MODEL_PREFIX = "last_model_"; // 前缀 + API URL hash
+    
+    /**
+     * 获取指定API URL的用户自定义模型列表
+     * @param context Context
+     * @param apiUrl API URL
+     * @return 用户自定义的模型列表
+     */
+    public static List<String> getCustomModels(Context context, String apiUrl) {
+        try {
+            String key = KEY_CUSTOM_MODELS_PREFIX + apiUrl.hashCode();
+            String modelsJson = getString(context, key, "[]");
+            JSONArray jsonArray = new JSONArray(modelsJson);
+            List<String> models = new ArrayList<>();
+            for (int i = 0; i < jsonArray.length(); i++) {
+                models.add(jsonArray.getString(i));
+            }
+            return models;
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to get custom models for " + apiUrl, e);
+            return new ArrayList<>();
+        }
+    }
+    
+    /**
+     * 添加用户自定义模型到指定API URL
+     * @param context Context
+     * @param apiUrl API URL
+     * @param modelName 模型名称
+     * @return 是否添加成功（false表示已存在）
+     */
+    public static boolean addCustomModel(Context context, String apiUrl, String modelName) {
+        try {
+            List<String> models = getCustomModels(context, apiUrl);
+            
+            // 检查是否已存在
+            if (models.contains(modelName)) {
+                return false;
+            }
+            
+            // 添加新模型
+            models.add(modelName);
+            
+            // 保存
+            JSONArray jsonArray = new JSONArray(models);
+            String key = KEY_CUSTOM_MODELS_PREFIX + apiUrl.hashCode();
+            setString(context, key, jsonArray.toString());
+            
+            LogManager.logD(TAG, "Added custom model: " + modelName + " for " + apiUrl);
+            return true;
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to add custom model: " + modelName, e);
+            return false;
+        }
+    }
+    
+    /**
+     * 删除用户自定义模型
+     * @param context Context
+     * @param apiUrl API URL
+     * @param modelName 模型名称
+     */
+    public static void removeCustomModel(Context context, String apiUrl, String modelName) {
+        try {
+            List<String> models = getCustomModels(context, apiUrl);
+            models.remove(modelName);
+            
+            // 保存
+            JSONArray jsonArray = new JSONArray(models);
+            String key = KEY_CUSTOM_MODELS_PREFIX + apiUrl.hashCode();
+            setString(context, key, jsonArray.toString());
+            
+            LogManager.logD(TAG, "Removed custom model: " + modelName + " for " + apiUrl);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to remove custom model: " + modelName, e);
+        }
+    }
+    
+    /**
+     * 获取指定API URL的最后使用模型名称
+     * @param context Context
+     * @param apiUrl API URL
+     * @return 最后使用的模型名称，如果没有则返回空字符串
+     */
+    public static String getLastModelForApi(Context context, String apiUrl) {
+        String key = KEY_LAST_MODEL_PREFIX + apiUrl.hashCode();
+        return getString(context, key, "");
+    }
+    
+    /**
+     * 保存指定API URL的最后使用模型名称
+     * @param context Context
+     * @param apiUrl API URL
+     * @param modelName 模型名称
+     */
+    public static void setLastModelForApi(Context context, String apiUrl, String modelName) {
+        String key = KEY_LAST_MODEL_PREFIX + apiUrl.hashCode();
+        setString(context, key, modelName);
+        LogManager.logD(TAG, "Saved last model for API " + apiUrl + ": " + modelName);
+    }
+    
+    /**
+     * 获取Agent动作格式设置
+     * @param context Context
+     * @return Agent动作格式 (Auto/MAI-UI/AutoGLM-Phone/Doubao-1.5-UI-TARS)，默认为Auto
+     */
+    public static String getAgentActionFormat(Context context) {
+        return getString(context, KEY_AGENT_ACTION_FORMAT, "Auto");
+    }
+    
+    /**
+     * 设置Agent动作格式
+     * @param context Context
+     * @param format Agent动作格式 (Auto/MAI-UI/AutoGLM-Phone/Doubao-1.5-UI-TARS)
+     */
+    public static void setAgentActionFormat(Context context, String format) {
+        setString(context, KEY_AGENT_ACTION_FORMAT, format);
+        LogManager.logD(TAG, "Set agent action format: " + format);
+    }
+    
+    /**
+     * 获取Agent经验总结开关
+     * @param context Context
+     * @return 是否启用经验总结，默认为false
+     */
+    public static boolean isAgentExperienceSummaryEnabled(Context context) {
+        return getBoolean(context, KEY_AGENT_EXPERIENCE_SUMMARY, false);
+    }
+    
+    /**
+     * 设置Agent经验总结开关
+     * @param context Context
+     * @param enabled 是否启用经验总结
+     */
+    public static void setAgentExperienceSummaryEnabled(Context context, boolean enabled) {
+        setBoolean(context, KEY_AGENT_EXPERIENCE_SUMMARY, enabled);
+        LogManager.logD(TAG, "Set agent experience summary enabled: " + enabled);
     }
 }
 

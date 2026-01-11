@@ -235,6 +235,27 @@
         android:text="@string/label_user_prompt"
         app:layout_constraintBottom_toTopOf="@+id/recyclerViewImageThumbnails"
         app:layout_constraintStart_toStartOf="parent" />
+    
+    <TextView
+        android:id="@+id/textViewAgentModeLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/label_agent_mode"
+        android:textSize="12sp"
+        app:layout_constraintTop_toTopOf="@+id/textViewUserPromptLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewUserPromptLabel"
+        app:layout_constraintEnd_toStartOf="@+id/checkBoxAgentMode" />
+    
+    <CheckBox
+        android:id="@+id/checkBoxAgentMode"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="4dp"
+        android:scaleX="0.9"
+        android:scaleY="0.9"
+        app:layout_constraintTop_toTopOf="@+id/textViewUserPromptLabel"
+        app:layout_constraintBottom_toBottomOf="@+id/textViewUserPromptLabel"
+        app:layout_constraintEnd_toEndOf="parent" />
 
     <!-- Image thumbnails container -->
     <androidx.recyclerview.widget.RecyclerView

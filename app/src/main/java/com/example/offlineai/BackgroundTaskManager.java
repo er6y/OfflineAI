@@ -487,6 +487,18 @@ public class BackgroundTaskManager {
     }
     
     /**
+     * Check if there are any active tasks of the specified type (across all chat folders).
+     */
+    public boolean hasActiveTasksOfType(BackgroundTask.TaskType taskType) {
+        for (BackgroundTask task : tasks.values()) {
+            if (task.isActive() && task.getType() == taskType) {
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    /**
      * Get summary of active tasks for a chat folder.
      * Returns a TaskSummary with flags for each task type.
      */

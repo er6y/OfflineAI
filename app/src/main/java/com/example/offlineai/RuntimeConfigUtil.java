@@ -31,6 +31,7 @@ public final class RuntimeConfigUtil {
 
         // Thinking and manual parameters
         config.noThinking = ConfigManager.getNoThinking(appCtx);
+        config.agentModeEnabled = ConfigManager.getBoolean(appCtx, ConfigManager.KEY_AGENT_MODE_ENABLED, false);
         config.priorityManualParams = ConfigManager.getPriorityManualParams(appCtx);
         config.manualTemperature = ConfigManager.getManualTemperature(appCtx);
         config.manualTopK = ConfigManager.getManualTopK(appCtx);
@@ -65,6 +66,9 @@ public final class RuntimeConfigUtil {
         config.backendPreference = SettingsFragment.getBackendPreference(appCtx);
         config.ttsModel = ConfigManager.getString(appCtx, ConfigManager.KEY_TTS_MODEL, ConfigManager.DEFAULT_TTS_MODEL);
         config.ttsDitSteps = ConfigManager.getTtsDitSteps(appCtx);
+
+        // VL (Vision-Language) settings
+        config.imagePreprocessSize = ConfigManager.getImagePreprocessSize(appCtx);
 
         // Model base paths
         config.llmModelBasePath = ConfigManager.getModelPath(appCtx);

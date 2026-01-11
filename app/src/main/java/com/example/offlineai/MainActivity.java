@@ -354,6 +354,17 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
             JSONObject config = ConfigManager.loadConfig(this);
             LogManager.logD(TAG, "Loading configuration at app startup: " + config.toString(2));
             
+            // Print example of new per-API model storage format
+            LogManager.logD(TAG, "=== Per-API Model Storage Example ===");
+            LogManager.logD(TAG, "Format: last_model_<apiUrlHash> = \"model-name\"");
+            LogManager.logD(TAG, "Format: custom_models_<apiUrlHash> = [\"model1\", \"model2\"]");
+            LogManager.logD(TAG, "Example keys in config:");
+            LogManager.logD(TAG, "  - last_model_1230390190: \"autoglm-phone\" (for GLM API)");
+            LogManager.logD(TAG, "  - last_model_-1859370495: \"doubao-1-5-ui-tars\" (for Doubao API)");
+            LogManager.logD(TAG, "  - custom_models_1230390190: [\"autoglm-phone\", \"glm-4-flash\"]");
+            LogManager.logD(TAG, "  - custom_models_-1859370495: [\"doubao-1-5-ui-tars\"]");
+            LogManager.logD(TAG, "======================================");
+            
             // 确保配置文件存在
             File configFile = new File(getFilesDir(), ".config");
             if (configFile.exists()) {

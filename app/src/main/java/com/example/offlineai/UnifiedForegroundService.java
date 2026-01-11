@@ -50,7 +50,8 @@ public class UnifiedForegroundService extends Service {
         KB_BUILD("知识库构建"),         // 知识库构建任务
         MODEL_DOWNLOAD("模型下载"),     // 模型下载任务
         NOTE_PROCESSING("知识笔记处理"), // 笔记处理任务
-        INFERENCE("推理中");            // 长时间推理任务
+        INFERENCE("推理中"),            // 长时间推理任务
+        AGENT_EXECUTING("Agent执行中"); // Agent自动操作任务
         
         private final String displayName;
         
@@ -166,9 +167,24 @@ public class UnifiedForegroundService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         LogManager.logI(TAG, "统一前台服务启动");
         
+        // Check if this is for MediaProjection (Agent screenshot)
+        boolean isMediaProjection = false;
+        if (intent != null) {
+            isMediaProjection = intent.getBooleanExtra("media_projection", false);
+        }
+        
         // 立即启动前台服务以避免ANR错误
-        startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0));
-        LogManager.logD(TAG, "前台服务已启动，保持进程存活");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isMediaProjection) {
+            // Android 10+ with MediaProjection type
+            startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0), 
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC | 
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+            LogManager.logD(TAG, "前台服务已启动（mediaProjection模式），保持进程存活");
+        } else {
+            // Normal mode (dataSync only)
+            startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0));
+            LogManager.logD(TAG, "前台服务已启动，保持进程存活");
+        }
         
         // 不使用START_STICKY，用户主动关闭app时应该清除服务
         // 只在有活动任务时保持运行，空闲时允许被清理
@@ -584,9 +600,26 @@ public class UnifiedForegroundService extends Service {
         // 释放唤醒锁
         releaseWakeLock();
         
+        // Check if there are any active TTS tasks before stopping service
+        BackgroundTaskManager taskManager = BackgroundTaskManager.getInstance();
+        boolean hasTtsTask = taskManager.hasActiveTasksOfType(BackgroundTask.TaskType.TTS_GENERATION);
+        
+        if (hasTtsTask) {
+            LogManager.logI(TAG, "任务完成，但检测到 TTS 任务正在运行，保持服务运行");
+            // Update notification to show TTS is running
+            updateNotification("生成语音中", 0);
+            return; // Don't stop service yet
+        }
+        
         // 任务完成后，延迟停止服务，避免通知驻留
         LogManager.logI(TAG, "任务完成，1秒后停止服务并清除通知");
         new android.os.Handler(getMainLooper()).postDelayed(() -> {
+            // Double-check TTS tasks before actually stopping
+            boolean stillHasTtsTask = taskManager.hasActiveTasksOfType(BackgroundTask.TaskType.TTS_GENERATION);
+            if (stillHasTtsTask) {
+                LogManager.logI(TAG, "检测到 TTS 任务仍在运行，取消停止服务");
+                return;
+            }
             stopSelf();
             LogManager.logI(TAG, "服务已停止，通知已清除");
         }, 1000); // 延迟1秒，确保回调完成

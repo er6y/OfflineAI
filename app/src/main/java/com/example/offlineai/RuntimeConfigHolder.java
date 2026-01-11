@@ -190,4 +190,12 @@ public final class RuntimeConfigHolder {
         }
         return (cfg != null && cfg.diffusionPrecisionMode >= 0) ? cfg.diffusionPrecisionMode : defaultValue;
     }
+
+    public static int getImagePreprocessSizeOrDefault(int defaultValue) {
+        RuntimeConfig cfg;
+        synchronized (LOCK) {
+            cfg = current;
+        }
+        return (cfg != null && cfg.imagePreprocessSize >= 0) ? cfg.imagePreprocessSize : defaultValue;
+    }
 }

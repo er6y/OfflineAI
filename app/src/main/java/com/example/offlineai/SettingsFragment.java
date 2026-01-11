@@ -24,6 +24,7 @@ import android.widget.Toast;
 import android.widget.Spinner;
 import android.widget.ArrayAdapter;
 import android.widget.AdapterView;
+import android.widget.Switch;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -97,6 +98,8 @@ public class SettingsFragment extends Fragment {
     private SeekBar seekBarGraphRagVectorExpand;
     private TextView textViewGraphRagVectorExpandValue;
     private Spinner spinnerGraphStopwords;
+    private Spinner spinnerAgentActionFormat;
+    private Switch switchAgentExperienceSummary;
     
     private EditText editTextDataRootPath;
     private Button buttonSelectDataRootPath;
@@ -245,6 +248,8 @@ public class SettingsFragment extends Fragment {
         seekBarGraphRagVectorExpand = view.findViewById(R.id.seekBarGraphRagVectorExpand);
         textViewGraphRagVectorExpandValue = view.findViewById(R.id.textViewGraphRagVectorExpandValue);
         spinnerGraphStopwords = view.findViewById(R.id.spinnerGraphStopwords);
+        spinnerAgentActionFormat = view.findViewById(R.id.spinnerAgentActionFormat);
+        switchAgentExperienceSummary = view.findViewById(R.id.switchAgentExperienceSummary);
         
         editTextDataRootPath = view.findViewById(R.id.editTextDataRootPath);
         buttonSelectDataRootPath = view.findViewById(R.id.buttonSelectDataRootPath);
@@ -347,6 +352,10 @@ public class SettingsFragment extends Fragment {
         ConfigManager.ensureDefaultStopwordsExample(requireContext());
         initializeGraphStopwordsSpinner();
         initializeGraphCustomDictionarySpinner();
+        
+        // 初始化Agent设置
+        initializeAgentActionFormatSpinner();
+        initializeAgentExperienceSummarySwitch();
         
         // 加载当前设置
         loadSettings();
@@ -1197,49 +1206,52 @@ public class SettingsFragment extends Fragment {
     }
     
     private void updateImagePreprocessSizeText(int progress) {
-        // New preset-based mapping (all multiples of 28 for VL models)
+        // Preset-based mapping: 420-800 + Auto mode
         int size = progressToSize(progress);
-        String displayText = (size == 0) ? "MAX" : String.valueOf(size);
+        String displayText = (size == 0) ? "Auto" : String.valueOf(size);
         textViewImagePreprocessSizeValue.setText(displayText);
     }
     
     /**
      * Convert SeekBar progress to image size
-     * Progress 0-7 maps to presets: 112, 280, 392, 504, 672, 896, 1008, MAX(0)
+     * Progress 0-7 maps to: 420, 504, 560, 616, 672, 728, 784, 800
+     * Progress 8 maps to: Auto (0) - use model's llm_config.json image_size
      */
     private int progressToSize(int progress) {
         switch (progress) {
-            case 0: return ConfigManager.IMAGE_SIZE_MIN;       // 112
-            case 1: return ConfigManager.IMAGE_SIZE_SMALL;     // 280
-            case 2: return ConfigManager.IMAGE_SIZE_MEDIUM;    // 392
-            case 3: return ConfigManager.IMAGE_SIZE_DEFAULT;   // 504 (default)
-            case 4: return ConfigManager.IMAGE_SIZE_LARGE;     // 672
-            case 5: return ConfigManager.IMAGE_SIZE_XLARGE;    // 896
-            case 6: return ConfigManager.IMAGE_SIZE_MAX_RESIZE;// 1008
-            case 7: return ConfigManager.IMAGE_SIZE_ORIGINAL;  // 0 (MAX)
-            default: return ConfigManager.IMAGE_SIZE_DEFAULT;  // 504
+            case 0: return ConfigManager.IMAGE_SIZE_420;  // 420
+            case 1: return ConfigManager.IMAGE_SIZE_504;  // 504
+            case 2: return ConfigManager.IMAGE_SIZE_560;  // 560
+            case 3: return ConfigManager.IMAGE_SIZE_616;  // 616
+            case 4: return ConfigManager.IMAGE_SIZE_672;  // 672
+            case 5: return ConfigManager.IMAGE_SIZE_728;  // 728
+            case 6: return ConfigManager.IMAGE_SIZE_784;  // 784
+            case 7: return ConfigManager.IMAGE_SIZE_800;  // 800
+            case 8: return ConfigManager.IMAGE_SIZE_AUTO; // 0 (Auto)
+            default: return ConfigManager.IMAGE_SIZE_AUTO; // Auto (default)
         }
     }
     
     /**
      * Convert image size to SeekBar progress
-     * CRITICAL: Must check 0 (MAX mode) FIRST, because 0 <= 112 would return wrong progress!
+     * CRITICAL: Must check 0 (Auto mode) FIRST, because 0 < 420 would return wrong progress!
      */
     private int sizeToProgress(int size) {
-        // Check MAX mode (0) first - this is the most important fix!
-        if (size == ConfigManager.IMAGE_SIZE_ORIGINAL) return 7; // 0 → progress 7 (MAX)
+        // Check Auto mode (0) first - this is the most important fix!
+        if (size == ConfigManager.IMAGE_SIZE_AUTO) return 8; // 0 → progress 8 (Auto)
         
         // Then check other sizes in ascending order
-        if (size <= ConfigManager.IMAGE_SIZE_MIN) return 0;       // ≤112 → progress 0
-        if (size <= ConfigManager.IMAGE_SIZE_SMALL) return 1;     // ≤280 → progress 1
-        if (size <= ConfigManager.IMAGE_SIZE_MEDIUM) return 2;    // ≤392 → progress 2
-        if (size <= ConfigManager.IMAGE_SIZE_DEFAULT) return 3;   // ≤504 → progress 3
-        if (size <= ConfigManager.IMAGE_SIZE_LARGE) return 4;     // ≤672 → progress 4
-        if (size <= ConfigManager.IMAGE_SIZE_XLARGE) return 5;    // ≤896 → progress 5
-        if (size <= ConfigManager.IMAGE_SIZE_MAX_RESIZE) return 6;// ≤1008 → progress 6
+        if (size <= ConfigManager.IMAGE_SIZE_420) return 0;  // ≤420 → progress 0
+        if (size <= ConfigManager.IMAGE_SIZE_504) return 1;  // ≤504 → progress 1
+        if (size <= ConfigManager.IMAGE_SIZE_560) return 2;  // ≤560 → progress 2
+        if (size <= ConfigManager.IMAGE_SIZE_616) return 3;  // ≤616 → progress 3
+        if (size <= ConfigManager.IMAGE_SIZE_672) return 4;  // ≤672 → progress 4
+        if (size <= ConfigManager.IMAGE_SIZE_728) return 5;  // ≤728 → progress 5
+        if (size <= ConfigManager.IMAGE_SIZE_784) return 6;  // ≤784 → progress 6
+        if (size <= ConfigManager.IMAGE_SIZE_800) return 7;  // ≤800 → progress 7
         
-        // Any size > 1008 also maps to MAX mode
-        return 7; // > 1008 or unknown → progress 7 (MAX)
+        // Any size > 800 also maps to Auto mode
+        return 8; // > 800 or unknown → progress 8 (Auto)
     }
     
     // setupImageEncodingThreadsSeekBar和updateImageEncodingThreadsText方法已移除（MNN不支持独立配置）
@@ -2042,6 +2054,95 @@ public class SettingsFragment extends Fragment {
             @Override
             public void onNothingSelected(AdapterView<?> parent) {
             }
+        });
+    }
+    
+    /**
+     * Initialize Agent action format spinner
+     */
+    private void initializeAgentActionFormatSpinner() {
+        LogManager.logD(TAG, "[AGENT_FORMAT_SPINNER] Initializing agent action format spinner");
+        
+        // Create options array
+        String[] formatOptions = new String[] {
+            getString(R.string.agent_action_format_auto),
+            getString(R.string.agent_action_format_mai_ui),
+            getString(R.string.agent_action_format_autoglm),
+            getString(R.string.agent_action_format_doubao)
+        };
+        
+        // Create adapter
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(requireContext(),
+            android.R.layout.simple_spinner_item, formatOptions);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerAgentActionFormat.setAdapter(adapter);
+        
+        // Load saved selection
+        String savedFormat = ConfigManager.getAgentActionFormat(requireContext());
+        int selectedIndex = 0; // Default to Auto
+        switch (savedFormat) {
+            case "Auto":
+                selectedIndex = 0;
+                break;
+            case "MAI-UI":
+                selectedIndex = 1;
+                break;
+            case "AutoGLM-Phone":
+                selectedIndex = 2;
+                break;
+            case "Doubao-1.5-UI-TARS":
+                selectedIndex = 3;
+                break;
+        }
+        spinnerAgentActionFormat.setSelection(selectedIndex);
+        LogManager.logD(TAG, "[AGENT_FORMAT_SPINNER] Loaded saved format: " + savedFormat);
+        
+        // Set selection listener
+        spinnerAgentActionFormat.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                String selectedFormat;
+                switch (position) {
+                    case 0:
+                        selectedFormat = "Auto";
+                        break;
+                    case 1:
+                        selectedFormat = "MAI-UI";
+                        break;
+                    case 2:
+                        selectedFormat = "AutoGLM-Phone";
+                        break;
+                    case 3:
+                        selectedFormat = "Doubao-1.5-UI-TARS";
+                        break;
+                    default:
+                        selectedFormat = "Auto";
+                }
+                ConfigManager.setAgentActionFormat(requireContext(), selectedFormat);
+                LogManager.logD(TAG, "[AGENT_FORMAT_SPINNER] Selected format: " + selectedFormat);
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+    }
+    
+    /**
+     * Initialize Agent experience summary switch
+     */
+    private void initializeAgentExperienceSummarySwitch() {
+        LogManager.logD(TAG, "[AGENT_EXP_SUMMARY] Initializing agent experience summary switch");
+        
+        // Load saved setting
+        boolean enabled = ConfigManager.isAgentExperienceSummaryEnabled(requireContext());
+        switchAgentExperienceSummary.setChecked(enabled);
+        LogManager.logD(TAG, "[AGENT_EXP_SUMMARY] Loaded saved setting: " + enabled);
+        
+        // Set change listener
+        switchAgentExperienceSummary.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            ConfigManager.setAgentExperienceSummaryEnabled(requireContext(), isChecked);
+            LogManager.logD(TAG, "[AGENT_EXP_SUMMARY] Experience summary enabled: " + isChecked);
         });
     }
 }

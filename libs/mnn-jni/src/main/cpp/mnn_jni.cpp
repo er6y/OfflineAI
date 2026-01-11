@@ -479,17 +479,60 @@ public:
             MNN::Express::ExecutorScope scope(executor);
             LOGI("✅ MNN Executor and ExecutorScope created with forwardType=%d", (int)forwardType);
             
-            // Create LLM instance from model directory
-            // CRITICAL: Pass directory path, NOT config.json path (like ChatMNN Line 109)
-            // LlmConfig will auto-load config.json and llm_config.json from the directory
-            // IMPORTANT: Directory path MUST end with "/" for MNN to correctly append filenames
+            // CRITICAL FIX: Merge runtime config into model config.json BEFORE createLLM()
+            // Reason: Omni::Omni() reads image_size in constructor, before set_config() is called
+            // Solution: Create a merged config and pass it to createLLM()
             std::string model_dir_with_slash = model_dir_;
             if (!model_dir_with_slash.empty() && model_dir_with_slash.back() != '/') {
                 model_dir_with_slash += "/";
             }
-            LOGI("Creating LLM instance from directory: %s", model_dir_with_slash.c_str());
             
-            llm_ = Llm::createLLM(model_dir_with_slash);
+            std::string config_path_for_llm = model_dir_with_slash;
+            
+            // If we have runtime config, merge it with model config.json
+            if (!config_json_.empty()) {
+                try {
+                    // Read model's config.json
+                    std::string model_config_path = model_dir_with_slash + "config.json";
+                    std::ifstream model_config_file(model_config_path);
+                    json merged_config;
+                    
+                    if (model_config_file.is_open()) {
+                        model_config_file >> merged_config;
+                        model_config_file.close();
+                        LOGI("Loaded model config.json");
+                    } else {
+                        merged_config = json::object();
+                        LOGW("Model config.json not found, using empty config");
+                    }
+                    
+                    // Parse runtime config
+                    json runtime_config = json::parse(config_json_);
+                    
+                    // Merge runtime config into model config (runtime takes precedence)
+                    for (auto& [key, value] : runtime_config.items()) {
+                        merged_config[key] = value;
+                    }
+                    
+                    // Save merged config to temporary file
+                    std::string temp_config_path = model_dir_with_slash + "config_runtime_merged.json";
+                    std::ofstream temp_config_file(temp_config_path);
+                    if (temp_config_file.is_open()) {
+                        temp_config_file << merged_config.dump(2);
+                        temp_config_file.close();
+                        config_path_for_llm = temp_config_path;
+                        LOGI("Saved merged config to: %s", temp_config_path.c_str());
+                        LOGI("Merged config contains image_size: %d", merged_config.value("image_size", -1));
+                    } else {
+                        LOGW("Failed to save merged config, using model directory");
+                    }
+                } catch (const std::exception& e) {
+                    LOGW("Failed to merge configs: %s, using model directory", e.what());
+                }
+            }
+            
+            LOGI("Creating LLM instance from: %s", config_path_for_llm.c_str());
+            llm_ = Llm::createLLM(config_path_for_llm);
             
             if (!llm_) {
                 LOGE("Failed to create LLM instance");
@@ -497,14 +540,6 @@ public:
             }
             
             LOGI("LLM instance created successfully");
-            
-            // Set runtime config BEFORE load() for other parameters (temp, top_p, etc.)
-            // Note: Backend is already set via ExecutorScope above
-            if (!config_json_.empty()) {
-                LOGI("Setting runtime config (temperature, top_p, etc.)...");
-                llm_->set_config(config_json_);
-                LOGI("Runtime config applied successfully");
-            }
             
             // Load model (this will use the runtime config set above)
             LOGI("About to load MNN model from: %s", model_dir_.c_str());
@@ -3198,15 +3233,16 @@ Java_com_offlineai_mnn_MnnInference_createDiffusion(
         // Note: Kernel compilation happens during first run(), not during load()
         // So we don't print "Compiling kernels" here
         
-        // Create Diffusion instance
-        auto diffusion = std::make_unique<Diffusion>(
+        // Create Diffusion instance via factory method (Diffusion is abstract base class)
+        auto diffusion = std::unique_ptr<Diffusion>(Diffusion::createDiffusion(
             modelDirStr,
             static_cast<DiffusionModelType>(modelType),
             actualBackend,
             memoryMode,
-            imageSize,
-            (bool)textEncoderOnCPU
-        );
+            imageSize, imageSize,
+            (bool)textEncoderOnCPU, false,
+            GPU_MEMORY_AUTO, PRECISION_AUTO, CFG_MODE_AUTO, 4
+        ));
         
         env->ReleaseStringUTFChars(jModelDir, modelDir);
         env->ReleaseStringUTFChars(jCachePath, cachePath);
@@ -3329,18 +3365,19 @@ Java_com_offlineai_mnn_MnnInference_createDiffusionAdvanced(
             env->DeleteLocalRef(jmsg);
         }
         
-        // Create Diffusion instance with advanced GPU configuration
-        auto diffusion = std::make_unique<Diffusion>(
+        // Create Diffusion instance with advanced GPU configuration via factory method
+        auto diffusion = std::unique_ptr<Diffusion>(Diffusion::createDiffusion(
             modelDirStr,
             static_cast<DiffusionModelType>(modelType),
             actualBackend,
             memoryMode,
-            imageSize,
-            (bool)textEncoderOnCPU,
+            imageSize, imageSize,
+            (bool)textEncoderOnCPU, false,
             static_cast<DiffusionGpuMemoryMode>(gpuMemoryMode),
             static_cast<DiffusionPrecisionMode>(precisionMode),
+            CFG_MODE_AUTO,
             numThreads
-        );
+        ));
         
         env->ReleaseStringUTFChars(jModelDir, modelDir);
         env->ReleaseStringUTFChars(jCachePath, cachePath);
@@ -3432,19 +3469,19 @@ Java_com_offlineai_mnn_MnnInference_createDiffusionWithSize(
             env->DeleteLocalRef(jmsg);
         }
         
-        // Create Diffusion instance with separate width and height
-        auto diffusion = std::make_unique<Diffusion>(
+        // Create Diffusion instance with separate width and height via factory method
+        auto diffusion = std::unique_ptr<Diffusion>(Diffusion::createDiffusion(
             modelDirStr,
             static_cast<DiffusionModelType>(modelType),
             actualBackend,
             memoryMode,
-            imageWidth,
-            imageHeight,
-            (bool)textEncoderOnCPU,
+            imageWidth, imageHeight,
+            (bool)textEncoderOnCPU, false,
             static_cast<DiffusionGpuMemoryMode>(gpuMemoryMode),
             static_cast<DiffusionPrecisionMode>(precisionMode),
+            CFG_MODE_AUTO,
             numThreads
-        );
+        ));
         
         env->ReleaseStringUTFChars(jModelDir, modelDir);
         env->ReleaseStringUTFChars(jCachePath, cachePath);
@@ -3671,18 +3708,19 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
                         env->DeleteLocalRef(jmsg);
                     }
                     
-                    // CRITICAL: Use full constructor with all parameters to preserve GPU/precision settings
-                    auto new_diffusion = std::make_unique<Diffusion>(
+                    // CRITICAL: Use factory method with all parameters to preserve GPU/precision settings
+                    auto new_diffusion = std::unique_ptr<Diffusion>(Diffusion::createDiffusion(
                         params.modelPath,
                         params.modelType,
                         params.backendType,
                         params.memoryMode,
-                        params.imageSize,
-                        params.textEncoderOnCPU,
+                        params.imageSize, params.imageSize,
+                        params.textEncoderOnCPU, false,
                         static_cast<DiffusionGpuMemoryMode>(params.gpuMemoryMode),
                         static_cast<DiffusionPrecisionMode>(params.precisionMode),
+                        CFG_MODE_AUTO,
                         params.numThreads
-                    );
+                    ));
                     new_diffusion->load();
                     
                     // Update global map
@@ -3873,10 +3911,10 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             LOGI("[DIFFUSION] Memory stats: initialRSS=%.1fMB, peakRSS=%.1fMB, delta=%.1fMB", 
                  initialRssKB / 1024.0, peakRssKB / 1024.0, inferenceMemDeltaKB / 1024.0);
             
-            // Send completion info to UI - close debug section first
+            // Send completion info to UI
             if (onTokenMethod) {
                 char buf[512];
-                snprintf(buf, sizeof(buf), "\nCompleted (%.1fs)\n</debug>", duration / 1000.0);
+                snprintf(buf, sizeof(buf), "\nCompleted (%.1fs)", duration / 1000.0);
                 jstring jmsg = env->NewStringUTF(buf);
                 env->CallBooleanMethod(callback, onTokenMethod, jmsg);
                 env->DeleteLocalRef(jmsg);
@@ -3895,7 +3933,7 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
             LOGE("[DIFF_DEBUG] FAILED");
             
             if (onTokenMethod) {
-                jstring jmsg = env->NewStringUTF("\nGeneration failed\n</debug>");
+                jstring jmsg = env->NewStringUTF("\nGeneration failed");
                 env->CallBooleanMethod(callback, onTokenMethod, jmsg);
                 env->DeleteLocalRef(jmsg);
             }
@@ -3906,12 +3944,12 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
     } catch (const std::exception& e) {
         LOGE("[DIFFUSION] Failed to generate image: %s", e.what());
         
-        // Close debug tag on exception
+        // Send exception info to UI
         jclass callbackClass = env->GetObjectClass(callback);
         jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
         if (onTokenMethod) {
             char buf[256];
-            snprintf(buf, sizeof(buf), "\nException: %s\n</debug>", e.what());
+            snprintf(buf, sizeof(buf), "\nException: %s", e.what());
             jstring jmsg = env->NewStringUTF(buf);
             env->CallBooleanMethod(callback, onTokenMethod, jmsg);
             env->DeleteLocalRef(jmsg);
@@ -3920,11 +3958,394 @@ Java_com_offlineai_mnn_MnnInference_generateImage(
     } catch (...) {
         LOGE("[DIFFUSION] Failed to generate image: unknown error");
         
-        // Close debug tag on exception
+        // Send error info to UI
         jclass callbackClass = env->GetObjectClass(callback);
         jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
         if (onTokenMethod) {
-            jstring jmsg = env->NewStringUTF("\nUnknown error\n</debug>");
+            jstring jmsg = env->NewStringUTF("\nUnknown error");
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        return JNI_FALSE;
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_offlineai_mnn_MnnInference_generateImageWithInput(
+    JNIEnv* env, jclass clazz,
+    jlong handle, jstring jPrompt, jstring jOutputPath, 
+    jint iterNum, jint randomSeed, jfloat cfgScale, jstring jInputImagePath, jobject callback) {
+    
+    try {
+        // Get diffusion instance and memory mode
+        Diffusion* diffusion = nullptr;
+        int memoryMode = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+            auto it = g_diffusion_sessions.find(handle);
+            if (it == g_diffusion_sessions.end()) {
+                LOGE("[DIFFUSION] Invalid diffusion handle: %lld", (long long)handle);
+                return JNI_FALSE;
+            }
+            diffusion = it->second.get();
+            
+            auto memIt = g_diffusion_memory_modes.find(handle);
+            if (memIt != g_diffusion_memory_modes.end()) {
+                memoryMode = memIt->second;
+            }
+        }
+        
+        // Get strings
+        const char* prompt = env->GetStringUTFChars(jPrompt, nullptr);
+        const char* outputPath = env->GetStringUTFChars(jOutputPath, nullptr);
+        const char* inputImagePath = jInputImagePath ? env->GetStringUTFChars(jInputImagePath, nullptr) : "";
+        
+        // Determine mode based on input image
+        std::string inputImageStr = inputImagePath ? std::string(inputImagePath) : "";
+        bool isEditMode = !inputImageStr.empty();
+        const char* modeStr = isEditMode ? "Edit" : "T2I";
+        
+        LOGI("[DIFFUSION] Generating image (%s mode): prompt='%s', output='%s', input='%s', iter=%d, seed=%d, cfg=%.2f, memoryMode=%d",
+             modeStr, prompt, outputPath, inputImageStr.c_str(), iterNum, randomSeed, cfgScale, memoryMode);
+        
+        // Get callback class and methods
+        jclass callbackClass = env->GetObjectClass(callback);
+        jmethodID onProgressMethod = env->GetMethodID(callbackClass, "onProgress", "(I)Z");
+        jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+        
+        // Track first run per session
+        bool is_first = false;
+        {
+            std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+            auto it = g_diffusion_first_run.find(handle);
+            if (it != g_diffusion_first_run.end() && it->second) {
+                is_first = true;
+                g_diffusion_first_run[handle] = false;
+            }
+        }
+        
+        // Print model info and mode
+        if (onTokenMethod) {
+            char cwd[1024];
+            getcwd(cwd, sizeof(cwd));
+            std::string cwdStr(cwd);
+            size_t lastSlash = cwdStr.find_last_of('/');
+            if (lastSlash != std::string::npos) {
+                cwdStr = cwdStr.substr(0, lastSlash);
+                lastSlash = cwdStr.find_last_of('/');
+                if (lastSlash != std::string::npos) {
+                    std::string modelName = cwdStr.substr(lastSlash + 1);
+                    char buf[512];
+                    snprintf(buf, sizeof(buf), "\nModel: %s (%s mode)", modelName.c_str(), modeStr);
+                    jstring jmsg = env->NewStringUTF(buf);
+                    env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                    env->DeleteLocalRef(jmsg);
+                }
+            }
+            
+            // Print GPU settings
+            {
+                std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+                auto it = g_diffusion_params.find(handle);
+                if (it != g_diffusion_params.end()) {
+                    const char* gpuMemModeStr = (it->second.gpuMemoryMode == 2) ? "IMAGE" : "BUFFER";
+                    const char* precisionStr = "AUTO";
+                    switch (it->second.precisionMode) {
+                        case 1: precisionStr = "LOW(FP16)"; break;
+                        case 2: precisionStr = "NORMAL"; break;
+                        case 3: precisionStr = "HIGH(FP32)"; break;
+                    }
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "\nGPU: MemMode=%s, Precision=%s", gpuMemModeStr, precisionStr);
+                    jstring jmsg = env->NewStringUTF(buf);
+                    env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                    env->DeleteLocalRef(jmsg);
+                }
+            }
+        }
+        
+        // Check GPU cache status (reuse existing logic)
+        if (onTokenMethod) {
+            struct stat buffer;
+            bool cacheExists = (stat(".tempcache", &buffer) == 0);
+            
+            char buf[512];
+            if (cacheExists) {
+                long cacheSize = buffer.st_size / 1024;
+                snprintf(buf, sizeof(buf), "\nGPU Kernel Cache: EXISTS (%ld KB)", cacheSize);
+            } else {
+                snprintf(buf, sizeof(buf), "\nGPU Kernel Cache: None");
+            }
+            jstring jmsg = env->NewStringUTF(buf);
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        
+        // Model reload logic (same as original generateImage)
+        if (is_first && onTokenMethod) {
+            jstring jmsg = env->NewStringUTF("\nModels loaded successfully!");
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        } else {
+            if (memoryMode != 1) {
+                const char* modeStrMem = (memoryMode == 0) ? "Low" : "Balance";
+                struct stat buffer;
+                bool cacheExists = (stat(".tempcache", &buffer) == 0);
+                
+                if (!cacheExists) {
+                    if (onTokenMethod) {
+                        char buf[256];
+                        snprintf(buf, sizeof(buf), "\nNo kernel cache detected, saving for next run (Memory: %s)...", modeStrMem);
+                        jstring jmsg = env->NewStringUTF(buf);
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
+                    
+                    DiffusionParams params;
+                    {
+                        std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+                        auto paramIt = g_diffusion_params.find(handle);
+                        if (paramIt != g_diffusion_params.end()) {
+                            params = paramIt->second;
+                        }
+                    }
+                    
+                    {
+                        std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+                        g_diffusion_sessions.erase(handle);
+                        g_diffusion_memory_modes.erase(handle);
+                        g_diffusion_params.erase(handle);
+                        g_diffusion_first_run.erase(handle);
+                    }
+                    
+                    usleep(100000);
+                    
+                    if (onTokenMethod) {
+                        jstring jmsg = env->NewStringUTF("\nReloading models...");
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
+                    
+                    auto new_diffusion = std::unique_ptr<Diffusion>(Diffusion::createDiffusion(
+                        params.modelPath,
+                        params.modelType,
+                        params.backendType,
+                        params.memoryMode,
+                        params.imageSize, params.imageSize,
+                        params.textEncoderOnCPU, false,
+                        static_cast<DiffusionGpuMemoryMode>(params.gpuMemoryMode),
+                        static_cast<DiffusionPrecisionMode>(params.precisionMode),
+                        CFG_MODE_AUTO,
+                        params.numThreads
+                    ));
+                    new_diffusion->load();
+                    
+                    {
+                        std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+                        g_diffusion_sessions[handle] = std::move(new_diffusion);
+                        g_diffusion_memory_modes[handle] = memoryMode;
+                        g_diffusion_params[handle] = params;
+                        g_diffusion_first_run[handle] = false;
+                        diffusion = g_diffusion_sessions[handle].get();
+                    }
+                    
+                    if (onTokenMethod) {
+                        jstring jmsg = env->NewStringUTF("\nModels reloaded (cache will be faster next time)!");
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
+                } else {
+                    if (onTokenMethod) {
+                        char buf[256];
+                        long cacheSize = buffer.st_size / 1024;
+                        snprintf(buf, sizeof(buf), "\nReloading models (Cache: %ld KB, Memory: %s)...", cacheSize, modeStrMem);
+                        jstring jmsg = env->NewStringUTF(buf);
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
+                    
+                    diffusion->load();
+                    
+                    if (onTokenMethod) {
+                        jstring jmsg = env->NewStringUTF("\nModels reloaded (fast with cache)!");
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
+                }
+            } else {
+                if (onTokenMethod) {
+                    jstring jmsg = env->NewStringUTF("\nStatus: Ready (Memory: Enough, models cached)");
+                    env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                    env->DeleteLocalRef(jmsg);
+                }
+            }
+        }
+        
+        // Print preparation info
+        if (onTokenMethod) {
+            char buf[512];
+            DiffusionModelType modelType = STABLE_DIFFUSION_1_5;
+            {
+                std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+                auto it = g_diffusion_params.find(handle);
+                if (it != g_diffusion_params.end()) {
+                    modelType = it->second.modelType;
+                }
+            }
+            
+            const char* schedulerName = (modelType == STABLE_DIFFUSION_ZIMAGE || modelType == LONGCAT_IMAGE_EDIT) ? "FlowMatch-Euler" : "PLMS";
+            snprintf(buf, sizeof(buf), "\nPreparing: Steps=%d, CFG=%.2f, Scheduler=%s, Seed=%s", 
+                     iterNum, cfgScale, schedulerName, 
+                     randomSeed < 0 ? "Random" : std::to_string(randomSeed).c_str());
+            jstring jmsg = env->NewStringUTF(buf);
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        
+        // Progress tracking
+        int total_steps = iterNum;
+        int last_step = 0;
+        bool unet_started = false;
+        bool text_encoder_printed = false;
+        long peakRssKB = getCurrentRssKB();
+        long initialRssKB = peakRssKB;
+        
+        std::function<void(int)> progressCallback = [env, callback, onProgressMethod, onTokenMethod, total_steps, &last_step, &unet_started, &text_encoder_printed, &peakRssKB](int progress) {
+            long currentRss = getCurrentRssKB();
+            if (currentRss > peakRssKB) {
+                peakRssKB = currentRss;
+            }
+            
+            if (onTokenMethod) {
+                char buf[256];
+                
+                if (progress >= 10 && !unet_started) {
+                    snprintf(buf, sizeof(buf), "\nText Encoder: done\nUNet Steps(%d): ", total_steps);
+                    last_step = 0;
+                    unet_started = true;
+                    text_encoder_printed = true;
+                }
+                else if (progress >= 10 && progress < 95 && unet_started) {
+                    int current_step = ((progress - 10) * total_steps) / 85 + 1;
+                    if (current_step > last_step && current_step <= total_steps) {
+                        snprintf(buf, sizeof(buf), "%d..", current_step);
+                        last_step = current_step;
+                        if (current_step == total_steps) {
+                            snprintf(buf, sizeof(buf), "%d\nUNet: done\nVAE Decoder: generating...", total_steps);
+                            unet_started = false;
+                        }
+                    } else {
+                        buf[0] = '\0';
+                    }
+                }
+                else if (progress >= 95 && progress < 100) {
+                    if (unet_started) {
+                        snprintf(buf, sizeof(buf), "%d\nUNet: done\nVAE Decoder: generating...", total_steps);
+                        unet_started = false;
+                    } else {
+                        buf[0] = '\0';
+                    }
+                }
+                else if (progress == 100) {
+                    snprintf(buf, sizeof(buf), "\nVAE Decoder: done");
+                }
+                else {
+                    buf[0] = '\0';
+                }
+                
+                if (buf[0] != '\0') {
+                    jstring jmsg = env->NewStringUTF(buf);
+                    env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                    env->DeleteLocalRef(jmsg);
+                }
+            }
+            
+            if (onProgressMethod) {
+                env->CallBooleanMethod(callback, onProgressMethod, progress);
+            }
+        };
+        
+        // Run diffusion with input image path
+        auto start = std::chrono::high_resolution_clock::now();
+        bool success = diffusion->run(
+            std::string(prompt),
+            std::string(outputPath),
+            iterNum,
+            randomSeed,
+            cfgScale,
+            progressCallback,
+            inputImageStr  // Pass input image path (empty for T2I, path for Edit)
+        );
+        
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        
+        // Release strings
+        env->ReleaseStringUTFChars(jPrompt, prompt);
+        env->ReleaseStringUTFChars(jOutputPath, outputPath);
+        if (jInputImagePath) {
+            env->ReleaseStringUTFChars(jInputImagePath, inputImagePath);
+        }
+        
+        if (success) {
+            LOGI("[DIFFUSION] Image generated successfully in %lld ms (%s mode)", (long long)duration, modeStr);
+            
+            long finalRssKB = getCurrentRssKB();
+            if (finalRssKB > peakRssKB) {
+                peakRssKB = finalRssKB;
+            }
+            
+            long inferenceMemDeltaKB = peakRssKB - initialRssKB;
+            LOGI("[DIFFUSION] Memory stats: initialRSS=%.1fMB, peakRSS=%.1fMB, delta=%.1fMB", 
+                 initialRssKB / 1024.0, peakRssKB / 1024.0, inferenceMemDeltaKB / 1024.0);
+            
+            if (onTokenMethod) {
+                char buf[512];
+                snprintf(buf, sizeof(buf), "\nCompleted (%.1fs)", duration / 1000.0);
+                jstring jmsg = env->NewStringUTF(buf);
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+                
+                if (peakRssKB > 0) {
+                    snprintf(buf, sizeof(buf), "[MEMORY_STATS:peak=%.1f,rss=%.1f]", 
+                             peakRssKB / 1024.0, finalRssKB / 1024.0);
+                    jmsg = env->NewStringUTF(buf);
+                    env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                    env->DeleteLocalRef(jmsg);
+                }
+            }
+        } else {
+            LOGE("[DIFFUSION] Image generation failed (%s mode)", modeStr);
+            
+            if (onTokenMethod) {
+                jstring jmsg = env->NewStringUTF("\nGeneration failed");
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+            }
+        }
+        
+        return success ? JNI_TRUE : JNI_FALSE;
+        
+    } catch (const std::exception& e) {
+        LOGE("[DIFFUSION] Failed to generate image: %s", e.what());
+        
+        jclass callbackClass = env->GetObjectClass(callback);
+        jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+        if (onTokenMethod) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "\nException: %s", e.what());
+            jstring jmsg = env->NewStringUTF(buf);
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+        return JNI_FALSE;
+    } catch (...) {
+        LOGE("[DIFFUSION] Failed to generate image: unknown error");
+        
+        jclass callbackClass = env->GetObjectClass(callback);
+        jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+        if (onTokenMethod) {
+            jstring jmsg = env->NewStringUTF("\nUnknown error");
             env->CallBooleanMethod(callback, onTokenMethod, jmsg);
             env->DeleteLocalRef(jmsg);
         }

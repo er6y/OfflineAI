@@ -16,6 +16,9 @@ import org.json.JSONObject;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 统一的大模型API适配器
@@ -31,6 +34,9 @@ public class LlmApiAdapter {
     
     // Task ID for log routing - set before calling callLlmApi
     private volatile String currentTaskId = null;
+    
+    // Endpoint cache: baseUrl -> successful full endpoint URL
+    private static final Map<String, String> endpointCache = new ConcurrentHashMap<>();
     
     /**
      * 回调接口定义
@@ -50,6 +56,7 @@ public class LlmApiAdapter {
         MOONSHOT,    // Moonshot API
         DOUBAO,      // 豆包 API
         QIANWEN,     // 千问 API
+        ZHIPU,       // 智谱 API
         OLLAMA,      // Ollama API
         MIMO,        // 小米 MiMo API (uses api-key header)
         LOCAL        // 本地模型
@@ -93,6 +100,8 @@ public class LlmApiAdapter {
             return ApiType.DOUBAO;
         } else if (apiUrl.contains("dashscope") || apiUrl.contains("aliyun")) {
             return ApiType.QIANWEN;
+        } else if (apiUrl.contains("bigmodel")) {
+            return ApiType.ZHIPU;
         } else if (apiUrl.contains("xiaomimimo")) {
             return ApiType.MIMO;
         } else {
@@ -102,7 +111,126 @@ public class LlmApiAdapter {
     
     
     /**
-     * 统一的API调用入口
+     * 统一的API调用入口 - 新版本，接受独立的system和user prompt
+     * 根据API类型自动选择适当的实现
+     * 所有API调用都使用统一的流式处理方式
+     */
+    public void callLlmApi(String apiUrl, String apiKey, String model, String systemPrompt, String userPrompt, java.util.List<String> imagePaths, java.util.List<String> audioPaths, ApiCallback callback) {
+        // For local model, combine prompts (LocalLLMMNNHandler expects single prompt)
+        // For online API, pass separately to avoid incorrect \n\n splitting
+        ApiType apiType = detectApiType(apiUrl);
+        
+        if (apiType == ApiType.LOCAL) {
+            // Local model: combine system and user prompt
+            String combinedPrompt = "";
+            if (systemPrompt != null && !systemPrompt.trim().isEmpty()) {
+                combinedPrompt = systemPrompt + "\n\n";
+            }
+            if (userPrompt != null) {
+                combinedPrompt += userPrompt;
+            }
+            callLlmApi(apiUrl, apiKey, model, combinedPrompt, imagePaths, audioPaths, callback);
+            return;
+        }
+        
+        // Online API: use new streamRequest signature with separate prompts
+        LogManager.logD(TAG, "检测到API类型: " + apiType.name());
+        LogManager.logD(TAG, "[STREAM] onStart - source=api, model=" + model + ", thread=" + Thread.currentThread().getName());
+        
+        try {
+            // Check endpoint cache first
+            String cachedEndpoint = endpointCache.get(apiUrl);
+            if (cachedEndpoint != null) {
+                LogManager.logD(TAG, "Using cached endpoint: " + cachedEndpoint);
+                makeStreamingRequestWithSeparatePrompts(cachedEndpoint, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, apiType, callback, null);
+                return;
+            }
+            
+            // For DOUBAO, use vendor endpoint directly (skip standard endpoint)
+            if (apiType == ApiType.DOUBAO) {
+                String vendorEndpoint = getFullApiUrl(apiUrl, apiType);
+                LogManager.logD(TAG, "Using DOUBAO vendor endpoint directly: " + vendorEndpoint);
+                
+                makeStreamingRequestWithSeparatePrompts(vendorEndpoint, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, apiType, new ApiCallback() {
+                    @Override
+                    public void onSuccess(String response) {
+                        endpointCache.put(apiUrl, vendorEndpoint);
+                        LogManager.logI(TAG, "DOUBAO endpoint succeeded, cached: " + vendorEndpoint);
+                        callback.onSuccess(response);
+                    }
+                    
+                    @Override
+                    public void onStreamingData(String chunk) {
+                        callback.onStreamingData(chunk);
+                    }
+                    
+                    @Override
+                    public void onError(String errorMessage) {
+                        callback.onError(errorMessage);
+                    }
+                }, null);
+                return;
+            }
+            
+            // Try OpenAI standard endpoint first for other APIs
+            String standardEndpoint = getStandardEndpoint(apiUrl);
+            LogManager.logD(TAG, "Trying standard endpoint: " + standardEndpoint);
+            
+            makeStreamingRequestWithSeparatePrompts(standardEndpoint, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, apiType, new ApiCallback() {
+                @Override
+                public void onSuccess(String response) {
+                    endpointCache.put(apiUrl, standardEndpoint);
+                    LogManager.logI(TAG, "Standard endpoint succeeded, cached: " + standardEndpoint);
+                    callback.onSuccess(response);
+                }
+                
+                @Override
+                public void onStreamingData(String chunk) {
+                    callback.onStreamingData(chunk);
+                }
+                
+                @Override
+                public void onError(String errorMessage) {
+                    callback.onError(errorMessage);
+                }
+            }, (errorMessage, statusCode) -> {
+                if (statusCode == 404 || statusCode == 400) {
+                    LogManager.logW(TAG, "Standard endpoint failed with " + statusCode + ", trying vendor-specific endpoint");
+                    
+                    String vendorEndpoint = getFullApiUrl(apiUrl, apiType);
+                    LogManager.logD(TAG, "Trying vendor endpoint: " + vendorEndpoint);
+                    
+                    makeStreamingRequestWithSeparatePrompts(vendorEndpoint, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, apiType, new ApiCallback() {
+                        @Override
+                        public void onSuccess(String response) {
+                            endpointCache.put(apiUrl, vendorEndpoint);
+                            LogManager.logI(TAG, "Vendor endpoint succeeded, cached: " + vendorEndpoint);
+                            callback.onSuccess(response);
+                        }
+                        
+                        @Override
+                        public void onStreamingData(String chunk) {
+                            callback.onStreamingData(chunk);
+                        }
+                        
+                        @Override
+                        public void onError(String errorMessage) {
+                            callback.onError(errorMessage);
+                        }
+                    }, null);
+                } else {
+                    LogManager.logE(TAG, "Request failed with non-retryable error: " + statusCode);
+                    callback.onError(errorMessage);
+                }
+            });
+        } catch (Exception e) {
+            LogManager.logE(TAG, "调用API时发生异常: " + e.getMessage(), e);
+            callback.onError("调用API时发生异常: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * 统一的API调用入口 - 旧版本，接受单个prompt（兼容性）
      * 根据API类型自动选择适当的实现
      * 所有API调用都使用统一的流式处理方式
      */
@@ -149,31 +277,95 @@ public class LlmApiAdapter {
                 return;
             }
             
-            // 创建适合当前API类型的请求体
-            JSONObject requestBody = createRequestBody(apiType, model, prompt);
+            // Check endpoint cache first
+            String cachedEndpoint = endpointCache.get(apiUrl);
+            if (cachedEndpoint != null) {
+                LogManager.logD(TAG, "Using cached endpoint: " + cachedEndpoint);
+                makeStreamingRequest(cachedEndpoint, apiKey, model, prompt, imagePaths, audioPaths, apiType, callback);
+                return;
+            }
             
-            // 补充API端点路径
-            String fullApiUrl = getFullApiUrl(apiUrl, apiType);
-            LogManager.logD(TAG, "完整API URL: " + fullApiUrl);
+            // For DOUBAO, use vendor endpoint directly (skip standard endpoint)
+            if (apiType == ApiType.DOUBAO) {
+                String vendorEndpoint = getFullApiUrl(apiUrl, apiType);
+                LogManager.logD(TAG, "Using DOUBAO vendor endpoint directly: " + vendorEndpoint);
+                
+                makeStreamingRequest(vendorEndpoint, apiKey, model, prompt, imagePaths, audioPaths, apiType, new ApiCallback() {
+                    @Override
+                    public void onSuccess(String response) {
+                        endpointCache.put(apiUrl, vendorEndpoint);
+                        LogManager.logI(TAG, "DOUBAO endpoint succeeded, cached: " + vendorEndpoint);
+                        callback.onSuccess(response);
+                    }
+                    
+                    @Override
+                    public void onStreamingData(String chunk) {
+                        callback.onStreamingData(chunk);
+                    }
+                    
+                    @Override
+                    public void onError(String errorMessage) {
+                        callback.onError(errorMessage);
+                    }
+                }, null);
+                return;
+            }
             
-            // 使用流式客户端发送请求
-            streamingClient.streamRequest(fullApiUrl, apiKey, model, prompt, new StreamingApiClient.StreamingCallback() {
+            // Try OpenAI standard endpoint first for other APIs
+            String standardEndpoint = getStandardEndpoint(apiUrl);
+            LogManager.logD(TAG, "Trying standard endpoint: " + standardEndpoint);
+            
+            AtomicBoolean retryWithVendor = new AtomicBoolean(false);
+            
+            makeStreamingRequest(standardEndpoint, apiKey, model, prompt, imagePaths, audioPaths, apiType, new ApiCallback() {
                 @Override
-                public void onToken(String token) {
-                    // Removed verbose per-token logging for online API (too much output)
-                    callback.onStreamingData(token);
+                public void onSuccess(String response) {
+                    // Standard endpoint works, cache it
+                    endpointCache.put(apiUrl, standardEndpoint);
+                    LogManager.logI(TAG, "Standard endpoint succeeded, cached: " + standardEndpoint);
+                    callback.onSuccess(response);
                 }
                 
                 @Override
-                public void onComplete(String fullResponse) {
-                    int len = fullResponse != null ? fullResponse.length() : 0;
-                    LogManager.logD(TAG, "[STREAM] onComplete - source=api, apiType=" + apiType.name() + ", len=" + len + ", thread=" + Thread.currentThread().getName());
-                    callback.onSuccess(fullResponse);
+                public void onStreamingData(String chunk) {
+                    callback.onStreamingData(chunk);
                 }
                 
                 @Override
                 public void onError(String errorMessage) {
-                    LogManager.logD(TAG, "[STREAM] onError - source=api, apiType=" + apiType.name() + ", msg=" + errorMessage + ", thread=" + Thread.currentThread().getName());
+                    callback.onError(errorMessage);
+                }
+            }, (errorMessage, statusCode) -> {
+                // Check if we should retry with vendor-specific endpoint
+                if (statusCode == 404 || statusCode == 400) {
+                    LogManager.logW(TAG, "Standard endpoint failed with " + statusCode + ", trying vendor-specific endpoint");
+                    
+                    // Try vendor-specific endpoint
+                    String vendorEndpoint = getFullApiUrl(apiUrl, apiType);
+                    LogManager.logD(TAG, "Trying vendor endpoint: " + vendorEndpoint);
+                    
+                    makeStreamingRequest(vendorEndpoint, apiKey, model, prompt, imagePaths, audioPaths, apiType, new ApiCallback() {
+                        @Override
+                        public void onSuccess(String response) {
+                            // Vendor endpoint works, cache it
+                            endpointCache.put(apiUrl, vendorEndpoint);
+                            LogManager.logI(TAG, "Vendor endpoint succeeded, cached: " + vendorEndpoint);
+                            callback.onSuccess(response);
+                        }
+                        
+                        @Override
+                        public void onStreamingData(String chunk) {
+                            callback.onStreamingData(chunk);
+                        }
+                        
+                        @Override
+                        public void onError(String errorMessage) {
+                            callback.onError(errorMessage);
+                        }
+                    }, null); // No more retry
+                } else {
+                    // Other errors (500, network, etc.), don't retry
+                    LogManager.logE(TAG, "Request failed with non-retryable error: " + statusCode);
                     callback.onError(errorMessage);
                 }
             });
@@ -197,56 +389,26 @@ public class LlmApiAdapter {
         String url = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
         
         // 根据API类型添加正确的端点路径
+        // 用户填写的API地址（包括版本号v1/v2/v3/v4等）保持原样，app只添加标准路径
         switch (apiType) {
-            case DEEPSEEK:
-                // DeepSeek API 端点（兼容以 /v1 结尾的基础地址）
-                if (url.endsWith("/v1")) {
-                    url = url.substring(0, url.length() - 3);
-                }
-                if (!url.contains("/v1/chat/completions")) {
-                    url += "/v1/chat/completions";
-                }
-                break;
-                
-            case MOONSHOT:
-                // Moonshot API 端点（兼容以 /v1 结尾的基础地址）
-                if (url.endsWith("/v1")) {
-                    url = url.substring(0, url.length() - 3);
-                }
-                if (!url.contains("/v1/chat/completions")) {
-                    url += "/v1/chat/completions";
-                }
-                break;
-                
-            case DOUBAO:
-                // 豆包 API 端点
-                if (!url.contains("/api/completion")) {
-                    url += "/api/completion";
-                }
-                break;
-                
-            case QIANWEN:
-                // 千问 API 端点
-                if (!url.contains("/v1/services/aigc/text-generation/generation")) {
-                    url += "/v1/services/aigc/text-generation/generation";
-                }
-                break;
-                
             case OLLAMA:
-                // Ollama API 端点
+                // Ollama API 端点（特殊格式）
                 if (!url.contains("/api/generate")) {
                     url += "/api/generate";
                 }
                 break;
                 
+            case DEEPSEEK:
+            case MOONSHOT:
+            case DOUBAO:
+            case QIANWEN:
+            case ZHIPU:
             case OPENAI:
             default:
-                // OpenAI API 端点（兼容以 /v1 结尾的基础地址）
-                if (url.endsWith("/v1")) {
-                    url = url.substring(0, url.length() - 3);
-                }
-                if (!url.contains("/v1/chat/completions")) {
-                    url += "/v1/chat/completions";
+                // 标准 OpenAI 兼容格式：用户地址 + /chat/completions
+                // 用户可以自己控制版本号（如 /v1、/v4 等）
+                if (!url.contains("/chat/completions")) {
+                    url += "/chat/completions";
                 }
                 break;
         }
@@ -281,8 +443,9 @@ public class LlmApiAdapter {
             case OPENAI:
             case DEEPSEEK:
             case MOONSHOT:
+            case ZHIPU:
             case MIMO:
-                // 这些API使用messages数组
+                // 这些API使用messages数组（智谱API兼容OpenAI格式）
                 JSONArray messages = new JSONArray();
                 messages.put(new JSONObject().put("role", "user").put("content", prompt));
                 requestBody.put("messages", messages);
@@ -414,6 +577,110 @@ public class LlmApiAdapter {
         }
         
         return result.toString();
+    }
+    
+    /**
+     * Get OpenAI standard endpoint (always try this first)
+     * 用户填写的API地址（包括版本号v1/v2/v3/v4等）保持原样，只添加/chat/completions
+     */
+    private String getStandardEndpoint(String baseUrl) {
+        String url = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        if (!url.contains("/chat/completions")) {
+            url += "/chat/completions";
+        }
+        return url;
+    }
+    
+    /**
+     * Make streaming request (overload without error callback)
+     */
+    private void makeStreamingRequest(String fullApiUrl, String apiKey, String model, String prompt,
+                                      java.util.List<String> imagePaths, java.util.List<String> audioPaths,
+                                      ApiType apiType, ApiCallback callback) {
+        makeStreamingRequest(fullApiUrl, apiKey, model, prompt, imagePaths, audioPaths, apiType, callback, null);
+    }
+    
+    /**
+     * Make streaming request with optional error callback for retry logic
+     */
+    private void makeStreamingRequest(String fullApiUrl, String apiKey, String model, String prompt,
+                                      java.util.List<String> imagePaths, java.util.List<String> audioPaths,
+                                      ApiType apiType, ApiCallback callback, ErrorCallbackWithStatus errorCallbackWithStatus) {
+        streamingClient.streamRequest(fullApiUrl, apiKey, model, prompt, imagePaths, audioPaths, new StreamingApiClient.StreamingCallback() {
+            @Override
+            public void onToken(String token) {
+                callback.onStreamingData(token);
+            }
+            
+            @Override
+            public void onComplete(String fullResponse) {
+                int len = fullResponse != null ? fullResponse.length() : 0;
+                LogManager.logD(TAG, "[STREAM] onComplete - source=api, apiType=" + apiType.name() + ", len=" + len + ", thread=" + Thread.currentThread().getName());
+                callback.onSuccess(fullResponse);
+            }
+            
+            @Override
+            public void onError(String errorMessage) {
+                LogManager.logD(TAG, "[STREAM] onError - source=api, apiType=" + apiType.name() + ", msg=" + errorMessage + ", thread=" + Thread.currentThread().getName());
+                callback.onError(errorMessage);
+            }
+            
+            @Override
+            public void onError(String errorMessage, int statusCode) {
+                LogManager.logD(TAG, "[STREAM] onError - source=api, apiType=" + apiType.name() + ", msg=" + errorMessage + ", statusCode=" + statusCode + ", thread=" + Thread.currentThread().getName());
+                if (errorCallbackWithStatus != null) {
+                    errorCallbackWithStatus.onError(errorMessage, statusCode);
+                } else {
+                    callback.onError(errorMessage);
+                }
+            }
+        });
+    }
+    
+    /**
+     * Make streaming request with separate system and user prompts (NEW)
+     */
+    private void makeStreamingRequestWithSeparatePrompts(String fullApiUrl, String apiKey, String model, 
+                                                         String systemPrompt, String userPrompt,
+                                                         java.util.List<String> imagePaths, java.util.List<String> audioPaths,
+                                                         ApiType apiType, ApiCallback callback, ErrorCallbackWithStatus errorCallbackWithStatus) {
+        streamingClient.streamRequest(fullApiUrl, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, new StreamingApiClient.StreamingCallback() {
+            @Override
+            public void onToken(String token) {
+                callback.onStreamingData(token);
+            }
+            
+            @Override
+            public void onComplete(String fullResponse) {
+                int len = fullResponse != null ? fullResponse.length() : 0;
+                LogManager.logD(TAG, "[STREAM] onComplete - source=api, apiType=" + apiType.name() + ", len=" + len + ", thread=" + Thread.currentThread().getName());
+                callback.onSuccess(fullResponse);
+            }
+            
+            @Override
+            public void onError(String errorMessage) {
+                LogManager.logD(TAG, "[STREAM] onError - source=api, apiType=" + apiType.name() + ", msg=" + errorMessage + ", thread=" + Thread.currentThread().getName());
+                callback.onError(errorMessage);
+            }
+            
+            @Override
+            public void onError(String errorMessage, int statusCode) {
+                LogManager.logD(TAG, "[STREAM] onError - source=api, apiType=" + apiType.name() + ", msg=" + errorMessage + ", statusCode=" + statusCode + ", thread=" + Thread.currentThread().getName());
+                if (errorCallbackWithStatus != null) {
+                    errorCallbackWithStatus.onError(errorMessage, statusCode);
+                } else {
+                    callback.onError(errorMessage);
+                }
+            }
+        });
+    }
+    
+    /**
+     * Error callback with status code for retry logic
+     */
+    @FunctionalInterface
+    private interface ErrorCallbackWithStatus {
+        void onError(String errorMessage, int statusCode);
     }
 }
 

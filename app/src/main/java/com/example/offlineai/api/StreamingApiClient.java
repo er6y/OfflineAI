@@ -11,7 +11,10 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import okhttp3.Call;
@@ -40,6 +43,7 @@ public class StreamingApiClient {
         void onToken(String token);
         void onComplete(String fullResponse);
         void onError(String errorMessage);
+        void onError(String errorMessage, int statusCode);
     }
     
     public StreamingApiClient(Context context) {
@@ -54,47 +58,133 @@ public class StreamingApiClient {
     }
     
     /**
-     * 发送流式API请求
+     * 发送流式API请求（支持多模态输入）- 旧版本，接受单个prompt（向后兼容）
      * @param apiUrl API地址
      * @param apiKey API密钥
      * @param model 模型名称
-     * @param prompt 提示内容
+     * @param prompt 提示内容（可能包含system和user prompt拼接）
+     * @param imagePaths 图片路径列表（可选）
+     * @param audioPaths 音频路径列表（可选，暂不支持）
      * @param callback 回调接口
      */
-    public void streamRequest(String apiUrl, String apiKey, String model, String prompt, StreamingCallback callback) {
+    public void streamRequest(String apiUrl, String apiKey, String model, String prompt, 
+                             List<String> imagePaths, List<String> audioPaths,
+                             StreamingCallback callback) {
+        // Legacy method: auto-split prompt by \n\n (may cause issues with Agent prompts)
+        // For new code, use the overload with separate systemPrompt and userPrompt
+        String systemPrompt = "";
+        String userPrompt = prompt;
+        
+        if (prompt != null && prompt.contains("\n\n")) {
+            int firstEmptyLineIndex = prompt.indexOf("\n\n");
+            systemPrompt = prompt.substring(0, firstEmptyLineIndex).trim();
+            userPrompt = prompt.substring(firstEmptyLineIndex + 2).trim();
+        }
+        
+        // Call new method with separated prompts
+        streamRequest(apiUrl, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, callback);
+    }
+    
+    /**
+     * 发送流式API请求（支持多模态输入）- 新版本，接受独立的system和user prompt
+     * @param apiUrl API地址
+     * @param apiKey API密钥
+     * @param model 模型名称
+     * @param systemPrompt 系统提示词（可为null或空）
+     * @param userPrompt 用户提示词
+     * @param imagePaths 图片路径列表（可选）
+     * @param audioPaths 音频路径列表（可选，暂不支持）
+     * @param callback 回调接口
+     */
+    public void streamRequest(String apiUrl, String apiKey, String model, 
+                             String systemPrompt, String userPrompt,
+                             List<String> imagePaths, List<String> audioPaths,
+                             StreamingCallback callback) {
         try {
             LogManager.logD(TAG, "准备发送流式请求: " + apiUrl);
             
-            // 检查提示词中是否包含系统提示词
-            String systemPrompt = "";
-            String userPrompt = prompt;
-            
-            // 提取系统提示词（如果存在）
-            // 系统提示词通常位于提示词的开头，直到第一个空行
-            if (prompt.contains("\n\n")) {
-                int firstEmptyLineIndex = prompt.indexOf("\n\n");
-                systemPrompt = prompt.substring(0, firstEmptyLineIndex).trim();
-                userPrompt = prompt.substring(firstEmptyLineIndex + 2).trim();
+            // CRITICAL: Do NOT auto-split prompt by \n\n!
+            // System prompt may contain multiple paragraphs with \n\n separators.
+            // Accept systemPrompt and userPrompt as separate parameters.
+            if (systemPrompt == null) {
+                systemPrompt = "";
+            }
+            if (userPrompt == null) {
+                userPrompt = "";
             }
             
             // 构建请求体
             JSONObject requestBody = new JSONObject();
             requestBody.put("model", model);
+
+            // Agent mode sampling (more conservative to reduce coordinate drift)
+            boolean isAgentPrompt = (systemPrompt != null && systemPrompt.contains("You are a GUI agent"))
+                    && (userPrompt != null && userPrompt.contains("What is the next action"));
+            if (isAgentPrompt) {
+                requestBody.put("temperature", 0.2);
+                requestBody.put("top_p", 0.9);
+                requestBody.put("top_k", 40);
+                LogManager.logI(TAG, "[AGENT_SAMPLING] Applied conservative sampling: temperature=0.2, top_p=0.9, top_k=40");
+            }
             
             // 创建消息数组
             JSONArray messages = new JSONArray();
             
             // 添加系统提示词（如果存在）
-            if (!systemPrompt.isEmpty()) {
+            if (!systemPrompt.trim().isEmpty()) {
                 messages.put(new JSONObject().put("role", "system").put("content", systemPrompt));
-                LogManager.logD(TAG, "添加系统提示词，长度: " + systemPrompt.length());
+                LogManager.logI(TAG, "添加系统提示词，长度: " + systemPrompt.length());
             }
             
-            // 添加用户提示词
-            messages.put(new JSONObject().put("role", "user").put("content", userPrompt));
+            // Build user message with multimodal content if images are provided
+            JSONObject userMessage = new JSONObject();
+            userMessage.put("role", "user");
+            
+            // Check if we have images (multimodal input)
+            boolean hasImages = (imagePaths != null && !imagePaths.isEmpty());
+            
+            if (hasImages) {
+                // Multimodal format: content is an array of {type, text/image_url}
+                JSONArray contentArray = new JSONArray();
+                
+                // Add text content first
+                JSONObject textContent = new JSONObject();
+                textContent.put("type", "text");
+                textContent.put("text", userPrompt);
+                contentArray.put(textContent);
+                
+                // Add image contents
+                for (String imagePath : imagePaths) {
+                    try {
+                        String base64Image = encodeImageToBase64(imagePath);
+                        if (base64Image != null) {
+                            JSONObject imageContent = new JSONObject();
+                            imageContent.put("type", "image_url");
+                            
+                            JSONObject imageUrl = new JSONObject();
+                            imageUrl.put("url", "data:image/jpeg;base64," + base64Image);
+                            imageContent.put("image_url", imageUrl);
+                            
+                            contentArray.put(imageContent);
+                            LogManager.logI(TAG, "Added image to request: " + imagePath);
+                        }
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Failed to encode image: " + imagePath, e);
+                    }
+                }
+                
+                userMessage.put("content", contentArray);
+            } else {
+                // Text-only format: content is a simple string
+                userMessage.put("content", userPrompt);
+            }
+            
+            messages.put(userMessage);
             
             requestBody.put("messages", messages);
             requestBody.put("stream", true);
+            
+            LogManager.logI(TAG, "[DEBUG_REQUEST] Request body size: " + requestBody.toString().length() + " bytes");
             
             // 构建请求 - Use cached auth method if available, default to Bearer
             Request.Builder requestBuilder = new Request.Builder()
@@ -127,9 +217,10 @@ public class StreamingApiClient {
                 @Override
                 public void onResponse(Call call, Response response) throws IOException {
                     if (!response.isSuccessful()) {
-                        LogManager.logE(TAG, "Request failed, status code: " + response.code());
+                        int statusCode = response.code();
+                        LogManager.logE(TAG, "Request failed, status code: " + statusCode);
                         new Handler(Looper.getMainLooper()).post(() -> {
-                            callback.onError("Request failed, status code: " + response.code());
+                            callback.onError("Request failed, status code: " + statusCode, statusCode);
                         });
                         return;
                     }
@@ -201,6 +292,31 @@ public class StreamingApiClient {
         } catch (Exception e) {
             LogManager.logE(TAG, "创建请求失败: " + e.getMessage(), e);
             callback.onError("创建请求失败: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Encode image file to Base64 string
+     * @param imagePath Path to image file
+     * @return Base64 encoded string, or null if failed
+     */
+    private String encodeImageToBase64(String imagePath) {
+        try {
+            File imageFile = new File(imagePath);
+            if (!imageFile.exists()) {
+                LogManager.logE(TAG, "Image file not found: " + imagePath);
+                return null;
+            }
+            
+            FileInputStream fis = new FileInputStream(imageFile);
+            byte[] imageBytes = new byte[(int) imageFile.length()];
+            fis.read(imageBytes);
+            fis.close();
+            
+            return android.util.Base64.encodeToString(imageBytes, android.util.Base64.NO_WRAP);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to encode image to Base64: " + imagePath, e);
+            return null;
         }
     }
 }

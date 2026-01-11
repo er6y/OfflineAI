@@ -95,6 +95,15 @@
     <string name="common_unknown_operation">Unknown Operation</string>
     <string name="common_unknown_file_type">Unknown File Type</string>
     <string name="common_unknown_model">Unknown Model</string>
+    <string name="common_add_custom_model">➕ Add Model</string>
+    
+    <!-- Custom Model Dialog -->
+    <string name="dialog_title_add_custom_model">Add Custom Model</string>
+    <string name="dialog_message_add_custom_model">Enter model name (e.g., glm-4-plus)</string>
+    <string name="hint_enter_model_name">Model name</string>
+    <string name="toast_model_name_empty">Model name cannot be empty</string>
+    <string name="toast_model_added_success">Model added: %s</string>
+    <string name="toast_model_already_exists">Model already exists: %s</string>
     
     <!-- MainActivity 生命周期日志 -->
     <string name="main_activity_on_create">MainActivity Created</string>
@@ -404,7 +413,6 @@
     <string name="hint_enter_question">Enter your question here…</string>
     <string name="hint_enter_api_url">Enter API URL</string>
     <string name="hint_enter_api_key">Enter API Key</string>
-    <string name="hint_enter_model_name">Enter model name</string>
     <string name="hint_enter_kb_name">Enter knowledge base name</string>
     <string name="hint_enter_file_path">Enter file path</string>
     <string name="hint_search">Search…</string>
@@ -1248,4 +1256,33 @@
     <string name="graph_viewer_view_mode">View Mode</string>
     <string name="graph_viewer_mode_markdown">Markdown</string>
     <string name="graph_viewer_mode_graph">Graph</string>
+    
+    <!-- Agent related strings -->
+    <string name="label_agent_mode">Agent</string>
+    <string name="agent_permission_title">Enable Agent Feature</string>
+    <string name="agent_permission_message">Agent feature requires Accessibility Service permission to automate phone operations.\n\nAfter clicking OK, you will be redirected to the settings page. Please find \"Offline AI\" and enable the accessibility service.\n\nNote: Accessibility service is only used for Agent automation and does not collect any privacy data.</string>
+    <string name="agent_permission_confirm">Go to Settings</string>
+    <string name="agent_permission_cancel">Cancel</string>
+    <string name="agent_service_not_enabled">Agent feature requires accessibility service to be enabled</string>
+    <string name="agent_executing">Agent Executing</string>
+    <string name="agent_step_format">Step %d: %s</string>
+    <string name="agent_task_completed">Task Completed</string>
+    <string name="agent_task_failed">Task Failed</string>
+    
+    <!-- Agent Settings -->
+    <string name="settings_category_agent">Agent Setting</string>
+    <string name="label_agent_action_format">Action</string>
+    <string name="agent_action_format_auto">Auto</string>
+    <string name="agent_action_format_mai_ui">MAI-UI</string>
+    <string name="agent_action_format_autoglm">AutoGLM-Phone</string>
+    <string name="agent_action_format_doubao">Doubao-1.5-UI-TARS</string>
+    <string name="label_agent_experience_summary">Experience Summary</string>
+    <string name="agent_experience_summary_hint">Summarize experience after task completion and save to knowledge base</string>
+    
+    <!-- Agent Experience Summary -->
+    <string name="agent_summarizing_experience">Summarizing experience...</string>
+    <string name="agent_experience_ready">Experience summary ready</string>
+    <string name="agent_save_experience">Save</string>
+    <string name="agent_experience_saved">Experience saved to AgentKB</string>
+    <string name="agent_experience_save_failed">Failed to save experience</string>
 </resources>

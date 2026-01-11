@@ -62,8 +62,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private static final String SCHEDULER = "PLMS";  // Note: ZImage uses FlowMatch-Euler
 
     // Diffusion model type for native engine (must match MNN upstream DiffusionModelType)
+    // 0=SD1.5, 1=Taiyi, 2=Sana(official), 3=ZImage(custom), 4=LongCat(custom)
     private static final int DIFFUSION_MODEL_SD15 = 0;
-    private static final int DIFFUSION_MODEL_ZIMAGE = 2;
+    private static final int DIFFUSION_MODEL_ZIMAGE = 3;
+    private static final int DIFFUSION_MODEL_LONGCAT_IMAGE_EDIT = 4;
     
     // Context reference
     private final Context context;
@@ -333,75 +335,206 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             LogManager.logW(TAG, "[Diffusion] Failed to map component filenames from config.json: " + e.getMessage());
         }
         
-        // Check for required Diffusion files (exact filenames for SD1.5-style models)
-        File textEncoder = new File(modelDir, "text_encoder.mnn");
-        File unet = new File(modelDir, "unet.mnn");
-        File vaeDecoder = new File(modelDir, "vae_decoder.mnn");
+        // Parse ALL component paths from config.json - NO HARDCODING!
+        String tokenizerPath = "tokenizer.txt"; // fallback only
+        String textEncoderPath = null;
+        String textEncoderWeightPath = null;
+        String unetPath = null;
+        String unetWeightPath = null;
+        String vaeDecoderPath = null;
+        String vaeEncoderPath = null;
+        
+        File configFile = new File(modelDir, "config.json");
+        boolean useHardcodedPaths = false;
+        
+        if (!configFile.exists()) {
+            LogManager.logW(TAG, "[Diffusion] config.json not found, will use hardcoded SD1.5 paths as fallback");
+            useHardcodedPaths = true;
+        }
+        
+        if (!useHardcodedPaths) {
+            try {
+                String content = new String(java.nio.file.Files.readAllBytes(configFile.toPath()));
+                org.json.JSONObject configJson = new org.json.JSONObject(content);
+            
+            // ========== Parse text_encoder section ==========
+            if (configJson.has("text_encoder")) {
+                org.json.JSONObject textEncoderConfig = configJson.getJSONObject("text_encoder");
+                String directory = textEncoderConfig.optString("directory", "");
+                String prefix = directory.isEmpty() ? "" : (directory + "/");
+                
+                // LongCat: text_encoder.llm.model
+                if (textEncoderConfig.has("llm")) {
+                    org.json.JSONObject llmConfig = textEncoderConfig.getJSONObject("llm");
+                    String modelFile = llmConfig.getString("model");
+                    textEncoderPath = prefix + modelFile;
+                    if (llmConfig.has("weight")) {
+                        textEncoderWeightPath = prefix + llmConfig.getString("weight");
+                    }
+                    LogManager.logI(TAG, "[Diffusion] text_encoder.llm.model='" + textEncoderPath + "'");
+                }
+                // ZImage: text_encoder.model
+                else if (textEncoderConfig.has("model")) {
+                    String modelFile = textEncoderConfig.getString("model");
+                    textEncoderPath = prefix + modelFile;
+                    if (textEncoderConfig.has("weight")) {
+                        textEncoderWeightPath = prefix + textEncoderConfig.getString("weight");
+                    }
+                    LogManager.logI(TAG, "[Diffusion] text_encoder.model='" + textEncoderPath + "'");
+                }
+                
+                // Tokenizer
+                if (textEncoderConfig.has("tokenizer")) {
+                    tokenizerPath = prefix + textEncoderConfig.getString("tokenizer");
+                }
+            }
+            
+            // ========== Parse transformer/unet section ==========
+            // LongCat uses "transformer", ZImage uses "unet"
+            org.json.JSONObject unetConfig = null;
+            if (configJson.has("transformer")) {
+                unetConfig = configJson.getJSONObject("transformer");
+                LogManager.logI(TAG, "[Diffusion] Found 'transformer' section (LongCat style)");
+            } else if (configJson.has("unet")) {
+                unetConfig = configJson.getJSONObject("unet");
+                LogManager.logI(TAG, "[Diffusion] Found 'unet' section (ZImage style)");
+            }
+            
+            if (unetConfig != null && unetConfig.has("model")) {
+                unetPath = unetConfig.getString("model");
+                if (unetConfig.has("weight")) {
+                    unetWeightPath = unetConfig.getString("weight");
+                }
+                LogManager.logI(TAG, "[Diffusion] unet/transformer.model='" + unetPath + "'");
+            }
+            
+            // ========== Parse vae section ==========
+            if (configJson.has("vae")) {
+                org.json.JSONObject vaeConfig = configJson.getJSONObject("vae");
+                if (vaeConfig.has("decoder_model")) {
+                    vaeDecoderPath = vaeConfig.getString("decoder_model");
+                    LogManager.logI(TAG, "[Diffusion] vae.decoder_model='" + vaeDecoderPath + "'");
+                }
+                if (vaeConfig.has("encoder_model")) {
+                    vaeEncoderPath = vaeConfig.getString("encoder_model");
+                    LogManager.logI(TAG, "[Diffusion] vae.encoder_model='" + vaeEncoderPath + "'");
+                }
+            }
+            
+            // ========== Parse tokenizer section (root level, e.g., ZImage) ==========
+            if (configJson.has("tokenizer")) {
+                org.json.JSONObject tokenizerConfig = configJson.getJSONObject("tokenizer");
+                String directory = tokenizerConfig.optString("directory", ".");
+                if (!directory.equals(".")) {
+                    tokenizerPath = directory + "/tokenizer.txt";
+                }
+            }
+            
+            LogManager.logI(TAG, "[Diffusion] tokenizer='" + tokenizerPath + "'");
+            
+            } catch (Exception e) {
+                LogManager.logW(TAG, "[Diffusion] Failed to parse config.json: " + e.getMessage());
+                LogManager.logW(TAG, "[Diffusion] Will use hardcoded SD1.5 paths as fallback");
+                useHardcodedPaths = true;
+            }
+        }
+        
+        // Fallback to SD1.5 hardcoded paths if config.json not found or parsing failed
+        if (useHardcodedPaths) {
+            LogManager.logI(TAG, "[Diffusion] Using hardcoded SD1.5 paths (backward compatibility)");
+            textEncoderPath = "text_encoder.mnn";
+            unetPath = "unet.mnn";
+            vaeDecoderPath = "vae_decoder.mnn";
+            tokenizerPath = "tokenizer.txt";
+        }
+        
+        // Validate required paths were set (either from config.json or hardcoded)
+        if (textEncoderPath == null) {
+            throw new Exception("text_encoder model path not found");
+        }
+        if (unetPath == null) {
+            throw new Exception("unet/transformer model path not found");
+        }
+        if (vaeDecoderPath == null) {
+            throw new Exception("vae decoder model path not found");
+        }
+        
+        // Check for required Diffusion files (using paths from config.json)
+        File textEncoder = new File(modelDir, textEncoderPath);
+        File textEncoderWeight = (textEncoderWeightPath != null) ? new File(modelDir, textEncoderWeightPath) : null;
+        File unet = new File(modelDir, unetPath);
+        File unetWeight = (unetWeightPath != null) ? new File(modelDir, unetWeightPath) : null;
+        File vaeDecoder = new File(modelDir, vaeDecoderPath);
         File vocabJson = new File(modelDir, "vocab.json");
         File mergesTxt = new File(modelDir, "merges.txt");
-        File tokenizerTxt = new File(modelDir, "tokenizer.txt");
+        File tokenizerTxt = new File(modelDir, tokenizerPath);
         
         LogManager.logI(TAG, "Checking Diffusion required files:");
-        LogManager.logI(TAG, "  text_encoder.mnn: " + (textEncoder.exists() ? "✓" : "✗ NOT FOUND"));
-        LogManager.logI(TAG, "  unet.mnn: " + (unet.exists() ? "✓" : "✗ NOT FOUND"));
-        LogManager.logI(TAG, "  vae_decoder.mnn: " + (vaeDecoder.exists() ? "✓" : "✗ NOT FOUND"));
-        if (diffusionModelType == DIFFUSION_MODEL_ZIMAGE) {
-            LogManager.logI(TAG, "  tokenizer.txt: " + (tokenizerTxt.exists() ? "✓" : "✗ NOT FOUND"));
+        LogManager.logI(TAG, "  " + textEncoderPath + ": " + (textEncoder.exists() ? "✓" : "✗ NOT FOUND"));
+        if (textEncoderWeight != null) {
+            LogManager.logI(TAG, "  " + textEncoderWeightPath + ": " + (textEncoderWeight.exists() ? "✓" : "✗ NOT FOUND"));
+        }
+        LogManager.logI(TAG, "  " + unetPath + ": " + (unet.exists() ? "✓" : "✗ NOT FOUND"));
+        if (unetWeight != null) {
+            LogManager.logI(TAG, "  " + unetWeightPath + ": " + (unetWeight.exists() ? "✓" : "✗ NOT FOUND"));
+        }
+        LogManager.logI(TAG, "  " + vaeDecoderPath + ": " + (vaeDecoder.exists() ? "✓" : "✗ NOT FOUND"));
+        
+        // Check tokenizer or vocab/merges based on what exists
+        boolean hasTokenizer = tokenizerTxt.exists();
+        boolean hasVocabMerges = vocabJson.exists() && mergesTxt.exists();
+        
+        if (hasTokenizer) {
+            LogManager.logI(TAG, "  " + tokenizerPath + ": ✓");
+        } else if (hasVocabMerges) {
+            LogManager.logI(TAG, "  vocab.json: ✓");
+            LogManager.logI(TAG, "  merges.txt: ✓");
         } else {
+            LogManager.logI(TAG, "  " + tokenizerPath + ": ✗ NOT FOUND");
             LogManager.logI(TAG, "  vocab.json: " + (vocabJson.exists() ? "✓" : "✗ NOT FOUND"));
             LogManager.logI(TAG, "  merges.txt: " + (mergesTxt.exists() ? "✓" : "✗ NOT FOUND"));
         }
 
-        if (diffusionModelType == DIFFUSION_MODEL_ZIMAGE) {
-            if (!tokenizerTxt.exists()) {
-                throw new Exception("[Diffusion] Missing tokenizer.txt for ZImage diffusion model (model_type=zimage_diffusion_mnn)");
-            }
-        } else {
-            if (!vocabJson.exists() || !mergesTxt.exists()) {
-                throw new Exception("[Diffusion] Missing vocab.json/merges.txt for SD1.5 diffusion. If this is a ZImage model, set config.json model_type=zimage_diffusion_mnn and provide tokenizer.txt.");
-            }
+        // Validate tokenizer files (auto-detected from config.json)
+        if (!tokenizerTxt.exists() && (!vocabJson.exists() || !mergesTxt.exists())) {
+            throw new Exception("[Diffusion] Missing tokenizer files. Expected either:\n" +
+                "  - " + tokenizerPath + " (detected from config.json), OR\n" +
+                "  - vocab.json + merges.txt (SD1.5 style)");
         }
 
-        boolean exactEncoderOk = textEncoder.exists();
-        boolean exactUnetOk = unet.exists();
-        boolean exactVaeOk = vaeDecoder.exists();
-
-        if (!exactEncoderOk || !exactUnetOk || !exactVaeOk) {
-            // Try flexible detection for non-SD1.5 models (e.g. Z-Image-Turbo)
-            LogManager.logW(TAG, "[Diffusion] Exact filenames missing, trying flexible detection for encoder/unet/vae components");
-
-            File[] mnnFiles = modelDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".mnn"));
-            File flexTextEncoder = null;
-            File flexUnet = null;
-            File flexVaeDecoder = null;
-
-            if (mnnFiles != null) {
-                for (File f : mnnFiles) {
-                    String n = f.getName().toLowerCase();
-                    if (flexTextEncoder == null && n.startsWith("text_encoder")) {
-                        flexTextEncoder = f;
-                    }
-                    if (flexUnet == null && (n.contains("unet") || n.contains("transformer") || n.contains("dit"))) {
-                        flexUnet = f;
-                    }
-                    if (flexVaeDecoder == null && (n.contains("vae") || n.contains("decoder"))) {
-                        flexVaeDecoder = f;
-                    }
-                }
-            }
-
-            LogManager.logI(TAG, "[Diffusion][flex] text_encoder candidate: " + (flexTextEncoder != null ? flexTextEncoder.getName() : "NONE"));
-            LogManager.logI(TAG, "[Diffusion][flex] unet/transformer/dit candidate: " + (flexUnet != null ? flexUnet.getName() : "NONE"));
-            LogManager.logI(TAG, "[Diffusion][flex] vae/decoder candidate: " + (flexVaeDecoder != null ? flexVaeDecoder.getName() : "NONE"));
-
-            if (flexTextEncoder == null || flexUnet == null || flexVaeDecoder == null) {
-                throw new Exception("Required Diffusion model components not found (encoder/unet/vae)");
-            } else {
-                LogManager.logI(TAG, "[Diffusion] Flexible component detection succeeded, proceeding with model directory: " + modelDir.getAbsolutePath());
-            }
-        } else {
-            LogManager.logI(TAG, "[Diffusion] Exact encoder/unet/vae filenames are present");
+        // Validate all required files exist
+        boolean allFilesExist = true;
+        if (!textEncoder.exists()) {
+            LogManager.logE(TAG, "[Diffusion] Missing: " + textEncoderPath);
+            allFilesExist = false;
         }
+        if (!unet.exists()) {
+            LogManager.logE(TAG, "[Diffusion] Missing: " + unetPath);
+            allFilesExist = false;
+        }
+        if (!vaeDecoder.exists()) {
+            LogManager.logE(TAG, "[Diffusion] Missing: " + vaeDecoderPath);
+            allFilesExist = false;
+        }
+        
+        if (!allFilesExist) {
+            throw new Exception("Required Diffusion model files not found. Check paths in config.json.");
+        }
+        
+        // Create canonical symlinks/copies for C++ compatibility
+        // C++ expects: text_encoder.mnn, unet.mnn, vae_decoder.mnn in root
+        // Strategy: Only copy .mnn files (small), create symlinks for .weight files (large)
+        createCanonicalLinkSmallFile(modelDir, textEncoderPath, "text_encoder.mnn");
+        if (textEncoderWeightPath != null) {
+            createCanonicalSymlink(modelDir, textEncoderWeightPath, "text_encoder.mnn.weight");
+        }
+        createCanonicalLinkSmallFile(modelDir, unetPath, "unet.mnn");
+        if (unetWeightPath != null) {
+            createCanonicalSymlink(modelDir, unetWeightPath, "unet.mnn.weight");
+        }
+        createCanonicalLinkSmallFile(modelDir, vaeDecoderPath, "vae_decoder.mnn");
+        
+        LogManager.logI(TAG, "[Diffusion] All required files validated and canonical links created");
         
         // Get user-selected backend from RuntimeConfig (fallback to CPU)
         String backendPreference = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
@@ -549,6 +682,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             String modelType = modelTypeRaw == null ? "" : modelTypeRaw.trim();
             if (!modelType.isEmpty()) {
                 LogManager.logI(TAG, "[Diffusion] config.json model_type(raw)='" + modelTypeRaw + "', normalized='" + modelType + "'");
+            }
+            if (!modelType.isEmpty() && modelType.equalsIgnoreCase("longcat_image_edit_mnn")) {
+                LogManager.logI(TAG, "[Diffusion] Detected LongCat Image Edit model from config.json (model_type=longcat_image_edit_mnn)");
+                return DIFFUSION_MODEL_LONGCAT_IMAGE_EDIT;
             }
             if (!modelType.isEmpty() && modelType.equalsIgnoreCase("zimage_diffusion_mnn")) {
                 LogManager.logI(TAG, "[Diffusion] Detected ZImage diffusion model from config.json (model_type=zimage_diffusion_mnn)");
@@ -777,7 +914,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // Route to specific inference based on model type
         if (currentModelType == ModelType.DIFFUSION) {
             // Diffusion models don't use history, just call inferenceDiffusion
-            inferenceDiffusion(userPrompt, params, callback);
+            // Pass first image path if available (for image editing), empty string for T2I mode
+            String inputImagePath = (imagePaths != null && !imagePaths.isEmpty()) ? imagePaths.get(0) : "";
+            inferenceDiffusion(userPrompt, inputImagePath, params, callback);
             return;
         } else if (currentModelType != ModelType.LLM) {
             // Unknown model type
@@ -789,8 +928,15 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         }
         
         try {
-            // Get history rounds and chat folder from RuntimeConfig snapshot
-            int historyRounds = RuntimeConfigHolder.getHistoryRoundsOrDefault(ConfigManager.DEFAULT_HISTORY_ROUNDS);
+            // Get history rounds: use params override if set (Agent mode uses 0), otherwise use RuntimeConfig
+            int historyRounds;
+            if (params != null && params.historyRounds != null) {
+                historyRounds = params.historyRounds;
+                LogManager.logI(TAG, "[HISTORY] Using params.historyRounds override: " + historyRounds);
+            } else {
+                historyRounds = RuntimeConfigHolder.getHistoryRoundsOrDefault(ConfigManager.DEFAULT_HISTORY_ROUNDS);
+                LogManager.logI(TAG, "[HISTORY] Using RuntimeConfig historyRounds: " + historyRounds);
+            }
             LogManager.logI(TAG, "[HISTORY] Starting inference with " + historyRounds + " rounds of history");
             
             // Load current chat history from markdown
@@ -1421,6 +1567,29 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         File cacheDir = context.getCacheDir();
         builder.tmpPath(cacheDir.getAbsolutePath());
 
+        // VL (Vision-Language) image size configuration
+        // 0 = Auto mode: use model's llm_config.json image_size (default 448)
+        // Other values (420-800): override model's image_size
+        RuntimeConfig runtimeCfg = RuntimeConfigHolder.get();
+        LogManager.logD(TAG, "[DEBUG] RuntimeConfig is null: " + (runtimeCfg == null));
+        if (runtimeCfg != null) {
+            LogManager.logD(TAG, "[DEBUG] RuntimeConfig.imagePreprocessSize = " + runtimeCfg.imagePreprocessSize);
+        }
+        LogManager.logD(TAG, "[DEBUG] DEFAULT_IMAGE_PREPROCESS_SIZE = " + ConfigManager.DEFAULT_IMAGE_PREPROCESS_SIZE);
+        
+        int imageSize = RuntimeConfigHolder.getImagePreprocessSizeOrDefault(ConfigManager.DEFAULT_IMAGE_PREPROCESS_SIZE);
+        LogManager.logD(TAG, "[DEBUG] Final imageSize from RuntimeConfigHolder = " + imageSize);
+        LogManager.logD(TAG, "[DEBUG] IMAGE_SIZE_AUTO = " + ConfigManager.IMAGE_SIZE_AUTO);
+        
+        if (imageSize != ConfigManager.IMAGE_SIZE_AUTO) {
+            // Manual mode: override model's image_size
+            builder.imageSize(imageSize);
+            LogManager.logI(TAG, "🖼️ VL image size: " + imageSize + " (manual override)");
+        } else {
+            // Auto mode: use model's llm_config.json image_size (default 448)
+            LogManager.logI(TAG, "🖼️ VL image size: Auto (use model's llm_config.json, default 448)");
+        }
+
         // Parameter priority logic:
         // 1. If priorityManual=true (手动参数优先): use manual params from RuntimeConfig
         // 2. If priorityManual=false (非手动参数优先): do NOT set params, let MNN read model config.json
@@ -1460,6 +1629,10 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                     "Built MNN config - Backend: %s, Threads: %d, MaxAllTokens: %d, MaxNewTokens: %d, Chunk: %d, KVLimit: %s, SamplingParams: model_default",
                     mnnBackend, threads, maxSeqLength, maxNewTokens, CHUNK_SIZE, kvLimitStr));
         }
+
+        LogManager.logD(TAG, "[DEBUG] ========== Final MNN Config JSON ==========");
+        LogManager.logD(TAG, "[DEBUG] " + config);
+        LogManager.logD(TAG, "[DEBUG] ==========================================");
 
         return config;
     }
@@ -1732,6 +1905,109 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     }
     
     /**
+     * Create canonical symlink for large files (weight files)
+     * Uses symbolic link to avoid copying multi-GB files
+     * Falls back to hard link if symlink fails, then copy as last resort
+     */
+    private void createCanonicalSymlink(File modelDir, String sourcePath, String canonicalName) {
+        if (sourcePath == null || sourcePath.equals(canonicalName)) {
+            return; // Already canonical or no source
+        }
+        
+        File sourceFile = new File(modelDir, sourcePath);
+        File canonicalFile = new File(modelDir, canonicalName);
+        
+        if (canonicalFile.exists()) {
+            LogManager.logI(TAG, "[Diffusion] Canonical file already exists: " + canonicalName);
+            return;
+        }
+        
+        if (!sourceFile.exists()) {
+            LogManager.logW(TAG, "[Diffusion] Source file not found: " + sourcePath);
+            return;
+        }
+        
+        // Try symbolic link first (works for large files, no space cost)
+        try {
+            java.nio.file.Files.createSymbolicLink(
+                canonicalFile.toPath(),
+                sourceFile.toPath()
+            );
+            LogManager.logI(TAG, "[Diffusion] Created symbolic link: " + canonicalName + " -> " + sourcePath);
+            return;
+        } catch (Exception e) {
+            LogManager.logD(TAG, "[Diffusion] Symbolic link failed (" + e.getMessage() + "), trying hard link");
+        }
+        
+        // Fallback to hard link
+        try {
+            java.nio.file.Files.createLink(
+                canonicalFile.toPath(),
+                sourceFile.toPath()
+            );
+            LogManager.logI(TAG, "[Diffusion] Created hard link: " + canonicalName + " -> " + sourcePath);
+            return;
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[Diffusion] Hard link also failed (" + e.getMessage() + "), weight file will be loaded from subdirectory");
+            // Don't copy large weight files - let MNN load from subdirectory
+        }
+    }
+    
+    /**
+     * Create canonical link/copy for small files (.mnn model structure files)
+     * These files are small (KB range), so copying is acceptable
+     */
+    private void createCanonicalLinkSmallFile(File modelDir, String sourcePath, String canonicalName) {
+        if (sourcePath == null || sourcePath.equals(canonicalName)) {
+            return; // Already canonical or no source
+        }
+        
+        File sourceFile = new File(modelDir, sourcePath);
+        File canonicalFile = new File(modelDir, canonicalName);
+        
+        if (canonicalFile.exists()) {
+            LogManager.logI(TAG, "[Diffusion] Canonical file already exists: " + canonicalName);
+            return;
+        }
+        
+        if (!sourceFile.exists()) {
+            LogManager.logW(TAG, "[Diffusion] Source file not found: " + sourcePath);
+            return;
+        }
+        
+        try {
+            // Try to create hard link (faster, no space cost)
+            java.nio.file.Files.createLink(
+                canonicalFile.toPath(),
+                sourceFile.toPath()
+            );
+            LogManager.logI(TAG, "[Diffusion] Created hard link: " + canonicalName + " -> " + sourcePath);
+        } catch (Exception e) {
+            // Fallback: copy small file (acceptable for .mnn files which are KB-sized)
+            try {
+                long fileSize = sourceFile.length();
+                LogManager.logI(TAG, "[Diffusion] Copying small file (" + (fileSize / 1024) + " KB): " + sourcePath + " -> " + canonicalName);
+                java.nio.file.Files.copy(
+                    sourceFile.toPath(),
+                    canonicalFile.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING
+                );
+                LogManager.logI(TAG, "[Diffusion] Copied file: " + sourcePath + " -> " + canonicalName);
+            } catch (Exception e2) {
+                LogManager.logW(TAG, "[Diffusion] Failed to link/copy: " + sourcePath + " -> " + canonicalName + ": " + e2.getMessage());
+            }
+        }
+    }
+    
+    /**
+     * Legacy method - kept for backward compatibility
+     * Now delegates to createCanonicalLinkSmallFile
+     */
+    private void createCanonicalLink(File modelDir, String sourcePath, String canonicalName) {
+        createCanonicalLinkSmallFile(modelDir, sourcePath, canonicalName);
+    }
+    
+    /**
      * Get statistics
      */
     public String getStatistics() {
@@ -1826,8 +2102,12 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     
     /**
      * Diffusion image generation inference
+     * @param prompt Text prompt
+     * @param inputImagePath Input image path for editing (empty string for T2I mode)
+     * @param params Inference parameters
+     * @param callback Streaming callback
      */
-    private void inferenceDiffusion(String prompt, LocalLlmHandler.InferenceParams params,
+    private void inferenceDiffusion(String prompt, String inputImagePath, LocalLlmHandler.InferenceParams params,
                                     LocalLlmHandler.StreamingCallback callback) {
         if (isGenerating.get()) {
             callback.onError("Image generation already in progress");
@@ -1984,13 +2264,22 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 final float[] capturedPeakMemMB = {-1.0f};
                 final float[] capturedRssMB = {-1.0f};
 
-                boolean success = MnnInference.generateImage(
+                // Determine mode based on input image
+                boolean isEditMode = (inputImagePath != null && !inputImagePath.isEmpty());
+                String modeStr = isEditMode ? "Edit" : "T2I";
+                LogManager.logI(TAG, "Diffusion mode: " + modeStr + (isEditMode ? " (input: " + inputImagePath + ")" : ""));
+                
+                // NOTE: [IMAGE:] marker is sent AFTER successful generation (Line 2341)
+                // to avoid residual empty references if inference is interrupted
+                
+                boolean success = MnnInference.generateImageWithInput(
                     diffusionHandle,
                     prompt,
                     outputPath,
                     steps,
                     seed,
                     cfgScale,
+                    inputImagePath != null ? inputImagePath : "",  // Pass input image path (empty for T2I)
                     new MnnInference.DiffusionCallback() {
                         @Override
                         public boolean onProgress(int progress) {
@@ -2079,8 +2368,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                     // Handler only sends data via callback, Manager handles persistence + cursor update.
                     // This ensures consistent pos management across LLM/Diffusion models.
 
-                    // Output image path to streaming callback
-                    // RagQueryManager will accumulate this and persist to MD
+                    // Send [IMAGE:] marker first (for RagQueryManager to detect and close <debug>)
+                    // Then send image path - this ensures atomicity (both sent only on success)
+                    callback.onToken("\n[IMAGE:]");
                     callback.onToken("\n\n[IMAGE:" + outputPath + "]");
 
                     // Output performance stats to streaming callback

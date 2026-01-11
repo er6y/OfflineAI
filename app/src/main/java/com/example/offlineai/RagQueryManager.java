@@ -229,8 +229,6 @@ public class RagQueryManager {
 
         void onQueryComplete(boolean success, String errorMessage);
 
-        void onStreamingData(String chunk);
-
         void onLlmCompleteWithAudio(String audioPath);
 
         void onRequestReloadChatHistory();
@@ -266,6 +264,9 @@ public class RagQueryManager {
         void onAsrStateChanged(boolean isRunning);
 
         // REMOVED: onRequestCallLlm - LLM calls are now handled directly by RagQueryManager.runLlmPipeline()
+        
+        // Notify UI that Agent action has been detected in model output
+        void onAgentActionDetected(String fullResponse);
     }
 
     public void updateCallback(@NonNull RagQueryCallback callback) {
@@ -507,6 +508,201 @@ public class RagQueryManager {
         }
     }
 
+    // Manager-side LLM pipeline with separate prompts (NEW) - avoids incorrect \n\n splitting
+    public void runLlmPipelineWithSeparatePrompts(@NonNull String apiUrl,
+                                                   @NonNull String apiKey,
+                                                   @NonNull String model,
+                                                   @NonNull String systemPrompt,
+                                                   @NonNull String userPrompt,
+                                                   @Nullable java.util.List<String> imagePaths,
+                                                   @Nullable java.util.List<String> audioPaths,
+                                                   @Nullable String taskId) {
+        RagQueryCallback cb = this.callback;
+        if (cb == null) {
+            LogManager.logE(TAG, "[MGR][LLM] runLlmPipelineWithSeparatePrompts called but callback is null");
+            return;
+        }
+
+        // Unified stop check before calling LLM
+        if (shouldStop()) {
+            LogManager.logI(TAG, "[MGR][LLM] runLlmPipelineWithSeparatePrompts aborted because stop was requested");
+            emitProgressFromManager("Operation stopped by user");
+            notifyQueryComplete(false, "Operation stopped by user");
+            return;
+        }
+
+        boolean isLocalModel = AppConstants.ApiUrl.LOCAL.equals(apiUrl);
+
+        // Emit basic debug info via unified method (writes buffer + notifies UI)
+        // For local model: debug info will be emitted by LocalLlmAdapter with Loading/Reusing status
+        if (!isLocalModel) {
+            String debugInfo = "[LLM] Using online API: " + model + "\n";
+            emitStreamingChunkFromManager(debugInfo);
+            // Close debug section for online API (no [TEXT:] marker)
+            String closeDebug = "</debug>\n\n";
+            emitStreamingChunkFromManager(closeDebug);
+        }
+
+        int systemLen = (systemPrompt != null) ? systemPrompt.length() : 0;
+        int userLen = (userPrompt != null) ? userPrompt.length() : 0;
+        LogManager.logI(TAG, "[MGR][LLM] Starting LLM API: " + apiUrl);
+        LogManager.logI(TAG, "[MGR][LLM] Using model: " + model);
+        LogManager.logI(TAG, "[MGR][LLM] Prompt length: system=" + systemLen + ", user=" + userLen);
+        
+        // Debug: Log image paths
+        if (imagePaths != null && !imagePaths.isEmpty()) {
+            LogManager.logI(TAG, "[MGR][DEBUG_IMAGE] Image count: " + imagePaths.size());
+            for (String imgPath : imagePaths) {
+                LogManager.logI(TAG, "[MGR][DEBUG_IMAGE] Image path: " + imgPath);
+            }
+        } else {
+            LogManager.logW(TAG, "[MGR][DEBUG_IMAGE] No images provided!");
+        }
+
+        if (taskId != null && !taskId.isEmpty()) {
+            updateLlmTaskProgress(taskId, 40, "LLM API call in progress");
+        } else {
+            emitProgressFromManager("LLM API call in progress");
+        }
+
+        final long startTime = System.currentTimeMillis();
+
+        try {
+            com.example.offlineai.api.LlmApiAdapter.ApiCallback llmCallback = new com.example.offlineai.api.LlmApiAdapter.ApiCallback() {
+                // Same callback implementation as runLlmPipeline
+                @Override
+                public void onSuccess(String response) {
+                    LogManager.logI(TAG, "[MGR][CALL][LLM] onSuccess enter - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
+                    LogManager.logD(TAG, "[MGR][LLM] API call successful, duration: " + (System.currentTimeMillis() - startTime) + "ms");
+                    LogManager.logD(TAG, "[MGR][LLM] Response length: " + (response == null ? 0 : response.length()) + " characters");
+
+                    // CRITICAL: Persist full response (with debug) to chat history
+                    try {
+                        String chatFolderPath = ConfigManager.getString(appContext, ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                        if (!chatFolderPath.isEmpty()) {
+                            String fullResponse = fullResponseAccumulator.toString();
+                            String persistedResponse = fullResponse.replaceAll("\\[AUDIO:[^\\]]*\\]", "");
+                            LogManager.logI(TAG, "[MGR][HISTORY] Saving response with debug, len=" + persistedResponse.length());
+
+                            java.util.regex.Pattern imagePattern = java.util.regex.Pattern.compile("\\[IMAGE:([^\\]]+)\\]");
+                            java.util.regex.Matcher imageMatcher = imagePattern.matcher(fullResponse);
+                            
+                            if (imageMatcher.find()) {
+                                String imagePath = imageMatcher.group(1);
+                                LogManager.logI(TAG, "[MGR][HISTORY] Detected Diffusion image: " + imagePath);
+                                
+                                String perfText = null;
+                                java.util.regex.Pattern perfPattern = java.util.regex.Pattern.compile("<performance>([\\s\\S]*?)</performance>");
+                                java.util.regex.Matcher perfMatcher = perfPattern.matcher(fullResponse);
+                                if (perfMatcher.find()) {
+                                    perfText = "<performance>" + perfMatcher.group(1) + "</performance>";
+                                }
+                                
+                                String debugText = null;
+                                java.util.regex.Pattern debugPattern = java.util.regex.Pattern.compile("<debug>([\\s\\S]*?)</debug>");
+                                java.util.regex.Matcher debugMatcher = debugPattern.matcher(fullResponse);
+                                if (debugMatcher.find()) {
+                                    debugText = "<debug>" + debugMatcher.group(1) + "</debug>";
+                                }
+                                
+                                ChatHistoryManager.appendAssistantImageMessage(appContext, chatFolderPath, imagePath, perfText, debugText);
+                            } else {
+                                ChatHistoryManager.appendAssistantTextMessage(appContext, chatFolderPath, persistedResponse);
+                            }
+                            
+                            // CRITICAL: Do NOT call markPersisted() here!
+                            // Polling may still be reading data from buffer. If we mark persisted now,
+                            // polling will stop reading and UI will miss the model's response.
+                            // Instead, markPersisted() will be called by resetSendingState() after polling completes.
+                            // if (taskId != null && !taskId.isEmpty()) {
+                            //     resetLogConsumerCursorAfterPersist(taskId);
+                            // }
+                        }
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[MGR][HISTORY] Failed to save response: " + e.getMessage(), e);
+                    }
+
+                    if (taskId != null && !taskId.isEmpty()) {
+                        finalizeLlmTask(taskId, BackgroundTask.TaskState.COMPLETED, 100, "Inference completed");
+                    }
+                    notifyQueryComplete(true, null);
+                }
+
+                private boolean debugClosed = !isLocalModel;
+                private final boolean[] streamingProgressReported = {false};
+
+                @Override
+                public void onStreamingData(String chunk) {
+                    if (chunk == null) return;
+                    
+                    if (chunk.contains("<debug>") || chunk.contains("</debug>") || chunk.contains("[TEXT:]") || chunk.contains("[IMAGE:]") || chunk.contains("[AUDIO:]")) {
+                        String preview = chunk.length() > 120 ? chunk.substring(0, 120) + "..." : chunk;
+                        LogManager.logD(TAG, "[MGR][STREAM] isLocal=" + isLocalModel + ", debugClosed=" + debugClosed + ", preview=" + preview);
+                    }
+
+                    if (shouldStop()) {
+                        LogManager.logD(TAG, "[MGR][LLM] Stop requested, ignoring streaming data");
+                        return;
+                    }
+
+                    if (!streamingProgressReported[0]) {
+                        streamingProgressReported[0] = true;
+                        if (taskId != null && !taskId.isEmpty()) {
+                            updateLlmTaskProgress(taskId, 60, "LLM streaming started");
+                        } else {
+                            emitProgressFromManager("LLM streaming started");
+                        }
+                    }
+
+                    if (!debugClosed && (chunk.contains("[TEXT:]") || chunk.contains("[IMAGE:]") || chunk.contains("[AUDIO:]"))) {
+                        LogManager.logD(TAG, "[MGR][DEBUG_TRACE] Detected head marker, closing debug section");
+                        String closeDebug = "</debug>\n";
+                        emitStreamingChunkFromManager(closeDebug);
+                        debugClosed = true;
+                    }
+
+                    String filteredChunk = chunk.replace("[TEXT:]", "");
+
+                    TtsAdapter tts = RagQueryManager.this.ttsAdapter;
+                    if (tts != null && tts.isEnabled() && debugClosed) {
+                        String ttsChunk = filterTtsContent(filteredChunk);
+                        if (!ttsChunk.trim().isEmpty()) {
+                            tts.processToken(ttsChunk);
+                        }
+                    }
+
+                    emitStreamingChunkFromManager(filteredChunk);
+                }
+
+                @Override
+                public void onError(String errorMessage) {
+                    LogManager.logE(TAG, "[MGR][LLM] API call failed: " + errorMessage);
+                    emitProgressFromManager("API call failed: " + errorMessage);
+                    if (taskId != null && !taskId.isEmpty()) {
+                        finalizeLlmTask(taskId, BackgroundTask.TaskState.FAILED, 0, "API call failed");
+                    }
+                    notifyQueryComplete(false, errorMessage);
+                }
+            };
+
+            com.example.offlineai.api.LlmApiAdapter adapter = new com.example.offlineai.api.LlmApiAdapter(appContext);
+            if (taskId != null && !taskId.isEmpty()) {
+                adapter.setTaskId(taskId);
+            }
+            
+            // Call new method signature with separate prompts
+            adapter.callLlmApi(apiUrl, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, llmCallback);
+
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[MGR][LLM] Exception in runLlmPipelineWithSeparatePrompts: " + e.getMessage(), e);
+            emitProgressFromManager("Error: " + e.getMessage());
+            if (taskId != null && !taskId.isEmpty()) {
+                finalizeLlmTask(taskId, BackgroundTask.TaskState.FAILED, 0, "Exception occurred");
+            }
+            notifyQueryComplete(false, e.getMessage());
+        }
+    }
+
     // Manager-side LLM pipeline: UI-free business logic, driven by RagQueryCallback.
     public void runLlmPipeline(@NonNull String apiUrl,
                                @NonNull String apiKey,
@@ -535,11 +731,9 @@ public class RagQueryManager {
         // For local model: debug info will be emitted by LocalLlmAdapter with Loading/Reusing status
         if (!isLocalModel) {
             String debugInfo = "[LLM] Using online API: " + model + "\n";
-            fullResponseAccumulator.append(debugInfo);
             emitStreamingChunkFromManager(debugInfo);
             // Close debug section for online API (no [TEXT:] marker)
             String closeDebug = "</debug>\n\n";
-            fullResponseAccumulator.append(closeDebug);
             emitStreamingChunkFromManager(closeDebug);
         }
 
@@ -613,9 +807,14 @@ public class RagQueryManager {
                             // - After MD persist, buffer content is "old", reset cursor to 0
                             // - UI can always replay from 0 to get unpersisted content
                             // - If UI is killed, it will reload MD + replay buffer seamlessly
-                            if (taskId != null && !taskId.isEmpty()) {
-                                resetLogConsumerCursorAfterPersist(taskId);
-                            }
+                            
+                            // CRITICAL: Do NOT call markPersisted() here!
+                            // Polling may still be reading data from buffer. If we mark persisted now,
+                            // polling will stop reading and UI will miss the model's response.
+                            // Instead, markPersisted() will be called by resetSendingState() after polling completes.
+                            // if (taskId != null && !taskId.isEmpty()) {
+                            //     resetLogConsumerCursorAfterPersist(taskId);
+                            // }
                         }
                     } catch (Exception e) {
                         LogManager.logE(TAG, "[MGR][HISTORY] Failed to save response: " + e.getMessage(), e);
@@ -670,17 +869,12 @@ public class RagQueryManager {
                                           chunk.contains("[AUDIO:]"))) {
                         LogManager.logD(TAG, "[MGR][DEBUG_TRACE] Detected head marker, closing debug section");
                         String closeDebug = "</debug>\n";
-                        fullResponseAccumulator.append(closeDebug);
                         emitStreamingChunkFromManager(closeDebug);
                         debugClosed = true;
                     }
 
                     // Strip [TEXT:] marker from streaming text; keep [IMAGE:] so UI can detect image markers
                     String filteredChunk = chunk.replace("[TEXT:]", "");
-                    
-                    // Accumulate filtered streaming data for persistence
-                    // This is AFTER debug close so markers don't appear in debug block
-                    fullResponseAccumulator.append(filteredChunk);
 
                     // Feed token to TtsAdapter when debug section is closed
                     // Use Manager-held TtsAdapter reference (survives UI destruction)
@@ -764,14 +958,17 @@ public class RagQueryManager {
             effectiveUserPrompt = buildUserPromptWithOnlineHistory(systemPrompt, userPrompt);
         }
 
-        String fullPrompt = buildPromptWithoutKnowledgeBase(systemPrompt, effectiveUserPrompt);
-        int promptLength = (fullPrompt != null) ? fullPrompt.length() : 0;
+        // CRITICAL: Do NOT combine system and user prompts with \n\n!
+        // Pass them separately to avoid incorrect splitting in StreamingApiClient.
+        int systemLen = (systemPrompt != null) ? systemPrompt.length() : 0;
+        int userLen = (effectiveUserPrompt != null) ? effectiveUserPrompt.length() : 0;
+        int totalLength = systemLen + userLen;
 
-        String promptInfo = "Prompt length: " + promptLength + " characters";
+        String promptInfo = "Prompt length: system=" + systemLen + ", user=" + userLen + ", total=" + totalLength + " characters";
         LogManager.logD(TAG, "[MGR][RAG] " + promptInfo);
         emitProgressFromManager(promptInfo);
 
-        if (promptLength > 4000) {
+        if (totalLength > 4000) {
             String warnMsg = "Warning: Prompt length exceeds 4000 characters, may be truncated by model";
             LogManager.logW(TAG, "[MGR][RAG] " + warnMsg);
             emitProgressFromManager(warnMsg);
@@ -781,7 +978,7 @@ public class RagQueryManager {
         // Use currentLlmTaskId (if any) so that LLM progress/finalization is
         // reflected in BackgroundTaskManager via manager-side helpers.
         String taskId = currentLlmTaskId;
-        runLlmPipeline(apiUrl, apiKey, model, fullPrompt, imagePaths, audioPaths, taskId);
+        runLlmPipelineWithSeparatePrompts(apiUrl, apiKey, model, systemPrompt, effectiveUserPrompt, imagePaths, audioPaths, taskId);
     }
 
     public void runRagLlmWithKnowledgeBase(@NonNull String apiUrl,
@@ -882,10 +1079,8 @@ public class RagQueryManager {
         // Start debug section and accumulate for persistence
         // Use unified method to write buffer AND notify UI
         String debugOpen = "<debug>\n";
-        fullResponseAccumulator.append(debugOpen);
         emitStreamingChunkFromManager(debugOpen);
         if (asrInfo != null && !asrInfo.isEmpty()) {
-            fullResponseAccumulator.append(asrInfo);
             emitStreamingChunkFromManager(asrInfo);
         }
 
@@ -1329,21 +1524,26 @@ public class RagQueryManager {
             return;
         }
         
-        // Step 1: Write to TaskLogBuffer (Manager owns buffer writes)
+        // Write to TaskLogBuffer (Manager owns buffer writes)
         String taskId = currentLlmTaskId;
         if (taskId != null && !taskId.isEmpty()) {
             appendInferenceLog(taskId, chunk);
         }
         
-        // Step 2: Notify UI (UI only displays, does NOT write buffer)
-        RagQueryCallback cb = this.callback;
-        if (cb != null) {
-            cb.onStreamingData(chunk);
-            
-            // NOTE: In new ring buffer design, no need to update consumer cursor.
-            // UI always reads from persistedPos to writePos (unpersisted data).
-            // After MD persist, persistedPos is updated, so UI won't re-read old data.
+        // Accumulate full response for persistence
+        fullResponseAccumulator.append(chunk);
+        
+        // Check if Agent should be triggered (detect complete tool_call)
+        String fullResponse = fullResponseAccumulator.toString();
+        if (fullResponse.contains("tool_call") && fullResponse.contains("}")) {
+            // Notify Fragment to trigger Agent
+            if (callback != null) {
+                callback.onAgentActionDetected(fullResponse);
+            }
         }
+        
+        // NOTE: UI updates are handled by pollBufferAndUpdateUi() polling mechanism
+        // No need to notify UI here - buffer write is sufficient
     }
 
     /**
@@ -1416,6 +1616,21 @@ public class RagQueryManager {
         }
         cb.onRequestEndInferenceForeground();
     }
+
+    /**
+     * Request UI to reload chat history from markdown file.
+     * Used by Agent to update UI after saving prompts and screenshots.
+     */
+    public void requestReloadChatHistory() {
+        RagQueryCallback cb = this.callback;
+        if (cb == null) {
+            LogManager.logD(TAG, "[MGR] requestReloadChatHistory called but callback is null");
+            return;
+        }
+        LogManager.logD(TAG, "[MGR] Requesting UI to reload chat history");
+        cb.onRequestReloadChatHistory();
+    }
+    
 
     // Manager-side helper to request LLM call via callback.
     public void callLlm(@NonNull String apiUrl,
@@ -1584,6 +1799,18 @@ public class RagQueryManager {
             LogManager.logE(TAG, "[MGR][PERSIST] Failed to mark persisted: " + e.getMessage(), e);
         }
     }
+    
+    /**
+     * Public API: Mark buffer as persisted after UI polling completes.
+     * CRITICAL: This should be called by Fragment AFTER polling has read all data,
+     * not immediately in onSuccess. This ensures UI gets all streaming data before
+     * buffer is marked as persisted.
+     *
+     * @param taskId The task ID
+     */
+    public void markBufferAsPersisted(@NonNull String taskId) {
+        resetLogConsumerCursorAfterPersist(taskId);
+    }
 
     /**
      * Get the current persisted position for a task's buffer.
@@ -1688,14 +1915,9 @@ public class RagQueryManager {
         java.util.List<String> newLogs = getNewLogsForConsumer(taskId, consumerId);
         if (newLogs != null && !newLogs.isEmpty()) {
             RagQueryCallback cb = this.callback;
-            if (cb != null) {
-                for (String line : newLogs) {
-                    if (line != null && !line.isEmpty()) {
-                        // Direct callback - no buffer write (content already in buffer)
-                        cb.onStreamingData(line);
-                    }
-                }
-            }
+            // NOTE: Replay is no longer needed - UI polling mechanism handles all buffer reads
+            // This method is kept for backward compatibility but does nothing
+            LogManager.logD(TAG, "[REPLAY] Replay requested but not needed - UI polling handles buffer reads");
         }
     }
 
@@ -2487,10 +2709,22 @@ public class RagQueryManager {
      */
     private String buildUserPromptWithOnlineHistory(@Nullable String systemPrompt, @NonNull String currentUserPrompt) {
         try {
+            // Read Agent mode setting - if enabled, force history to 0 (like LocalLlmAdapter)
+            boolean agentModeEnabled = ConfigManager.getBoolean(appContext,
+                    ConfigManager.KEY_AGENT_MODE_ENABLED,
+                    false);
+            
             // Read history rounds from persistent config
             int historyRounds = ConfigManager.getInt(appContext,
                     ConfigManager.KEY_HISTORY_ROUNDS,
                     ConfigManager.DEFAULT_HISTORY_ROUNDS);
+            
+            // CRITICAL: Force 0 history in Agent mode (same logic as LocalLlmAdapter Line 428-433)
+            if (agentModeEnabled) {
+                historyRounds = 0;
+                LogManager.logI(TAG, "[HISTORY][ONLINE] Agent mode enabled, forcing historyRounds=0");
+            }
+            
             if (historyRounds <= 0) {
                 LogManager.logD(TAG, "[HISTORY][ONLINE] History rounds <= 0, skip history injection");
                 return currentUserPrompt;
@@ -2750,6 +2984,169 @@ public class RagQueryManager {
             return modelPath;
         } catch (Exception e) {
             LogManager.logE(TAG, "Failed to get reranker model path in manager: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
+    /**
+     * Generic synchronous query method
+     * Blocks until query completes and returns the result
+     * Can be used by Agent or any other component that needs synchronous query
+     * 
+     * @param request Query request with all parameters
+     * @return Model output string, or null if error
+     */
+    @Nullable
+    public String querySync(@NonNull QueryRequest request) {
+        LogManager.logI(TAG, "[SYNC] Starting synchronous query");
+        
+        try {
+            // Use CountDownLatch to block until query completes
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+            final java.util.concurrent.atomic.AtomicBoolean success = new java.util.concurrent.atomic.AtomicBoolean(false);
+            final java.util.concurrent.atomic.AtomicReference<String> taskIdRef = new java.util.concurrent.atomic.AtomicReference<>(null);
+            
+            // Wrap original callback instead of replacing it
+            // This allows UI updates and history saving while also returning result to caller
+            final RagQueryCallback originalCallback = this.callback;
+            updateCallback(new RagQueryCallback() {
+                @Override
+                public void onSendingStateChanged(boolean sending) {
+                    if (originalCallback != null) {
+                        originalCallback.onSendingStateChanged(sending);
+                    }
+                }
+                
+                @Override
+                public void onTtsStateChanged(boolean generating) {
+                    if (originalCallback != null) {
+                        originalCallback.onTtsStateChanged(generating);
+                    }
+                }
+                
+                @Override
+                public void onProgressUpdate(int progress, String message) {
+                    if (originalCallback != null) {
+                        originalCallback.onProgressUpdate(progress, message);
+                    }
+                }
+                
+                // NOTE: onStreamingData removed - UI uses polling mechanism
+                // We accumulate result by reading from buffer after completion
+                
+                @Override
+                public void onQueryComplete(boolean querySuccess, String errorMessage) {
+                    // Forward to original callback for history saving
+                    if (originalCallback != null) {
+                        originalCallback.onQueryComplete(querySuccess, errorMessage);
+                    }
+                    // Unblock synchronous caller
+                    success.set(querySuccess);
+                    latch.countDown();
+                    LogManager.logI(TAG, "[SYNC] Query completed: " + querySuccess);
+                }
+                
+                @Override
+                public void onLlmCompleteWithAudio(String audioPath) {
+                    if (originalCallback != null) {
+                        originalCallback.onLlmCompleteWithAudio(audioPath);
+                    }
+                }
+                
+                @Override
+                public void onRequestReloadChatHistory() {
+                    if (originalCallback != null) {
+                        originalCallback.onRequestReloadChatHistory();
+                    }
+                }
+                
+                @Override
+                public void onRequestUpdateButtonText() {
+                    if (originalCallback != null) {
+                        originalCallback.onRequestUpdateButtonText();
+                    }
+                }
+                
+                @Override
+                public void onResetStopFlagsForNewQuery() {
+                    if (originalCallback != null) {
+                        originalCallback.onResetStopFlagsForNewQuery();
+                    }
+                }
+                
+                @Override
+                public void onQueryStarted(@NonNull String taskId) {
+                    // Save taskId so we can read from buffer after completion
+                    taskIdRef.set(taskId);
+                    if (originalCallback != null) {
+                        originalCallback.onQueryStarted(taskId);
+                    }
+                }
+                
+                @Override
+                public void onRequestStartInferenceForeground(@NonNull String description) {
+                    if (originalCallback != null) {
+                        originalCallback.onRequestStartInferenceForeground(description);
+                    }
+                }
+                
+                @Override
+                public void onRequestEndInferenceForeground() {
+                    if (originalCallback != null) {
+                        originalCallback.onRequestEndInferenceForeground();
+                    }
+                }
+                
+                @Override
+                public void onAgentActionDetected(String fullResponse) {
+                    if (originalCallback != null) {
+                        originalCallback.onAgentActionDetected(fullResponse);
+                    }
+                }
+                
+                @Override
+                public void onAsrStateChanged(boolean isRunning) {
+                    if (originalCallback != null) {
+                        originalCallback.onAsrStateChanged(isRunning);
+                    }
+                }
+            });
+            
+            // Start query
+            startQuery(request);
+            
+            // Wait for completion (no timeout - caller decides timeout strategy)
+            LogManager.logI(TAG, "[SYNC] Waiting for query to complete...");
+            latch.await();
+            
+            // Restore original callback
+            updateCallback(originalCallback);
+            
+            if (!success.get()) {
+                LogManager.logE(TAG, "[SYNC] Query failed");
+                return null;
+            }
+            
+            // Read complete result from buffer
+            String taskId = taskIdRef.get();
+            if (taskId == null || taskId.isEmpty()) {
+                LogManager.logE(TAG, "[SYNC] No taskId available, cannot read result");
+                return null;
+            }
+            
+            // Read all data from buffer (from position 0 to end)
+            TaskLogBuffer.ReadResult bufferResult = readBufferFromPos(taskId, 0);
+            if (bufferResult == null || !bufferResult.hasData()) {
+                LogManager.logW(TAG, "[SYNC] No data in buffer for taskId=" + taskId);
+                return "";
+            }
+            
+            String result = bufferResult.data;
+            LogManager.logI(TAG, "[SYNC] Query result length: " + result.length() + " (read from buffer)");
+            return result;
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[SYNC] Error in synchronous query", e);
             return null;
         }
     }

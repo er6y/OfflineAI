@@ -156,11 +156,71 @@ flowchart TB
 
 ### 2.3 推理与原生层
 - **LocalLLMMNNHandler**：MNN 推理枢纽，需求是对不同模型类型（纯文本 LLM、视觉-语言、Diffusion、TTS）进行统一探测、配置构建、推理调度，并处理流式回调与停止控制。设计：通过检测模型目录内文件（llm.mnn、visual.mnn、text_encoder.mnn、audio.mnn、talker.mnn）判定功能，使用 MnnInference.ConfigBuilder 构建 runtime config，注册回调处理文本 token、图像/音频输出，支持 dit_steps/dit_solver、KV Cache 等高级参数。**主要 API**：`findModelFile()`、`initialize()`、`generate()`、`stopGeneration()`、`buildMnnConfig()`、`handleStreamingToken()`。**关键数据结构**：`LocalLlmHandler.InferenceParams`、`MnnInference.ConfigBuilder`、`StreamingCallback`。
-  - **Diffusion（MNN upstream）模型类型**：
-    - `0`：Stable Diffusion 1.5 / chilloutmix（CLIP tokenizer，CFG + PNDM/PLMS）。
-    - `1`：Taiyi Stable Diffusion Chinese（BERT tokenizer，CFG + PNDM/PLMS）。
-    - `2`：ZImage（FlowMatch Euler；依赖 `MNN_BUILD_LLM=ON`；text encoder 输入 `input_ids` + `attention_mask`；latent 形状 `[1,16,128,128]`；无 CFG；timestep 为 float，使用 `t = 1 - sigma`）。
-    - **识别约定（OfflineAI）**：当模型目录 `config.json` 中 `model_type` 为 `zimage_diffusion_mnn` 时，Java 层创建 Diffusion session 会传 `modelType=2`；否则兜底按 `modelType=0`（SD1.5）。
+  - **Diffusion 引擎架构（MNN upstream rebase 2025-02）**：
+    - **继承体系**：官方 upstream 将 Diffusion 引擎重构为抽象基类 + 子类模式，我们的 fork 在此基础上扩展了 ZImage 和 LongCat 子类：
+      ```
+      Diffusion (abstract base, diffusion.hpp/cpp)
+      ├── StableDiffusion (official, stable_diffusion.hpp/cpp) — SD1.5/Taiyi
+      ├── SanaDiffusion (official, sana_diffusion.hpp/cpp) — Sana
+      ├── ZImageDiffusion (custom, zimage_diffusion.hpp/cpp) — ZImage FlowMatch
+      └── LongCatDiffusion (custom, longcat_diffusion.hpp/cpp) — LongCat Image Edit/T2I
+      ```
+    - **工厂方法**：所有实例通过 `Diffusion::createDiffusion()` 创建（JNI 层不可直接 `new Diffusion`），支持简单版（4参数）和扩展版（含 imageWidth/Height、GPU/精度/CFG 配置）。
+    - **文件结构**：
+      - `diffusion.hpp`：轻量基类头文件（枚举、配置结构体、虚函数声明、`PhiloxRNG` 类供子类共享），不含重型依赖。
+      - `diffusion_config.hpp`：`DiffusionConfig` 类（解析 config.json 模型路径），依赖 rapidjson。
+      - `diffusion.cpp`：基类实现（工厂方法、图像处理工具函数、latent packing/unpacking）。
+      - `zimage_diffusion.cpp`：ZImage 子类（LlmTokenizerWrapper、FlowMatch Euler、单 UNet 无 CFG）。
+      - `longcat_diffusion.cpp`：LongCat 子类（LLM text encoder、Flux-like packed latent、Limited Interval CFG）。
+    - **关键实现细节（深度 review 2025-02 确认）**：
+      - **噪声生成**：ZImage/LongCat 均使用 `PhiloxRNG`（与 PyTorch 对齐），不使用 `std::mt19937`。
+      - **ZImage timestep**：UNet 输入 `t = 1.0f - sigma`（非 sigma 本身）。
+      - **LongCat timestep**：UNet 输入 `t = sigma`。
+      - **ZImage VAE 缩放**：使用 SD VAE 标准缩放 `latent * (1/0.18215)`。
+      - **LongCat VAE 缩放**：使用 Flux VAE 缩放 `latent / 0.3611 + 0.1159`。
+      - **text_encoder 输出**：ZImage 保持原始 layout（不做 `_Convert(NCHW)`），直接传入 UNet。
+      - **计算图隔离**：UNet 循环中使用 `plms->input(updated)` 和 `mSampleVar->input(plms)` 断开计算图链，防止步时间递增。
+      - **LongCat packed latent**：使用预分配的 `mSampleVar` 做 CPU pack（`writeMap/readMap`），避免每步创建新 VARP。
+      - **LongCat CFG 范围**：`sigma > sigmaLow && sigma <= sigmaHigh`（严格大于 low）。
+      - **初始噪声**：不做 sigma0 缩放（直接使用 PhiloxRNG 输出）。
+      - **load() 运行时配置**：
+        - GPU Memory AUTO → `MNN_GPU_MEMORY_BUFFER`（ZImage/LongCat 均用 BUFFER 模式）。
+        - Precision AUTO → GPU 用 `Precision_High`（FP32，-inf 处理），CPU 用 `Precision_Normal`。
+        - `backendConfig.memory = Memory_Low`（确保内存及时释放）。
+        - `exe->lazyEval = false` + `setGlobalExecutorConfig`（全局执行器配置）。
+        - `module_config.rearrange` 不设置（保持默认 false）。
+        - OpenCL 启用 `.tempcache` 缓存。
+        - `WINOGRAD_MEMORY_LEVEL`、`DYNAMIC_QUANT_OPTIONS` hints 根据 memoryMode/backend 设置。
+        - CPU runtime（text encoder）：`Precision_Normal` + `Memory_Low` + `DYNAMIC_QUANT_OPTIONS=0`。
+      - **LongCat text_encoder_llm**：
+        - Lazy load LLM（`mLlm` 成员变量，非每次创建）。
+        - 通过 `set_config` 设置 LLM backend（跟随全局 backend 或强制 CPU）。
+        - 使用 `apply_chat_template` 构建 prompt（含 system prompt）。
+        - T2I 模式：image captioning expert system prompt，动态计算 prefix 长度。
+        - Image Edit 模式：image editing expert system prompt，传递 preprocessedImage 给 LLM。
+        - 使用 `tokenizer_encode` + `forward` + `getOutputs` 获取 hidden_states。
+        - 使用 `_GatherV2` slice + `_Fill`/`_Concat` padding。
+        - UNet 开始前卸载 LLM（`mMemoryMode != 1` 时 `delete mLlm`）。
+    - **模型类型枚举（DiffusionModelType）**：
+      - `0`：Stable Diffusion 1.5 / chilloutmix（CLIP tokenizer，CFG + PNDM/PLMS）。
+      - `1`：Taiyi Stable Diffusion Chinese（BERT tokenizer，CFG + PNDM/PLMS）。
+      - `2`：Sana Diffusion（官方新增，Qwen3-0.6B LLM text encoder）。
+      - `3`：ZImage（FlowMatch Euler；依赖 `MNN_BUILD_LLM=ON`；text encoder 输入 `input_ids` + `attention_mask`；latent 形状 `[1,16,H,W]`；timestep 为 float sigma）。
+      - `4`：LongCat Image Edit（FlowMatch Euler；LLM-based text encoder；T2I/Image Edit 双模式；VAE encoder/decoder；Flux-like latent packing/unpacking）。
+    - **识别约定（OfflineAI）**：
+      - `model_type` 为 `longcat_image_edit_mnn`：Java 层传 `modelType=4`（LongCat Image Edit）。
+      - `model_type` 为 `zimage_diffusion_mnn`：Java 层传 `modelType=3`（ZImage）。
+      - 其他情况：兜底按 `modelType=0`（SD1.5）。
+    - **LongCat Image Edit 图片编辑支持（2025-01-07）**：
+      - **模式自动判断**：
+        - **T2I 模式**：无图片输入时，`inputImagePath` 为空字符串，纯文本生成图片。
+        - **Image Edit 模式**：有图片输入时，传递图片路径到 `inputImagePath`，基于输入图片进行编辑。
+      - **图片传递逻辑**：
+        - Java 层：`inferenceWithConversationHistory` 检查 `imagePaths` 列表，如果非空则取第一张图片路径传递给 `inferenceDiffusion`。
+        - JNI 层：调用 `MnnInference.generateImageWithInput(handle, prompt, outputPath, steps, seed, cfg, inputImagePath, callback)`。
+        - C++ 层：调用 `diffusion->run(prompt, outputPath, iterNum, seed, cfg, callback, inputImagePath)`，MNN 引擎根据 `inputImagePath` 是否为空自动切换 T2I/Edit 模式。
+      - **通用设计**：不区分模型类型，所有 Diffusion 模型（SD1.5/ZImage/LongCat）都支持图片输入参数，有图片传路径，无图片传空字符串，由 MNN 引擎内部处理。
+      - **VAE on CPU 控制**：当前写死为 `false`（不启用），后续可根据需求通过 RuntimeConfig 配置。
     - **ZImage 图片尺寸配置（OfflineAI，2025-12-26 扩展支持非正方形比例）**：
       - **配置键**：
         - 旧版（正方形）：`ConfigManager.KEY_DIFFUSION_IMAGE_SIZE` / `RuntimeConfig.diffusionImageSize`（保留兼容）。
@@ -201,6 +261,32 @@ flowchart TB
       - 手机 App 默认 CFG=1.0（通过 ConfigManager 配置）。
     - **潜在问题**：Windows 命令行运行时若未显式传递 CFG 参数，可能使用错误默认值导致生成质量差异。
     - **正确调用示例**：`./diffusion_demo <model_path> 2 0 0 4 42 output.jpg 512 1.25 0 0 1 "prompt"`（ZImage 模型）。
+  - **MNN Fork 本地修改清单（fork 点 9bd83023，rebase 2025-02 验证）**：
+    - 以下为我们 fork 对 upstream MNN 的所有本地修改，rebase 后需确保全部保留。
+    - **OpenCL 修复（3 文件）**：
+      - `BinaryBufExecution.cpp`：localWorkSize 必须整除 globalWorkSize，否则用 NullRange(0,0)，修复 Adreno GPU 上的 CL_INVALID_WORK_GROUP_SIZE。
+      - `binary_buf.cl` / `binary_buf_mnn_cl.cpp`：float4/int4 初始化为 0 + ReLU per-element 修复 NVIDIA OpenCL 编译器 NaN bug。
+    - **Shape 计算修复（2 文件）**：
+      - `ShapeSliceTf.cpp`：重写 SliceTf shape 计算，修复动态 shape 场景下的越界。
+      - `ShapeWhere.cpp`：重写 Where shape 计算，修复动态 shape 场景下的越界。
+    - **Converter 修复（1 文件）**：
+      - `OnnxEinsum.cpp`：外积 (i,j→ij) 用 `_Unsqueeze` 替代 Reshape+Transpose，修复维度错误。
+    - **Pipeline Debug（1 文件）**：
+      - `Pipeline.cpp`：`MNN_DEBUG_NAN_CHECK` 宏（默认 disabled），每个 Op 执行后检查 NaN/Inf，用于 OpenCL 精度问题排查。
+    - **PyMNN 绑定（1 文件）**：
+      - `pymnn/src/llm.h`：新增 `forward_all()` 方法，返回所有输出（logits + hidden_states），供 Python 侧获取中间层输出。
+    - **LLM Engine（5 文件）**：
+      - `llm/CMakeLists.txt`：visibility preset（CXX_VISIBILITY_PRESET default），使 LLM 符号可导出给 diffusion engine 链接。
+      - `llm_demo.cpp`：`#define LLM_DEMO_ONELINE` 启用单行 prompt 模式。
+      - `include/llm/tokenizer.hpp`：新增 wrapper header，暴露内部 tokenizer 给 diffusion engine。
+      - `src/tokenizer.hpp`：`MNN_PUBLIC` 修饰 `createTokenizer()` 和 `encode()`，使符号可导出。
+      - `src/llm.cpp`：upstream `attention_mode` 替代 `quant_qkv` + CPU attention mask 优化已合入；fork 的 hidden_states 文件保存为冗余（LongCat 已改为直接 `forward()+getOutputs()`），不恢复。
+    - **Omni/VL 修复（2 文件）**：
+      - `omni.cpp`：Qwen3-VL `round→floor` 对齐 Python smart_resize + `mVisionModule nullptr` 检查 + debug MNN_PRINT。
+      - `omni.hpp`：mrope `nextPosition()` 改为 `max(T,H,W)+1`，修复 Qwen3-VL position_ids 计算。
+    - **Vision Export（1 文件）**：
+      - `vision.py`：Qwen2.5-VL `transformer_fuse=False`——upstream 已独立修复，无需恢复。
+    - **Diffusion Engine（6+ 文件）**：架构重构为子类模式，所有 fork 修改在 ZImage/LongCat 子类中重新实现（详见上方 Diffusion 引擎架构章节）。
 - **MnnInference JNI（libs/mnn-jni）**：Java 层调用 MNN C++ 引擎的唯一桥梁。需求：对外提供 createSession、generate、embedding、reranker 等接口，维持线程安全、日志输出与错误返回。设计：在 mnn_jni.cpp 中统一管理 Session 生命周期（含 ExecutorScope 创建）、音频数据缓冲、Wavform 回调、错误码打印，使 Java 层只需关注高层业务。**主要 API**：`createSession()`、`generate()`、`createEmbeddingWithConfig()`、`createRerankerWithConfig()`、`setWavformCallback()`、`releaseSession()`。**关键数据结构**：`MnnLlmSession`（JNI 持有的会话对象）、音频缓冲 `tts_audio_buffer_`。
   - 优化与注意事项：
     - Android 构建强制 native 使用 `-DCMAKE_BUILD_TYPE=Release`（O3），避免 JNI/MNN 被 Debug 构建拖慢。
@@ -403,6 +489,18 @@ flowchart TB
 ### 4.1 MNN 推理核心
 - **统一入口**：LocalLLMMNNHandler 负责检测模型目录，判断是否具备 LLM、视觉、Diffusion、TTS 功能。需求：自动化检测避免用户手动配置，加载失败时给出可读日志。
 - **配置构建**：通过 MnnInference.ConfigBuilder 设置后端、线程、精度、内存模式、功耗策略、max_all_tokens、max_new_tokens 等关键参数；根据模型内文件自动启用视觉/音频模块，TTS 默认设置 dit_steps=5、dit_solver=1。需求：确保配置优先级为运行时参数 > ConfigManager > 模型 config.json。
+- **VL 图片尺寸配置（2025-01-19 重构）**：VL（Vision-Language）模型的图片预处理尺寸控制机制。
+  - **设计变更**：从 Java 层 resize 改为通过 MNN API 的 `image_size` 参数控制，让 MNN 根据模型配置自动处理图片尺寸。
+  - **配置参数**（`ConfigManager.IMAGE_SIZE_*`）：
+    - **手动模式**：420, 504, 560, 616, 672, 728, 784, 800（所有值都是 28 的倍数，优化 VL 模型性能）
+    - **Auto 模式**：`IMAGE_SIZE_AUTO = 0`，不设置 `image_size` 参数，让 MNN 使用模型 `llm_config.json` 的 `image_size` 字段（默认 448）
+  - **实现位置**：
+    - UI 设置：`SettingsFragment.java` Line 1211-1245（滑块范围 0-8，最右边为 Auto）
+    - Java 层：`MediaThumbnailAdapter.processImage()` Line 899-901（不再 resize，直接保存原图）
+    - MNN API：`MnnInference.ConfigBuilder.imageSize()` Line 437-440（新增方法）
+    - 配置传递：`LocalLLMMNNHandler.buildMnnConfig()` Line 1562-1573（根据设置传递参数）
+  - **配置优先级**：RuntimeConfig > 模型 `llm_config.json`（仅 Auto 模式使用模型默认值）
+  - **mllm 独立配置**：Visual encoder 的 precision、backend、threads 由 `config.json` 的 `mllm` 部分决定，不受上层 API 设置影响（`omni.cpp` Line 88-114）。
 - **特性实现**：LLM 流式输出、KV Cache 管控、手动/默认采样切换；视觉模型支持多轮图像追问，需避免 chunk>0 导致的 mVisionEmbeddings 崩溃；Diffusion 在本地执行文本转图并输出进度；TTS 通过 Talker Diffusion 输出音频文件并将路径传回 UI。
 - **JNI 实现**：mnn_jni.cpp 中封装 Session 生命周期、创建 ExecutorScope、绑定流式回调与音频回调，处理停止标志。需求：日志需英文输出，关键路径（加载、推理、回调）均保留调试信息，错误需抛回 Java 层处理。
 - **Diffusion OpenCL 后端配置（2025-12-16 修复，2025-12-16 增强可配置性）**：针对 Adreno GPU 上 Diffusion 模型推理出现黑图/NaN 问题的修复方案。
@@ -591,6 +689,7 @@ flowchart TB
    - 大文件构建前确保前台运行与充足存储。
    - JSON 数据保持结构化字段，便于自动解析。
    - 向量异常日志应及时关注，避免检索质量下降。
+   - **NER 图谱写入必须使用事务**：`KnowledgeGraphDatabase.addEntitiesAndBuildGraph()` 是统一入口，内部用单事务包裹所有实体/边写入。禁止在调用方逐条调用 `addEntity()`/`addEdge()`，否则 N² 条边会产生 N² 次独立事务（fsync），142 个实体即需 4 分钟。`KnowledgeNoteFragment`（笔记）和 `AgentAccessibilityService`（Agent 经验）均通过此方法写入。
 3. **RAG 调优**：
    - `searchDepth` 与 `rerankCount` 建议保持 1:2~1:3，平衡召回与性能。
    - 合理设置采样参数，确保回答连贯性；在“手动优先”模式下谨慎调整温度与 Top-P。
@@ -600,7 +699,113 @@ flowchart TB
 5. **隐私与合规**：
    - 用户数据（文档、向量、日志）均存储本地；提供手动备份/导出方案。
    - 提示用户遵守模型许可与内容生成规范。
-6. **x86_64 模拟器兼容性（TTS 模块）**：
+6. **UI 线程安全与数据同步**：
+   - **RecyclerView 并发修改防护**：所有对 `chatMessages` 的修改必须在主线程执行，避免 `IndexOutOfBoundsException: Inconsistency detected`。
+     - **错误模式**：后台线程修改数据 → 主线程通知 adapter → RecyclerView layout 时 position 不一致 → 崩溃
+     - **正确模式**：使用 `runOnUiThread()` 包裹数据修改和 adapter 通知，确保原子性
+     - **关键位置**：`addAgentAIMessageToChat()` 等所有涉及 `chatMessages.add/remove/set` 的方法
+   - **Polling 停止延迟优化**：Buffer polling 机制在收到停止信号后延迟 1 秒停止，确保收集完整的模型输出。
+     - **机制说明**：`pollBufferAndUpdateUi()` 每 50ms 轮询一次 buffer，当 `queryCompleted=true` 且距离最后一次读取数据超过 1000ms 时才停止
+     - **设计原因**：模型输出可能存在延迟，过早停止会丢失尾部数据（debug 信息、性能统计等）
+     - **关键参数**：停止延迟从 300ms 调整为 1000ms（`pollBufferAndUpdateUi()` Line 2494）
+7. **Agent 模式优化**：
+   - **架构概览**：Agent 模块基于 MAI-UI 设计，实现自主循环执行（截图 → 模型推理 → 动作执行）
+     ```
+     RagQaFragment → AgentManager → AgentAccessibilityService → AgentEngine
+                                          ↓
+                              callRagQueryManagerSync() → RagQueryManager → 模型推理
+                                          ↓
+                              ActionExecutor → 执行点击/滑动/输入等动作
+     ```
+   - **核心组件**：
+     - `AgentManager.java`：Java 桥接层，处理 MediaProjection 权限、前台服务启动、Kotlin 协程桥接
+     - `AgentAccessibilityService.kt`：无障碍服务，托管 Agent 循环，管理悬浮窗和截图保存
+     - `AgentEngine.kt`：核心编排器，管理执行循环和状态（`isRunning()` 是唯一真相源）
+     - `AgentPrompts.kt`：系统提示词管理，支持缓存避免重复构建
+   - **状态管理**：
+     - `AgentEngine.isRunning()`：Agent 执行状态的**唯一真相源**
+     - `AgentManager.isAgentRunning()`：委托查询方法，供 Java 层调用
+     - `isAgentEnabled`（RagQaFragment）：用户 UI 开关状态
+   - **消息保存机制**（分工明确）：
+     - `prepareAndSaveUserInput()`：保存初始任务目标（Step 0）
+     - `callRagQueryManagerSync()`：保存每个 Agent Step（含截图、Previous Steps）
+   - **初始状态**：`AgentEngine.executeTask()` 在第一次截图前自动按 Home 键（`pressHome()` + 1秒等待），确保模型第一眼看到桌面而非 OfflineAI 界面，省去模型自行切换的步骤
+   - **Scroll/Swipe 方向语义**：`scroll down` / `swipe down` = **页面内容向下滚**（看到更下面的内容）= 手指从下往上滑（start.y 大, end.y 小）。三处执行器统一修正：`ActionExecutor.kt`、`ActionFormat.kt`（scroll→drag转换）、`UnifiedActionExecutor.kt`
+   - **Type 动作容错机制**：`inputTextWithReason()` 替代原 `inputText()`，增加自动聚焦和详细错误反馈：
+     1. **自动聚焦**：当 `findFocus(FOCUS_INPUT)` 返回 null 时，递归遍历 accessibility tree 查找 `isEditable` 节点，执行 `ACTION_FOCUS` + `ACTION_CLICK` 尝试聚焦，等待 300ms 后重试
+     2. **详细错误信息**：失败时返回具体原因（如 `"No focused input field. Click the input box first, then type"`），通过 `ActionExecutor`/`UnifiedActionExecutor` 传递给模型历史
+     3. **历史失败原因**：`buildUserPromptWithHistory()` 中失败原因不做截断，完整传递给模型（错误消息均为代码中定义的短字符串，不会膨胀 prompt）
+     4. **向后兼容**：保留 `inputText()` 作为 legacy wrapper，内部委托 `inputTextWithReason()`
+   - **截图处理**：截图缩放至 612×1388（50% 常见设备分辨率）并以 JPEG quality=85 保存（文件名：`agent_step_{step}_{timestamp}.jpg`），相比全分辨率 PNG 节省约 80% 体积和 API token 消耗。常量定义在 `ConfigManager.AGENT_SCREENSHOT_WIDTH/HEIGHT/JPEG_QUALITY`。模型坐标使用归一化 [0-999] 范围，与截图分辨率无关，缩放不影响坐标解析
+   - **性能优化**：
+     - APP 列表在 `AgentAccessibilityService.cachedAppList` 中缓存，整个 Agent 循环复用同一列表
+     - `ActionExecutor` 异步加载 APP 列表（`CoroutineScope(Dispatchers.IO)`），避免阻塞主线程启动
+     - 首次使用时如未加载完成会同步等待（Agent 执行时才需要）
+     - 截图缩放至 612×1388 JPEG q=85，Base64 体积从 ~6MB 降至 ~500KB，大幅减少 API token 消耗
+   - **历史记录自动管理**：勾选 Agent 模式时，系统自动将历史轮数设置为 0，避免历史对话干扰 Agent 推理；取消勾选时自动恢复默认历史轮数。
+   - **步骤历史增强与重复行为防护**：
+     - **历史格式**：`buildUserPromptWithHistory()` 为每步生成 `S{n}: [思考:{摘要}] {动作} -> OK/Failed` 格式，thinking 摘要截取前 80 字符以控制 token 消耗
+     - **动作文本提取**：`AgentEngine` 优先提取 `<tool_call>` 内容，fallback 提取 `Action:` 行（兼容 Doubao UI-TARS 等不使用 tool_call 标签的格式），再 fallback 从解析后的 `AgentAction` 对象生成可读描述
+     - **重复行为警告**：历史步骤后追加 `⚠注意：仔细检查以上历史步骤，如果多次执行相同/相似动作但未取得进展，必须换一种方法！`，放在用户提示词中紧跟历史步骤之后，利用模型对末尾内容注意力更强的特性
+     - **系统提示词配合**：`AgentPrompts.getSystemPromptForApi()` 规则中包含 `历史步骤判断，如果多次重复同一/相似动作，说明此方法行不通，需要尝试别的方法`
+   - **应用打开策略**：统一在 `AppNameMapper.kt` 管理应用启动策略，采用三层优先级：
+     1. **Intent Action**（系统应用，如 Dialer/Camera/Settings）- 最佳跨设备兼容性
+     2. **包名映射**（第三方应用，如微信/淘宝）- 预定义常用应用
+     3. **模糊匹配**（已安装应用）- 兜底方案
+   - 编译前运行 `android_env.cmd` 确保工具链环境正确，避免 Gradle 找不到 JDK 或 SDK 路径。
+   - 构建命令：`gradlew assembleRelease -PKEYPSWD=abc-1234`（使用 Release 构建，密码为 key.jks 文件密码）。
+   - **经验总结功能**（Agent 任务完成后自动生成可复用经验）：
+     - **设计原则**：完全复用 Agent Step 流程（`modelInferenceCallback` → `callRagQueryManagerSync`），经验总结作为 Terminate 后的额外一步，不额外造轮子
+     - **触发条件**：Terminate action 且成功，经验总结开关已启用
+     - **核心流程**（`AgentEngine.executeTask()` 中 Terminate 分支）：
+       ```
+       Terminate(success) + 经验开关启用
+         → 切回 OfflineAI 前台
+         → 截图
+         → readTaskHistoryFromConversationMd() 提取精简历史
+         → buildExperienceSummaryPromptFromHistory() 构建提示词
+         → modelInferenceCallback(summaryPrompt, screenshot, emptyList())
+           （复用 Agent Step 流程：写 conversation.md + 调模型 + 刷新 ChatUI）
+         → onExperienceSummaryGenerated() 显示保存按钮
+         → 等待用户保存或取消
+       ```
+     - **历史提取**：`readTaskHistoryFromConversationMd()` 从 conversation.md 中只摘抄关键信息：
+       - 查找最后一个 `agent_step_1_*.jpg` 或 `agent_step_1_*.png` 定位任务起点（截图格式已从 PNG 改为 JPEG，兼容旧数据）
+       - 逐行解析，**只提取**每步的 `<thinking>` 内容、`Action:` 行和 `RESULT:` 行（执行成功/失败及原因）
+       - **过滤掉**：`<debug>`、`<!-- MESSAGE_SEPARATOR -->`、`![](agent_step_*)`、`## 用户/AI助手` 标题、`Previous Steps` 等噪声
+       - 输出格式：`Task: {目标}\nStep N thinking: ...\nStep N action: ...\nStep N result: RESULT: Success/Failed - ...\n`
+     - **系统提示词**：经验总结时 `isExperienceSummaryStep=true`，`callRagQueryManagerSync` 检测到后系统提示词置空（Agent 的 UI-TARS 系统提示词不适用于经验总结），同时传空 `knowledgeBase` 跳过 RAG 召回（经验总结不需要知识库上下文）
+     - **用户提示词**：`buildUserPromptWithHistory` 检测到 `isExperienceSummaryStep=true` 时直接返回 `instruction` 原文，跳过 `"任务: "` 前缀包裹和 `"现在，根据当前截图，决定下一步操作以继续任务。"` 后缀追加（经验总结 prompt 已是完整自包含的提示词）
+     - **提示词模板**：`buildExperienceSummaryPromptFromHistory()` 要求模型按以下顺序输出：
+       1. 任务概述（任务类型、目标和要求，放在最前面）
+       2. 关键操作步骤
+       3. 目标应用识别
+       4. UI元素定位规律
+       5. 需要避免的错误（根据 RESULT 中的失败记录）
+       6. 最短成功路径（3-5步）
+     - **悬浮窗交互**：
+       - 经验生成后：`isWaitingForExperienceSave=true`，悬浮窗保持可见，显示保存/停止按钮
+       - 保存按钮：保存到 AgentKB → 倒计时关闭
+       - 停止按钮（作为取消）：清除 `isWaitingForExperienceSave` → 隐藏悬浮窗
+       - `finally` 块：检查 `isWaitingForExperienceSave`，为 true 时不调用 `stopAgentLoop()`
+     - **知识库保存**：`saveExperienceToAgentKB()` 完全复用 `KnowledgeNoteFragment` 的笔记保存流程：
+       - 路径：`ConfigManager.getKnowledgeBasePath()/AgentKB/`（与所有知识库统一路径）
+       - 存储：`KnowledgeGraphDatabase.addChunk()` 写入 `knowledge_graph.db`（不分片，整条经验作为一个 chunk）
+       - 向量化：`InferenceClient.computeEmbedding()` 生成嵌入向量
+       - **嵌入模型路径拼接**：`ConfigManager.getLastSelectedEmbeddingModel()` 返回的是模型名（如 `Qwen3-Embedding-0.6B-MNN-int4`），**必须**与 `ConfigManager.getEmbeddingModelPath()` 拼接为绝对路径后传给 `computeEmbedding()`，与 `BuildKnowledgeBaseFragment` 第961行保持一致
+       - **Metadata 写入规范**：`embedding_model` 和 `modeldir` 字段**必须存模型名**（如 `Qwen3-Embedding-0.6B-MNN-int4`），不能存绝对路径。`RagQueryManager.resolveEmbeddingModelPath()` 会将 `modeldir` 与 `embeddingModelRoot` 拼接为绝对路径。每次保存经验都更新 metadata（SQLite + `metadata.json` 双写），与 `TextChunkProcessor.writeKnowledgeBaseMetadata()` 约定一致
+       - **知识图谱**：调用 `KnowledgeGraphDatabase.addEntitiesAndBuildGraph(chunkId, entities, nerHandler)` 统一 API，单事务完成实体写入 + chunk-entity 关联 + 共现边构建（与 `KnowledgeNoteFragment` 共用同一方法，不重复实现）
+       - 元数据：首次创建 AgentKB 时，从 `ConfigManager.getLastSelectedEmbeddingModel/RerankerModel()` 读取模型配置写入 metadata
+     - **Agent RAG 召回**（完全复用 `RagQueryManager` 管线，Agent 不干涉 RAG 内部流程）：
+       - **Step 1~N**：每步正常传 `configKnowledgeBase`，走完整 RAG 流程（embedding → vector search → Graph RAG → prompt 构建 → LLM 调用）。首次加载 embedding 模型较慢（~6s），后续每步召回约 600ms，成本可接受
+       - **经验总结步骤**：`isExperienceSummaryStep=true` 时传空 `knowledgeBase`，`RagQueryManager` 自动走无 KB 路径（`runDirectLlmWithoutKnowledgeBase`），完全跳过 RAG
+       - 用户在 RAG 问答页面选择 AgentKB 即可启用经验召回，所有 RAG 设置（召回数量、重排、图谱使能等）完全复用
+     - **关键教训**：
+       - 复用 `modelInferenceCallback` 即复用整个 Agent Step 流程（截图保存、conversation.md 记录、模型调用、ChatUI 刷新）
+       - 复用 `KnowledgeNoteFragment` 笔记流程即获得完整的向量化 + NER + 知识图谱能力
+       - 复用 `RagQueryManager` RAG 流程即获得完整的向量检索 + reranker + Graph RAG 能力
+       - 模块化和复用的重要性：Agent 只做编排，不重复实现已有功能
+8. **x86_64 模拟器兼容性（TTS 模块）**：
    - **问题**：x86_64 Android 模拟器上 `std::locale` 初始化会崩溃（SIGABRT: misaligned pointer when deallocating）
    - **影响范围**：所有使用 `std::regex`、`std::stringstream`、`std::wstring_convert`、`std::codecvt` 的代码
    - **解决方案**：TTS 模块（`libs/mnn/apps/frameworks/mnn_tts`）已全面替换为手动实现（无 locale 依赖）
@@ -9792,4 +9997,385 @@ public synchronized boolean initialize(String modelName) {
 
 ---
 
+### I.2 Bert-Vits2 TTS "鸟语"问题（MNN 上游兼容性问题）
 
+**问题描述**：
+2026年1月，Bert-Vits2 TTS 模型生成的音频出现"鸟语"（高频噪音、无法理解的声音），但之前（2024年11月前）工作正常。
+
+**调试过程**：
+
+**Phase 1: 初步排查**
+- ✅ 确认模型文件完整（MD5 校验通过）
+- ✅ 确认 config.json 配置正确
+- ✅ 确认 Java 层参数传递正确
+
+**Phase 2: BERT 特征调试**
+- 发现 `en_bert` 和 `cn_bert` 特征值全为 `0.0f`
+- 添加详细日志到 `chinese_bert.cpp`（INFO 级别）
+- 确认 BERT 模型输出**正常**（非零值）
+
+**Phase 3: TTS Generator 输入调试**
+- 发现 `tts_generator.cpp` Line 81 硬编码 `en_bert=0.0f`（工作版本遗留代码）
+- 修复：恢复正常的 `en_bert` 输入
+- 修复 `mnn_bertvits2_tts_impl.cpp`：中文用 `cn_bert`，英文用 `en_bert`，另一个填零
+- **结果**：BERT 输入正确，但音频**仍是鸟语**
+
+**Phase 4: MNN 上游变化分析**
+- 对比 MNN 版本：工作版本（2024年10月）vs 当前版本（2026年1月）
+- 发现 MNN 核心推理引擎重大变化：
+  - **版本跨越**：3.0.0 → 3.3.1（4个大版本）
+  - **CPU Backend 重构**：线程池、CPU IDs 绑定机制完全重写
+  - **Pipeline 执行流程**：内存分配逻辑调整（`needAllocIO()` 检查）
+  - **算子优化**：LayerNorm、Convolution、ReduceSum 等大量优化
+
+**根本原因分析**：
+
+**MNN 上游改动导致问题的概率：85%+**
+
+1. **TTS 框架本身无变化**：
+   - `CMakeLists.txt`：完全一致
+   - 源文件列表：完全一致
+   - 编译选项：完全一致
+
+2. **BERT 正常但 TTS Generator 异常**：
+   - **BERT 模型**：简单 Transformer Encoder，对 MNN 版本不敏感 ✅
+   - **TTS Generator 模型**：复杂生成模型（VITS/Flow/Diffusion），对推理引擎更敏感 ❌
+
+3. **MNN Pipeline 变化可能影响 TTS Generator**：
+   ```cpp
+   // 新版 MNN 增加了 needAllocIO() 检查，可能影响某些算子的输出内存分配
+   if (iter.execution->needAllocIO()) {
+       for (auto t : iter.workOutputs) {
+           auto res = _allocTensor(t, curBackend, mOutputStatic, index);
+   ```
+
+**最终决策**：
+- ❌ **不回退 MNN 版本**（旧版本缺少 `mnn_supertonic_tts_impl.cpp` 等新文件）
+- ✅ **保持当前最新版本 MNN**
+- ⏳ **等待 MNN 官方修复推理引擎兼容性问题**
+
+**已修复的代码**：
+1. `libs/mnn/apps/frameworks/mnn_tts/src/bertvits2/tts_generator.cpp` Line 80：
+   ```cpp
+   // ✅ 恢复正常的 en_bert 输入（不再硬编码为 0）
+   input_pointer1[1][i * token_num + j] = en_bert[j][i];
+   ```
+
+2. `libs/mnn/apps/frameworks/mnn_tts/src/bertvits2/mnn_bertvits2_tts_impl.cpp`：
+   - Line 117：中文输入时，`en_bert` 填零
+   - Line 160：英文输入时，`cn_bert` 填零
+
+**当前状态**：
+- ✅ BERT 特征提取正常
+- ✅ BERT 输入到 TTS Generator 正确
+- ❌ TTS Generator 推理结果异常（鸟语）
+- ⏳ 等待 MNN 官方修复
+
+**相关文件**：
+- `libs/mnn/apps/frameworks/mnn_tts/src/bertvits2/tts_generator.cpp`
+- `libs/mnn/apps/frameworks/mnn_tts/src/bertvits2/mnn_bertvits2_tts_impl.cpp`
+- `libs/mnn/apps/frameworks/mnn_tts/src/bertvits2/chinese_bert.cpp`
+
+**教训**：
+> 依赖上游推理引擎时，版本升级可能引入不兼容变化。对于复杂生成模型（如 TTS、Diffusion），推理引擎的内存布局、算子执行逻辑变化可能导致输出异常，即使简单模型（如 BERT）工作正常。建议：(1) 锁定推理引擎版本；(2) 升级前充分测试；(3) 保留回退方案。
+
+**调试日期**：2026年1月12日
+
+---
+
+### I.4 历史记录重复保存问题（2026-01-20）
+
+**问题描述**：
+Agent commit引入后，AI响应的每个词都重复保存，导致 `conversation.md` 文件中出现重复内容。
+
+**问题现象**：
+```markdown
+## AI助手 (2026-01-20 15:57:31)
+
+<debug>
+<debug>
+[LLM] Reusing local model: Qwen3-VL-2B-Instruct-MNN
+[LLM] Reusing local model: Qwen3-VL-2B-Instruct-MNN
+</debug>
+</debug>
+
+HelloHello!! How How can can I I assist assist you you today today??
+
+<performance>
+Model: Qwen3-VL-2B-Instruct-MNN
+...
+</performance>
+
+<performance>
+Model: Qwen3-VL-2B-Instruct-MNN
+...
+</performance>
+```
+
+**根本原因**：
+Agent commit在 `RagQueryManager.java:1342` 新增了重复的追加逻辑：
+
+```java
+// L1342: Agent commit新增的代码（错误）
+fullResponseAccumulator.append(chunk);
+```
+
+但是在 **L686** 的 `onStreamingData()` 回调中已经有追加逻辑了：
+
+```java
+// L686: 原有的追加逻辑（正确）
+fullResponseAccumulator.append(filteredChunk);
+```
+
+**结果**：每个streaming chunk被追加了**两次**，导致所有内容（debug、文本、performance）都重复保存到 `conversation.md`。
+
+**修复方案**：
+删除 `RagQueryManager.java:1342` 的重复追加逻辑：
+
+```java
+// 修复前（错误）
+fullResponseAccumulator.append(chunk);  // 删除这行
+
+// 修复后（正确）
+// Check if Agent should be triggered (detect complete tool_call)
+// NOTE: fullResponseAccumulator is already populated by onStreamingData callback (L686)
+// Do NOT append here to avoid duplicate content
+String fullResponse = fullResponseAccumulator.toString();
+```
+
+**相关文件**：
+- `app/src/main/java/com/example/offlineai/RagQueryManager.java`（修改）
+
+**关键教训**：
+1. **避免重复追加**：同一个数据流不应该在多个地方追加到同一个累加器
+2. **明确数据流向**：`fullResponseAccumulator` 由 `onStreamingData()` 负责追加，其他地方只读取
+3. **代码审查重要性**：新增代码时需要检查是否与现有逻辑冲突
+
+**修复日期**：2026年1月20日
+
+---
+
+### I.5 在线API配置说明（2026-01-31）
+
+**在线API endpoint构建逻辑**：
+- 用户填写的API地址（包括版本号 `/v1`、`/v2`、`/v3`、`/v4` 等）**完全保留**
+- app只负责添加标准OpenAI路径：`/chat/completions`
+- 特殊API（Ollama）使用 `/api/generate`
+
+**示例**：
+| 用户填写 | app添加 | 最终endpoint |
+|---------|--------|-------------|
+| `https://api.openai.com/v1` | `/chat/completions` | `https://api.openai.com/v1/chat/completions` |
+| `https://open.bigmodel.cn/api/paas/v4` | `/chat/completions` | `https://open.bigmodel.cn/api/paas/v4/chat/completions` |
+| `https://ark.cn-beijing.volces.com/api/v3` | `/chat/completions` | `https://ark.cn-beijing.volces.com/api/v3/chat/completions` |
+
+**⚠️ 豆包（火山引擎）API特殊要求**：
+
+豆包API的 `model` 参数**不是模型名，而是endpoint_id**！
+
+**错误示例**：
+```json
+{
+  "model": "doubao-lite-128k-240428",  // ❌ 模型名，会返回404
+  ...
+}
+```
+
+**正确示例**：
+```json
+{
+  "model": "ep-20240101-xxxxx",  // ✅ endpoint_id
+  ...
+}
+```
+
+**获取endpoint_id步骤**：
+1. 访问豆包控制台：https://console.volcengine.com/ark/region:ark+cn-beijing/endpoint
+2. 查看"推理接入点"列表，或创建新的推理接入点
+3. 复制endpoint_id（格式：`ep-xxxxxxxx-xxxx`）
+4. 在app中使用"➕ 新建模型"功能，输入endpoint_id
+5. 选择该endpoint_id进行调用
+
+**其他厂商API**（OpenAI、智谱、千问等）：
+- 直接使用模型名作为 `model` 参数
+- 可通过API动态获取模型列表，或手动添加
+
+**相关代码**：
+- `app/src/main/java/com/example/offlineai/api/LlmApiAdapter.java`：endpoint构建逻辑
+- `app/src/main/java/com/example/offlineai/RagQaFragment.java`：自定义模型管理
+
+**配置日期**：2026年1月31日
+
+---
+
+### I.6 Agent动态Action格式系统（2026-02-01）
+
+**设计目标**：支持多种Prompt风格（MAI-UI、AutoGLM），根据模型自动选择合适的格式，便于后续扩展。
+
+#### 架构设计
+
+**核心组件**：
+
+1. **ActionFormat接口**（`ActionFormat.kt`）
+   - 定义统一的格式接口：`getSystemPrompt()`, `parseAction()`, `isCompatibleWith()`
+   - 统一的Action数据类：支持所有动作类型（click、swipe、drag、type等）
+   - ActionType枚举：16种动作类型
+
+2. **格式实现类**：
+   - **MaiUiFormat**：JSON格式 `{"action":"click","coordinate":[x,y]}`
+   - **AutoGlmFormat**：函数式格式 `do(action="Tap", element=[x,y])`
+
+3. **ActionFormatRegistry**（`ActionFormatRegistry.kt`）
+   - 格式注册表：管理所有可用格式
+   - 自动选择：根据模型名自动选择格式（GLM系列→AutoGLM，其他→MAI-UI）
+   - 可扩展：支持注册新格式
+
+4. **UnifiedActionExecutor**（`UnifiedActionExecutor.kt`）
+   - 统一执行层：接收统一的Action对象
+   - 坐标转换：归一化坐标[0-999]→实际像素坐标
+   - 屏幕适配：自动适配不同分辨率设备
+
+5. **AgentManager**（`AgentManager.kt`）
+   - 协调器：管理格式选择、解析、执行
+   - 模型感知：根据模型名自动配置
+   - 统一接口：`setModel()`, `getSystemPrompt()`, `parseAction()`, `executeAction()`
+
+6. **AgentPrompts**（修改）
+   - 新方法：`getSystemPromptForModel(modelName, apps, useThinking)`
+   - 自动选择：根据模型名选择合适的Prompt格式
+
+#### 格式对比
+
+| 特性 | MAI-UI | AutoGLM |
+|------|--------|---------|
+| **输出格式** | `<tool_call>{"action":"click"}</tool_call>` | `<answer>do(action="Tap")</answer>` |
+| **坐标系统** | 归一化[0-999] | 归一化[0-999] |
+| **滑动方式** | 方向+可选坐标 | 起点+终点 |
+| **适用模型** | 通用（默认） | GLM系列 |
+| **解析方式** | JSON解析 | 正则表达式 |
+| **高级功能** | answer, take_over, confirm | Take_over, Interact, Note |
+
+#### 坐标系统（统一）
+
+**归一化坐标 [0-999]**：
+- 左上角：[0, 0]
+- 右上角：[999, 0]
+- 左下角：[0, 999]
+- 右下角：[999, 999]
+- 中心点：[500, 500]
+
+**运行时转换**：
+```kotlin
+fun normalizedToPixel(xNorm: Int, yNorm: Int): Pair<Int, Int> {
+    val x = ((xNorm / 999f) * (screenWidth - 1)).roundToInt()
+    val y = ((yNorm / 999f) * (screenHeight - 1)).roundToInt()
+    return Pair(x, y)
+}
+```
+
+**优势**：
+- ✅ 模型输出与设备无关
+- ✅ 自动适配所有分辨率
+- ✅ 与MAI-UI、Open-AutoGLM保持一致
+
+#### 使用示例
+
+```kotlin
+// 1. 创建AgentManager
+val agentManager = AgentManager(context)
+
+// 2. 设置模型（自动选择格式）
+agentManager.setModel("glm-4v-plus")  // 自动使用AutoGLM格式
+// 或
+agentManager.setModel("gpt-4o")  // 自动使用MAI-UI格式
+
+// 3. 获取System Prompt
+val systemPrompt = agentManager.getSystemPrompt(availableApps, useThinking = true)
+
+// 4. 解析模型输出
+val parseResult = agentManager.parseAction(modelResponse)
+when (parseResult) {
+    is AgentManager.ParseResult.Success -> {
+        val thinking = parseResult.thinking
+        val action = parseResult.action
+        
+        // 5. 执行动作
+        val result = agentManager.executeAction(action)
+        if (result.success) {
+            // 成功
+        }
+    }
+    is AgentManager.ParseResult.Failure -> {
+        // 解析失败
+    }
+}
+```
+
+#### 扩展新格式
+
+```kotlin
+// 1. 实现ActionFormat接口
+class CustomFormat : ActionFormat {
+    override fun getFormatName() = "Custom"
+    
+    override fun getSystemPrompt(apps: List<String>, useThinking: Boolean): String {
+        // 返回自定义Prompt
+    }
+    
+    override fun parseAction(response: String): Pair<String?, Action?>? {
+        // 解析自定义格式
+    }
+    
+    override fun isCompatibleWith(modelName: String): Boolean {
+        // 判断是否适用于该模型
+    }
+}
+
+// 2. 注册格式
+ActionFormatRegistry.registerFormat(CustomFormat())
+```
+
+#### 模型检测规则
+
+**AutoGLM格式**（`AutoGlmFormat.isCompatibleWith()`）：
+- 模型名包含 "glm"（不区分大小写）
+- 模型名包含 "chatglm"
+- 模型名包含 "autoglm"
+
+**MAI-UI格式**（默认）：
+- 所有其他模型
+
+#### 关键优化
+
+1. **统一数据结构**：所有格式解析为相同的Action对象
+2. **格式隔离**：各格式独立实现，互不影响
+3. **自动选择**：根据模型名自动配置，无需手动切换
+4. **易于扩展**：新增格式只需实现接口并注册
+5. **向后兼容**：保留旧的AgentPrompts方法（标记为Deprecated）
+
+#### 相关文件
+
+**新增文件**：
+- `app/src/main/java/com/example/offlineai/agent/ActionFormat.kt`
+- `app/src/main/java/com/example/offlineai/agent/MaiUiFormat.kt`
+- `app/src/main/java/com/example/offlineai/agent/AutoGlmFormat.kt`
+- `app/src/main/java/com/example/offlineai/agent/ActionFormatRegistry.kt`
+- `app/src/main/java/com/example/offlineai/agent/UnifiedActionExecutor.kt`
+- `app/src/main/java/com/example/offlineai/agent/AgentManager.kt`
+
+**修改文件**：
+- `app/src/main/java/com/example/offlineai/agent/AgentPrompts.kt`
+
+#### 参考项目
+
+- **MAI-UI**：https://github.com/Alibaba-NLP/MAI-UI
+  - Prompt设计：`MAI-UI/src/prompt.py`
+  - JSON格式，简洁清晰
+  
+- **Open-AutoGLM**：https://github.com/THUDM/AutoGLM
+  - Handler设计：`Open-AutoGLM/phone_agent/actions/handler.py`
+  - 函数式格式，功能丰富
+
+**设计日期**：2026年2月1日
+
+---

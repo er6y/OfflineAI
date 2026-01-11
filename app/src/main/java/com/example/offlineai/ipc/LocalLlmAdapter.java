@@ -404,10 +404,9 @@ public class LocalLlmAdapter {
         boolean useHistory = false;
         
         if (engine instanceof LocalLLMMNNHandler) {
-            // Get history rounds setting from RuntimeConfig (fallback to default)
-            int historyRounds = RuntimeConfigHolder.getHistoryRoundsOrDefault(ConfigManager.DEFAULT_HISTORY_ROUNDS);
             // Use history if historyRounds > 0, regardless of current images/audio
             // (User images will be filtered in history, AI images will be skipped)
+            int historyRounds = RuntimeConfigHolder.getHistoryRoundsOrDefault(ConfigManager.DEFAULT_HISTORY_ROUNDS);
             useHistory = historyRounds > 0;
             LogManager.logI(TAG, "[HISTORY] useHistory=" + useHistory + " (historyRounds=" + historyRounds + 
                           ", currentImages=" + (imagePaths != null ? imagePaths.size() : 0) + 
@@ -425,6 +424,14 @@ public class LocalLlmAdapter {
             RuntimeConfig cfg = RuntimeConfigHolder.get();
             String systemPrompt = (cfg != null && cfg.systemPrompt != null) ? cfg.systemPrompt : "";
             params.systemPrompt = systemPrompt;
+            
+            // CRITICAL: Force 0 history in Agent mode to avoid Scudo OOM
+            // Use RuntimeConfig.agentModeEnabled instead of string matching
+            boolean isAgentMode = (cfg != null && cfg.agentModeEnabled);
+            if (isAgentMode) {
+                params.historyRounds = 0;
+                LogManager.logW(TAG, "[AGENT] Agent mode enabled, forcing historyRounds=0 (avoid OOM)");
+            }
             
             // Set TTS output path if supported
             if (mnnHandler.hasTtsSupport()) {

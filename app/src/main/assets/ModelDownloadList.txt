@@ -97,6 +97,17 @@
       "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen3-VL-2B-Instruct-MNN/resolve/master/visual.mnn.weight",
 	    "comments": "Qwen3 VL 2B Instruct Text-Image2Text, fast image understanding"
     },
+    "MAI-UI-2B-MNN-fp16": {
+      "config.json": "https://www.modelscope.cn/models/yileiwang/MAI-UI-2B-MNN-fp16/resolve/master/config.json",
+      "configuration.json": "https://modelscope.cn/models/yileiwang/MAI-UI-2B-MNN-fp16/resolve/master/configuration.json",
+      "llm_config.json": "https://www.modelscope.cn/models/yileiwang/MAI-UI-2B-MNN-fp16/resolve/master/llm_config.json" ,
+      "llm.mnn.json": "https://www.modelscope.cn/models/yileiwang/MAI-UI-2B-MNN-fp16/resolve/master/llm.mnn.json",
+      "llm.mnn": "https://www.modelscope.cn/models/yileiwang/MAI-UI-2B-MNN-fp16/resolve/master/llm.mnn",
+      "llm.mnn.weight": "https://www.modelscope.cn/models/yileiwang/MAI-UI-2B-MNN-fp16/resolve/master/llm.mnn.weight",
+      "tokenizer.txt": "https://www.modelscope.cn/models/yileiwang/MAI-UI-2B-MNN-fp16/resolve/master/tokenizer.txt",
+      "visual.mnn": "https://www.modelscope.cn/models/yileiwang/MAI-UI-2B-MNN-fp16/resolve/master/visual.mnn",
+	    "comments": "MAI-UI-2B-MNN-fp16 Text-Image2Text, mobile UI for mobile agent."
+    },
     "MiniCPM-V-4-MNN-int4": {
       "config.json": "https://www.modelscope.cn/models/MNN/MiniCPM-V-4-MNN/resolve/master/config.json",
       "configuration.json": "https://www.modelscope.cn/models/MNN/MiniCPM-V-4-MNN/resolve/master/configuration.json",
@@ -184,6 +195,24 @@
       "scheduler_config.json": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/scheduler_config.json",
       "tokenizer.txt": "https://www.modelscope.cn/models/yileiwang/ZImageTurboMNNint4/resolve/master/tokenizer.txt",
       "comments": "Z-Image Turbo Text2Image, 512/768/1024，for OpenCL，Precision Mode=high is a mandatory"
+    },
+    "LongCat-Image-Edit-Turbo-MNN-int8": {
+      "text_encoder/config.json": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/text_encoder/config.json",
+      "text_encoder/embeddings_bf16.bin": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/text_encoder/embeddings_bf16.bin",
+      "text_encoder/tokenizer.txt": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/text_encoder/tokenizer.txt",
+      "text_encoder/llm_config.json": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/text_encoder/llm_config.json",
+      "text_encoder/llm.mnn": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/text_encoder/llm.mnn",
+      "text_encoder/llm.mnn.weight": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/text_encoder/llm.mnn.weight",
+      "text_encoder/visual.mnn": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/text_encoder/visual.mnn",
+      "text_encoder/visual.mnn.weight": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/text_encoder/visual.mnn.weight",
+      "configuration.json": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/configuration.json",
+      "unet.mnn": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/unet.mnn",
+      "unet.mnn.weight": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/unet.mnn.weight",
+      "vae_decoder.mnn": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/vae_decoder.mnn",
+      "vae_encoder.mnn": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/vae_encoder.mnn",
+      "config.json": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/config.json",
+      "scheduler_config.json": "https://modelscope.cn/models/yileiwang/LongCat-Image-Edit-Turbo-MNN-int8/resolve/master/scheduler_config.json",
+      "comments": "LongCat-Image-Edit-Turbo Text2Image or Edit, 512/768/1024，for OpenCL，Precision Mode=high is a mandatory"
     }
   },
   "asr": {
@@ -223,6 +252,21 @@
       "common/text_processing_jsons/word_freq.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/word_freq.bin",
       "common/text_processing_jsons/word_tag.bin": "https://www.modelscope.cn/models/MNN/bert-vits2-MNN/resolve/master/common/text_processing_jsons/word_tag.bin",
       "comments": "BERT-VITS2 TTS模型，高质量中文语音合成。/BERT-VITS2 TTS model for high-quality Chinese speech synthesis."
+    },
+    "supertonic-tts-mnn": {
+      "config.json": "https://modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/config.json",
+      "configuration.json": "https://modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/configuration.json",
+      "mnn_models/tts.json": "https://modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/mnn_models/tts.json",
+      "unicode_indexer.json": "https://modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/mnn_models/unicode_indexer.json",
+      "mnn_models/int8/duration_predictor.mnn": "https://modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/mnn_models/int8/duration_predictor.mnn",
+      "mnn_models/int8/text_encoder.mnn": "https://modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/mnn_models/int8/text_encoder.mnn",
+      "mnn_models/int8/vector_estimator.mnn": "https://modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/mnn_models/int8/vector_estimator.mnn",
+      "mnn_models/int8/vocoder.mnn": "https://modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/mnn_models/int8/vocoder.mnn",
+      "voice_styles/F1.json": "https://www.modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/voice_styles/F1.json",
+      "voice_styles/F2.json": "https://www.modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/voice_styles/F2.json",
+      "voice_styles/M1.json": "https://www.modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/voice_styles/M1.json",
+      "voice_styles/M2.json": "https://www.modelscope.cn/models/MNN/supertonic-tts-mnn/resolve/master/voice_styles/M2.json",
+      "comments": "Supertonic TTS模型，超快速轻量级语音合成（66M参数，167×实时速度）。/Supertonic TTS model, ultra-fast lightweight speech synthesis (66M params, 167× real-time speed)."
     }
   }
 }

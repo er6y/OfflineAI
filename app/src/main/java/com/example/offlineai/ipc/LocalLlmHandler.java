@@ -1487,6 +1487,7 @@ public class LocalLlmHandler {
         // History and TTS support
         public String systemPrompt = null;      // System prompt for history inference
         public String ttsOutputPath = null;     // TTS output file path
+        public Integer historyRounds = null;    // Override history rounds (null = use RuntimeConfig value)
         
         // Getter和Setter方法
         public int getMaxTokens() { return maxTokens; }

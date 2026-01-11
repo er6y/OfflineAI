@@ -501,20 +501,37 @@ public class ChatHistoryManager {
                 }
                 
                 // 提取图片（如果有）
-                if (bodyContent.contains("![](")) {
-                    int imgStart = bodyContent.indexOf("![](");
-                    int imgEnd = bodyContent.indexOf(")", imgStart);
-                    if (imgEnd > imgStart) {
-                        String imageFileName = bodyContent.substring(imgStart + 4, imgEnd);
-                        File imageFile = new File(folderPath, imageFileName);
-                        if (imageFile.exists()) {
-                            item.imageUri = Uri.fromFile(imageFile);
+                // Support both formats: ![](filename.jpg) and ![description](filename.jpg)
+                if (bodyContent.contains("![")) {
+                    int imgStart = bodyContent.indexOf("![");
+                    if (imgStart >= 0) {
+                        // Find the closing ] for alt text
+                        int altEnd = bodyContent.indexOf("]", imgStart);
+                        if (altEnd > imgStart) {
+                            // Find the opening ( for URL
+                            int urlStart = bodyContent.indexOf("(", altEnd);
+                            int urlEnd = bodyContent.indexOf(")", urlStart);
+                            
+                            if (urlStart == altEnd + 1 && urlEnd > urlStart) {
+                                String imageFileName = bodyContent.substring(urlStart + 1, urlEnd);
+                                File imageFile = new File(folderPath, imageFileName);
+                                
+                                LogManager.logD(TAG, "[HISTORY_LOAD] Parsing image: fileName=" + imageFileName + 
+                                              ", folderPath=" + folderPath + ", exists=" + imageFile.exists());
+                                
+                                if (imageFile.exists()) {
+                                    item.imageUri = Uri.fromFile(imageFile);
+                                    LogManager.logI(TAG, "[HISTORY_LOAD] ✅ Image loaded: " + imageFile.getAbsolutePath());
+                                } else {
+                                    LogManager.logW(TAG, "[HISTORY_LOAD] ❌ Image file NOT found: " + imageFile.getAbsolutePath());
+                                }
+                                
+                                // 移除图片markdown语法，获取纯文本
+                                String beforeImg = bodyContent.substring(0, imgStart).trim();
+                                String afterImg = bodyContent.substring(urlEnd + 1).trim();
+                                bodyContent = (beforeImg + "\n" + afterImg).trim();
+                            }
                         }
-                        
-                        // 移除图片markdown语法，获取纯文本
-                        String beforeImg = bodyContent.substring(0, imgStart).trim();
-                        String afterImg = bodyContent.substring(imgEnd + 1).trim();
-                        bodyContent = (beforeImg + "\n" + afterImg).trim();
                     }
                 }
                 
@@ -522,28 +539,43 @@ public class ChatHistoryManager {
                 item.setDisplayText(bodyContent);
             }
             // 处理AI回复：需要解析各个部分
+            // CRITICAL: Parse tags in the order they appear in the text to avoid index confusion
             else if (type == ChatViewHolders.ASSISTANT) {
                 StringBuilder displayText = new StringBuilder();
                 
-                // 解析思考部分
-                if (bodyContent.contains("<think>")) {
-                    int thinkStart = bodyContent.indexOf("<think>");
-                    int thinkEnd = bodyContent.indexOf("</think>");
-                    if (thinkEnd > thinkStart) {
-                        String thinkContent = bodyContent.substring(thinkStart + 7, thinkEnd).trim();
-                        item.setThinkingText(thinkContent);
-                        bodyContent = bodyContent.substring(0, thinkStart) + bodyContent.substring(thinkEnd + 8);
-                    }
-                }
-                
-                // 解析调试部分
+                // 解析调试部分（通常在最前面）
                 if (bodyContent.contains("<debug>")) {
                     int debugStart = bodyContent.indexOf("<debug>");
                     int debugEnd = bodyContent.indexOf("</debug>");
                     if (debugEnd > debugStart) {
                         String debugContent = bodyContent.substring(debugStart + 7, debugEnd).trim();
                         item.setDebugText(debugContent);
+                        // Remove tag but DON'T trim intermediate results to avoid index confusion
                         bodyContent = bodyContent.substring(0, debugStart) + bodyContent.substring(debugEnd + 8);
+                    }
+                }
+                
+                // 解析思考部分 - 支持<think>和<thinking>两种格式
+                if (bodyContent.contains("<think>") || bodyContent.contains("<thinking>")) {
+                    // Try <thinking> first (longer tag)
+                    int thinkStart = bodyContent.indexOf("<thinking>");
+                    int thinkEnd = bodyContent.indexOf("</thinking>");
+                    int tagLength = 10; // <thinking> length
+                    int endTagLength = 11; // </thinking> length
+                    
+                    // Fallback to <think> if <thinking> not found
+                    if (thinkStart < 0 || thinkEnd < 0) {
+                        thinkStart = bodyContent.indexOf("<think>");
+                        thinkEnd = bodyContent.indexOf("</think>");
+                        tagLength = 7; // <think> length
+                        endTagLength = 8; // </think> length
+                    }
+                    
+                    if (thinkEnd > thinkStart && thinkStart >= 0) {
+                        String thinkContent = bodyContent.substring(thinkStart + tagLength, thinkEnd).trim();
+                        item.setThinkingText(thinkContent);
+                        // Remove tag but DON'T trim intermediate results to avoid index confusion
+                        bodyContent = bodyContent.substring(0, thinkStart) + bodyContent.substring(thinkEnd + endTagLength);
                     }
                 }
                 
@@ -554,9 +586,14 @@ public class ChatHistoryManager {
                     if (perfEnd > perfStart) {
                         String perfContent = bodyContent.substring(perfStart + 13, perfEnd).trim();
                         item.setPerformanceText(perfContent);
+                        // Remove tag but DON'T trim intermediate results to avoid index confusion
                         bodyContent = bodyContent.substring(0, perfStart) + bodyContent.substring(perfEnd + 14);
                     }
                 }
+                
+                // DO NOT parse tool_call or other tags here!
+                // CollapsibleTextParser will handle all tag parsing during rendering
+                // Just extract images and audio, keep all text tags intact
                 
                 // 剩余的是正文内容和图片
                 // 提取图片（如果有，Diffusion生成的图片）
@@ -604,6 +641,8 @@ public class ChatHistoryManager {
                     }
                 }
                 
+                // Keep all remaining text as-is (including <tool_call>, Step X:, etc.)
+                // CollapsibleTextParser will handle tag parsing during rendering
                 String mainContent = bodyContent.trim();
                 item.text = mainContent;
                 item.setDisplayText(mainContent);

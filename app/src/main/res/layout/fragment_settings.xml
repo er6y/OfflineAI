@@ -927,8 +927,8 @@
                 android:layout_weight="1"
                 android:layout_marginStart="0dp"
                 android:layout_marginEnd="0dp"
-                android:max="7"
-                android:progress="3" />
+                android:max="8"
+                android:progress="8" />
 
             <TextView
                 android:id="@+id/textViewImagePreprocessSizeValue"
@@ -1385,6 +1385,72 @@
                 android:textSize="14sp"
                 android:gravity="center"
                 android:layout_marginStart="0dp" />
+        </LinearLayout>
+
+        <!-- 代理设置 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_category_agent"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Agent动作格式选择 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_agent_action_format"
+                android:textSize="16sp" />
+
+            <Spinner
+                android:id="@+id/spinnerAgentActionFormat"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1" />
+        </LinearLayout>
+
+        <!-- Agent经验总结开关 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="16dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/label_agent_experience_summary"
+                    android:textSize="16sp" />
+
+                <Switch
+                    android:id="@+id/switchAgentExperienceSummary"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/agent_experience_summary_hint"
+                android:textSize="12sp"
+                android:textColor="?android:attr/textColorSecondary"
+                android:layout_marginTop="4dp" />
         </LinearLayout>
 
         <!-- 全局设置 -->

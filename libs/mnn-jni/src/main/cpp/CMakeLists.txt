@@ -127,6 +127,11 @@ include_directories(
 # Add nlohmann/json
 include_directories(${MNN_ROOT}/3rd_party/nlohmann)
 
+# Add OpenCV (required for diffusion)
+if(MNN_BUILD_DIFFUSION)
+    include_directories(${MNN_ROOT}/tools/cv/include)
+endif()
+
 # ========== Source Files ==========
 set(JNI_SOURCES
     mnn_jni.cpp

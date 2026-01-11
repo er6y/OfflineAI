@@ -507,8 +507,9 @@ object ChatViewHolders {
         private fun updateCollapsibleSections(data: ChatDataItem) {
             // Update thinking section (controlled by static switch)
             val thinkingHeaderBase = itemView.context.getString(com.example.offlineai.R.string.collapsible_thinking)
+            val thinkingHasContent = showThinkingEnabled && !TextUtils.isEmpty(data.thinkingText)
             updateSection(
-                hasContent = showThinkingEnabled && !TextUtils.isEmpty(data.thinkingText),
+                hasContent = thinkingHasContent,
                 isExpanded = data.showThinking,
                 toggleView = thinkingToggle,
                 containerView = thinkingContainer,

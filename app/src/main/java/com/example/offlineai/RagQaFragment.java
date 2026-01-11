@@ -70,6 +70,7 @@ import com.example.offlineai.ipc.LocalLlmAdapter;
 import com.example.offlineai.ipc.InferenceClient;
 import com.example.offlineai.ipc.TtsAdapter;
 import com.example.offlineai.ApiUrlAdapter;
+import com.example.offlineai.agent.AgentManager;
 // Removed: import com.example.offlineai.RerankerHandler; - Now handled by RagQueryManager
 import com.example.offlineai.AppConstants;
 import com.example.offlineai.StateDisplayManager;
@@ -221,6 +222,12 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     private final AtomicBoolean useExternalTtsForCurrentQuery = new AtomicBoolean(false);
     private final AtomicBoolean useOmniTtsForCurrentQuery = new AtomicBoolean(false); // Track native Omni TTS usage for current query
     
+    // Agent related
+    private AgentManager agentManager;
+    private CheckBox checkBoxAgentMode;
+    private final AtomicBoolean isAgentEnabled = new AtomicBoolean(false);
+    private final AtomicBoolean isAgentExecuting = new AtomicBoolean(false);
+    
     // Audio compression state tracking (for ANR prevention)
     private final AtomicBoolean isUserAudioCompressing = new AtomicBoolean(false); // User audio compression in progress
     private final AtomicBoolean isAiAudioCompressing = new AtomicBoolean(false);   // AI audio compression in progress
@@ -229,6 +236,10 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     
     // ASR state tracking (to prevent premature resetSendingState)
     private final AtomicBoolean isAsrRunning = new AtomicBoolean(false); // ASR transcription in progress
+    
+    // Query completion tracking (to prevent premature UI collapse before polling finishes)
+    private volatile boolean queryCompleted = false; // LLM query completed, waiting for buffer polling to finish
+    private volatile long lastDataReadTime = 0; // Last time data was read from buffer (to ensure UI render time)
     
     // Audio decoding state tracking (for selected audio files)
     private final AtomicBoolean isAudioDecoding = new AtomicBoolean(false); // Audio decoding in progress
@@ -344,6 +355,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         spinnerRerankCount = view.findViewById(R.id.spinnerRerankCount); // Initialize rerank count spinner
         checkBoxThinkingMode = view.findViewById(R.id.checkBoxThinkingModeKey); // Initialize thinking mode checkbox
         checkBoxGraphRagMode = view.findViewById(R.id.checkBoxGraphRagMode);
+        checkBoxAgentMode = view.findViewById(R.id.checkBoxAgentMode); // Initialize Agent mode checkbox
         recyclerViewImageThumbnails = view.findViewById(R.id.recyclerViewImageThumbnails); // Initialize image thumbnail container
         textViewResponse = view.findViewById(R.id.textViewResponse); // Initialize response text view
         recyclerViewChat = view.findViewById(R.id.recyclerViewChat); // Initialize chat RecyclerView
@@ -514,9 +526,24 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 String selectedModel = parent.getItemAtPosition(position).toString();
+                
+                // Check if user clicked "➕ 新建模型"
+                if (selectedModel.equals(getString(R.string.common_add_custom_model))) {
+                    // Show dialog to add custom model
+                    showAddCustomModelDialog();
+                    return;
+                }
+                
                 if (!StateDisplayManager.isModelStatusDisplayText(requireContext(), selectedModel)) {
+                    // Save to global model name (for compatibility)
                     ConfigManager.setString(requireContext(), ConfigManager.KEY_MODEL_NAME, selectedModel);
-                    LogManager.logD(TAG, "Saved model name: " + selectedModel);
+                    
+                    // Save to current API's last used model
+                    String currentApiUrl = spinnerApiUrl.getSelectedItem().toString();
+                    String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), currentApiUrl);
+                    ConfigManager.setLastModelForApi(requireContext(), apiUrl, selectedModel);
+                    
+                    LogManager.logD(TAG, "Saved model name: " + selectedModel + " for API: " + apiUrl);
                 }
             }
 
@@ -661,6 +688,9 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         
         // Initialize main thread Handler
         mainHandler = new Handler(Looper.getMainLooper());
+        
+        // Initialize Agent Manager
+        initializeAgentManager();
         
         // Initialize TtsAdapter and set it to Manager
         ttsAdapter = TtsAdapter.getInstance(requireContext());
@@ -857,8 +887,9 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                         // resetSendingState() will be called from checkCompressionCompleteAndFinalize()
                         LogManager.logI(TAG, "[TTS] Omni TTS enabled for this query, deferring resetSendingState to audio compression finalization");
                     } else {
-                        // No TTS for this query, reset immediately
-                        resetSendingState();
+                        // No TTS for this query, mark query completed and let polling finish
+                        queryCompleted = true;
+                        LogManager.logI(TAG, "[STATE] Query completed, waiting for buffer polling to finish before reset");
                     }
 
                     // NOTE: Do NOT reload chat history here!
@@ -868,27 +899,6 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                     // loadChatHistory() should only be called when UI is recreated (e.g., after
                     // switching from background) and needs to restore state from persistent storage.
                     LogManager.logD(TAG, "[QUERY_COMPLETE] Skipping loadChatHistory - in-memory data is authoritative");
-                }
-
-                @Override
-                public void onStreamingData(String chunk) {
-                    // NOTE: This callback is NO LONGER used for UI updates!
-                    // UI updates are now handled by pollBufferAndUpdateUi() which polls
-                    // the buffer every 200ms. This ensures a single source of truth
-                    // and proper handling of UI reconstruction.
-                    //
-                    // This callback is kept for diagnostic logging only.
-                    if (chunk != null && (chunk.contains("<debug>") ||
-                            chunk.contains("</debug>") ||
-                            chunk.contains("[TEXT:]") ||
-                            chunk.contains("[IMAGE:]") ||
-                            chunk.contains("[AUDIO:]") )) {
-                        String preview = chunk;
-                        if (preview.length() > 120) {
-                            preview = preview.substring(0, 120) + "...";
-                        }
-                        LogManager.logD(TAG, "[FRAG][STREAM] Received chunk with marker, preview=" + preview);
-                    }
                 }
 
                 @Override
@@ -969,23 +979,22 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
 
                 /**
                  * Notification from Manager that a query has started.
-                 * Fragment only saves taskId for UI state tracking - NO flow control here.
-                 * All pipeline logic is in Manager.
                  */
                 @Override
                 public void onQueryStarted(@NonNull String taskId) {
-                    LogManager.logI(TAG, "[EXECUTOR] onQueryStarted - taskId=" + taskId);
+                    LogManager.logI(TAG, "[MGR][QUERY_STARTED] taskId=" + taskId);
+                    llmTaskId = taskId;
                     
-                    // Initialize per-query TTS flags based on current config
-                    try {
-                        String ttsModel = ConfigManager.getString(getContext(), ConfigManager.KEY_TTS_MODEL, "无");
-                        boolean isOmni = "原生(Omni)".equals(ttsModel);
-                        useOmniTtsForCurrentQuery.set(isOmni);
-                        LogManager.logD(TAG, "[TTS] Query started, useOmniTts=" + isOmni + ", model=" + ttsModel);
-                    } catch (Exception e) {
-                        LogManager.logE(TAG, "[TTS] Failed to read TTS model for query start", e);
-                        useOmniTtsForCurrentQuery.set(false);
-                    }
+                    // CRITICAL: Reset queryCompleted flag for new query
+                    // In Agent mode, multiple queries share the same Fragment instance
+                    // Previous query's queryCompleted=true would cause next query's polling to stop prematurely
+                    queryCompleted = false;
+                    lastDataReadTime = 0;
+                    LogManager.logI(TAG, "[QUERY_STARTED] Reset queryCompleted=false for new query");
+                    
+                    // Reset Omni TTS flag for new query
+                    // Will be set to true by LocalLLMMNNHandler if talker.mnn exists
+                    useOmniTtsForCurrentQuery.set(false);
                     
                     // Initialize UI state
                     initializeSendingState();
@@ -994,6 +1003,13 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                     llmTaskId = taskId;
                     // Reset UI read position for new task
                     uiBufferReadPos = -1;
+                    
+                    // CRITICAL: Start buffer polling loop for this query
+                    // This ensures UI can read streaming data from buffer
+                    // Must be called here because onResume() is only triggered once when Fragment is created
+                    // Subsequent queries won't trigger onResume(), so polling must be started here
+                    startBufferPollLoop();
+                    LogManager.logI(TAG, "[EXECUTOR] Started buffer polling loop for new query");
                     
                     // Bind to foreground service for task tracking
                     try {
@@ -1017,14 +1033,19 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 public void onRequestEndInferenceForeground() {
                     leaveInferenceForegroundSession();
                 }
-
+                
+                @Override
+                public void onAgentActionDetected(String fullResponse) {
+                    // Agent loop is now started directly when user sends message in Agent mode
+                    // No need to trigger from streaming output
+                    LogManager.logD(TAG, "[AGENT] onAgentActionDetected called but ignored (using loop mode)");
+                }
+                
                 @Override
                 public void onAsrStateChanged(boolean isRunning) {
-                    isAsrRunning.set(isRunning);
-                    LogManager.logD(TAG, "[ASR] State changed: isRunning=" + isRunning);
+                    LogManager.logD(TAG, "[ASR] ASR state changed: " + (isRunning ? "running" : "completed"));
                 }
-
-                // REMOVED: onRequestCallLlm - LLM calls are now handled directly by RagQueryManager
+                
             });
         
         // Set TtsAdapter to Manager after callback is set (Manager is now initialized)
@@ -1264,8 +1285,17 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             if (checkBoxGraphRagMode != null) {
                 checkBoxGraphRagMode.setChecked(graphRagEnabled);
             }
+            
+            // Load Agent mode setting
+            boolean agentModeEnabled = ConfigManager.getBoolean(requireContext(), ConfigManager.KEY_AGENT_MODE_ENABLED, false);
+            isAgentEnabled.set(agentModeEnabled);
+            if (checkBoxAgentMode != null) {
+                checkBoxAgentMode.setChecked(agentModeEnabled);
+            }
+            
             LogManager.logD(TAG, "Loaded thinking mode setting: " + (!noThinking ? "enabled" : "disabled"));
             LogManager.logD(TAG, "Loaded Graph RAG mode setting: " + (graphRagEnabled ? "enabled" : "disabled"));
+            LogManager.logD(TAG, "Loaded Agent mode setting: " + (agentModeEnabled ? "enabled" : "disabled"));
             isUpdatingUiFromConfig = false;
             
             // Update initial display based on API URL (show API Key or Backend Preference)
@@ -1408,7 +1438,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
      */
     private void ensureAssistantPlaceholderForReplay() {
         if (chatMessages == null || chatAdapter == null) {
-            LogManager.logW(TAG, "[FG][REPLAY] Cannot ensure placeholder: chatMessages or adapter is null");
+            LogManager.logW(TAG, "[PLACEHOLDER][ERROR] Cannot ensure placeholder: chatMessages=" + (chatMessages != null) + ", adapter=" + (chatAdapter != null));
             return;
         }
         
@@ -1416,21 +1446,14 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         if (!chatMessages.isEmpty()) {
             ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
             if (lastMsg.getType() == ChatViewHolders.ASSISTANT) {
-                LogManager.logD(TAG, "[FG][REPLAY] Assistant placeholder already exists, lastMsg.text.len=" + 
-                    (lastMsg.text != null ? lastMsg.text.length() : 0));
                 return;
             }
         }
         
         // Create new assistant placeholder for streaming content
-        LogManager.logI(TAG, "[FG][REPLAY] Creating assistant placeholder for replay (chatMessages.size=" + 
-            chatMessages.size() + ", lastMsgType=" + 
-            (chatMessages.isEmpty() ? "empty" : chatMessages.get(chatMessages.size() - 1).getType()) + ")");
-        
-        ChatDataItem aiMsg = new ChatDataItem(ChatViewHolders.ASSISTANT);
-        aiMsg.setLoading(true);  // Show loading indicator
-        aiMsg.text = "";  // Start with empty text, will be filled by replay
-        chatMessages.add(aiMsg);
+        ChatDataItem placeholder = new ChatDataItem(ChatViewHolders.ASSISTANT);
+        placeholder.setLoading(true);
+        chatMessages.add(placeholder);
         
         // Notify adapter on UI thread
         if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -1443,14 +1466,17 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             });
         }
     }
-    
-    // Load API URL list, including custom URLs from configuration
+
+
+    // ...
+
     private void loadApiUrlList() {
         LogManager.logD(TAG, "Starting to load API URL list");
         
         // Merge predefined and custom API URL lists
         List<String> apiUrlsList = new ArrayList<>();
         
+        // ...
         // Add "New..." option as the first item
         apiUrlsList.add(StateDisplayManager.getApiUrlDisplayText(requireContext(), AppConstants.API_URL_NEW));
         
@@ -1773,42 +1799,18 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             String systemPrompt = editTextSystemPrompt.getText().toString();
             String userPrompt = editTextUserPrompt.getText().toString();
             
-            LogManager.logI(TAG, "[SEND][CLICK] Enter handleSendStopClick - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
-            LogManager.logD(TAG, "[SEND][PARAM] apiUrl=" + apiUrl + ", model=" + model + ", kb=" + knowledgeBase + ", sys.len=" + (systemPrompt==null?0:systemPrompt.length()) + ", user.len=" + (userPrompt==null?0:userPrompt.length()) + ", apiKey.len=" + (apiKey==null?0:apiKey.length()));
-            LogManager.logD(TAG, "User clicked send button, preparing to send request");
-            LogManager.logD(TAG, "Request parameters: API URL=" + apiUrl + ", Model=" + model + ", Knowledge Base=" + knowledgeBase);
+            LogManager.logI(TAG, "[SEND] User clicked send - model=" + model + ", kb=" + knowledgeBase);
             // Debug snapshot at send click (English log)
             try {
                 boolean ui_isSending = isSending.get();
                 boolean ui_isTaskRunning = isTaskRunning;
                 boolean ui_isTaskCancelled = isTaskCancelled;
-                boolean ui_globalStopFlag = globalStopFlag;
-                boolean ui_globalStopRequested = userRequestedStop;
-                String ragFutureState = (ragTaskFuture == null ? "null" : (ragTaskFuture.isDone() ? "done" : "not_done"));
-                Thread uiThread = Thread.currentThread();
-
-                // Query status from inference process via IPC (not main process singleton)
-                com.example.offlineai.ipc.InferenceClient inferenceClient = com.example.offlineai.ipc.InferenceClient.getInstance(requireContext());
-                com.example.offlineai.ipc.ServiceStatus status = inferenceClient.safeGetStatus();
-                String modelState = status.modelState;
-                boolean llmBusy = status.llmBusy;
-                boolean llmRunning = status.llmRunning;
+                String modelState = "";
+                boolean llmBusy = false;
+                boolean llmRunning = false;
                 boolean llmShouldStop = false; // Stop flag is managed in child process now
 
-                LogManager.logI(
-                        TAG,
-                        "[SNAPSHOT][SEND] isSending=" + ui_isSending
-                            + ", isTaskRunning=" + ui_isTaskRunning
-                            + ", isTaskCancelled=" + ui_isTaskCancelled
-                            + ", globalStopFlag=" + ui_globalStopFlag
-                            + ", GlobalStopManager=" + ui_globalStopRequested
-                            + ", ragTaskFuture=" + ragFutureState
-                            + ", modelState=" + modelState
-                            + ", llmBusy=" + llmBusy
-                            + ", llmRunning=" + llmRunning
-                            + ", llmShouldStop=" + llmShouldStop
-                            + ", uiThread=" + uiThread.getName()
-                    );
+                // State snapshot removed - too verbose    );
             } catch (Throwable th) {
                 LogManager.logE(TAG, "Error collecting send-click snapshot", th);
             }
@@ -1867,7 +1869,6 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         }
 
         // Save current configuration
-        LogManager.logD(TAG, "[SEND] Persisting configuration selection to storage");
         saveConfig();
         
         // Update button state (isSending has already been set to true in compareAndSet)
@@ -1914,28 +1915,56 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             }
         }
 
-        if (ragQueryManager != null) {
-            RagQueryManager.QueryRequest request = new RagQueryManager.QueryRequest(
-                    apiUrl,
-                    apiKey,
-                    model,
-                    knowledgeBase,
-                    systemPrompt,
-                    userPrompt,
-                    userInput.imagePaths,
-                    userInput.audioPaths,
-                    userInput.audioDuration,
-                    searchDepth,
-                    graphRagEnabled,
-                    needsAsr,
-                    asrModel
-            );
-            LogManager.logI(TAG, "[SEND] Delegating query execution to RagQueryManager.startQuery");
-            ragQueryManager.startQuery(request);
-        } else {
+        // CRITICAL: Both Agent mode and Normal mode need to call startQuery to create llmTaskId and enable polling
+        // Agent mode adds autonomous loop execution on top of normal LLM query
+        if (ragQueryManager == null) {
             LogManager.logE(TAG, "[SEND] ragQueryManager is null, manager-driven pipeline is required; aborting send");
             restoreSendStateAfterValidationFailure("ragQueryManager is null");
             return;
+        }
+        
+        // Create query request (used by both Agent and Normal mode)
+        RagQueryManager.QueryRequest request = new RagQueryManager.QueryRequest(
+                apiUrl,
+                apiKey,
+                model,
+                knowledgeBase,
+                systemPrompt,
+                userPrompt,
+                userInput.imagePaths,
+                userInput.audioPaths,
+                userInput.audioDuration,
+                searchDepth,
+                graphRagEnabled,
+                needsAsr,
+                asrModel
+        );
+        
+        // CRITICAL: Agent mode vs Normal mode branching
+        if (isAgentEnabled.get()) {
+            // Agent mode: Skip normal LLM query, directly start Agent loop
+            LogManager.logI(TAG, "[AGENT] Agent mode enabled, skipping normal query and starting Agent loop");
+            
+            if (agentManager == null) {
+                LogManager.logE(TAG, "[AGENT] agentManager is null, falling back to normal query");
+                Toast.makeText(requireContext(), "Agent未初始化，执行普通查询", Toast.LENGTH_SHORT).show();
+                ragQueryManager.startQuery(request);
+            } else {
+                // Save task goal for Agent
+                lastUserPrompt = userPrompt;
+                
+                // Initialize UI state for Agent execution
+                initializeSendingState();
+                
+                // Start Agent loop (will handle LLM calls with proper Agent system prompt)
+                agentManager.startAgentLoop(userPrompt, ragQueryManager);
+                
+                LogManager.logI(TAG, "[AGENT] Agent loop started, task: " + userPrompt);
+            }
+        } else {
+            // Normal mode: Start LLM query (creates llmTaskId, registers callbacks, enables polling)
+            LogManager.logI(TAG, "[SEND] Normal mode, delegating query execution to RagQueryManager.startQuery");
+            ragQueryManager.startQuery(request);
         }
 
         } else if (isSending.get()) {
@@ -2032,7 +2061,12 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
      * [Fix] Only reset global stop flag after confirming all tasks have truly stopped
      */
     private void resetSendingState() {
-        LogManager.logI(TAG, "[STATE] resetSendingState enter - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isSending=" + isSending.get() + ", isTaskRunning=" + isTaskRunning + ", isTaskCancelled=" + isTaskCancelled + ", globalStopFlag=" + globalStopFlag);
+        LogManager.logI(TAG, "[RESET_STATE][ENTER] thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis() + ", isSending=" + isSending.get() + ", isTaskRunning=" + isTaskRunning + ", isTaskCancelled=" + isTaskCancelled + ", globalStopFlag=" + globalStopFlag + ", queryCompleted=" + queryCompleted);
+        
+        // Reset queryCompleted flag
+        queryCompleted = false;
+        lastDataReadTime = 0;
+        LogManager.logI(TAG, "[RESET_STATE][FLAGS] Reset queryCompleted=false, lastDataReadTime=0");
         
         // NOTE: For local models (LLM/Diffusion), history is persisted by manager/handler
         // via appendAssistantTextMessage/appendAssistantImageMessage. Fragment only reloads.
@@ -2042,9 +2076,10 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         
         // Check if TTS is still generating
         if (isTtsGenerating.get()) {
-            LogManager.logW(TAG, "[STATE] TTS is still generating, conversation saved but state reset deferred");
+            LogManager.logW(TAG, "[RESET_STATE][DEFER] TTS is still generating, conversation saved but state reset deferred");
             return;
         }
+        LogManager.logD(TAG, "[RESET_STATE][TTS] TTS not generating, continuing with reset");
         
         // Finalize LLM background task before clearing flags
         if (llmTaskId != null) {
@@ -2085,21 +2120,31 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             LogManager.logD(TAG, "Cleared ragTaskFuture reference");
         }
         
+        LogManager.logI(TAG, "[RESET_STATE][BEFORE] isSending=" + isSending.get() + ", isTaskRunning=" + isTaskRunning);
         isSending.set(false); // Use atomic operation to reset sending state
+        LogManager.logI(TAG, "[RESET_STATE][AFTER] isSending=" + isSending.get());
         
         // Clear media thumbnails after successful send
         if (mediaThumbnailAdapter != null && mediaThumbnailAdapter.getMediaCount() > 0) {
             mainHandler.post(() -> {
                 mediaThumbnailAdapter.clearMedia();
                 recyclerViewImageThumbnails.setVisibility(View.GONE);
-                LogManager.logD(TAG, "Cleared media thumbnails after send");
+                LogManager.logD(TAG, "[RESET_STATE][UI] Cleared media thumbnails after send");
             });
         }
         
         // Auto-collapse collapsible sections after streaming completes
+        // Note: Parsing is already done in performUpdateChatMessage during streaming
+        // Here we only need to collapse the sections (fold, not hide)
+        // Section visibility is controlled by ChatViewHolders.AssistantViewHolder static flags:
+        // - showDebugEnabled, showThinkingEnabled, showPerformanceEnabled
+        // These flags are set from ConfigManager in onViewCreated()
         if (!chatMessages.isEmpty()) {
             ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
             if (lastMsg.getType() == ChatViewHolders.ASSISTANT) {
+                LogManager.logD(TAG, "[RESET_STATE][UI] Collapsing assistant message sections, isLoading=" + lastMsg.getLoading());
+                
+                // Collapse sections (fold, not hide)
                 lastMsg.setShowDebug(false);
                 lastMsg.setShowThinking(false);
                 lastMsg.setShowPerformance(false);
@@ -2122,20 +2167,27 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         }
         
         // Update button state on UI thread, add Fragment lifecycle check
-        if (mainHandler != null && buttonSendStop != null) {
+        LogManager.logD(TAG, "[RESET_STATE][UI] Posting updateButtonText and clearKeepScreenOn to main thread");
+        if (mainHandler != null) {
             mainHandler.post(() -> {
-                // Check if Fragment is still attached to Activity
-                if (getActivity() == null || !isAdded() || isDetached()) {
-                    LogManager.logW(TAG, "Cannot reset sending state, Fragment not attached to Activity");
-                    return;
+                if (getActivity() != null && isAdded() && !isDetached()) {
+                    LogManager.logD(TAG, "[RESET_STATE][UI] Executing updateButtonText");
+                    updateButtonText();
+                    LogManager.logD(TAG, "[RESET_STATE][UI] Executing enableKeepScreenOn(false)");
+                    enableKeepScreenOn(false);
+                } else {
+                    LogManager.logW(TAG, "[RESET_STATE][UI] Cannot update UI: activity=" + (getActivity() != null) + ", isAdded=" + isAdded() + ", isDetached=" + isDetached());
                 }
-
-                LogManager.logD(TAG, "[UI_TRACE] resetSendingState - before updateButtonText & leaveInferenceForegroundSession");
-                updateButtonText();
-                // End foreground inference session in unified foreground service when all tasks are done
                 ragQueryManager.requestEndInferenceForeground();
                 LogManager.logD(TAG, "[UI_TRACE] resetSendingState - after leaveInferenceForegroundSession");
             });
+        }
+        
+        // CRITICAL: Mark buffer as persisted AFTER polling completes
+        // This ensures all streaming data has been read by UI before marking as persisted
+        if (ragQueryManager != null && llmTaskId != null && !llmTaskId.isEmpty()) {
+            ragQueryManager.markBufferAsPersisted(llmTaskId);
+            LogManager.logI(TAG, "[RESET_STATE][PERSIST] Marked buffer as persisted after polling complete, taskId=" + llmTaskId);
         }
     }
 
@@ -2408,25 +2460,47 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
      */
     private void pollBufferAndUpdateUi() {
         if (ragQueryManager == null || llmTaskId == null || llmTaskId.isEmpty()) {
+            // Skip polling if no active task (no log to avoid spam)
             return;
         }
+        
 
-        // First poll: initialize uiBufferReadPos from Manager's persistedPos
+        // First poll: initialize uiBufferReadPos to 0 (read all data for UI display)
+        // Note: persistedPos indicates data written to markdown, NOT data displayed in UI
         if (uiBufferReadPos < 0) {
-            uiBufferReadPos = ragQueryManager.getBufferPersistedPos(llmTaskId);
-            LogManager.logD(TAG, "[POLL] Initialized uiBufferReadPos=" + uiBufferReadPos);
+            uiBufferReadPos = 0;
+            LogManager.logI(TAG, "[POLL][INIT] Initialized uiBufferReadPos=0 (read all data for UI)");
         }
         
         // Read from our maintained position
         TaskLogBuffer.ReadResult result = ragQueryManager.readBufferFromPos(llmTaskId, uiBufferReadPos);
+        
+        // If no data to read
         if (result == null || !result.hasData()) {
+            // Check if query completed - if so, stop polling and reset
+            // BUT: ensure at least 1000ms (1 second) have passed since last data read
+            // This gives buffer enough time to collect all remaining data and UI enough time to render
+            if (queryCompleted) {
+                long timeSinceLastRead = System.currentTimeMillis() - lastDataReadTime;
+                if (lastDataReadTime == 0 || timeSinceLastRead >= 1000) {
+                    //LogManager.logI(TAG, "[POLL][STOP] Query completed and buffer fully read (waited " + timeSinceLastRead + "ms), stopping poll and resetting state");
+                    queryCompleted = false;
+                    lastDataReadTime = 0;
+                    stopBufferPollLoop();
+                    resetSendingState();
+                } else {
+                    // Only log once when waiting starts
+                    //if (timeSinceLastRead < 100) {
+                        //LogManager.logI(TAG, "[POLL][WAIT] Query completed, waiting for buffer collection (need 1000ms)");
+                    //}
+                }
+            }
             return;
         }
         
         // Update our read position for next poll
-        long oldPos = uiBufferReadPos;
         uiBufferReadPos = result.newReadPos;
-        LogManager.logD(TAG, "[POLL] Read " + result.data.length() + " chars, pos " + oldPos + " -> " + uiBufferReadPos);
+        lastDataReadTime = System.currentTimeMillis(); // Record data read time
 
         // Ensure assistant placeholder exists before updating
         ensureAssistantPlaceholderForReplay();
@@ -2434,10 +2508,12 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         // Split data into lines and update UI
         String data = result.data;
         int start = 0;
+        int lineCount = 0;
         for (int i = 0; i < data.length(); i++) {
             if (data.charAt(i) == '\n') {
                 String line = data.substring(start, i + 1);
                 if (!line.isEmpty()) {
+                    lineCount++;
                     performUpdateChatMessage(line);
                 }
                 start = i + 1;
@@ -2447,6 +2523,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         if (start < data.length()) {
             String line = data.substring(start);
             if (!line.isEmpty()) {
+                lineCount++;
                 performUpdateChatMessage(line);
             }
         }
@@ -3180,6 +3257,58 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     }
     
     /**
+     * Show dialog for adding custom model name
+     */
+    private void showAddCustomModelDialog() {
+        if (!isAdded() || getContext() == null) return;
+        
+        String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
+        String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
+        
+        android.app.AlertDialog.Builder builder = new android.app.AlertDialog.Builder(requireContext());
+        builder.setTitle(R.string.dialog_title_add_custom_model);
+        builder.setMessage(R.string.dialog_message_add_custom_model);
+        
+        final android.widget.EditText input = new android.widget.EditText(requireContext());
+        input.setHint(R.string.hint_enter_model_name);
+        builder.setView(input);
+        
+        builder.setPositiveButton(android.R.string.ok, (dialog, which) -> {
+            String modelName = input.getText().toString().trim();
+            if (modelName.isEmpty()) {
+                Toast.makeText(requireContext(), R.string.toast_model_name_empty, Toast.LENGTH_SHORT).show();
+                return;
+            }
+            
+            // Check if model already exists
+            List<String> customModels = ConfigManager.getCustomModels(requireContext(), apiUrl);
+            if (customModels.contains(modelName)) {
+                Toast.makeText(requireContext(), getString(R.string.toast_model_already_exists, modelName), Toast.LENGTH_SHORT).show();
+                return;
+            }
+            
+            // Add custom model
+            boolean success = ConfigManager.addCustomModel(requireContext(), apiUrl, modelName);
+            if (success) {
+                Toast.makeText(requireContext(), getString(R.string.toast_model_added_success, modelName), Toast.LENGTH_SHORT).show();
+                LogManager.logD(TAG, "Custom model added: " + modelName + " for API: " + apiUrl);
+                
+                // Refresh model list
+                fetchModelsForApi();
+                
+                // Select the newly added model
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+                    setSpinnerSelection(spinnerApiModel, modelName);
+                }, 100);
+            }
+        });
+        
+        builder.setNegativeButton(android.R.string.cancel, null);
+        
+        builder.show();
+    }
+    
+    /**
      * Try to fetch models with a specific auth method, and try next method if it fails
      */
     private void tryFetchModelsWithAuth(String modelsUrl, String apiUrl, String apiKey, 
@@ -3187,24 +3316,42 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         
         Map<String, String> headers = com.example.offlineai.api.AuthMethodCache.getAuthHeaders(apiKey, authMethod);
         
+        LogManager.logD(TAG, "Fetching models from: " + modelsUrl + " with auth method: " + authMethod);
+        
         JsonObjectRequest request = new JsonObjectRequest(Request.Method.GET, modelsUrl, null,
                 response -> {
                     try {
                         JSONArray data = response.getJSONArray("data");
-                        List<String> modelsList = new ArrayList<>();
+                        List<String> apiModelsList = new ArrayList<>();
                         for (int i = 0; i < data.length(); i++) {
                             JSONObject model = data.getJSONObject(i);
-                            modelsList.add(model.getString("id"));
+                            apiModelsList.add(model.getString("id"));
                         }
                         
                         // Success! Cache this auth method
                         com.example.offlineai.api.AuthMethodCache.cacheMethod(requireContext(), apiUrl, authMethod);
                         LogManager.logD(TAG, "Auth method " + authMethod + " succeeded, cached for " + apiUrl);
+                        LogManager.logI(TAG, "API returned " + apiModelsList.size() + " models: " + apiModelsList);
                         
-                        if (modelsList.isEmpty()) {
+                        // Get user-defined custom models for this API
+                        List<String> customModels = ConfigManager.getCustomModels(requireContext(), apiUrl);
+                        
+                        // Merge: custom models first, then API models (avoid duplicates)
+                        List<String> mergedModels = new ArrayList<>(customModels);
+                        for (String apiModel : apiModelsList) {
+                            if (!mergedModels.contains(apiModel)) {
+                                mergedModels.add(apiModel);
+                            }
+                        }
+                        
+                        // Add "➕ 新建模型" option at the end
+                        mergedModels.add(getString(R.string.common_add_custom_model));
+                        
+                        if (mergedModels.size() == 1) {
+                            // Only "➕ 新建模型" option, show no available models
                             setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_NO_AVAILABLE)});
                         } else {
-                            setupSpinner(spinnerApiModel, modelsList.toArray(new String[0]));
+                            setupSpinner(spinnerApiModel, mergedModels.toArray(new String[0]));
                             if (!savedModelName.isEmpty()) {
                                 setSpinnerSelection(spinnerApiModel, savedModelName);
                             }
@@ -3215,7 +3362,22 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                     }
                 },
                 error -> {
-                    LogManager.logW(TAG, "Auth method " + authMethod + " failed: " + error.getMessage());
+                    // Log detailed error information
+                    String errorMsg = "Auth method " + authMethod + " failed for " + modelsUrl;
+                    if (error.networkResponse != null) {
+                        errorMsg += ", HTTP " + error.networkResponse.statusCode;
+                        if (error.networkResponse.data != null) {
+                            try {
+                                String responseBody = new String(error.networkResponse.data, "UTF-8");
+                                errorMsg += ", Response: " + responseBody;
+                            } catch (Exception e) {
+                                errorMsg += ", Response parse error: " + e.getMessage();
+                            }
+                        }
+                    } else {
+                        errorMsg += ", Error: " + error.getMessage();
+                    }
+                    LogManager.logW(TAG, errorMsg);
                     
                     if (tryNextOnFail) {
                         // Try next auth method
@@ -3228,9 +3390,34 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                         }
                     }
                     
-                    // All methods failed or not trying next - show manual input option
+                    // All methods failed - use saved model name or custom models, don't show dialog
                     LogManager.logE(TAG, "All auth methods failed for " + apiUrl);
-                    showManualModelInputDialog(apiUrl, savedModelName);
+                    
+                    // Get user-defined custom models for this API
+                    List<String> customModels = ConfigManager.getCustomModels(requireContext(), apiUrl);
+                    
+                    // If we have a saved model name and it's not a status text, add it to the list
+                    if (!savedModelName.isEmpty() && !savedModelName.startsWith("[")) {
+                        if (!customModels.contains(savedModelName)) {
+                            customModels.add(0, savedModelName);  // Add saved model at the beginning
+                        }
+                    }
+                    
+                    // Add "➕ 新建模型" option at the end
+                    customModels.add(getString(R.string.common_add_custom_model));
+                    
+                    if (customModels.size() == 1) {
+                        // Only "➕ 新建模型" option, show fetch failed status
+                        setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_FETCH_FAILED)});
+                        LogManager.logW(TAG, "No saved model or custom models for " + apiUrl);
+                    } else {
+                        // Show saved model and custom models
+                        setupSpinner(spinnerApiModel, customModels.toArray(new String[0]));
+                        if (!savedModelName.isEmpty()) {
+                            setSpinnerSelection(spinnerApiModel, savedModelName);
+                        }
+                        LogManager.logI(TAG, "Using saved/custom models for " + apiUrl + ": " + customModels.size() + " models");
+                    }
                 }) {
             @Override
             public Map<String, String> getHeaders() {
@@ -3249,8 +3436,15 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
         String apiKey = editTextApiKey.getText().toString();
         
-        // Get currently saved model name for restoring selection
-        String savedModelName = ConfigManager.getString(requireContext(), ConfigManager.KEY_MODEL_NAME, "");
+        // Get saved model name for restoring selection
+        // Priority: 1. Current API's last used model, 2. Global model name
+        String savedModelName = ConfigManager.getLastModelForApi(requireContext(), apiUrl);
+        if (savedModelName.isEmpty()) {
+            savedModelName = ConfigManager.getString(requireContext(), ConfigManager.KEY_MODEL_NAME, "");
+            LogManager.logD(TAG, "No last model for API " + apiUrl + ", using global: " + savedModelName);
+        } else {
+            LogManager.logD(TAG, "Using last model for API " + apiUrl + ": " + savedModelName);
+        }
         
         // Show loading state
         setupSpinner(spinnerApiModel, new String[]{StateDisplayManager.getModelStatusDisplayText(requireContext(), AppConstants.MODEL_STATUS_LOADING)});
@@ -3945,17 +4139,6 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             LogManager.logE(TAG, "Failed to share image", e);
         }
     }
-    
-    /**
-     * Get current model name for chat UI
-     */
-    private String getCurrentModelName() {
-        if (spinnerApiModel != null && spinnerApiModel.getSelectedItem() != null) {
-            return spinnerApiModel.getSelectedItem().toString();
-        }
-        return "Unknown Model";
-    }
-    
     /**
      * Get current time for chat UI
      */
@@ -4007,13 +4190,13 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     private void performUpdateChatMessage(String chunk) {
         try {
             if (chatMessages.isEmpty()) {
-                LogManager.logW(TAG, "No chat messages to update");
+                LogManager.logW(TAG, "[UPDATE_MSG][ERROR] No chat messages to update");
                 return;
             }
             
             ChatDataItem lastMsg = chatMessages.get(chatMessages.size() - 1);
             if (lastMsg.getType() != ChatViewHolders.ASSISTANT) {
-                LogManager.logW(TAG, "Last message is not assistant type");
+                LogManager.logW(TAG, "[UPDATE_MSG][ERROR] Last message is not assistant type, actual type=" + lastMsg.getType());
                 return;
             }
             
@@ -4070,19 +4253,10 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             
             lastMsg.text = newText;
 
-            // Debug trace before parsing collapsible sections
-            LogManager.logI(TAG, "[DIFF_UI_TRACE] Before parse - hasImage="
-                    + (lastMsg.imageUri != null)
-                    + ", textLen=" + (newText != null ? newText.length() : 0));
-
-            // Parse collapsible sections
+            // Parse collapsible sections during streaming
+            // Even if tags are incomplete, partial parsing is better than no display
+            // This ensures debug/thinking/performance sections are visible during streaming
             CollapsibleTextParser.INSTANCE.parseAndPopulate(newText, lastMsg);
-
-            // Debug trace after parsing collapsible sections
-            LogManager.logI(TAG, "[DIFF_UI_TRACE] After parse - hasDebug="
-                    + (lastMsg.getDebugText() != null)
-                    + ", hasPerformance=" + (lastMsg.getPerformanceText() != null)
-                    + ", hasImage=" + (lastMsg.imageUri != null));
             
             lastMsg.setLoading(false);
             
@@ -4466,6 +4640,12 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     public void onDestroy() {
         super.onDestroy();
         
+        // Release Agent resources
+        if (agentManager != null) {
+            agentManager.release();
+            agentManager = null;
+        }
+        
         // Cleanup media cache (images and audio)
         // Note: Media files are saved to chat history folder, no separate cache cleanup needed
         
@@ -4831,22 +5011,20 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
         // Create new chat folder
         String newFolder = ChatHistoryManager.createNewChatFolder(getContext());
         if (newFolder == null) {
-            LogManager.logE(TAG, "[PREPARE_INPUT] Failed to create chat folder");
+            LogManager.logE(TAG, "Failed to create chat folder");
             Toast.makeText(requireContext(), "无法创建对话文件夹，请检查存储权限", Toast.LENGTH_SHORT).show();
             return null;
         }
         ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, newFolder);
         currentChatFolderPath = newFolder;
         chatFolderPath = newFolder;
-        LogManager.logI(TAG, "[PREPARE_INPUT] Created new chat folder: " + newFolder);
     } else {
         // Verify existing folder
         File existingFolder = new File(chatFolderPath);
         if (!existingFolder.exists()) {
-            LogManager.logW(TAG, "[PREPARE_INPUT] Chat folder doesn't exist, creating new one");
             String newFolder = ChatHistoryManager.createNewChatFolder(getContext());
             if (newFolder == null) {
-                LogManager.logE(TAG, "[PREPARE_INPUT] Failed to create chat folder");
+                LogManager.logE(TAG, "Failed to create chat folder");
                 return null;
             }
             ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, newFolder);
@@ -4900,8 +5078,6 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
                 mainHandler.post(() -> checkCompressionCompleteAndFinalize());
             }
         });
-        
-        LogManager.logI(TAG, "[PREPARE_INPUT] User audio compression started in background (duration: " + audioDuration + "s)");
     }
     
     // Process media from MediaThumbnailAdapter
@@ -4923,20 +5099,17 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
                     String imagePath = processImageToChatFolder(item.getOriginalUri(), chatFolderPath);
                     if (imagePath != null) {
                         imagePaths.add(imagePath);
-                        LogManager.logI(TAG, "[PREPARE_INPUT] Saved image: " + imagePath);
                     } else {
                         failedMediaCount++;
-                        LogManager.logE(TAG, "[PREPARE_INPUT] Failed to process image (returned null)");
+                        LogManager.logE(TAG, "Failed to process image");
                     }
                 } catch (Exception e) {
                     failedMediaCount++;
-                    LogManager.logE(TAG, "[PREPARE_INPUT] Error processing image", e);
+                    LogManager.logE(TAG, "Error processing image", e);
                 }
             } else if (item instanceof MediaThumbnailAdapter.AudioItem) {
                 // Audio already decoded and appended to user_voice.wav in handleAudioFileSelected()
-                // Mark that we have audio files (will compress cache WAV after loop)
                 hasAudioFiles = true;
-                LogManager.logI(TAG, "[PREPARE_INPUT] Audio file detected (already decoded to cache WAV)");
             }
         }
     }
@@ -4983,10 +5156,8 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
                     mainHandler.post(() -> checkCompressionCompleteAndFinalize());
                 }
             });
-            
-            LogManager.logI(TAG, "[PREPARE_INPUT] User audio compression started (duration: " + audioDuration + "s)");
         } else {
-            LogManager.logE(TAG, "[PREPARE_INPUT] Cache WAV not found!");
+            LogManager.logE(TAG, "Cache WAV not found!");
         }
     }
     
@@ -4999,12 +5170,11 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
                 String.format("%d/%d 个媒体文件保存失败", failed, total), 
                 Toast.LENGTH_LONG).show();
         });
-        LogManager.logW(TAG, String.format("[PREPARE_INPUT] %d/%d media files failed to process", failed, total));
     }
     
     // Step 3: Create UserInput structure
     UserInput userInput = new UserInput(textPrompt, imagePaths, audioPaths, audioDuration);
-    LogManager.logI(TAG, String.format("[PREPARE_INPUT] Created UserInput: text=%d chars, images=%d, audio=%d", 
+    LogManager.logI(TAG, String.format("User input prepared: text=%d, images=%d, audio=%d", 
         textPrompt.length(), imagePaths.size(), audioPaths.size()));
     
     // Step 4: Create user message and add to chat
@@ -5038,14 +5208,11 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
     // Immediately scroll to bottom when adding user message (no animation)
     recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
     userScrolledAway = false; // Reset flag for new message
-    LogManager.logI(TAG, "[PREPARE_INPUT] User message added to chat");
     
     // Step 5: Save to conversation.md immediately
     boolean saved = ChatHistoryManager.saveConversation(getContext(), chatMessages, chatFolderPath);
-    if (saved) {
-        LogManager.logI(TAG, "[PREPARE_INPUT] Conversation saved to markdown");
-    } else {
-        LogManager.logE(TAG, "[PREPARE_INPUT] Failed to save conversation to markdown");
+    if (!saved) {
+        LogManager.logE(TAG, "Failed to save conversation");
         // Warn user but don't fail the operation (message is already in UI)
         mainHandler.post(() -> {
             Toast.makeText(requireContext(), "对话历史保存失败，但消息已发送", Toast.LENGTH_LONG).show();
@@ -5059,7 +5226,6 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
             mediaThumbnailAdapter.clearMedia();
             recyclerViewImageThumbnails.setVisibility(View.GONE);
         }
-        LogManager.logI(TAG, "[PREPARE_INPUT] Cleared input fields and media thumbnails");
     });
     
     return userInput;
@@ -5585,6 +5751,226 @@ private static class UserInput {
             LogManager.logW(TAG, "[VOICE] Vibrator service is null");
         }
     }
+    
+    // ==================== Helper Methods ====================
+    
+    /**
+     * Get current selected model name from spinner
+     */
+    private String getCurrentModelName() {
+        if (spinnerApiModel != null && spinnerApiModel.getSelectedItem() != null) {
+            return spinnerApiModel.getSelectedItem().toString();
+        }
+        return "Unknown";
+    }
+    
+    // ==================== Agent Integration Methods ====================
+    
+    /**
+     * Initialize Agent Manager and set up callbacks
+     */
+    private void initializeAgentManager() {
+        try {
+            agentManager = AgentManager.getInstance(requireContext());
+            LogManager.logI(TAG, "[AGENT] AgentManager initialized");
+            
+            // Set Agent callback
+            agentManager.setCallback(new AgentManager.AgentCallback() {
+                @Override
+                public void onAgentActionDetected(String thinking, String actionType) {
+                    LogManager.logI(TAG, "[AGENT] Action detected: " + actionType);
+                    mainHandler.post(() -> {
+                        addSystemMessage("🤖 Agent: " + thinking);
+                        updateAgentExecutionState(true, "Executing: " + actionType);
+                    });
+                }
+                
+                @Override
+                public void onAgentActionCompleted(boolean success, String message) {
+                    LogManager.logI(TAG, "[AGENT] Action completed: " + message);
+                    mainHandler.post(() -> {
+                        addSystemMessage("✓ " + message);
+                    });
+                }
+                
+                @Override
+                public void onAgentError(String error) {
+                    LogManager.logE(TAG, "[AGENT] Error: " + error);
+                    mainHandler.post(() -> {
+                        Toast.makeText(requireContext(), error, Toast.LENGTH_SHORT).show();
+                        addSystemMessage("❌ Agent error: " + error);
+                        updateAgentExecutionState(false, "");
+                    });
+                }
+                
+                @Override
+                public void onAgentAnswer(String text) {
+                    LogManager.logI(TAG, "[AGENT] Final answer: " + text);
+                    mainHandler.post(() -> {
+                        addAssistantMessage(text);
+                        updateAgentExecutionState(false, "");
+                        resetSendingState();
+                    });
+                }
+                
+                @Override
+                public void onRequestAccessibilityPermission() {
+                    LogManager.logI(TAG, "[AGENT] Requesting accessibility permission");
+                    mainHandler.post(() -> {
+                        showAgentPermissionDialog();
+                    });
+                }
+            });
+            
+            // Set Agent checkbox listener
+            if (checkBoxAgentMode != null) {
+                checkBoxAgentMode.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                    if (isUpdatingUiFromConfig) {
+                        LogManager.logD(TAG, "[AGENT] Ignore checkbox change during config-driven UI update");
+                        return;
+                    }
+                    
+                    isAgentEnabled.set(isChecked);
+                    
+                    // Auto-manage history rounds: 0 for Agent mode, restore default when disabled
+                    if (isChecked) {
+                        // Save current history rounds before setting to 0
+                        int currentHistoryRounds = ConfigManager.getInt(requireContext(), ConfigManager.KEY_HISTORY_ROUNDS, 5);
+                        if (currentHistoryRounds != 0) {
+                            ConfigManager.setInt(requireContext(), "agent_saved_history_rounds", currentHistoryRounds);
+                            LogManager.logI(TAG, "[AGENT] Saved current history rounds: " + currentHistoryRounds);
+                        }
+                        // Set history rounds to 0 for Agent mode
+                        ConfigManager.setInt(requireContext(), ConfigManager.KEY_HISTORY_ROUNDS, 0);
+                        LogManager.logI(TAG, "[AGENT] Auto-set history rounds to 0 (Agent mode)");
+                    } else {
+                        // Restore saved history rounds
+                        int savedHistoryRounds = ConfigManager.getInt(requireContext(), "agent_saved_history_rounds", 5);
+                        ConfigManager.setInt(requireContext(), ConfigManager.KEY_HISTORY_ROUNDS, savedHistoryRounds);
+                        LogManager.logI(TAG, "[AGENT] Restored history rounds to: " + savedHistoryRounds);
+                    }
+                    
+                    // Save to ConfigManager
+                    ConfigManager.setBoolean(requireContext(), ConfigManager.KEY_AGENT_MODE_ENABLED, isChecked);
+                    LogManager.logI(TAG, "[AGENT] Agent mode " + (isChecked ? "enabled" : "disabled") + ", saved to config");
+                    
+                    if (isChecked && !agentManager.isAccessibilityServiceEnabled()) {
+                        // Show permission dialog
+                        showAgentPermissionDialog();
+                        // Uncheck the box since permission not granted
+                        checkBoxAgentMode.setChecked(false);
+                        isAgentEnabled.set(false);
+                        // Restore history rounds since Agent mode failed to enable
+                        int savedHistoryRounds = ConfigManager.getInt(requireContext(), "agent_saved_history_rounds", 5);
+                        ConfigManager.setInt(requireContext(), ConfigManager.KEY_HISTORY_ROUNDS, savedHistoryRounds);
+                        LogManager.logI(TAG, "[AGENT] Permission denied, restored history rounds to: " + savedHistoryRounds);
+                    }
+                });
+            }
+            
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[AGENT] Failed to initialize AgentManager: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
+     * Show Agent permission dialog to guide user to enable Accessibility Service
+     */
+    private void showAgentPermissionDialog() {
+        new AlertDialog.Builder(requireContext())
+            .setTitle(R.string.agent_permission_title)
+            .setMessage(R.string.agent_permission_message)
+            .setPositiveButton(R.string.agent_permission_confirm, (dialog, which) -> {
+                agentManager.openAccessibilitySettings();
+            })
+            .setNegativeButton(R.string.agent_permission_cancel, null)
+            .show();
+    }
+    
+    /**
+     * Update Agent execution state and UI
+     */
+    private void updateAgentExecutionState(boolean executing, String statusText) {
+        isAgentExecuting.set(executing);
+        
+        if (executing) {
+            // Update button text
+            buttonSendStop.setText(R.string.agent_executing);
+            LogManager.logI(TAG, "[AGENT] Execution state: " + statusText);
+        } else {
+            // Reset to normal state
+            if (!isSending.get()) {
+                buttonSendStop.setText(R.string.button_send);
+            }
+        }
+    }
+    
+    /**
+     * Add system message to chat (for Agent callbacks)
+     */
+    private void addSystemMessage(String message) {
+        LogManager.logI(TAG, "[AGENT] System message: " + message);
+        // Agent messages are shown via floating window, just log here
+    }
+    
+    /**
+     * Add assistant message to chat (for Agent callbacks)
+     */
+    private void addAssistantMessage(String message) {
+        LogManager.logI(TAG, "[AGENT] Assistant message: " + message);
+        // Agent answer will be shown via floating window, just log here
+    }
+    
+    /**
+     * Public API for Agent to add user message to chat UI
+     * Agent saves messages directly to conversation.md, but needs to update UI in real-time
+     * This method creates a ChatDataItem and adds it to chatMessages, just like prepareAndSaveUserInput does
+     * If Fragment is destroyed, it will fail silently (user will see message on next app launch)
+     */
+    public void addAgentUserMessageToChat(String text, String imagePath) {
+        try {
+            if (chatMessages == null || chatAdapter == null) {
+                LogManager.logW(TAG, "[AGENT_API] Fragment not ready, skip UI update");
+                return;
+            }
+            
+            // Create user message like prepareAndSaveUserInput does
+            ChatDataItem userMsg = new ChatDataItem(getCurrentTime(), ChatViewHolders.USER, text);
+            
+            // Set image if provided
+            if (imagePath != null && !imagePath.isEmpty()) {
+                File imageFile = new File(imagePath);
+                if (imageFile.exists()) {
+                    userMsg.imageUri = Uri.fromFile(imageFile);
+                    LogManager.logD(TAG, "[AGENT_API] Image attached: " + imagePath);
+                }
+            }
+            
+            // Add to chatMessages list
+            chatMessages.add(userMsg);
+            LogManager.logI(TAG, "[AGENT_API] Added Agent user message to chatMessages, total: " + chatMessages.size());
+            
+            // Notify adapter on main thread (same as prepareAndSaveUserInput)
+            if (getActivity() != null) {
+                getActivity().runOnUiThread(() -> {
+                    try {
+                        chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+                        // Scroll to bottom to show new message
+                        if (recyclerViewChat != null && !chatMessages.isEmpty()) {
+                            recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
+                        }
+                        LogManager.logI(TAG, "[AGENT_API] UI updated successfully");
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "[AGENT_API] Failed to update UI: " + e.getMessage());
+                    }
+                });
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[AGENT_API] Failed to add Agent message: " + e.getMessage());
+            // Fail silently - user will see message when they reopen app
+        }
+    }
+    
 }  // End of RagQaFragment class
 
 

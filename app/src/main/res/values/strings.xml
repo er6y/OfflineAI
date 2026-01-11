@@ -95,12 +95,16 @@
     <string name="common_unknown_operation">未知操作</string>
     <string name="common_unknown_file_type">未知文件类型</string>
     <string name="common_unknown_model">未知模型</string>
+    <string name="common_add_custom_model">➕ 新建模型</string>
     
-    <!-- MainActivity 生命周期日志 -->
-    <string name="main_activity_on_create">MainActivity 创建</string>
-    <string name="main_activity_on_destroy">MainActivity 销毁</string>
-    <string name="main_activity_on_pause">MainActivity 暂停</string>
-    <string name="main_activity_on_resume">MainActivity 恢复</string>
+    <!-- 自定义模型对话框 -->
+    <string name="dialog_title_add_custom_model">添加自定义模型</string>
+    <string name="dialog_message_add_custom_model">请输入模型名称（如：glm-4-plus）</string>
+    <string name="hint_enter_model_name">模型名称</string>
+    <string name="toast_model_name_empty">模型名称不能为空</string>
+    <string name="toast_model_added_success">模型已添加：%s</string>
+    <string name="toast_model_already_exists">模型已存在：%s</string>
+    
     <string name="main_activity_on_stop">MainActivity 停止</string>
     <string name="main_activity_on_start">MainActivity 启动</string>
     <string name="main_activity_on_restart">MainActivity 重新启动</string>
@@ -388,7 +392,6 @@
     <string name="hint_enter_question">在此输入您的问题...</string>
     <string name="hint_enter_api_url">输入API URL</string>
     <string name="hint_enter_api_key">输入API Key</string>
-    <string name="hint_enter_model_name">输入模型名称</string>
     <string name="hint_enter_kb_name">输入知识库名称</string>
     <string name="hint_enter_file_path">输入文件路径</string>
     <string name="hint_search">搜索...</string>
@@ -1266,4 +1269,30 @@
     <string name="graph_viewer_view_mode">查看模式</string>
     <string name="graph_viewer_mode_markdown">Markdown</string>
     <string name="graph_viewer_mode_graph">图形</string>
+    
+    <!-- Agent related strings -->
+    <string name="label_agent_mode">Agent</string>
+    <string name="agent_permission_title">开启Agent功能</string>
+    <string name="agent_permission_message">Agent功能需要无障碍服务权限才能自动操作手机。\n\n点击确定后将跳转到设置页面，请找到"离线AI"并开启无障碍服务。\n\n注意：无障碍服务仅用于Agent自动操作，不会收集任何隐私数据。</string>
+    <string name="agent_permission_confirm">去设置</string>
+    <string name="agent_permission_cancel">取消</string>
+    <string name="agent_service_not_enabled">Agent功能需要开启无障碍服务</string>
+    
+    <!-- Agent Settings -->
+    <string name="settings_category_agent">代理设置</string>
+    <string name="label_agent_action_format">动作格式</string>
+    <string name="agent_action_format_auto">自动</string>
+    <string name="agent_action_format_mai_ui">MAI-UI</string>
+    <string name="agent_action_format_autoglm">AutoGLM-Phone</string>
+    <string name="agent_action_format_doubao">Doubao-1.5-UI-TARS</string>
+    <string name="label_agent_experience_summary">总结经验</string>
+    <string name="agent_experience_summary_hint">任务完成后总结经验并可保存到知识库</string>
+    
+    <!-- Agent Experience Summary -->
+    <string name="agent_executing">Agent执行中</string>
+    <string name="agent_summarizing_experience">正在总结经验...</string>
+    <string name="agent_experience_ready">经验总结完成</string>
+    <string name="agent_save_experience">保存</string>
+    <string name="agent_experience_saved">经验已保存到AgentKB</string>
+    <string name="agent_experience_save_failed">保存经验失败</string>
 </resources>

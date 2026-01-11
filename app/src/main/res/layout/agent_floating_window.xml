@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content">
+
+    <!-- Expanded view -->
+    <LinearLayout
+        android:id="@+id/layoutExpanded"
+        android:layout_width="280dp"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@drawable/agent_floating_window_bg"
+        android:padding="12dp"
+        android:elevation="8dp">
+
+        <!-- Title bar -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="🤖 Agent Executing"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <ImageButton
+                android:id="@+id/buttonMinimize"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:background="@android:color/transparent"
+                android:src="@android:drawable/ic_menu_close_clear_cancel"
+                android:scaleType="centerInside"
+                android:contentDescription="Minimize" />
+        </LinearLayout>
+
+        <!-- Divider -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#40FFFFFF"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Task info -->
+        <TextView
+            android:id="@+id/textViewTask"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Task: Loading..."
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:maxLines="2"
+            android:ellipsize="end"
+            android:paddingBottom="4dp" />
+
+        <!-- Step info -->
+        <TextView
+            android:id="@+id/textViewStep"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Step: 0"
+            android:textColor="#CCFFFFFF"
+            android:textSize="11sp"
+            android:paddingBottom="4dp" />
+
+        <!-- Status -->
+        <TextView
+            android:id="@+id/textViewStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Status: Initializing..."
+            android:textColor="#99FFFFFF"
+            android:textSize="11sp"
+            android:paddingBottom="8dp" />
+
+        <TextView
+            android:id="@+id/textViewOutput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text=""
+            android:textColor="#99FFFFFF"
+            android:textSize="10sp"
+            android:maxLines="6"
+            android:ellipsize="end"
+            android:paddingBottom="8dp" />
+
+        <!-- Control buttons -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="end">
+
+            <Button
+                android:id="@+id/buttonSaveExperience"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:text="@string/agent_save_experience"
+                android:textSize="12sp"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:background="@drawable/agent_button_bg"
+                android:textColor="#FFFFFF"
+                android:visibility="gone"
+                android:layout_marginEnd="8dp" />
+
+            <ImageButton
+                android:id="@+id/buttonStop"
+                android:layout_width="48dp"
+                android:layout_height="32dp"
+                android:background="@drawable/agent_button_bg"
+                android:src="@drawable/ic_stop_square"
+                android:scaleType="centerInside"
+                android:contentDescription="Stop Agent" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Minimized view (floating ball) -->
+    <LinearLayout
+        android:id="@+id/layoutMinimized"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:orientation="vertical"
+        android:background="@drawable/agent_floating_ball_bg"
+        android:gravity="center"
+        android:elevation="8dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🤖"
+            android:textSize="24sp" />
+
+        <TextView
+            android:id="@+id/textViewMinimizedStep"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="0"
+            android:textColor="#FFFFFF"
+            android:textSize="10sp"
+            android:textStyle="bold" />
+    </LinearLayout>
+
+</FrameLayout>

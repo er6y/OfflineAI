@@ -803,51 +803,9 @@ public class KnowledgeNoteFragment extends Fragment {
                                     }
 
                                     if (!entities.isEmpty()) {
-                                        long entitiesStartTime = System.currentTimeMillis();
-
-                                        List<Long> entityIds = new ArrayList<>();
-                                        int aliasNormalizedCount = 0;
-                                        for (HanLpNerHandler.NerResult.Entity entity : entities) {
-                                            if (entity == null || entity.text == null) {
-                                                continue;
-                                            }
-                                            String baseText = entity.text;
-                                            String normalizedText = nerHandler.normalizeTextForGraph(baseText);
-                                            if (normalizedText == null) {
-                                                continue;
-                                            }
-                                            if (!normalizedText.equals(baseText)) {
-                                                aliasNormalizedCount++;
-                                            }
-
-                                            long entityId = noteVectorDb.addEntity(normalizedText, entity.type, entity.confidence);
-                                            if (entityId > 0) {
-                                                entityIds.add(entityId);
-                                                noteVectorDb.linkChunkToEntity(docId, normalizedText, entity.type, entity.confidence);
-                                            }
-                                        }
-
-                                        if (aliasNormalizedCount > 0) {
-                                            String aliasMsg = String.format("[NOTE_ALIAS] Normalized %d note entities by alias map", aliasNormalizedCount);
-                                            LogManager.logD(TAG, aliasMsg);
-                                            updateProgress(aliasMsg);
-                                        }
-
-                                        // Build co-occurrence edges between entities in this note
-                                        if (entityIds.size() > 1) {
-                                            for (int j = 0; j < entityIds.size(); j++) {
-                                                for (int k = j + 1; k < entityIds.size(); k++) {
-                                                    long fromId = entityIds.get(j);
-                                                    long toId = entityIds.get(k);
-                                                    // Add bidirectional edges with weight 1.0
-                                                    noteVectorDb.addEdge(fromId, toId, 1.0f);
-                                                    noteVectorDb.addEdge(toId, fromId, 1.0f);
-                                                }
-                                            }
-                                        }
-
-                                        long entitiesTime = System.currentTimeMillis() - entitiesStartTime;
-                                        LogManager.logD(TAG, String.format("[NOTE_GRAPH] docId=%d: entities=%d, time=%dms", docId, entityIds.size(), entitiesTime));
+                                        // Single transactional call: entities + chunk-entity links + co-occurrence edges
+                                        int entityCount = noteVectorDb.addEntitiesAndBuildGraph(docId, entities, nerHandler);
+                                        LogManager.logD(TAG, String.format("[NOTE_GRAPH] docId=%d: entities=%d (via addEntitiesAndBuildGraph)", docId, entityCount));
                                     } else {
                                         LogManager.logD(TAG, "[NOTE_GRAPH] No entities extracted for this note (after stopwords filtering)");
                                     }

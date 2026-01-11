@@ -81,56 +81,65 @@ public class LlmModelFactory {
     
     /**
      * 初始化模型提供商
+     * 注意：不再使用硬编码的静态模型列表，完全依赖：
+     * 1. 用户自定义模型（通过ConfigManager保存）
+     * 2. API动态获取（/models端点）
      */
     private void initializeModelProviders() {
-        // 本地模型
-        // 注意：本地模型的实际模型列表将在运行时动态获取
+        // 本地模型 - 运行时动态获取
         modelProviders.put(AppConstants.ApiUrl.LOCAL, new ModelProvider(
                 context.getString(R.string.api_url_local) + "模型",
                 AppConstants.ApiUrl.LOCAL,
-                new String[]{"Qwen3-0.6B_onnx_static_int8", "Qwen3-01.7B_onnx_static_int8"}
+                new String[]{}
         ));
         
         // OpenAI兼容API
         modelProviders.put("openai", new ModelProvider(
                 "OpenAI兼容API",
                 "https://api.openai.com/v1",
-                new String[]{"gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"}
+                new String[]{}
         ));
         
         // DeepSeek API
         modelProviders.put("deepseek", new ModelProvider(
                 "DeepSeek API",
                 "https://api.deepseek.com/v1",
-                new String[]{"deepseek-chat", "deepseek-coder"}
+                new String[]{}
         ));
         
         // Moonshot API
         modelProviders.put("moonshot", new ModelProvider(
                 "Moonshot API",
                 "https://api.moonshot.cn/v1",
-                new String[]{"moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"}
+                new String[]{}
         ));
         
         // 豆包 API
         modelProviders.put("doubao", new ModelProvider(
                 "豆包 API",
                 "https://api.doubao.com/v1",
-                new String[]{"doubao-lite", "doubao-pro"}
+                new String[]{}
         ));
         
         // 千问 API
         modelProviders.put("qianwen", new ModelProvider(
                 "千问 API",
                 "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
-                new String[]{"qwen-turbo", "qwen-plus", "qwen-max"}
+                new String[]{}
+        ));
+        
+        // 智谱 API
+        modelProviders.put("zhipu", new ModelProvider(
+                "智谱 API",
+                "https://open.bigmodel.cn/api/paas/v4/",
+                new String[]{}
         ));
         
         // Ollama API
         modelProviders.put("ollama", new ModelProvider(
                 "Ollama API",
                 "http://localhost:11434",
-                new String[]{"llama2", "mistral", "gemma"}
+                new String[]{}
         ));
     }
     
@@ -165,6 +174,8 @@ public class LlmModelFactory {
                 return modelProviders.get("doubao");
             case QIANWEN:
                 return modelProviders.get("qianwen");
+            case ZHIPU:
+                return modelProviders.get("zhipu");
             case OLLAMA:
                 return modelProviders.get("ollama");
             case OPENAI:
