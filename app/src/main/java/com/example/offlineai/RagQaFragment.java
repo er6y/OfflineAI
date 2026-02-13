@@ -14,6 +14,7 @@ import android.graphics.Color;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Environment;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Parcelable;
@@ -3452,9 +3453,32 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         // If it's a local model, get available model list from local model directory
         if (AppConstants.ApiUrl.LOCAL.equals(apiUrl)) {
             
+            // Check storage permission first (Android 11+ needs MANAGE_EXTERNAL_STORAGE)
+            boolean hasStoragePermission;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                hasStoragePermission = Environment.isExternalStorageManager();
+            } else {
+                hasStoragePermission = ContextCompat.checkSelfPermission(requireContext(), 
+                    Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+            }
+            
+            if (!hasStoragePermission) {
+                LogManager.logW(TAG, "Storage permission not granted, cannot access model directory");
+                setupSpinner(spinnerApiModel, new String[]{getString(R.string.toast_need_storage_permission)});
+                Toast.makeText(requireContext(), getString(R.string.toast_need_storage_permission), Toast.LENGTH_LONG).show();
+                return;
+            }
+            
             // Get model path from configuration
             String modelPath = ConfigManager.getModelPath(requireContext());
             File modelDir = new File(modelPath);
+            
+            // Try to create directory if it doesn't exist
+            if (!modelDir.exists()) {
+                LogManager.logI(TAG, "Model directory does not exist, trying to create: " + modelPath);
+                boolean created = modelDir.mkdirs();
+                LogManager.logI(TAG, "Create model directory result: " + created);
+            }
             
             if (!modelDir.exists() || !modelDir.isDirectory()) {
                 LogManager.logE(TAG, "Model directory does not exist: " + modelPath);

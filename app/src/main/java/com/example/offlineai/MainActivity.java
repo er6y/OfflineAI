@@ -82,6 +82,7 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
     private StateDisplayManager stateDisplayManager;
     
     private boolean isInForeground = false;
+    private boolean isMainUIInitialized = false;
     private UnifiedForegroundService unifiedForegroundService;
     private ServiceConnection serviceConnection;
     // OTA download state flag
@@ -152,8 +153,76 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         
         logManager.i(TAG, "应用启动，版本: " + BUILD_VERSION);
         
-        // 请求必要的权限
-        requestRequiredPermissions();
+        // Check storage permission FIRST - if not granted, redirect to settings before loading UI
+        if (checkStoragePermission()) {
+            // Permission already granted, initialize everything
+            initializeMainUI();
+        } else {
+            // No permission - directly redirect to permission settings
+            LogManager.logI(TAG, "Storage permission not granted on startup, redirecting to settings");
+            requestStoragePermissionDirect();
+        }
+    }
+    
+    /**
+     * Check if storage permission is granted
+     */
+    private boolean checkStoragePermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return Environment.isExternalStorageManager();
+        } else {
+            return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+        }
+    }
+    
+    /**
+     * Directly request storage permission without dialog - jump straight to settings
+     */
+    private void requestStoragePermissionDirect() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                // Show a brief explanation then go to settings
+                androidx.appcompat.app.AlertDialog.Builder builder = new androidx.appcompat.app.AlertDialog.Builder(this);
+                builder.setTitle(stateDisplayManager.getDialogDisplay(AppConstants.DIALOG_TITLE_NEED_FULL_FILE_ACCESS));
+                builder.setMessage(stateDisplayManager.getDialogDisplay(AppConstants.DIALOG_MESSAGE_NEED_FULL_FILE_ACCESS));
+                builder.setPositiveButton(stateDisplayManager.getButtonDisplay(AppConstants.BUTTON_TEXT_GO_TO_SETTINGS), (dialog, which) -> {
+                    Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                    Uri uri = Uri.fromParts("package", getPackageName(), null);
+                    intent.setData(uri);
+                    manageStorageLauncher.launch(intent);
+                });
+                builder.setCancelable(false);
+                builder.show();
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Cannot open file access permission settings: " + e.getMessage());
+                // Fallback: try app detail settings
+                try {
+                    Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                    Uri uri = Uri.fromParts("package", getPackageName(), null);
+                    intent.setData(uri);
+                    manageStorageLauncher.launch(intent);
+                } catch (Exception e2) {
+                    Toast.makeText(this, getString(R.string.toast_cannot_open_file_permission_settings), Toast.LENGTH_LONG).show();
+                }
+            }
+        } else {
+            // Android 10 and below: request runtime permissions
+            ActivityCompat.requestPermissions(this,
+                    new String[]{
+                            Manifest.permission.READ_EXTERNAL_STORAGE,
+                            Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    },
+                    PERMISSION_REQUEST_CODE);
+        }
+    }
+    
+    /**
+     * Initialize main UI (ViewPager, Fragments, etc.) - only called after permission granted
+     */
+    private void initializeMainUI() {
+        if (isMainUIInitialized) return;
+        isMainUIInitialized = true;
         
         // 请求忽略电池优化
         requestIgnoreBatteryOptimization();
@@ -231,68 +300,14 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         
         // 绑定到知识库构建服务
         bindToKnowledgeBaseBuilderService();
-        
-        // 尝试恢复上Fragment状态（如果存在）
-        if (savedInstanceState != null) {
-            restoreFragmentsState(savedInstanceState);
-        }
     }
     
     /**
-     * 请求必要的权限
+     * 请求必要的权限 (legacy - kept for backward compatibility, now handled by checkStoragePermission + requestStoragePermissionDirect)
      */
     private void requestRequiredPermissions() {
-        // 对 Android 11 以下版本（API < 30），仍需请求传统存储权限
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            // 检查是否已经获得了所有权限
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED ||
-                ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                
-                // 请求存储权限
-                ActivityCompat.requestPermissions(this,
-                        new String[]{
-                                Manifest.permission.READ_EXTERNAL_STORAGE,
-                                Manifest.permission.WRITE_EXTERNAL_STORAGE
-                        },
-                        PERMISSION_REQUEST_CODE);
-            }
-        } else {
-            // English log: skip legacy storage permissions on Android 11+
-            LogManager.logD(TAG, "Skip legacy READ/WRITE external storage permissions on Android 11+ (MANAGE_EXTERNAL_STORAGE flow only)");
-        }
-        
-        // 对于Android 11及以上版本，需要请求MANAGE_EXTERNAL_STORAGE权限
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // 检查是否已经保存了权限状态
-            boolean hasStoragePermission = ConfigManager.getBoolean(this, "has_storage_permission", false);
-            
-            if (!hasStoragePermission && !Environment.isExternalStorageManager()) {
-                try {
-                    // 显示一次性权限请求对话框
-                    androidx.appcompat.app.AlertDialog.Builder builder = new androidx.appcompat.app.AlertDialog.Builder(this);
-                    builder.setTitle(stateDisplayManager.getDialogDisplay(AppConstants.DIALOG_TITLE_NEED_FULL_FILE_ACCESS));
-                    builder.setMessage(stateDisplayManager.getDialogDisplay(AppConstants.DIALOG_MESSAGE_NEED_FULL_FILE_ACCESS));
-                    builder.setPositiveButton(stateDisplayManager.getButtonDisplay(AppConstants.BUTTON_TEXT_GO_TO_SETTINGS), (dialog, which) -> {
-                        Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
-                        Uri uri = Uri.fromParts("package", getPackageName(), null);
-                        intent.setData(uri);
-                        manageStorageLauncher.launch(intent);
-                    });
-                    builder.setNegativeButton(stateDisplayManager.getButtonDisplay(AppConstants.BUTTON_TEXT_CANCEL), (dialog, which) -> {
-                        Toast.makeText(this, getString(R.string.toast_app_may_not_work_short), Toast.LENGTH_LONG).show();
-                    });
-                    builder.setCancelable(false);
-                    builder.show();
-                } catch (Exception e) {
-                    LogManager.logE(TAG, "Cannot open file access permission settings: " + e.getMessage());
-                    Toast.makeText(this, getString(R.string.toast_cannot_open_file_permission_settings), Toast.LENGTH_LONG).show();
-                }
-            } else if (Environment.isExternalStorageManager() && !hasStoragePermission) {
-                // 如果已经有权限但没有保存状态，则保存状态
-                ConfigManager.setBoolean(this, "has_storage_permission", true);
-                LogManager.logD(TAG, "Obtained full file access permission and saved status");
-            }
-        }
+        // Now handled by checkStoragePermission() and requestStoragePermissionDirect() in onCreate
+        LogManager.logD(TAG, "requestRequiredPermissions called - permission check is now handled in onCreate");
     }
     
     /**
@@ -403,14 +418,12 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
             
             if (allGranted) {
                 LogManager.logD(TAG, "All permissions granted");
-                // 重新加载配置
-                initializeConfig();
+                // Permission granted - initialize main UI
+                initializeMainUI();
             } else {
-                LogManager.logE(TAG, "Permissions denied");
-                Toast.makeText(this, "需要存储权限才能访问模型和知识库文件", Toast.LENGTH_LONG).show();
-                
-                // 显示权限说明对话框
-                showPermissionExplanationDialog();
+                LogManager.logE(TAG, "Permissions denied, re-requesting");
+                // Re-request - app cannot work without storage permission
+                requestStoragePermissionDirect();
             }
         }
     }
@@ -1268,14 +1281,15 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
             result -> {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     if (Environment.isExternalStorageManager()) {
-                        // English log: persist granted status to avoid repeated prompts
                         ConfigManager.setBoolean(MainActivity.this, "has_storage_permission", true);
                         LogManager.logD(TAG, "Full file access permission obtained via launcher; persisted flag");
                         Toast.makeText(MainActivity.this, getString(R.string.toast_file_access_permission_granted), Toast.LENGTH_SHORT).show();
+                        // Permission granted - now initialize main UI if not yet done
+                        initializeMainUI();
                     } else {
-                        // English log: user denied full file access
-                        LogManager.logW(TAG, "User denied MANAGE_EXTERNAL_STORAGE, app may not work properly");
-                        Toast.makeText(MainActivity.this, getString(R.string.toast_file_access_permission_denied), Toast.LENGTH_LONG).show();
+                        LogManager.logW(TAG, "User denied MANAGE_EXTERNAL_STORAGE, re-requesting");
+                        // User denied - re-request permission, app cannot work without it
+                        requestStoragePermissionDirect();
                     }
                 }
             }
