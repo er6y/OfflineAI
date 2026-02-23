@@ -62,10 +62,11 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     private static final String SCHEDULER = "PLMS";  // Note: ZImage uses FlowMatch-Euler
 
     // Diffusion model type for native engine (must match MNN upstream DiffusionModelType)
-    // 0=SD1.5, 1=Taiyi, 2=Sana(official), 3=ZImage(custom), 4=LongCat(custom)
+    // 0=SD1.5, 1=Taiyi, 2=Sana(official), 3=ZImage(custom), 4=LongCat(custom), 5=Flux2Klein
     private static final int DIFFUSION_MODEL_SD15 = 0;
     private static final int DIFFUSION_MODEL_ZIMAGE = 3;
     private static final int DIFFUSION_MODEL_LONGCAT_IMAGE_EDIT = 4;
+    private static final int DIFFUSION_MODEL_FLUX2_KLEIN = 5;
     
     // Context reference
     private final Context context;
@@ -690,6 +691,18 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             if (!modelType.isEmpty() && modelType.equalsIgnoreCase("zimage_diffusion_mnn")) {
                 LogManager.logI(TAG, "[Diffusion] Detected ZImage diffusion model from config.json (model_type=zimage_diffusion_mnn)");
                 return DIFFUSION_MODEL_ZIMAGE;
+            }
+            if (!modelType.isEmpty() && modelType.equalsIgnoreCase("flux2_klein_diffusion_mnn")) {
+                LogManager.logI(TAG, "[Diffusion] Detected Flux2Klein diffusion model from config.json (model_type=flux2_klein_diffusion_mnn)");
+                return DIFFUSION_MODEL_FLUX2_KLEIN;
+            }
+            // Fallback: detect Flux2Klein by checking for vae.bn_mean (Flux-specific VAE BN params)
+            if (config.has("vae")) {
+                org.json.JSONObject vae = config.optJSONObject("vae");
+                if (vae != null && vae.has("bn_mean") && vae.has("bn_std")) {
+                    LogManager.logI(TAG, "[Diffusion] Detected Flux2Klein diffusion model from config.json (vae.bn_mean/bn_std present)");
+                    return DIFFUSION_MODEL_FLUX2_KLEIN;
+                }
             }
         } catch (Throwable t) {
             LogManager.logW(TAG, "[Diffusion] Failed to detect diffusion model type from config.json, fallback to SD1.5: " + t.getMessage());

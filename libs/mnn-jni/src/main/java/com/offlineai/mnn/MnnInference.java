@@ -583,7 +583,7 @@ public class MnnInference {
     /**
      * Create MNN Diffusion session for text-to-image generation
      * @param modelDir Path to model directory containing text_encoder.mnn, unet.mnn, vae_decoder.mnn, vocab.json, merges.txt
-     * @param modelType Model type: 0=SD1.5, 1=Taiyi Chinese, 2=ZImage
+     * @param modelType Model type: 0=SD1.5, 1=Taiyi, 2=Sana, 3=ZImage, 4=LongCat, 5=Flux2Klein
      * @param backendType Backend type: 0=CPU, 1=Metal, 3=OpenCL, 7=Vulkan
      * @param memoryMode Memory mode: 0=saving (slower), 1=enough (faster), 2=balance
      * @param imageSize Output image size (512, 640, 768, 896, 1024)
@@ -597,7 +597,7 @@ public class MnnInference {
     /**
      * Create MNN Diffusion session with advanced GPU configuration
      * @param modelDir Path to model directory
-     * @param modelType Model type: 0=SD1.5, 1=Taiyi Chinese, 2=ZImage
+     * @param modelType Model type: 0=SD1.5, 1=Taiyi, 2=Sana, 3=ZImage, 4=LongCat, 5=Flux2Klein
      * @param backendType Backend type: 0=CPU, 1=Metal, 3=OpenCL, 7=Vulkan
      * @param memoryMode Memory mode: 0=saving (slower), 1=enough (faster), 2=balance
      * @param imageSize Output image size (512, 640, 768, 896, 1024)
@@ -614,7 +614,7 @@ public class MnnInference {
     /**
      * Create MNN Diffusion session with separate width and height for non-square aspect ratios
      * @param modelDir Path to model directory
-     * @param modelType Model type: 0=SD1.5, 1=Taiyi Chinese, 2=ZImage
+     * @param modelType Model type: 0=SD1.5, 1=Taiyi, 2=Sana, 3=ZImage, 4=LongCat, 5=Flux2Klein
      * @param backendType Backend type: 0=CPU, 1=Metal, 3=OpenCL, 7=Vulkan
      * @param memoryMode Memory mode: 0=saving (slower), 1=enough (faster), 2=balance
      * @param imageWidth Output image width (must be multiple of 8, e.g., 1280, 1024, 768, 720, 512)

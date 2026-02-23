@@ -13,6 +13,9 @@ if(ANDROID_ABI STREQUAL "x86_64")
     set(MNN_NNAPI OFF CACHE BOOL "Disable NNAPI for x86_64" FORCE)
 endif()
 
+# CRITICAL: Force MNN to use logcat for Android logging (must be before add_subdirectory)
+add_definitions(-DMNN_USE_LOGCAT)
+
 # ========== Build MNN ==========
 # All build options are set via build.gradle arguments
 add_subdirectory(${MNN_ROOT} ${CMAKE_CURRENT_BINARY_DIR}/mnn_build)

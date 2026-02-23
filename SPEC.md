@@ -163,7 +163,8 @@ flowchart TB
       ├── StableDiffusion (official, stable_diffusion.hpp/cpp) — SD1.5/Taiyi
       ├── SanaDiffusion (official, sana_diffusion.hpp/cpp) — Sana
       ├── ZImageDiffusion (custom, zimage_diffusion.hpp/cpp) — ZImage FlowMatch
-      └── LongCatDiffusion (custom, longcat_diffusion.hpp/cpp) — LongCat Image Edit/T2I
+      ├── LongCatDiffusion (custom, longcat_diffusion.hpp/cpp) — LongCat Image Edit/T2I
+      └── Flux2KleinDiffusion (official, flux2_klein_diffusion.hpp/cpp) — FLUX.2-Klein-4B
       ```
     - **工厂方法**：所有实例通过 `Diffusion::createDiffusion()` 创建（JNI 层不可直接 `new Diffusion`），支持简单版（4参数）和扩展版（含 imageWidth/Height、GPU/精度/CFG 配置）。
     - **文件结构**：
@@ -207,9 +208,12 @@ flowchart TB
       - `2`：Sana Diffusion（官方新增，Qwen3-0.6B LLM text encoder）。
       - `3`：ZImage（FlowMatch Euler；依赖 `MNN_BUILD_LLM=ON`；text encoder 输入 `input_ids` + `attention_mask`；latent 形状 `[1,16,H,W]`；timestep 为 float sigma）。
       - `4`：LongCat Image Edit（FlowMatch Euler；LLM-based text encoder；T2I/Image Edit 双模式；VAE encoder/decoder；Flux-like latent packing/unpacking）。
+      - `5`：Flux2Klein（官方新增，Qwen3-4B LLM text encoder + DiT transformer；FlowMatch Euler；VAE BN 归一化；支持动态分辨率；图像尺寸需为 16 的倍数）。
     - **识别约定（OfflineAI）**：
       - `model_type` 为 `longcat_image_edit_mnn`：Java 层传 `modelType=4`（LongCat Image Edit）。
       - `model_type` 为 `zimage_diffusion_mnn`：Java 层传 `modelType=3`（ZImage）。
+      - `model_type` 为 `flux2_klein_diffusion_mnn`：Java 层传 `modelType=5`（Flux2Klein）。
+      - 备用检测：config.json 包含 `vae.bn_mean` 和 `vae.bn_std` 字段时识别为 Flux2Klein（Flux 特有的 VAE BN 参数）。
       - 其他情况：兜底按 `modelType=0`（SD1.5）。
     - **LongCat Image Edit 图片编辑支持（2025-01-07）**：
       - **模式自动判断**：
@@ -293,7 +297,8 @@ flowchart TB
     - app 的 `assembleRelease` 任务显式依赖 `:libs:mnn-jni:assembleRelease`，保证先构建 JNI 的 Release 版本。
     - `libs/mnn-jni` 的 `debug` 构建禁用 `ndk.debugSymbolLevel` 并传递 Release 参数，统一使用 O3 优化；Java 层仍可保留 Debug 便于问题定位。
     - 如需对 native 进行调试，建议在本地分支临时开启符号和断言，不要影响主线发布构建。
-    - 最佳实践：仅在必要时打开 native 调试符号；发布通道一律保持 Release 优化以确保 TTS/LLM 性能。
+    - **Android logcat 日志重定向**（2026-02-22 修复）：MNN Diffusion 引擎的 `display_progress()` 函数原使用 `fprintf(stdout, ...)`、`putchar()`、`fflush()` 等标准 C 输出函数，这些函数在 Linux 终端可工作但**不会重定向到 Android logcat**。已修改 `libs/mnn/transformers/diffusion/engine/src/diffusion.cpp` 中的 `display_progress()` 函数，改用 `MNN_PRINT()` 宏（会根据 `MNN_USE_LOGCAT` 自动调用 `__android_log_print`），确保进度日志在 Android 上可见。其他 Diffusion 模型文件（flux2_klein_diffusion.cpp、longcat_diffusion.cpp 等）已正确使用 `MNN_PRINT`/`MNN_ERROR`，无需修改。
+    - 最佳实践：仅在必要时打开 native 调试符号；发布通道一律保持 Release 优化以确保 TTS/LLM 性能；MNN 代码中避免使用 `printf`/`fprintf`/`std::cout` 等标准输出函数，统一使用 `MNN_PRINT`/`MNN_ERROR` 宏以保证跨平台日志输出。
 - **StreamingApiClient / LlmApiAdapter**：在线 + 本地统一推理客户端。需求：兼容多家 OpenAI/Claude 风格 API，同时以相同回调接口封装本地 MNN 推理。设计：
   - **在线路径**：使用 Volley/OkHttp 发起 HTTP 请求，按流式事件将增量内容回传给 RagQaFragment，支持停止信号中断网络请求。**主要 API**：`StreamingApiClient.startStreaming()`、`stopStreaming()`、`LlmApiAdapter.ApiCallback`（成功/失败/流式回调）。**关键数据结构**：`LlmApiAdapter.ProviderConfig`、`StreamingChunk`。
   - **本地路径（多进程推理架构，2025-11-22，2025-12-05 IPC 重构）**：
