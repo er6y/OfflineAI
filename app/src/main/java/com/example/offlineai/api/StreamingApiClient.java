@@ -235,7 +235,9 @@ public class StreamingApiClient {
                     }
                     
                     StringBuilder fullResponse = new StringBuilder();
+                    StringBuilder thinkingContent = new StringBuilder();
                     boolean[] textHeadSent = {false}; // Track if [TEXT:] head has been sent
+                    boolean[] isInThinkingMode = {false}; // Track if we're in thinking phase
                     
                     try {
                         BufferedSource source = body.source();
@@ -243,7 +245,7 @@ public class StreamingApiClient {
                             String line = source.readUtf8Line();
                             if (line == null) continue;
                             
-                            //LogManager.logD(TAG, "收到数据: " + line);
+                            //LogManager.logD(TAG, "Received line: " + line);
                             
                             if (line.startsWith("data: ") && !line.equals("data: [DONE]")) {
                                 String jsonStr = line.substring(6).trim();
@@ -253,9 +255,33 @@ public class StreamingApiClient {
                                     JSONObject choice = choices.getJSONObject(0);
                                     JSONObject delta = choice.getJSONObject("delta");
                                     
-                                    if (delta.has("content")) {
+                                    // Handle reasoning_content (thinking phase)
+                                    if (delta.has("reasoning_content") && !delta.isNull("reasoning_content")) {
+                                        String reasoning = delta.getString("reasoning_content");
+                                        thinkingContent.append(reasoning);
+                                        
+                                        // Mark that we entered thinking mode
+                                        if (!isInThinkingMode[0]) {
+                                            isInThinkingMode[0] = true;
+                                            LogManager.logI(TAG, "[THINKING] Entered thinking phase");
+                                        }
+                                        
+                                        // Send thinking content to UI (will be shown in debug section)
+                                        new Handler(Looper.getMainLooper()).post(() -> {
+                                            callback.onToken(reasoning);
+                                        });
+                                    }
+                                    
+                                    // Handle content (response phase)
+                                    if (delta.has("content") && !delta.isNull("content")) {
                                         String content = delta.getString("content");
                                         fullResponse.append(content);
+                                        
+                                        // If we were in thinking mode, log the transition
+                                        if (isInThinkingMode[0]) {
+                                            LogManager.logI(TAG, "[THINKING] Exited thinking phase, thinking length: " + thinkingContent.length());
+                                            isInThinkingMode[0] = false;
+                                        }
                                         
                                         // 在主线程中回调
                                         new Handler(Looper.getMainLooper()).post(() -> {
@@ -268,7 +294,7 @@ public class StreamingApiClient {
                                         });
                                     }
                                 } catch (JSONException e) {
-                                    LogManager.logE(TAG, "解析JSON失败: " + e.getMessage(), e);
+                                    LogManager.logE(TAG, "Failed to parse JSON: " + e.getMessage(), e);
                                 }
                             }
                         }
