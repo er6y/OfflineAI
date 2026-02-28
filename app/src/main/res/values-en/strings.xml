@@ -966,11 +966,23 @@
         <item>720×1280 (9:16 Mobile)</item>
         <item>1280×720 (16:9 Widescreen)</item>
         <item>1024×1024 (1:1)</item>
+        <item>1152×1152 (1:1)</item>
+        <item>1024×1536 (2:3 Portrait)</item>
+        <item>1536×1024 (3:2 Widescreen)</item>
+        <item>1280×1280 (1:1)</item>
+        <item>1024×1792 (4:7 Ultra-tall)</item>
+        <item>1792×1024 (7:4 Ultra-wide)</item>
+        <item>1536×1536 (1:1 High Quality)</item>
+        <item>1280×1920 (2:3 Portrait)</item>
+        <item>1920×1280 (3:2 Widescreen)</item>
+        <item>1440×2560 (9:16 Mobile)</item>
+        <item>2560×1440 (16:9 Widescreen)</item>
+        <item>2048×2048 (1:1 Max)</item>
     </string-array>
     
-    <!-- Diffusion Precision Mode Options (Order must match MNN: 0=auto, 1=low, 2=normal, 3=high) -->
+    <!-- Diffusion precision mode options (Order must match MNN: 0=auto, 1=low, 2=normal, 3=high) -->
     <string-array name="diffusion_precision_modes">
-        <item>auto</item>
+        <item>auto (auto)</item>
         <item>low (FP16)</item>
         <item>normal (FP32)</item>
         <item>high (FP32)</item>
@@ -1278,11 +1290,16 @@
     <string name="agent_action_format_doubao">Doubao-1.5-UI-TARS</string>
     <string name="label_agent_experience_summary">Experience Summary</string>
     <string name="agent_experience_summary_hint">Summarize experience after task completion and save to knowledge base</string>
+    <string name="label_agent_tts">Agent TTS</string>
+    <string name="agent_tts_hint">Voice announcement when task completes or user action is needed</string>
+    <string name="agent_tts_task_done">Task Done</string>
+    <string name="agent_tts_task_failed">Task Failed</string>
+    <string name="agent_tts_ask_user_prefix">Please Confirm</string>
     
     <!-- Agent Experience Summary -->
     <string name="agent_summarizing_experience">Summarizing experience...</string>
     <string name="agent_experience_ready">Experience summary ready</string>
-    <string name="agent_save_experience">Save</string>
+    <string name="agent_save_experience">Save Experience</string>
     <string name="agent_experience_saved">Experience saved to AgentKB</string>
     <string name="agent_experience_save_failed">Failed to save experience</string>
 </resources>

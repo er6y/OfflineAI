@@ -170,6 +170,78 @@
       "visual.mnn.weight": "https://www.modelscope.cn/models/MNN/Qwen2.5-Omni-7B-MNN/resolve/master/visual.mnn.weight",
       "comments": "Qwen2.5 Omni Multimodal: Text+Image+Audio2Text (Full multimodal support with audio input/output), slow for mobiles"
     },
+    "Qwen3.5-0.8B-MNN": {
+      "config.json": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-MNN/resolve/master/config.json",
+      "configuration.json": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-MNN/resolve/master/configuration.json",
+      "llm_config.json": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-MNN/resolve/master/llm_config.json" ,
+      "llm.mnn.json": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-MNN/resolve/master/llm.mnn.json",
+      "llm.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-MNN/resolve/master/llm.mnn",
+      "llm.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-MNN/resolve/master/llm.mnn.weight",
+      "tokenizer.txt": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-MNN/resolve/master/tokenizer.txt",
+      "visual.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-MNN/resolve/master/visual.mnn",
+      "visual.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-MNN/resolve/master/visual.mnn.weight",
+	    "comments": "Qwen3.5-0.8B-MNN Text-Image2Text."
+    },
+    "Qwen3.5-2B-MNN": {
+      "config.json": "https://modelscope.cn/models/MNN/Qwen3.5-2B-MNN/resolve/master/config.json",
+      "configuration.json": "https://modelscope.cn/models/MNN/Qwen3.5-2B-MNN/resolve/master/configuration.json",
+      "llm_config.json": "https://modelscope.cn/models/MNN/Qwen3.5-2B-MNN/resolve/master/llm_config.json" ,
+      "llm.mnn.json": "https://modelscope.cn/models/MNN/Qwen3.5-2B-MNN/resolve/master/llm.mnn.json",
+      "llm.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-2B-MNN/resolve/master/llm.mnn",
+      "llm.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-2B-MNN/resolve/master/llm.mnn.weight",
+      "tokenizer.txt": "https://modelscope.cn/models/MNN/Qwen3.5-2B-MNN/resolve/master/tokenizer.txt",
+      "visual.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-2B-MNN/resolve/master/visual.mnn",
+      "visual.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-2B-MNN/resolve/master/visual.mnn.weight",
+	    "comments": "Qwen3.5-2B-MNN Text-Image2Text."
+    },
+    "Qwen3.5-4B-MNN": {
+      "config.json": "https://modelscope.cn/models/MNN/Qwen3.5-4B-MNN/resolve/master/config.json",
+      "configuration.json": "https://modelscope.cn/models/MNN/Qwen3.5-4B-MNN/resolve/master/configuration.json",
+      "llm_config.json": "https://modelscope.cn/models/MNN/Qwen3.5-4B-MNN/resolve/master/llm_config.json" ,
+      "llm.mnn.json": "https://modelscope.cn/models/MNN/Qwen3.5-4B-MNN/resolve/master/llm.mnn.json",
+      "llm.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-4B-MNN/resolve/master/llm.mnn",
+      "llm.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-4B-MNN/resolve/master/llm.mnn.weight",
+      "tokenizer.txt": "https://modelscope.cn/models/MNN/Qwen3.5-4B-MNN/resolve/master/tokenizer.txt",
+      "visual.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-4B-MNN/resolve/master/visual.mnn",
+      "visual.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-4B-MNN/resolve/master/visual.mnn.weight",
+	    "comments": "Qwen3.5-4B-MNN Text-Image2Text."
+    },
+    "Qwen3.5-0.8B-Base-MNN": {
+      "config.json": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-Base-MNN/resolve/master/config.json",
+      "configuration.json": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-Base-MNN/resolve/master/configuration.json",
+      "llm_config.json": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-Base-MNN/resolve/master/llm_config.json" ,
+      "llm.mnn.json": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-Base-MNN/resolve/master/llm.mnn.json",
+      "llm.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-Base-MNN/resolve/master/llm.mnn",
+      "llm.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-Base-MNN/resolve/master/llm.mnn.weight",
+      "tokenizer.txt": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-Base-MNN/resolve/master/tokenizer.txt",
+      "visual.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-Base-MNN/resolve/master/visual.mnn",
+      "visual.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-0.8B-Base-MNN/resolve/master/visual.mnn.weight",
+	    "comments": "Qwen3.5-0.8B-Base-MNN Text-Image2Text."
+    },
+    "Qwen3.5-2B-Base-MNN": {
+      "config.json": "https://modelscope.cn/models/MNN/Qwen3.5-2B-Base-MNN/resolve/master/config.json",
+      "configuration.json": "https://modelscope.cn/models/MNN/Qwen3.5-2B-Base-MNN/resolve/master/configuration.json",
+      "llm_config.json": "https://modelscope.cn/models/MNN/Qwen3.5-2B-MNN/resolve/master/llm_config.json" ,
+      "llm.mnn.json": "https://modelscope.cn/models/MNN/Qwen3.5-2B-Base-MNN/resolve/master/llm.mnn.json",
+      "llm.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-2B-Base-MNN/resolve/master/llm.mnn",
+      "llm.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-2B-Base-MNN/resolve/master/llm.mnn.weight",
+      "tokenizer.txt": "https://modelscope.cn/models/MNN/Qwen3.5-2B-Base-MNN/resolve/master/tokenizer.txt",
+      "visual.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-2B-Base-MNN/resolve/master/visual.mnn",
+      "visual.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-2B-Base-MNN/resolve/master/visual.mnn.weight",
+	    "comments": "Qwen3.5-2B-Base-MNN Text-Image2Text."
+    },
+    "Qwen3.5-4B-Base-MNN": {
+      "config.json": "https://modelscope.cn/models/MNN/Qwen3.5-4B-Base-MNN/resolve/master/config.json",
+      "configuration.json": "https://modelscope.cn/models/MNN/Qwen3.5-4B-Base-MNN/resolve/master/configuration.json",
+      "llm_config.json": "https://modelscope.cn/models/MNN/Qwen3.5-4B-Base-MNN/resolve/master/llm_config.json" ,
+      "llm.mnn.json": "https://modelscope.cn/models/MNN/Qwen3.5-4B-Base-MNN/resolve/master/llm.mnn.json",
+      "llm.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-4B-Base-MNN/resolve/master/llm.mnn",
+      "llm.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-4B-Base-MNN/resolve/master/llm.mnn.weight",
+      "tokenizer.txt": "https://modelscope.cn/models/MNN/Qwen3.5-4B-Base-MNN/resolve/master/tokenizer.txt",
+      "visual.mnn": "https://modelscope.cn/models/MNN/Qwen3.5-4B-Base-MNN/resolve/master/visual.mnn",
+      "visual.mnn.weight": "https://modelscope.cn/models/MNN/Qwen3.5-4B-Base-MNN/resolve/master/visual.mnn.weight",
+	    "comments": "Qwen3.5-4B-Base-MNN Text-Image2Text."
+    },
     "stable-diffusion-v1-5-mnn-opencl-int8": {
       "configuration.json": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/configuration.json",
       "text_encoder.mnn": "https://www.modelscope.cn/models/MNN/stable-diffusion-v1-5-mnn-opencl/resolve/master/text_encoder.mnn",

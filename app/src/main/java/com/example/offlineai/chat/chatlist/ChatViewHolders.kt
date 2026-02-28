@@ -336,10 +336,13 @@ object ChatViewHolders {
             applyGlobalTextSize()
             
             if (!payloads.isNullOrEmpty()) {
-                // Incremental update (streaming) - only update text
+                // Incremental update (streaming) - use plain text to avoid layout jitter
+                // Markdown rendering is deferred until streaming completes
                 updateCollapsibleSections(data)
                 if (data.displayText != null) {
-                    markdown.setMarkdown(viewText, normalizeLatex(data.displayText!!))
+                    // Use plain text during streaming to prevent font/size changes causing jitter
+                    viewText.text = data.displayText
+                    viewText.visibility = View.VISIBLE
                 }
                 return
             }

@@ -5,15 +5,16 @@ import android.content.Intent
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.example.offlineai.LogManager
-import com.example.offlineai.agent.executor.ActionExecutor as LegacyActionExecutor
+import com.example.offlineai.agent.model.AgentAction
+import com.example.offlineai.agent.model.ExecutionResult
 import com.example.offlineai.agent.service.AgentAccessibilityService
 import com.example.offlineai.agent.utils.AppNameMapper
 import kotlinx.coroutines.*
 import kotlin.math.roundToInt
 
 /**
- * Unified Action Executor - supports multiple action formats (MAI-UI, AutoGLM)
- * Executes actions using Accessibility Service
+ * Unified Action Executor - executes AgentAction using Accessibility Service.
+ * Single executor for all action formats (MAI-UI, AutoGLM, Doubao, OpenAI FuncCall).
  */
 class UnifiedActionExecutor(private val context: Context) {
     
@@ -28,8 +29,8 @@ class UnifiedActionExecutor(private val context: Context) {
     private val accessibilityService: AgentAccessibilityService?
         get() = AgentAccessibilityService.getInstance()
     
-    private val screenWidth: Int
-    private val screenHeight: Int
+    val screenWidth: Int
+    val screenHeight: Int
     
     init {
         val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -48,7 +49,6 @@ class UnifiedActionExecutor(private val context: Context) {
     
     private suspend fun loadInstalledAppList() {
         if (isLoadingAppList || installedAppList != null) return
-        
         isLoadingAppList = true
         try {
             val apps = withContext(Dispatchers.IO) {
@@ -64,332 +64,222 @@ class UnifiedActionExecutor(private val context: Context) {
     }
     
     /**
-     * Execute an action
+     * Execute an AgentAction.
      */
-    suspend fun execute(action: Action): ActionResult {
+    suspend fun execute(action: AgentAction): ExecutionResult {
         if (accessibilityService == null) {
-            return ActionResult(
-                success = false,
-                shouldFinish = false,
-                message = "Accessibility service not available"
-            )
+            return ExecutionResult(false, "Accessibility service not available")
         }
         
-        LogManager.logI(TAG, "Executing action: ${action.type}")
+        LogManager.logI(TAG, "Executing action: ${action.javaClass.simpleName}")
         
         // Hide floating window for screen interactions
-        val needsHideFloatingWindow = when (action.type) {
-            ActionType.CLICK, ActionType.LONG_PRESS, ActionType.DOUBLE_CLICK,
-            ActionType.TYPE, ActionType.SWIPE, ActionType.DRAG,
-            ActionType.SYSTEM_BUTTON -> true
-            else -> false
-        }
+        val needsHide = action is AgentAction.Click || action is AgentAction.LongPress ||
+            action is AgentAction.DoubleClick || action is AgentAction.Type ||
+            action is AgentAction.Swipe || action is AgentAction.Drag ||
+            action is AgentAction.SystemButton
         
-        if (needsHideFloatingWindow) {
+        if (needsHide) {
             accessibilityService?.floatingWindow?.temporaryHide()
             delay(50)
         }
         
         val result = try {
-            when (action.type) {
-                ActionType.CLICK -> executeClick(action)
-                ActionType.LONG_PRESS -> executeLongPress(action)
-                ActionType.DOUBLE_CLICK -> executeDoubleClick(action)
-                ActionType.TYPE -> executeType(action)
-                ActionType.SWIPE -> executeSwipe(action)
-                ActionType.DRAG -> executeDrag(action)
-                ActionType.OPEN -> executeOpen(action)
-                ActionType.SYSTEM_BUTTON -> executeSystemButton(action)
-                ActionType.WAIT -> executeWait(action)
-                ActionType.TERMINATE -> executeTerminate(action)
-                ActionType.ANSWER -> executeAnswer(action)
-                ActionType.TAKE_OVER -> executeTakeOver(action)
-                ActionType.CONFIRM -> executeConfirm(action)
-                ActionType.NOTE -> executeNote(action)
-                ActionType.CALL_API -> executeCallApi(action)
-                ActionType.INTERACT -> executeInteract(action)
+            when (action) {
+                is AgentAction.Click -> executeClick(action.x, action.y)
+                is AgentAction.LongPress -> executeLongPress(action.x, action.y)
+                is AgentAction.DoubleClick -> executeDoubleClick(action.x, action.y)
+                is AgentAction.Type -> executeType(action.text)
+                is AgentAction.Swipe -> executeSwipe(action)
+                is AgentAction.Drag -> executeDrag(action.startX, action.startY, action.endX, action.endY)
+                is AgentAction.Open -> executeOpen(action.appName)
+                is AgentAction.SystemButton -> executeSystemButton(action.button)
+                is AgentAction.Wait -> { delay(1000); ExecutionResult(true, "Waited") }
+                is AgentAction.Terminate -> ExecutionResult(true, "Task ${action.status.value}")
+                is AgentAction.Context -> ExecutionResult(true, "Context updated")
+                is AgentAction.AskUser -> ExecutionResult(true, "AskUser: ${action.text}")
+                is AgentAction.GetAppList -> executeGetAppList()
+                is AgentAction.KbInsert -> {
+                    LogManager.logI(TAG, "[KB] kb_insert deferred to experience save flow")
+                    ExecutionResult(true, "KB insert deferred")
+                }
+                is AgentAction.KbDelete -> {
+                    LogManager.logI(TAG, "[KB] kb_delete deferred to experience save flow")
+                    ExecutionResult(true, "KB delete deferred")
+                }
+                is AgentAction.WebOpen -> executeWebOpen(action.url)
+                is AgentAction.WebGetContent -> executeWebGetContent()
+                is AgentAction.WebExecuteJs -> executeWebExecuteJs(action.script)
+                is AgentAction.DataMemory -> ExecutionResult(true, "data_memory handled by AgentEngine")
             }
         } finally {
-            if (needsHideFloatingWindow) {
+            if (needsHide) {
                 accessibilityService?.floatingWindow?.temporaryShow()
             }
         }
         
-        if (result.success && action.type != ActionType.WAIT) {
+        if (result.success && action !is AgentAction.Wait) {
             delay(ACTION_DELAY_MS)
         }
         
         return result
     }
     
-    private fun executeClick(action: Action): ActionResult {
-        val coord = action.coordinate ?: return ActionResult(false, false, "No coordinate")
-        val (screenX, screenY) = normalizedToPixel(coord[0], coord[1])
-        
-        LogManager.logI(TAG, "[CLICK] Normalized: [${coord[0]}, ${coord[1]}] -> Pixel: ($screenX, $screenY)")
-        
-        val success = accessibilityService?.clickAtPosition(screenX, screenY) ?: false
-        return ActionResult(
-            success = success,
-            shouldFinish = false,
-            message = if (success) "Clicked at ($screenX, $screenY)" else "Failed to click"
-        )
+    private fun executeClick(xNorm: Int, yNorm: Int): ExecutionResult {
+        val (sx, sy) = normalizedToPixel(xNorm, yNorm)
+        LogManager.logI(TAG, "[CLICK] Normalized: [$xNorm, $yNorm] -> Pixel: ($sx, $sy)")
+        val ok = accessibilityService?.clickAtPosition(sx, sy) ?: false
+        return ExecutionResult(ok, if (ok) "Clicked ($sx,$sy)" else "Failed to click")
     }
     
-    private fun executeLongPress(action: Action): ActionResult {
-        val coord = action.coordinate ?: return ActionResult(false, false, "No coordinate")
-        val (screenX, screenY) = normalizedToPixel(coord[0], coord[1])
-        
-        val success = accessibilityService?.longPressAtPosition(screenX, screenY) ?: false
-        return ActionResult(
-            success = success,
-            shouldFinish = false,
-            message = if (success) "Long pressed at ($screenX, $screenY)" else "Failed to long press"
-        )
+    private fun executeLongPress(xNorm: Int, yNorm: Int): ExecutionResult {
+        val (sx, sy) = normalizedToPixel(xNorm, yNorm)
+        val ok = accessibilityService?.longPressAtPosition(sx, sy) ?: false
+        return ExecutionResult(ok, if (ok) "Long pressed ($sx,$sy)" else "Failed to long press")
     }
     
-    private fun executeDoubleClick(action: Action): ActionResult {
-        val coord = action.coordinate ?: return ActionResult(false, false, "No coordinate")
-        val (screenX, screenY) = normalizedToPixel(coord[0], coord[1])
-        
-        val success = accessibilityService?.doubleClickAtPosition(screenX, screenY) ?: false
-        return ActionResult(
-            success = success,
-            shouldFinish = false,
-            message = if (success) "Double clicked at ($screenX, $screenY)" else "Failed to double click"
-        )
+    private fun executeDoubleClick(xNorm: Int, yNorm: Int): ExecutionResult {
+        val (sx, sy) = normalizedToPixel(xNorm, yNorm)
+        val ok = accessibilityService?.doubleClickAtPosition(sx, sy) ?: false
+        return ExecutionResult(ok, if (ok) "Double clicked ($sx,$sy)" else "Failed to double click")
     }
     
-    private fun executeType(action: Action): ActionResult {
-        val text = action.text ?: return ActionResult(false, false, "No text")
-        val errorReason = accessibilityService?.inputTextWithReason(text)
-        val success = (errorReason == null)
-        
-        return ActionResult(
-            success = success,
-            shouldFinish = false,
-            message = if (success) "Typed: $text" else "Failed to type: $errorReason"
-        )
+    private fun executeType(text: String): ExecutionResult {
+        val err = accessibilityService?.inputTextWithReason(text)
+        return if (err == null) ExecutionResult(true, "Typed: $text")
+        else ExecutionResult(false, "Failed to type: $err")
     }
     
-    private fun executeSwipe(action: Action): ActionResult {
-        val direction = action.direction ?: return ActionResult(false, false, "No direction")
-        val (startX, startY, endX, endY) = calculateSwipeCoordinates(direction, action.coordinate)
-        
-        val success = accessibilityService?.swipe(startX, startY, endX, endY) ?: false
-        return ActionResult(
-            success = success,
-            shouldFinish = false,
-            message = if (success) "Swiped $direction" else "Failed to swipe"
-        )
-    }
-    
-    private fun executeDrag(action: Action): ActionResult {
-        val start = action.startCoordinate ?: return ActionResult(false, false, "No start coordinate")
-        val end = action.endCoordinate ?: return ActionResult(false, false, "No end coordinate")
-        
-        val (startX, startY) = normalizedToPixel(start[0], start[1])
-        val (endX, endY) = normalizedToPixel(end[0], end[1])
-        
-        val success = accessibilityService?.drag(startX, startY, endX, endY) ?: false
-        return ActionResult(
-            success = success,
-            shouldFinish = false,
-            message = if (success) "Dragged from ($startX, $startY) to ($endX, $endY)" else "Failed to drag"
-        )
-    }
-    
-    private fun executeOpen(action: Action): ActionResult {
-        val appName = action.text ?: return ActionResult(false, false, "No app name")
-        
-        LogManager.logI(TAG, "Opening app: $appName")
-        
-        // Ensure app list is loaded
-        if (installedAppList == null) {
-            runBlocking { loadInstalledAppList() }
-        }
-        
-        val appList = installedAppList ?: return ActionResult(
-            false, false, "Failed to load app list"
-        )
-        
-        // Find exact match (case-insensitive)
-        val matchedApp = appList.find { (name, _) ->
-            name.equals(appName, ignoreCase = true)
-        }
-        
-        if (matchedApp == null) {
-            return ActionResult(
-                false, false,
-                "App '$appName' not found. Use exact name from app list."
-            )
-        }
-        
-        // Try launch strategy first
-        val strategy = AppNameMapper.getLaunchStrategy(appName)
-        if (strategy != null) {
-            return when (strategy) {
-                is AppNameMapper.LaunchStrategy.IntentAction -> {
-                    try {
-                        context.startActivity(strategy.createIntent())
-                        ActionResult(true, false, "App launched")
-                    } catch (e: Exception) {
-                        ActionResult(false, false, "Failed to launch: ${e.message}")
-                    }
-                }
-                is AppNameMapper.LaunchStrategy.PackageName -> {
-                    openViaPackage(matchedApp.second)
-                }
-            }
-        }
-        
-        return openViaPackage(matchedApp.second)
-    }
-    
-    private fun openViaPackage(packageName: String): ActionResult {
-        return try {
-            val intent = context.packageManager.getLaunchIntentForPackage(packageName)
-            if (intent != null) {
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(intent)
-                ActionResult(true, false, "App launched")
-            } else {
-                ActionResult(false, false, "No launch intent")
-            }
-        } catch (e: Exception) {
-            ActionResult(false, false, "Failed to launch: ${e.message}")
-        }
-    }
-    
-    private fun executeSystemButton(action: Action): ActionResult {
-        val button = action.button ?: return ActionResult(false, false, "No button")
-        
-        val success = when (button.lowercase()) {
-            "back" -> accessibilityService?.pressBack()
-            "home" -> accessibilityService?.pressHome()
-            "menu" -> accessibilityService?.pressRecents()
-            "enter" -> accessibilityService?.pressEnter()
-            else -> false
-        } ?: false
-        
-        return ActionResult(
-            success = success,
-            shouldFinish = false,
-            message = if (success) "Pressed $button" else "Failed to press button"
-        )
-    }
-    
-    private suspend fun executeWait(action: Action): ActionResult {
-        val duration = (action.duration ?: 1) * 1000L
-        delay(duration)
-        return ActionResult(true, false, "Waited ${action.duration}s")
-    }
-    
-    private fun executeTerminate(action: Action): ActionResult {
-        return ActionResult(
-            success = true,
-            shouldFinish = true,
-            message = "Task ${action.status}: ${action.text}"
-        )
-    }
-    
-    private fun executeAnswer(action: Action): ActionResult {
-        return ActionResult(
-            success = true,
-            shouldFinish = false,
-            message = "Answer: ${action.text}"
-        )
-    }
-    
-    private fun executeTakeOver(action: Action): ActionResult {
-        return ActionResult(
-            success = true,
-            shouldFinish = false,
-            message = "User intervention required: ${action.text}",
-            requiresConfirmation = true
-        )
-    }
-    
-    private fun executeConfirm(action: Action): ActionResult {
-        // Sensitive operation - requires user confirmation
-        return ActionResult(
-            success = true,
-            shouldFinish = false,
-            message = "Confirm sensitive operation: ${action.text}",
-            requiresConfirmation = true
-        )
-    }
-    
-    private fun executeNote(@Suppress("UNUSED_PARAMETER") action: Action): ActionResult {
-        // Placeholder for content recording
-        return ActionResult(true, false, "Note recorded")
-    }
-    
-    private fun executeCallApi(@Suppress("UNUSED_PARAMETER") action: Action): ActionResult {
-        // Placeholder for API call/summarization
-        return ActionResult(true, false, "API called")
-    }
-    
-    private fun executeInteract(@Suppress("UNUSED_PARAMETER") action: Action): ActionResult {
-        return ActionResult(
-            success = true,
-            shouldFinish = false,
-            message = "User interaction required",
-            requiresConfirmation = true
-        )
-    }
-    
-    private fun normalizedToPixel(xNorm: Int, yNorm: Int): Pair<Int, Int> {
-        val x = ((xNorm / 999f) * (screenWidth - 1)).roundToInt()
-        val y = ((yNorm / 999f) * (screenHeight - 1)).roundToInt()
-        
-        val screenX = x.coerceIn(0, screenWidth - 1)
-        val screenY = y.coerceIn(0, screenHeight - 1)
-        
-        return Pair(screenX, screenY)
-    }
-    
-    private fun calculateSwipeCoordinates(
-        direction: String,
-        coordinate: IntArray?
-    ): SwipeCoordinates {
+    private fun executeSwipe(action: AgentAction.Swipe): ExecutionResult {
         val centerX = screenWidth / 2
         val centerY = screenHeight / 2
-        val swipeDistance = screenHeight / 3
+        val dist = screenHeight / 5  // Reduced from 1/3 to 1/5 to avoid skipping content
         
-        val (startCenterX, startCenterY) = if (coordinate != null && coordinate.size >= 2) {
-            normalizedToPixel(coordinate[0], coordinate[1])
+        val (cx, cy) = if (action.x != null && action.y != null) {
+            normalizedToPixel(action.x, action.y)
         } else {
             Pair(centerX, centerY)
         }
         
-        // Direction semantics: "scroll/swipe down" = page content moves down = finger swipes UP
-        // "scroll/swipe up" = page content moves up = finger swipes DOWN
-        return when (direction.lowercase()) {
-            "up" -> SwipeCoordinates(
-                startCenterX, startCenterY - swipeDistance / 2,
-                startCenterX, startCenterY + swipeDistance / 2
-            )
-            "down" -> SwipeCoordinates(
-                startCenterX, startCenterY + swipeDistance / 2,
-                startCenterX, startCenterY - swipeDistance / 2
-            )
-            "left" -> SwipeCoordinates(
-                startCenterX + swipeDistance / 2, startCenterY,
-                startCenterX - swipeDistance / 2, startCenterY
-            )
-            "right" -> SwipeCoordinates(
-                startCenterX - swipeDistance / 2, startCenterY,
-                startCenterX + swipeDistance / 2, startCenterY
-            )
-            else -> SwipeCoordinates(centerX, centerY, centerX, centerY)
+        val (sx, sy, ex, ey) = when (action.direction) {
+            // UP: finger moves bottom→top (startY > endY), page scrolls up to show content below
+            AgentAction.Swipe.Direction.UP -> intArrayOf(cx, cy + dist / 2, cx, cy - dist / 2)
+            // DOWN: finger moves top→bottom (startY < endY), page scrolls down to show content above
+            AgentAction.Swipe.Direction.DOWN -> intArrayOf(cx, cy - dist / 2, cx, cy + dist / 2)
+            // LEFT: finger moves right→left, page scrolls left
+            AgentAction.Swipe.Direction.LEFT -> intArrayOf(cx + dist / 2, cy, cx - dist / 2, cy)
+            // RIGHT: finger moves left→right, page scrolls right
+            AgentAction.Swipe.Direction.RIGHT -> intArrayOf(cx - dist / 2, cy, cx + dist / 2, cy)
         }
+        
+        val ok = accessibilityService?.swipe(sx, sy, ex, ey) ?: false
+        return ExecutionResult(ok, if (ok) "Swiped ${action.direction}" else "Failed to swipe")
     }
     
-    private data class SwipeCoordinates(
-        val startX: Int,
-        val startY: Int,
-        val endX: Int,
-        val endY: Int
-    )
+    private fun executeDrag(sx: Int, sy: Int, ex: Int, ey: Int): ExecutionResult {
+        val (psx, psy) = normalizedToPixel(sx, sy)
+        val (pex, pey) = normalizedToPixel(ex, ey)
+        val ok = accessibilityService?.drag(psx, psy, pex, pey) ?: false
+        return ExecutionResult(ok, if (ok) "Dragged ($psx,$psy)->($pex,$pey)" else "Failed to drag")
+    }
+    
+    private fun executeOpen(appName: String): ExecutionResult {
+        LogManager.logI(TAG, "Opening app: $appName")
+        if (installedAppList == null) runBlocking { loadInstalledAppList() }
+        
+        val appList = installedAppList ?: return ExecutionResult(false, "Failed to load app list")
+        val matched = appList.find { it.first.equals(appName, ignoreCase = true) }
+            ?: return ExecutionResult(false, "App '$appName' not found")
+        
+        val strategy = AppNameMapper.getLaunchStrategy(appName)
+        if (strategy != null) {
+            return when (strategy) {
+                is AppNameMapper.LaunchStrategy.IntentAction -> {
+                    try { context.startActivity(strategy.createIntent()); ExecutionResult(true, "App launched") }
+                    catch (e: Exception) { ExecutionResult(false, "Failed: ${e.message}") }
+                }
+                is AppNameMapper.LaunchStrategy.PackageName -> openViaPackage(matched.second)
+            }
+        }
+        return openViaPackage(matched.second)
+    }
+    
+    private fun openViaPackage(pkg: String): ExecutionResult {
+        return try {
+            val intent = context.packageManager.getLaunchIntentForPackage(pkg)
+            if (intent != null) {
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(intent)
+                ExecutionResult(true, "App launched")
+            } else ExecutionResult(false, "No launch intent")
+        } catch (e: Exception) { ExecutionResult(false, "Failed: ${e.message}") }
+    }
+    
+    private fun executeSystemButton(button: AgentAction.SystemButton.Button): ExecutionResult {
+        val ok = when (button) {
+            AgentAction.SystemButton.Button.BACK -> accessibilityService?.pressBack()
+            AgentAction.SystemButton.Button.HOME -> accessibilityService?.pressHome()
+            AgentAction.SystemButton.Button.MENU -> accessibilityService?.pressRecents()
+            AgentAction.SystemButton.Button.ENTER -> accessibilityService?.pressEnter()
+        } ?: false
+        return ExecutionResult(ok, if (ok) "Pressed $button" else "Failed to press $button")
+    }
+    
+    private suspend fun executeGetAppList(): ExecutionResult {
+        if (installedAppList == null) loadInstalledAppList()
+        val apps = installedAppList ?: return ExecutionResult(false, "Failed to load app list")
+        val names = apps.map { it.first }
+        val json = names.joinToString("\",\"", prefix = "[\"", postfix = "\"]")
+        LogManager.logI(TAG, "[GET_APP_LIST] Returning ${names.size} apps")
+        return ExecutionResult(true, "App list: ${names.size} apps", returnData = json)
+    }
+    
+    fun normalizedToPixel(xNorm: Int, yNorm: Int): Pair<Int, Int> {
+        val x = ((xNorm / 999f) * (screenWidth - 1)).roundToInt().coerceIn(0, screenWidth - 1)
+        val y = ((yNorm / 999f) * (screenHeight - 1)).roundToInt().coerceIn(0, screenHeight - 1)
+        return Pair(x, y)
+    }
+    
+    // ============================================================================
+    // Web Operations (using Agent-dedicated background WebView)
+    // ============================================================================
+
+    private fun getAgentWebView(): AgentWebView? = accessibilityService?.agentWebView
+
+    private suspend fun executeWebOpen(url: String): ExecutionResult {
+        LogManager.logI(TAG, "[WEB_OPEN] Opening URL: $url")
+        val webView = getAgentWebView()
+            ?: return ExecutionResult(false, "AgentWebView not available (accessibility service not running)")
+        val ok = webView.loadUrl(url)
+        return if (ok) {
+            ExecutionResult(true, "Opened URL: $url (page loaded)")
+        } else {
+            ExecutionResult(false, "Failed to load URL: $url (timeout or network error)")
+        }
+    }
+
+    private suspend fun executeWebGetContent(): ExecutionResult {
+        LogManager.logI(TAG, "[WEB_GET_CONTENT] Extracting page content")
+        val webView = getAgentWebView()
+            ?: return ExecutionResult(false, "AgentWebView not available (accessibility service not running)")
+        val content = webView.getContent()
+        return if (content != null) {
+            LogManager.logI(TAG, "[WEB_GET_CONTENT] Got ${content.length} chars")
+            ExecutionResult(true, "Page content extracted (${content.length} chars)", returnData = content)
+        } else {
+            ExecutionResult(false, "Failed to extract page content (timeout)")
+        }
+    }
+
+    private suspend fun executeWebExecuteJs(script: String): ExecutionResult {
+        LogManager.logI(TAG, "[WEB_EXECUTE_JS] Executing: ${script.take(100)}...")
+        val webView = getAgentWebView()
+            ?: return ExecutionResult(false, "AgentWebView not available (accessibility service not running)")
+        val result = webView.executeJs(script)
+        return if (result != null) {
+            ExecutionResult(true, "JS executed, result: ${result.take(200)}", returnData = result)
+        } else {
+            ExecutionResult(false, "JS execution timeout")
+        }
+    }
 }

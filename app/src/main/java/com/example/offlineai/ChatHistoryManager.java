@@ -376,18 +376,23 @@ public class ChatHistoryManager {
             String[] messageParts = content.toString().split(separatorPattern);
             List<ChatDataItem> messages = new ArrayList<>();
             
+            // Stats: [0]=chars, [1]=audio, [2]=image
+            int[] stats = new int[3];
+            
             for (String part : messageParts) {
                 if (TextUtils.isEmpty(part.trim())) {
                     continue;
                 }
                 
-                ChatDataItem item = markdownToChatItem(context, part.trim(), folderPath);
+                ChatDataItem item = markdownToChatItem(context, part.trim(), folderPath, stats);
                 if (item != null) {
                     messages.add(item);
+                    stats[0] += (item.text != null ? item.text.length() : 0);
                 }
             }
             
-            LogManager.logD(TAG, "Loaded " + messages.size() + " messages from: " + conversationFile.getAbsolutePath());
+            LogManager.logD(TAG, String.format("[HISTORY_LOAD] Loaded %d messages (%d chars, %d audio, %d images)",
+                messages.size(), stats[0], stats[1], stats[2]));
             return messages;
             
         } catch (IOException e) {
@@ -404,6 +409,13 @@ public class ChatHistoryManager {
      * @return ChatDataItem对象
      */
     private static ChatDataItem markdownToChatItem(Context context, String markdown, String folderPath) {
+        return markdownToChatItem(context, markdown, folderPath, null);
+    }
+    
+    /**
+     * 将Markdown文本转换为ChatDataItem（带统计）
+     */
+    private static ChatDataItem markdownToChatItem(Context context, String markdown, String folderPath, int[] stats) {
         try {
             // 确定消息类型
             int type = ChatViewHolders.USER;
@@ -456,15 +468,11 @@ public class ChatHistoryManager {
                                 String audioFileName = bodyContent.substring(linkStart + 1, audioLinkEnd);
                                 File audioFile = new File(folderPath, audioFileName);
                                 
-                                LogManager.logD(TAG, "[HISTORY_LOAD] Parsing audio: fileName=" + audioFileName + ", folderPath=" + folderPath + ", exists=" + audioFile.exists());
-                                
                                 if (audioFile.exists()) {
                                     // CRITICAL: Only set audioUri (like createAudioInputData does)
                                     // UI will auto-initialize audioPlayComponent when user clicks play button
                                     item.audioUri = Uri.fromFile(audioFile);
-                                    
-                                    LogManager.logI(TAG, "[HISTORY_LOAD] ✅ Audio loaded: " + audioFile.getAbsolutePath());
-                                    LogManager.logI(TAG, "[HISTORY_LOAD]    audioUri.scheme=" + item.audioUri.getScheme() + ", path=" + item.audioUri.getPath());
+                                    if (stats != null) stats[1]++; // audio count
                                     
                                     // 提取时长信息（如果有）从label部分：[音频: filename (3.4s)]
                                     String audioLabel = bodyContent.substring(audioStart, labelEnd);
@@ -474,13 +482,10 @@ public class ChatHistoryManager {
                                         try {
                                             String durationStr = audioLabel.substring(durationStart + 1, durationEnd).trim();
                                             item.setAudioDuration(Float.parseFloat(durationStr));
-                                            LogManager.logD(TAG, "[HISTORY_LOAD]    duration=" + durationStr + "s");
-                                        } catch (NumberFormatException e) {
-                                            LogManager.logW(TAG, "[HISTORY_LOAD]    Failed to parse duration: " + e.getMessage());
+                                                } catch (NumberFormatException e) {
+                                            // Ignore parse error
                                         }
                                     }
-                                } else {
-                                    LogManager.logE(TAG, "[HISTORY_LOAD] ❌ Audio file NOT found: " + audioFile.getAbsolutePath());
                                 }
                                 
                                 // 移除音频markdown语法，获取纯文本
@@ -516,14 +521,9 @@ public class ChatHistoryManager {
                                 String imageFileName = bodyContent.substring(urlStart + 1, urlEnd);
                                 File imageFile = new File(folderPath, imageFileName);
                                 
-                                LogManager.logD(TAG, "[HISTORY_LOAD] Parsing image: fileName=" + imageFileName + 
-                                              ", folderPath=" + folderPath + ", exists=" + imageFile.exists());
-                                
                                 if (imageFile.exists()) {
                                     item.imageUri = Uri.fromFile(imageFile);
-                                    LogManager.logI(TAG, "[HISTORY_LOAD] ✅ Image loaded: " + imageFile.getAbsolutePath());
-                                } else {
-                                    LogManager.logW(TAG, "[HISTORY_LOAD] ❌ Image file NOT found: " + imageFile.getAbsolutePath());
+                                    if (stats != null) stats[2]++; // image count
                                 }
                                 
                                 // 移除图片markdown语法，获取纯文本

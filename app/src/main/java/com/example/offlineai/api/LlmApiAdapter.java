@@ -8,6 +8,7 @@ import com.android.volley.toolbox.Volley;
 import com.example.offlineai.LogManager;
 import com.example.offlineai.AppConstants;
 import com.example.offlineai.BackgroundTaskManager;
+import com.example.offlineai.ConfigManager;
 import com.example.offlineai.ipc.InferenceClient;
 
 import org.json.JSONArray;
@@ -48,6 +49,15 @@ public class LlmApiAdapter {
     }
     
     /**
+     * Model capability: determines endpoint routing and response handling.
+     * Callers set this based on user selection / model metadata, not hardcoded names.
+     */
+    public enum ModelCapability {
+        TEXT_GENERATION,   // Standard LLM chat (streaming)
+        IMAGE_GENERATION   // Image generation (synchronous, returns image URL)
+    }
+
+    /**
      * API类型枚举
      */
     public enum ApiType {
@@ -85,6 +95,17 @@ public class LlmApiAdapter {
     }
     
     /**
+     * Heuristic to detect image generation models by name.
+     * Used as fallback when caller does not specify ModelCapability.
+     */
+    private static boolean looksLikeImageModel(String model) {
+        if (model == null) return false;
+        String m = model.toLowerCase();
+        return m.contains("image") || m.contains("dall-e") || m.contains("wanx")
+            || m.contains("flux") || m.contains("stable-diffusion") || m.contains("cogview");
+    }
+    
+    /**
      * 根据API URL自动检测API类型
      */
     public ApiType detectApiType(String apiUrl) {
@@ -116,6 +137,26 @@ public class LlmApiAdapter {
      * 所有API调用都使用统一的流式处理方式
      */
     public void callLlmApi(String apiUrl, String apiKey, String model, String systemPrompt, String userPrompt, java.util.List<String> imagePaths, java.util.List<String> audioPaths, ApiCallback callback) {
+        // Detect capability: caller can use the overload with explicit ModelCapability,
+        // otherwise fall back to heuristic based on model name.
+        ModelCapability capability = looksLikeImageModel(model)
+                ? ModelCapability.IMAGE_GENERATION : ModelCapability.TEXT_GENERATION;
+        callLlmApi(apiUrl, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, capability, callback);
+    }
+
+    /**
+     * Unified API entry point with explicit model capability.
+     * Callers who know the model type should use this overload.
+     */
+    public void callLlmApi(String apiUrl, String apiKey, String model, String systemPrompt, String userPrompt,
+                            java.util.List<String> imagePaths, java.util.List<String> audioPaths,
+                            ModelCapability capability, ApiCallback callback) {
+        if (capability == ModelCapability.IMAGE_GENERATION) {
+            LogManager.logI(TAG, "[IMAGE_GEN] Detected image generation model: " + model);
+            handleImageGeneration(apiUrl, apiKey, model, systemPrompt, userPrompt, imagePaths, callback);
+            return;
+        }
+        
         // For local model, combine prompts (LocalLLMMNNHandler expects single prompt)
         // For online API, pass separately to avoid incorrect \n\n splitting
         ApiType apiType = detectApiType(apiUrl);
@@ -673,6 +714,201 @@ public class LlmApiAdapter {
                 }
             }
         });
+    }
+    
+    /**
+     * Handle image generation API call.
+     * Reuses StreamingApiClient for HTTP + auth, ApiUtils for Base64 + image saving.
+     * Supports Qianwen and OpenAI-compatible providers.
+     * For local Diffusion models, routes to local inference path.
+     */
+    private void handleImageGeneration(String apiUrl, String apiKey, String model,
+                                       String systemPrompt, String userPrompt,
+                                       java.util.List<String> imagePaths, ApiCallback callback) {
+        try {
+            ApiType apiType = detectApiType(apiUrl);
+            
+            // CRITICAL: Local Diffusion models should use local inference, not HTTP request
+            if (apiType == ApiType.LOCAL) {
+                LogManager.logI(TAG, "[IMAGE_GEN] Detected local Diffusion model: " + model);
+                LogManager.logI(TAG, "[IMAGE_GEN] Routing to local inference path");
+                
+                // Combine prompts
+                String prompt = userPrompt;
+                if (systemPrompt != null && !systemPrompt.trim().isEmpty()) {
+                    prompt = systemPrompt + "\n" + userPrompt;
+                }
+                
+                // Push latest runtime configuration to inference process
+                com.example.offlineai.RuntimeConfigUtil.pushToInference(context);
+                
+                // Use InferenceClient for local Diffusion inference
+                InferenceClient client = InferenceClient.getInstance(context.getApplicationContext());
+                client.runLlmTask(model, prompt, imagePaths, null, callback);
+                return;
+            }
+            
+            String baseUrl = ApiUtils.extractBaseUrl(apiUrl);
+            final boolean isQianwenFormat = (apiType == ApiType.QIANWEN);
+
+            // Determine endpoint
+            String endpoint = isQianwenFormat
+                    ? baseUrl + "/api/v1/services/aigc/multimodal-generation/generation"
+                    : baseUrl + "/v1/images/generations";
+
+            LogManager.logI(TAG, "[IMAGE_GEN] Detected image generation model: " + model);
+            LogManager.logI(TAG, "[IMAGE_GEN] endpoint=" + endpoint + ", format=" + (isQianwenFormat ? "Qianwen" : "OpenAI"));
+
+            // Combine prompts
+            String prompt = userPrompt;
+            if (systemPrompt != null && !systemPrompt.trim().isEmpty()) {
+                prompt = systemPrompt + "\n" + userPrompt;
+            }
+            final String finalPrompt = prompt;
+
+            // Get image size from ConfigManager (reuse Diffusion settings)
+            int imageWidth = ConfigManager.getDiffusionImageWidth(context);
+            int imageHeight = ConfigManager.getDiffusionImageHeight(context);
+            // Use 1024 as default if not configured
+            if (imageWidth == 0) imageWidth = 1024;
+            if (imageHeight == 0) imageHeight = 1024;
+            LogManager.logI(TAG, "[IMAGE_GEN] Image size: " + imageWidth + "x" + imageHeight);
+
+            // Build request body
+            JSONObject requestBody = buildImageGenRequestBody(model, finalPrompt, imagePaths, isQianwenFormat, imageWidth, imageHeight);
+            LogManager.logI(TAG, "[IMAGE_GEN] Request size: " + requestBody.toString().length() + " bytes");
+
+            // Execute on background thread via StreamingApiClient.imageRequest
+            final String origApiUrl = apiUrl;
+            new Thread(() -> {
+                streamingClient.imageRequest(endpoint, apiKey, origApiUrl, requestBody,
+                    new StreamingApiClient.StreamingCallback() {
+                        @Override
+                        public void onToken(String token) { }
+
+                        @Override
+                        public void onComplete(String responseBody) {
+                            try {
+                                String imageUrl = parseImageUrl(responseBody, isQianwenFormat);
+                                LogManager.logI(TAG, "[IMAGE_GEN] Image URL extracted: " + imageUrl);
+
+                                // Download and save using shared OkHttp client + ApiUtils
+                                String savedPath = ApiUtils.downloadAndSaveImage(
+                                        context, imageUrl, streamingClient.getClient());
+
+                                if (savedPath == null) {
+                                    callback.onError("Failed to download/save generated image");
+                                    return;
+                                }
+
+                                // Return [IMAGE:path] so RagQueryManager can detect it
+                                String resultMessage = "[IMAGE:" + savedPath + "]";
+                                // CRITICAL: onStreamingData first to populate fullResponseAccumulator
+                                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                                    callback.onStreamingData(resultMessage);
+                                    callback.onSuccess(resultMessage);
+                                });
+                            } catch (Exception e) {
+                                LogManager.logE(TAG, "[IMAGE_GEN] Parse/download error: " + e.getMessage(), e);
+                                callback.onError("Image generation error: " + e.getMessage());
+                            }
+                        }
+
+                        @Override
+                        public void onError(String errorMessage) {
+                            callback.onError(errorMessage);
+                        }
+
+                        @Override
+                        public void onError(String errorMessage, int statusCode) {
+                            callback.onError(errorMessage);
+                        }
+                    });
+            }).start();
+
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[IMAGE_GEN] Failed to build request: " + e.getMessage(), e);
+            callback.onError("Failed to build image generation request: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Build image generation request body for Qianwen or OpenAI format.
+     * Qianwen: text and image are mutually exclusive in content array.
+     * OpenAI: uses prompt field directly.
+     */
+    private JSONObject buildImageGenRequestBody(String model, String prompt,
+                                                 java.util.List<String> imagePaths,
+                                                 boolean isQianwenFormat,
+                                                 int imageWidth, int imageHeight) throws JSONException {
+        JSONObject body = new JSONObject();
+        body.put("model", model);
+
+        if (isQianwenFormat) {
+            JSONObject input = new JSONObject();
+            JSONArray messages = new JSONArray();
+            JSONObject message = new JSONObject();
+            message.put("role", "user");
+
+            JSONArray content = new JSONArray();
+            boolean hasInputImage = (imagePaths != null && !imagePaths.isEmpty());
+
+            // Text content is ALWAYS required by Qianwen image API
+            JSONObject textObj = new JSONObject();
+            textObj.put("text", prompt);
+            content.put(textObj);
+
+            if (hasInputImage) {
+                // Image-to-image: add all input images alongside text
+                for (int i = 0; i < imagePaths.size(); i++) {
+                    String base64 = ApiUtils.encodeImageToBase64(imagePaths.get(i));
+                    if (base64 != null) {
+                        JSONObject imgObj = new JSONObject();
+                        imgObj.put("image", "data:image/jpeg;base64," + base64);
+                        content.put(imgObj);
+                        LogManager.logI(TAG, "[IMAGE_GEN] Image-to-image mode, added image " + (i + 1) + "/" + imagePaths.size());
+                    }
+                }
+            } else {
+                LogManager.logI(TAG, "[IMAGE_GEN] Text-to-image mode");
+            }
+
+            message.put("content", content);
+            messages.put(message);
+            input.put("messages", messages);
+            body.put("input", input);
+
+            JSONObject parameters = new JSONObject();
+            // Qianwen format: "width*height"
+            parameters.put("size", imageWidth + "*" + imageHeight);
+            body.put("parameters", parameters);
+            LogManager.logI(TAG, "[IMAGE_GEN] Qianwen size parameter: " + imageWidth + "*" + imageHeight);
+        } else {
+            // OpenAI format: "widthxheight"
+            body.put("prompt", prompt);
+            body.put("n", 1);
+            body.put("size", imageWidth + "x" + imageHeight);
+            LogManager.logI(TAG, "[IMAGE_GEN] OpenAI size parameter: " + imageWidth + "x" + imageHeight);
+        }
+        return body;
+    }
+
+    /**
+     * Parse image URL from API response (Qianwen or OpenAI format).
+     */
+    private String parseImageUrl(String responseBody, boolean isQianwenFormat) throws JSONException {
+        JSONObject json = new JSONObject(responseBody);
+        if (isQianwenFormat) {
+            // {"output":{"choices":[{"message":{"content":[{"image":"..."}]}}]}}
+            return json.getJSONObject("output")
+                       .getJSONArray("choices").getJSONObject(0)
+                       .getJSONObject("message")
+                       .getJSONArray("content").getJSONObject(0)
+                       .getString("image");
+        } else {
+            // {"data":[{"url":"..."}]}
+            return json.getJSONArray("data").getJSONObject(0).getString("url");
+        }
     }
     
     /**

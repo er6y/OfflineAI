@@ -11,11 +11,15 @@ import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.widget.Button
+import android.widget.EditText
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.example.offlineai.LogManager
 import com.example.offlineai.R
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 /**
  * Floating window to display Agent execution status
@@ -25,6 +29,9 @@ class AgentFloatingWindow(private val context: Context) {
     
     companion object {
         private const val TAG = "AgentFloatingWindow"
+        private const val SCROLL_HEIGHT_NORMAL_DP = 100
+        private const val SCROLL_HEIGHT_ASK_USER_DP = 60
+        private const val SCROLL_HEIGHT_TERMINATE_DP = 150
     }
     
     private val windowManager: WindowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -52,11 +59,19 @@ class AgentFloatingWindow(private val context: Context) {
     private var textViewStep: TextView? = null
     private var textViewStatus: TextView? = null
     private var textViewOutput: TextView? = null
+    private var scrollViewOutput: android.widget.ScrollView? = null
     private var buttonMinimize: ImageButton? = null
     private var buttonStop: ImageButton? = null
-    private var buttonSaveExperience: android.widget.Button? = null
+    private var buttonSaveExperience: Button? = null
     private var layoutExpanded: LinearLayout? = null
     private var layoutMinimized: LinearLayout? = null
+    // TakeOver UI components
+    private var layoutTakeOver: LinearLayout? = null
+    private var textViewTakeOverQuestion: TextView? = null
+    private var editTextTakeOverInput: EditText? = null
+    private var buttonTakeOverConfirm: Button? = null
+    // Window params reference for focusable toggling
+    private var windowParams: WindowManager.LayoutParams? = null
     
     // Callbacks
     private var onStopClickListener: (() -> Unit)? = null
@@ -92,11 +107,16 @@ class AgentFloatingWindow(private val context: Context) {
             textViewStep = floatingView?.findViewById(R.id.textViewStep)
             textViewStatus = floatingView?.findViewById(R.id.textViewStatus)
             textViewOutput = floatingView?.findViewById(R.id.textViewOutput)
+            scrollViewOutput = floatingView?.findViewById(R.id.scrollViewOutput)
             buttonMinimize = floatingView?.findViewById(R.id.buttonMinimize)
             buttonStop = floatingView?.findViewById(R.id.buttonStop)
             buttonSaveExperience = floatingView?.findViewById(R.id.buttonSaveExperience)
             layoutExpanded = floatingView?.findViewById(R.id.layoutExpanded)
             layoutMinimized = floatingView?.findViewById(R.id.layoutMinimized)
+            layoutTakeOver = floatingView?.findViewById(R.id.layoutTakeOver)
+            textViewTakeOverQuestion = floatingView?.findViewById(R.id.textViewTakeOverQuestion)
+            editTextTakeOverInput = floatingView?.findViewById(R.id.editTextTakeOverInput)
+            buttonTakeOverConfirm = floatingView?.findViewById(R.id.buttonTakeOverConfirm)
 
             // Setup window parameters
             val windowType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -117,6 +137,7 @@ class AgentFloatingWindow(private val context: Context) {
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT
             )
+            windowParams = params
 
             // Position at top-right corner to avoid obscuring main interaction area
             params.gravity = Gravity.TOP or Gravity.END
@@ -172,7 +193,8 @@ class AgentFloatingWindow(private val context: Context) {
                     }
 
                     MotionEvent.ACTION_MOVE -> {
-                        params.x = initialX + (event.rawX - initialTouchX).toInt()
+                        // Note: gravity=END means x is offset from right edge, so direction is reversed
+                        params.x = initialX - (event.rawX - initialTouchX).toInt()
                         params.y = initialY + (event.rawY - initialTouchY).toInt()
                         windowManager.updateViewLayout(floatingView, params)
                         true
@@ -295,11 +317,40 @@ class AgentFloatingWindow(private val context: Context) {
 
     fun updateOutput(output: String) {
         val compact = buildCompactOutput(output)
-        if (Looper.myLooper() == Looper.getMainLooper()) {
+        runOnMainThread {
             textViewOutput?.text = compact
-        } else {
-            mainHandler.post { textViewOutput?.text = compact }
+            textViewOutput?.setTextColor(0x99FFFFFF.toInt())
+            textViewOutput?.textSize = 10f
+            // Reset ScrollView height back to normal in case showTerminateResult had expanded it
+            setScrollViewHeight(SCROLL_HEIGHT_NORMAL_DP)
         }
+    }
+
+    /**
+     * Show final terminate/finish result in the output area.
+     * Clears previous step output and displays the full expanded text so the user
+     * can read and scroll through the entire task summary.
+     * Subsequent experience-summary model outputs will NOT overwrite this.
+     */
+    fun showTerminateResult(text: String) {
+        val display = text.trim().ifEmpty { "Task completed." }
+        runOnMainThread {
+            textViewOutput?.text = display
+            // Use brighter colour and slightly larger font to distinguish from step output
+            textViewOutput?.setTextColor(0xFFFFFFFF.toInt())
+            textViewOutput?.textSize = 11f
+            // Expand ScrollView to 200dp so long terminate text is scrollable without overflowing screen
+            setScrollViewHeight(SCROLL_HEIGHT_TERMINATE_DP)
+            // Scroll to top so user reads from beginning
+            scrollViewOutput?.scrollTo(0, 0)
+        }
+    }
+
+    private fun setScrollViewHeight(dp: Int) {
+        val px = (dp * context.resources.displayMetrics.density).toInt()
+        val lp = scrollViewOutput?.layoutParams ?: return
+        lp.height = px
+        scrollViewOutput?.layoutParams = lp
     }
 
     private fun buildCompactOutput(output: String): String {
@@ -326,6 +377,70 @@ class AgentFloatingWindow(private val context: Context) {
     
     fun setOnSaveExperienceClickListener(listener: () -> Unit) {
         onSaveExperienceClickListener = listener
+    }
+    
+    /**
+     * Show AskUser input UI and suspend until user confirms.
+     * Displays the model's question, an optional text input, and a confirm button.
+     * Returns the user's input text (may be empty if user just clicks confirm).
+     */
+    suspend fun showAskUserInputAndWait(question: String): String {
+        return suspendCancellableCoroutine { continuation ->
+            runOnMainThread {
+                // Show AskUser panel
+                textViewTakeOverQuestion?.text = question
+                editTextTakeOverInput?.setText("")
+                layoutTakeOver?.visibility = View.VISIBLE
+                
+                // Make window focusable so EditText can receive input
+                windowParams?.let { p ->
+                    p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
+                    try { floatingView?.let { windowManager.updateViewLayout(it, p) } } catch (_: Exception) {}
+                }
+                
+                // Request focus for EditText and show keyboard
+                editTextTakeOverInput?.post {
+                    editTextTakeOverInput?.requestFocus()
+                    // Optionally show keyboard (requires InputMethodManager)
+                    try {
+                        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+                        imm?.showSoftInput(editTextTakeOverInput, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                    } catch (e: Exception) {
+                        LogManager.logE(TAG, "[ASK_USER] Failed to show keyboard", e)
+                    }
+                }
+                
+                LogManager.logI(TAG, "[ASK_USER] AskUser UI shown, waiting for user input")
+                
+                // Shrink output area to give TakeOver panel more room
+                setScrollViewHeight(SCROLL_HEIGHT_ASK_USER_DP)
+
+                buttonTakeOverConfirm?.setOnClickListener {
+                    val userText = editTextTakeOverInput?.text?.toString()?.trim() ?: ""
+                    LogManager.logI(TAG, "[ASK_USER] User confirmed, input length=${userText.length}")
+                    
+                    // Hide AskUser panel, restore non-focusable, and restore scroll height
+                    layoutTakeOver?.visibility = View.GONE
+                    setScrollViewHeight(SCROLL_HEIGHT_NORMAL_DP)
+                    windowParams?.let { p ->
+                        p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        try { floatingView?.let { windowManager.updateViewLayout(it, p) } } catch (_: Exception) {}
+                    }
+                    
+                    if (continuation.isActive) continuation.resume(userText)
+                }
+                
+                continuation.invokeOnCancellation {
+                    // Hide panel on cancellation, restore scroll height
+                    layoutTakeOver?.visibility = View.GONE
+                    setScrollViewHeight(SCROLL_HEIGHT_NORMAL_DP)
+                    windowParams?.let { p ->
+                        p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        try { floatingView?.let { windowManager.updateViewLayout(it, p) } } catch (_: Exception) {}
+                    }
+                }
+            }
+        }
     }
     
     /**

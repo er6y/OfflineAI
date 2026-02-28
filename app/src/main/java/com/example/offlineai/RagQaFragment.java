@@ -197,9 +197,9 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     // Current chat folder path for saving images and conversation
     private String currentChatFolderPath = null;
     
-    // Image picker launcher for Android 13+
+    // Image picker launcher for Android 13+ (supports multiple selection)
     private ActivityResultLauncher<PickVisualMediaRequest> pickMedia;
-    // Document picker launcher for Android 11/12
+    // Document picker launcher for Android 11/12 (supports multiple selection)
     private ActivityResultLauncher<String[]> pickDocument;
     // Media picker launcher (images, audio, video)
     private ActivityResultLauncher<String[]> pickMediaFile;
@@ -1038,8 +1038,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 @Override
                 public void onAgentActionDetected(String fullResponse) {
                     // Agent loop is now started directly when user sends message in Agent mode
-                    // No need to trigger from streaming output
-                    LogManager.logD(TAG, "[AGENT] onAgentActionDetected called but ignored (using loop mode)");
+                    // No need to trigger from streaming output (callback ignored)
                 }
                 
                 @Override
@@ -3558,25 +3557,31 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         super.onCreate(savedInstanceState);
         
         // Initialize image picker launchers - must be done in onCreate before Fragment is attached
-        // For Android 13+ (API 33+): Use Photo Picker
+        // For Android 13+ (API 33+): Use Photo Picker with multiple selection
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             pickMedia = registerForActivityResult(
-                    new ActivityResultContracts.PickVisualMedia(),
-                    uri -> {
-                        if (uri != null) {
-                            handleImageSelected(uri);
+                    new ActivityResultContracts.PickMultipleVisualMedia(MAX_IMAGES),
+                    uris -> {
+                        if (uris != null && !uris.isEmpty()) {
+                            for (Uri uri : uris) {
+                                handleImageSelected(uri);
+                            }
+                            LogManager.logI(TAG, "Picked " + uris.size() + " images from Photo Picker");
                         } else {
                             LogManager.logI(TAG, "Pick image from selection menu - no image selected");
                         }
                     });
         }
         
-        // For Android 11/12: Use OpenDocument
+        // For Android 11/12: Use OpenMultipleDocuments
         pickDocument = registerForActivityResult(
-                new ActivityResultContracts.OpenDocument(),
-                uri -> {
-                    if (uri != null) {
-                        handleImageSelected(uri);
+                new ActivityResultContracts.OpenMultipleDocuments(),
+                uris -> {
+                    if (uris != null && !uris.isEmpty()) {
+                        for (Uri uri : uris) {
+                            handleImageSelected(uri);
+                        }
+                        LogManager.logI(TAG, "Picked " + uris.size() + " images from Document Picker");
                     } else {
                         LogManager.logI(TAG, "Pick image from selection menu - no image selected");
                     }
@@ -5216,11 +5221,23 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
             userMsg.imageUri = Uri.parse(imagePaths.get(0));
         }
     } else if (userInput.hasImages()) {
-        // Image message (with optional text)
+        // Multi-image support: create one ChatDataItem per image
+        // First N-1 images: image only (no text), last image: image + text
+        int imageCount = imagePaths.size();
+        for (int i = 0; i < imageCount - 1; i++) {
+            ChatDataItem imgOnlyMsg = ChatDataItem.Companion.createImageInputData(
+                getCurrentTime(),
+                null,  // No text for intermediate images
+                Uri.parse(imagePaths.get(i))
+            );
+            chatMessages.add(imgOnlyMsg);
+            chatAdapter.notifyItemInserted(chatMessages.size() - 1);
+        }
+        // Last image carries the text prompt
         userMsg = ChatDataItem.Companion.createImageInputData(
             getCurrentTime(),
             textPrompt,
-            Uri.parse(imagePaths.get(0))  // Use first image
+            Uri.parse(imagePaths.get(imageCount - 1))
         );
     } else {
         // Text-only message

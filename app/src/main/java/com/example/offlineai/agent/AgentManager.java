@@ -89,15 +89,9 @@ public class AgentManager {
             }
             
             @Override
-            public void onAnswer(@NotNull String text) {
-                if (callback != null) {
-                    callback.onAgentAnswer(text);
-                }
-            }
-            
-            @Override
-            public void onAskUser(@NotNull String question, @NotNull kotlin.jvm.functions.Function1<? super String, Unit> callback) {
-                // Not implemented
+            public Object onAskUser(@NotNull String question, @NotNull kotlin.coroutines.Continuation<? super String> continuation) {
+                // AgentManager path has no floating window UI; return empty string synchronously
+                return "";
             }
         });
     }

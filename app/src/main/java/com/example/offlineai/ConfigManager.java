@@ -120,6 +120,7 @@ public class ConfigManager {
     public static final String KEY_AGENT_MODE_ENABLED = "agent_mode_enabled"; // Agent模式是否启用
     public static final String KEY_AGENT_ACTION_FORMAT = "agent_action_format"; // Agent动作格式选择 (Auto/MAI-UI/AutoGLM-Phone/Doubao-1.5-UI-TARS)
     public static final String KEY_AGENT_EXPERIENCE_SUMMARY = "agent_experience_summary"; // Agent经验总结开关
+    public static final String KEY_AGENT_TTS_ENABLED = "agent_tts_enabled"; // Agent语音播报开关
     public static final String KEY_THREADS = "threads"; // ONNX推理线程数
     public static final String KEY_EMBEDDING_CONCURRENCY = "embedding_concurrency"; // Embedding session concurrency for knowledge base building
     public static final String KEY_EMBEDDING_THREADS = "embedding_threads"; // MNN threads per embedding session for knowledge base building
@@ -3048,6 +3049,21 @@ public class ConfigManager {
     public static void setAgentExperienceSummaryEnabled(Context context, boolean enabled) {
         setBoolean(context, KEY_AGENT_EXPERIENCE_SUMMARY, enabled);
         LogManager.logD(TAG, "Set agent experience summary enabled: " + enabled);
+    }
+
+    /**
+     * 获取Agent TTS语音播报开关
+     */
+    public static boolean isAgentTtsEnabled(Context context) {
+        return getBoolean(context, KEY_AGENT_TTS_ENABLED, false);
+    }
+
+    /**
+     * 设置Agent TTS语音播报开关
+     */
+    public static void setAgentTtsEnabled(Context context, boolean enabled) {
+        setBoolean(context, KEY_AGENT_TTS_ENABLED, enabled);
+        LogManager.logD(TAG, "Set agent TTS enabled: " + enabled);
     }
 }
 

@@ -100,6 +100,7 @@ public class SettingsFragment extends Fragment {
     private Spinner spinnerGraphStopwords;
     private Spinner spinnerAgentActionFormat;
     private Switch switchAgentExperienceSummary;
+    private Switch switchAgentTts;
     
     private EditText editTextDataRootPath;
     private Button buttonSelectDataRootPath;
@@ -250,6 +251,7 @@ public class SettingsFragment extends Fragment {
         spinnerGraphStopwords = view.findViewById(R.id.spinnerGraphStopwords);
         spinnerAgentActionFormat = view.findViewById(R.id.spinnerAgentActionFormat);
         switchAgentExperienceSummary = view.findViewById(R.id.switchAgentExperienceSummary);
+        switchAgentTts = view.findViewById(R.id.switchAgentTts);
         
         editTextDataRootPath = view.findViewById(R.id.editTextDataRootPath);
         buttonSelectDataRootPath = view.findViewById(R.id.buttonSelectDataRootPath);
@@ -356,6 +358,7 @@ public class SettingsFragment extends Fragment {
         // 初始化Agent设置
         initializeAgentActionFormatSpinner();
         initializeAgentExperienceSummarySwitch();
+        initializeAgentTtsSwitch();
         
         // 加载当前设置
         loadSettings();
@@ -589,6 +592,18 @@ public class SettingsFragment extends Fragment {
                 // 18: 720x1280 (9:16 Mobile)
                 // 19: 1280x720 (16:9 Widescreen)
                 // 20: 1024x1024 (1:1)
+                // 21: 1152x1152 (1:1)
+                // 22: 1024x1536 (2:3 Portrait)
+                // 23: 1536x1024 (3:2 Widescreen)
+                // 24: 1280x1280 (1:1)
+                // 25: 1024x1792 (4:7 Ultra-tall)
+                // 26: 1792x1024 (7:4 Ultra-wide)
+                // 27: 1536x1536 (1:1 High Quality)
+                // 28: 1280x1920 (2:3 Portrait)
+                // 29: 1920x1280 (3:2 Widescreen)
+                // 30: 1440x2560 (9:16 Mobile)
+                // 31: 2560x1440 (16:9 Widescreen)
+                // 32: 2048x2048 (1:1 Max)
                 int width, height;
                 switch (position) {
                     case 0: width = 256; height = 256; break;
@@ -612,6 +627,18 @@ public class SettingsFragment extends Fragment {
                     case 18: width = 720; height = 1280; break;
                     case 19: width = 1280; height = 720; break;
                     case 20: width = 1024; height = 1024; break;
+                    case 21: width = 1152; height = 1152; break;
+                    case 22: width = 1024; height = 1536; break;
+                    case 23: width = 1536; height = 1024; break;
+                    case 24: width = 1280; height = 1280; break;
+                    case 25: width = 1024; height = 1792; break;
+                    case 26: width = 1792; height = 1024; break;
+                    case 27: width = 1536; height = 1536; break;
+                    case 28: width = 1280; height = 1920; break;
+                    case 29: width = 1920; height = 1280; break;
+                    case 30: width = 1440; height = 2560; break;
+                    case 31: width = 2560; height = 1440; break;
+                    case 32: width = 2048; height = 2048; break;
                     default: width = 512; height = 512; break;
                 }
 
@@ -1582,6 +1609,18 @@ public class SettingsFragment extends Fragment {
         else if (savedWidth == 720 && savedHeight == 1280) imageSizeSelection = 18;
         else if (savedWidth == 1280 && savedHeight == 720) imageSizeSelection = 19;
         else if (savedWidth == 1024 && savedHeight == 1024) imageSizeSelection = 20;
+        else if (savedWidth == 1152 && savedHeight == 1152) imageSizeSelection = 21;
+        else if (savedWidth == 1024 && savedHeight == 1536) imageSizeSelection = 22;
+        else if (savedWidth == 1536 && savedHeight == 1024) imageSizeSelection = 23;
+        else if (savedWidth == 1280 && savedHeight == 1280) imageSizeSelection = 24;
+        else if (savedWidth == 1024 && savedHeight == 1792) imageSizeSelection = 25;
+        else if (savedWidth == 1792 && savedHeight == 1024) imageSizeSelection = 26;
+        else if (savedWidth == 1536 && savedHeight == 1536) imageSizeSelection = 27;
+        else if (savedWidth == 1280 && savedHeight == 1920) imageSizeSelection = 28;
+        else if (savedWidth == 1920 && savedHeight == 1280) imageSizeSelection = 29;
+        else if (savedWidth == 1440 && savedHeight == 2560) imageSizeSelection = 30;
+        else if (savedWidth == 2560 && savedHeight == 1440) imageSizeSelection = 31;
+        else if (savedWidth == 2048 && savedHeight == 2048) imageSizeSelection = 32;
         spinnerDiffusionImageSize.setSelection(imageSizeSelection);
         
         int diffSteps = ConfigManager.getDiffusionSteps(ctx);
@@ -1595,9 +1634,12 @@ public class SettingsFragment extends Fragment {
         seekBarDiffusionCfg.setProgress(cfgProgress);
         textViewDiffusionCfgValue.setText(String.format(java.util.Locale.US, "%.2f", diffCfg));
         
-        int diffSeed = ConfigManager.getDiffusionSeed(ctx);
-        boolean isRandom = (diffSeed == -1);
+        // Load random seed switch state from KEY_DIFFUSION_SEED_RANDOM
+        boolean isRandom = ConfigManager.getDiffusionSeedRandom(ctx);
         switchDiffusionSeedRandom.setChecked(isRandom);
+        
+        // Load seed value
+        int diffSeed = ConfigManager.getDiffusionSeed(ctx);
         editTextDiffusionSeed.setText(isRandom ? "" : String.valueOf(diffSeed));
         editTextDiffusionSeed.setEnabled(!isRandom);
         editTextDiffusionSeed.setAlpha(isRandom ? 0.5f : 1.0f);
@@ -2068,7 +2110,8 @@ public class SettingsFragment extends Fragment {
             getString(R.string.agent_action_format_auto),
             getString(R.string.agent_action_format_mai_ui),
             getString(R.string.agent_action_format_autoglm),
-            getString(R.string.agent_action_format_doubao)
+            getString(R.string.agent_action_format_doubao),
+            getString(R.string.agent_action_format_openai_funccall)
         };
         
         // Create adapter
@@ -2093,6 +2136,9 @@ public class SettingsFragment extends Fragment {
             case "Doubao-1.5-UI-TARS":
                 selectedIndex = 3;
                 break;
+            case "OpenAI FuncCall":
+                selectedIndex = 4;
+                break;
         }
         spinnerAgentActionFormat.setSelection(selectedIndex);
         LogManager.logD(TAG, "[AGENT_FORMAT_SPINNER] Loaded saved format: " + savedFormat);
@@ -2115,6 +2161,9 @@ public class SettingsFragment extends Fragment {
                     case 3:
                         selectedFormat = "Doubao-1.5-UI-TARS";
                         break;
+                    case 4:
+                        selectedFormat = "OpenAI FuncCall";
+                        break;
                     default:
                         selectedFormat = "Auto";
                 }
@@ -2128,6 +2177,18 @@ public class SettingsFragment extends Fragment {
         });
     }
     
+    /**
+     * Initialize Agent TTS switch
+     */
+    private void initializeAgentTtsSwitch() {
+        boolean enabled = ConfigManager.isAgentTtsEnabled(requireContext());
+        switchAgentTts.setChecked(enabled);
+        switchAgentTts.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            ConfigManager.setAgentTtsEnabled(requireContext(), isChecked);
+            LogManager.logD(TAG, "[AGENT_TTS] Agent TTS enabled: " + isChecked);
+        });
+    }
+
     /**
      * Initialize Agent experience summary switch
      */

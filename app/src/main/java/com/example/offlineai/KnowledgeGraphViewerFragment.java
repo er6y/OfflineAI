@@ -1,12 +1,16 @@
 package com.example.offlineai;
 
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -65,6 +69,10 @@ public class KnowledgeGraphViewerFragment extends Fragment {
     // Background executor
     private ExecutorService executor;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    
+    // Agent Web Operations Support
+    private BroadcastReceiver agentWebReceiver;
+    private String lastPageContent = "";
 
     private synchronized ExecutorService getExecutor() {
         if (executor == null || executor.isShutdown() || executor.isTerminated()) {
@@ -92,6 +100,9 @@ public class KnowledgeGraphViewerFragment extends Fragment {
     @Override
     public void onViewCreated(@NonNull View view, @Nullable Bundle savedInstanceState) {
         super.onViewCreated(view, savedInstanceState);
+        
+        // Register BroadcastReceiver for Agent Web operations
+        registerAgentWebReceiver();
         
         // Setup menu provider for close button (new API)
         requireActivity().addMenuProvider(new MenuProvider() {
@@ -170,6 +181,9 @@ public class KnowledgeGraphViewerFragment extends Fragment {
                 return true;
             }
         });
+        
+        // Add JavaScript Interface for Agent operations
+        webViewGraph.addJavascriptInterface(new WebAppInterface(), "AgentBridge");
 
         webViewLoaded = false;
         webViewGraph.loadUrl("file:///android_asset/knowledge_graph.html");
@@ -559,9 +573,154 @@ public class KnowledgeGraphViewerFragment extends Fragment {
     @Override
     public void onDestroyView() {
         super.onDestroyView();
+        
+        // Unregister BroadcastReceiver
+        if (agentWebReceiver != null && getContext() != null) {
+            try {
+                getContext().unregisterReceiver(agentWebReceiver);
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Failed to unregister receiver", e);
+            }
+            agentWebReceiver = null;
+        }
+        
         if (executor != null && !executor.isShutdown()) {
             executor.shutdownNow();
         }
         executor = null;
+    }
+    
+    // ============================================================================
+    // Agent Web Operations Support
+    // ============================================================================
+    
+    /**
+     * JavaScript Interface for Agent to get page content
+     */
+    private class WebAppInterface {
+        @JavascriptInterface
+        public void setPageContent(String content) {
+            lastPageContent = content;
+            LogManager.logI(TAG, "[AGENT_WEB] Page content captured: " + content.length() + " chars");
+            
+            // Send broadcast back to Agent with content
+            Intent intent = new Intent("com.example.offlineai.AGENT_WEB_CONTENT_RESULT");
+            intent.putExtra("content", content);
+            intent.setPackage(requireContext().getPackageName());
+            requireContext().sendBroadcast(intent);
+        }
+    }
+    
+    /**
+     * Register BroadcastReceiver to listen for Agent Web operations
+     */
+    private void registerAgentWebReceiver() {
+        if (getContext() == null) return;
+        
+        agentWebReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                String action = intent.getAction();
+                if (action == null) return;
+                
+                LogManager.logI(TAG, "[AGENT_WEB] Received broadcast: " + action);
+                
+                switch (action) {
+                    case "com.example.offlineai.AGENT_WEB_OPEN":
+                        String url = intent.getStringExtra("url");
+                        if (url != null) {
+                            handleAgentWebOpen(url);
+                        }
+                        break;
+                        
+                    case "com.example.offlineai.AGENT_WEB_GET_CONTENT":
+                        handleAgentWebGetContent();
+                        break;
+                        
+                    case "com.example.offlineai.AGENT_WEB_EXECUTE_JS":
+                        String script = intent.getStringExtra("script");
+                        if (script != null) {
+                            handleAgentWebExecuteJs(script);
+                        }
+                        break;
+                }
+            }
+        };
+        
+        IntentFilter filter = new IntentFilter();
+        filter.addAction("com.example.offlineai.AGENT_WEB_OPEN");
+        filter.addAction("com.example.offlineai.AGENT_WEB_GET_CONTENT");
+        filter.addAction("com.example.offlineai.AGENT_WEB_EXECUTE_JS");
+        getContext().registerReceiver(agentWebReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        
+        LogManager.logI(TAG, "[AGENT_WEB] BroadcastReceiver registered");
+    }
+    
+    /**
+     * Handle Agent request to open URL
+     */
+    private void handleAgentWebOpen(String url) {
+        LogManager.logI(TAG, "[AGENT_WEB] Opening URL: " + url);
+        mainHandler.post(() -> {
+            if (webViewGraph != null) {
+                webViewGraph.loadUrl(url);
+                Toast.makeText(requireContext(), 
+                    "Agent: Opening " + url, 
+                    Toast.LENGTH_SHORT).show();
+            }
+        });
+    }
+    
+    /**
+     * Handle Agent request to get page content
+     */
+    private void handleAgentWebGetContent() {
+        LogManager.logI(TAG, "[AGENT_WEB] Getting page content");
+        mainHandler.post(() -> {
+            if (webViewGraph != null) {
+                // Inject JavaScript to extract page content
+                String js = "(function() {" +
+                    "  var title = document.title;" +
+                    "  var url = window.location.href;" +
+                    "  var bodyText = document.body.innerText;" +
+                    "  var links = Array.from(document.querySelectorAll('a')).map(a => ({text: a.innerText, href: a.href}));" +
+                    "  var buttons = Array.from(document.querySelectorAll('button, input[type=button], input[type=submit]')).map(b => b.innerText || b.value);" +
+                    "  var inputs = Array.from(document.querySelectorAll('input[type=text], input[type=email], input[type=password], textarea')).map(i => ({type: i.type, name: i.name, placeholder: i.placeholder}));" +
+                    "  var result = JSON.stringify({" +
+                    "    title: title," +
+                    "    url: url," +
+                    "    text: bodyText.substring(0, 5000)," +
+                    "    links: links.slice(0, 20)," +
+                    "    buttons: buttons.slice(0, 10)," +
+                    "    inputs: inputs.slice(0, 10)" +
+                    "  });" +
+                    "  AgentBridge.setPageContent(result);" +
+                    "})();";
+                
+                webViewGraph.evaluateJavascript(js, value -> 
+                    LogManager.logI(TAG, "[AGENT_WEB] Content extraction completed")
+                );
+            }
+        });
+    }
+    
+    /**
+     * Handle Agent request to execute JavaScript
+     */
+    private void handleAgentWebExecuteJs(String script) {
+        LogManager.logI(TAG, "[AGENT_WEB] Executing JS: " + script.substring(0, Math.min(100, script.length())));
+        mainHandler.post(() -> {
+            if (webViewGraph != null) {
+                webViewGraph.evaluateJavascript(script, value -> {
+                    LogManager.logI(TAG, "[AGENT_WEB] JS execution completed, result: " + value);
+                    
+                    // Send result back to Agent
+                    Intent intent = new Intent("com.example.offlineai.AGENT_WEB_JS_RESULT");
+                    intent.putExtra("result", value != null ? value : "null");
+                    intent.setPackage(requireContext().getPackageName());
+                    requireContext().sendBroadcast(intent);
+                });
+            }
+        });
     }
 }

@@ -9,6 +9,8 @@ import android.database.sqlite.SQLiteOpenHelper;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import com.example.offlineai.ipc.InferenceClient;
+
 import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -1630,6 +1632,235 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
         }
     }
     
+    // ========== Chunk Deletion (Full Strategy) ==========
+
+    /**
+     * Delete chunks by IDs with full graph cleanup.
+     * Strategy:
+     * 1. Delete documents (chunk_entities auto-cascaded via ON DELETE CASCADE)
+     * 2. Decrement entity frequency; remove orphaned entities (frequency=0)
+     * 3. Update entity_edges: remove chunk IDs from chunk_ids JSON, decrement weight; remove empty edges
+     *
+     * @param ids List of chunk IDs to delete
+     * @return Number of chunks actually deleted
+     */
+    public int deleteChunksByIds(List<Long> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return 0;
+        }
+        long startTime = System.currentTimeMillis();
+        int deletedCount = 0;
+
+        synchronized (DB_WRITE_LOCK) {
+            SQLiteDatabase db = getWritableDatabase();
+            db.beginTransaction();
+            try {
+                // Step 1: For each chunk, find its linked entities BEFORE deletion
+                Map<Long, List<String>> chunkEntityMap = new HashMap<>();
+                for (Long chunkId : ids) {
+                    List<String> entities = new ArrayList<>();
+                    Cursor cursor = db.query(TABLE_CHUNK_ENTITIES,
+                        new String[]{"entity_text"},
+                        "chunk_id=?",
+                        new String[]{String.valueOf(chunkId)},
+                        null, null, null);
+                    while (cursor.moveToNext()) {
+                        entities.add(cursor.getString(0));
+                    }
+                    cursor.close();
+                    if (!entities.isEmpty()) {
+                        chunkEntityMap.put(chunkId, entities);
+                    }
+                }
+
+                // Step 2: Delete documents (chunk_entities auto-cascaded)
+                for (Long chunkId : ids) {
+                    int rows = db.delete(TABLE_DOCUMENTS, "id=? AND collection=?",
+                        new String[]{String.valueOf(chunkId), collection});
+                    deletedCount += rows;
+                }
+
+                // Step 3: Decrement entity frequency, remove orphaned entities
+                Set<String> allAffectedEntities = new HashSet<>();
+                for (List<String> entities : chunkEntityMap.values()) {
+                    allAffectedEntities.addAll(entities);
+                }
+                for (String entityText : allAffectedEntities) {
+                    // Count how many of the deleted chunks referenced this entity
+                    int refCount = 0;
+                    for (List<String> entities : chunkEntityMap.values()) {
+                        if (entities.contains(entityText)) {
+                            refCount++;
+                        }
+                    }
+                    // Decrement frequency
+                    db.execSQL("UPDATE " + TABLE_ENTITIES +
+                        " SET frequency = MAX(frequency - ?, 0)" +
+                        " WHERE collection=? AND entity_text=?",
+                        new Object[]{refCount, collection, entityText});
+                    // Remove orphaned entities (frequency=0)
+                    db.delete(TABLE_ENTITIES,
+                        "collection=? AND entity_text=? AND frequency<=0",
+                        new String[]{collection, entityText});
+                }
+
+                // Step 4: Update entity_edges - remove chunk IDs from chunk_ids JSON
+                Set<Long> idSet = new HashSet<>(ids);
+                Cursor edgeCursor = db.query(TABLE_EDGES,
+                    new String[]{"id", "chunk_ids", "weight"},
+                    "collection=?",
+                    new String[]{collection},
+                    null, null, null);
+                while (edgeCursor.moveToNext()) {
+                    long edgeId = edgeCursor.getLong(0);
+                    String chunkIdsJson = edgeCursor.getString(1);
+                    if (chunkIdsJson == null || chunkIdsJson.isEmpty()) continue;
+
+                    try {
+                        JSONArray arr = new JSONArray(chunkIdsJson);
+                        JSONArray newArr = new JSONArray();
+                        int removed = 0;
+                        for (int i = 0; i < arr.length(); i++) {
+                            long cid = arr.getLong(i);
+                            if (!idSet.contains(cid)) {
+                                newArr.put(cid);
+                            } else {
+                                removed++;
+                            }
+                        }
+                        if (removed > 0) {
+                            if (newArr.length() == 0) {
+                                // No chunks left, delete edge
+                                db.delete(TABLE_EDGES, "id=?", new String[]{String.valueOf(edgeId)});
+                            } else {
+                                ContentValues cv = new ContentValues();
+                                cv.put("chunk_ids", newArr.toString());
+                                cv.put("weight", newArr.length());
+                                cv.put("updated_at", System.currentTimeMillis() / 1000);
+                                db.update(TABLE_EDGES, cv, "id=?", new String[]{String.valueOf(edgeId)});
+                            }
+                        }
+                    } catch (Exception e) {
+                        LogManager.logW(TAG, "[DELETE_CHUNKS] Failed to parse edge chunk_ids JSON for edge " + edgeId);
+                    }
+                }
+                edgeCursor.close();
+
+                db.setTransactionSuccessful();
+                long duration = System.currentTimeMillis() - startTime;
+                LogManager.logI(TAG, String.format(
+                    "[DELETE_CHUNKS] Deleted %d/%d chunks, affected %d entities, time=%dms",
+                    deletedCount, ids.size(), allAffectedEntities.size(), duration));
+
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[DELETE_CHUNKS] Failed", e);
+            } finally {
+                try { db.endTransaction(); } catch (Exception ignore) {}
+            }
+        }
+        return deletedCount;
+    }
+
+    // ========== Static RAG Query Helper ==========
+
+    /**
+     * Lightweight RAG query for any knowledge base.
+     * Returns formatted text with chunk IDs for model consumption.
+     * On any error (KB not found, embedding failure, etc.), returns empty string silently.
+     *
+     * @param context Android context
+     * @param kbName Knowledge base name (e.g. "AgentKB")
+     * @param queryText Query text for embedding
+     * @param topK Number of results to return
+     * @return Formatted string: "Document1 [ID:42]:\ncontent...\n\n..." or ""
+     */
+    public static String queryKnowledgeBase(Context context, String kbName, String queryText, int topK) {
+        if (context == null || kbName == null || kbName.isEmpty()
+                || queryText == null || queryText.isEmpty() || topK <= 0) {
+            return "";
+        }
+        long startTime = System.currentTimeMillis();
+        KnowledgeGraphDatabase vectorDb = null;
+        try {
+            String kbBasePath = ConfigManager.getKnowledgeBasePath(context);
+            File kbDir = new File(kbBasePath, kbName);
+            if (!kbDir.exists()) {
+                LogManager.logD(TAG, "[STATIC_RAG] KB directory not found: " + kbDir.getAbsolutePath());
+                return "";
+            }
+            File graphDbFile = new File(kbDir, "knowledge_graph.db");
+            if (!graphDbFile.exists()) {
+                LogManager.logD(TAG, "[STATIC_RAG] DB file not found: " + graphDbFile.getAbsolutePath());
+                return "";
+            }
+
+            vectorDb = new KnowledgeGraphDatabase(context, graphDbFile.getAbsolutePath(), kbName);
+
+            // Read metadata to find embedding model
+            DatabaseMetadata metadata = vectorDb.getMetadata();
+            String embModelName = (metadata != null) ? metadata.getModeldir() : null;
+            if (embModelName == null || embModelName.trim().isEmpty()) {
+                embModelName = (metadata != null) ? metadata.getEmbeddingModel() : null;
+            }
+            if (embModelName == null || embModelName.trim().isEmpty()) {
+                LogManager.logW(TAG, "[STATIC_RAG] No embedding model in metadata for KB: " + kbName);
+                return "";
+            }
+
+            String embeddingModelRoot = ConfigManager.getEmbeddingModelPath(context);
+            String embeddingModelPath = embeddingModelRoot + File.separator + embModelName;
+            File modelFile = new File(embeddingModelPath);
+            if (!modelFile.exists()) {
+                LogManager.logW(TAG, "[STATIC_RAG] Embedding model not found: " + embeddingModelPath);
+                return "";
+            }
+
+            // Compute embedding
+            RuntimeConfigUtil.pushToInference(context);
+            InferenceClient client = InferenceClient.getInstance(context);
+            float[] queryVector = client.computeEmbedding(
+                embeddingModelPath,
+                EmbeddingHandler.MemoryMode.LOW.getValue(),
+                queryText
+            );
+            if (queryVector == null || queryVector.length == 0) {
+                LogManager.logW(TAG, "[STATIC_RAG] Embedding computation returned null/empty");
+                return "";
+            }
+
+            // Search
+            List<SearchResult> results = vectorDb.searchSimilar(queryVector, topK);
+            if (results == null || results.isEmpty()) {
+                LogManager.logD(TAG, "[STATIC_RAG] No results found for KB: " + kbName);
+                return "";
+            }
+
+            // Format with IDs
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < results.size(); i++) {
+                SearchResult r = results.get(i);
+                sb.append("Document").append(i + 1)
+                  .append(" [ID:").append(r.id).append("]:\n")
+                  .append(r.content).append("\n\n");
+            }
+
+            long duration = System.currentTimeMillis() - startTime;
+            LogManager.logI(TAG, String.format(
+                "[STATIC_RAG] KB=%s, query=%d chars, results=%d, time=%dms",
+                kbName, queryText.length(), results.size(), duration));
+
+            return sb.toString();
+
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[STATIC_RAG] Query failed for KB " + kbName + ": " + e.getMessage());
+            return "";
+        } finally {
+            if (vectorDb != null) {
+                try { vectorDb.close(); } catch (Exception ignore) {}
+            }
+        }
+    }
+
     /**
      * Get chunk count in database
      * @return Number of chunks

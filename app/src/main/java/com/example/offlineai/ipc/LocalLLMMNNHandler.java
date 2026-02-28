@@ -1230,18 +1230,30 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         }
         // Non-Omni models: System/External TTS handled by TtsAdapter in RagQaFragment
         
-        // ========== Configure thinking mode (Qwen3 support) ==========
+        // ========== Configure thinking mode (Qwen3/Qwen3.5 support) ==========
         // Reference: MNN iOS app LLMInferenceEngineWrapper.mm Line 637-643
         // Qwen3 defaults to enable_thinking=true, must explicitly disable if needed
+        // Qwen3.5: Does NOT support /think /nothink soft switch, MUST use enable_thinking parameter
         RuntimeConfig cfgForThinking = RuntimeConfigHolder.get();
+        
+        // Debug: Log RuntimeConfig state
+        if (cfgForThinking == null) {
+            LogManager.logW(TAG, "[THINKING][DEBUG] RuntimeConfig is NULL! Using default (thinking enabled)");
+        } else {
+            LogManager.logI(TAG, "[THINKING][DEBUG] RuntimeConfig.noThinking = " + cfgForThinking.noThinking);
+        }
+        
         boolean thinkingEnabled = !(cfgForThinking != null && cfgForThinking.noThinking);
+        LogManager.logI(TAG, "[THINKING][DEBUG] Calculated thinkingEnabled = " + thinkingEnabled);
+        
         try {
             String thinkingConfig = String.format(
                 "{\"jinja\":{\"context\":{\"enable_thinking\":%s}}}",
                 thinkingEnabled ? "true" : "false"
             );
+            LogManager.logI(TAG, "[THINKING][DEBUG] Sending config JSON: " + thinkingConfig);
             MnnInference.updateConfig(llmSessionHandle, thinkingConfig);
-            LogManager.logI(TAG, "[THINKING] Thinking mode " + (thinkingEnabled ? "enabled" : "disabled"));
+            LogManager.logI(TAG, "[THINKING] Thinking mode " + (thinkingEnabled ? "ENABLED" : "DISABLED") + " (Qwen3.5: no soft switch support)");
         } catch (Exception e) {
             LogManager.logW(TAG, "[THINKING] Failed to set thinking mode: " + e.getMessage());
         }

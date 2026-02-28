@@ -156,7 +156,7 @@ public class StreamingApiClient {
                 // Add image contents
                 for (String imagePath : imagePaths) {
                     try {
-                        String base64Image = encodeImageToBase64(imagePath);
+                        String base64Image = ApiUtils.encodeImageToBase64(imagePath);
                         if (base64Image != null) {
                             JSONObject imageContent = new JSONObject();
                             imageContent.put("type", "image_url");
@@ -238,6 +238,7 @@ public class StreamingApiClient {
                     StringBuilder thinkingContent = new StringBuilder();
                     boolean[] textHeadSent = {false}; // Track if [TEXT:] head has been sent
                     boolean[] isInThinkingMode = {false}; // Track if we're in thinking phase
+                    boolean[] hasLoggedThinkingEntry = {false}; // Track if we've logged thinking entry
                     
                     try {
                         BufferedSource source = body.source();
@@ -260,10 +261,13 @@ public class StreamingApiClient {
                                         String reasoning = delta.getString("reasoning_content");
                                         thinkingContent.append(reasoning);
                                         
-                                        // Mark that we entered thinking mode
+                                        // Mark that we entered thinking mode (only log once)
                                         if (!isInThinkingMode[0]) {
                                             isInThinkingMode[0] = true;
-                                            LogManager.logI(TAG, "[THINKING] Entered thinking phase");
+                                            if (!hasLoggedThinkingEntry[0]) {
+                                                LogManager.logI(TAG, "[THINKING] Entered thinking phase");
+                                                hasLoggedThinkingEntry[0] = true;
+                                            }
                                         }
                                         
                                         // Send thinking content to UI (will be shown in debug section)
@@ -277,9 +281,8 @@ public class StreamingApiClient {
                                         String content = delta.getString("content");
                                         fullResponse.append(content);
                                         
-                                        // If we were in thinking mode, log the transition
+                                        // If we were in thinking mode, mark exit (don't log yet)
                                         if (isInThinkingMode[0]) {
-                                            LogManager.logI(TAG, "[THINKING] Exited thinking phase, thinking length: " + thinkingContent.length());
                                             isInThinkingMode[0] = false;
                                         }
                                         
@@ -297,6 +300,11 @@ public class StreamingApiClient {
                                     LogManager.logE(TAG, "Failed to parse JSON: " + e.getMessage(), e);
                                 }
                             }
+                        }
+                        
+                        // Log final thinking length if we had thinking content
+                        if (hasLoggedThinkingEntry[0] && thinkingContent.length() > 0) {
+                            LogManager.logI(TAG, "[THINKING] Exited thinking phase, thinking length: " + thinkingContent.length());
                         }
                         
                         // 流结束，回调完整响应
@@ -322,28 +330,63 @@ public class StreamingApiClient {
     }
     
     /**
-     * Encode image file to Base64 string
-     * @param imagePath Path to image file
-     * @return Base64 encoded string, or null if failed
+     * Synchronous image generation API request.
+     * Reuses OkHttp client and auth logic from streaming path.
+     * Builds OpenAI-compatible multimodal content array.
+     *
+     * @param apiUrl       Full image generation endpoint URL
+     * @param apiKey       API key
+     * @param origApiUrl   Original user-configured API URL (for auth cache lookup)
+     * @param requestBody  Pre-built JSON request body
+     * @param callback     Callback for result
      */
-    private String encodeImageToBase64(String imagePath) {
-        try {
-            File imageFile = new File(imagePath);
-            if (!imageFile.exists()) {
-                LogManager.logE(TAG, "Image file not found: " + imagePath);
-                return null;
-            }
-            
-            FileInputStream fis = new FileInputStream(imageFile);
-            byte[] imageBytes = new byte[(int) imageFile.length()];
-            fis.read(imageBytes);
-            fis.close();
-            
-            return android.util.Base64.encodeToString(imageBytes, android.util.Base64.NO_WRAP);
-        } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to encode image to Base64: " + imagePath, e);
-            return null;
+    public void imageRequest(String apiUrl, String apiKey, String origApiUrl,
+                             JSONObject requestBody, StreamingCallback callback) {
+        // Build request with same auth logic as streamRequest
+        Request.Builder requestBuilder = new Request.Builder()
+            .url(apiUrl)
+            .header("Content-Type", "application/json")
+            .post(RequestBody.create(requestBody.toString(), MediaType.parse("application/json")));
+
+        String cachedMethod = AuthMethodCache.getCachedMethod(context, origApiUrl);
+        if (cachedMethod != null) {
+            AuthMethodCache.applyAuthHeader(requestBuilder, apiKey, cachedMethod);
+        } else {
+            requestBuilder.header("Authorization", "Bearer " + apiKey);
         }
+
+        Request request = requestBuilder.build();
+
+        // Execute synchronously on caller's thread (already a background thread)
+        try {
+            Response response = client.newCall(request).execute();
+
+            if (!response.isSuccessful()) {
+                String errorBody = response.body() != null ? response.body().string() : "Unknown error";
+                int statusCode = response.code();
+                LogManager.logE(TAG, "[IMAGE_GEN] Request failed: " + statusCode + " - " + errorBody);
+                // Stay on background thread - caller may need to do more I/O
+                callback.onError("Image generation failed: " + errorBody, statusCode);
+                return;
+            }
+
+            String responseBody = response.body().string();
+            LogManager.logI(TAG, "[IMAGE_GEN] Response: " + responseBody.substring(0, Math.min(200, responseBody.length())));
+
+            // Stay on background thread - caller needs to download image (network I/O)
+            callback.onComplete(responseBody);
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[IMAGE_GEN] Error: " + e.getMessage(), e);
+            // Stay on background thread
+            callback.onError("Image generation error: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Get the OkHttp client instance (for reuse by ApiUtils.downloadAndSaveImage).
+     */
+    public OkHttpClient getClient() {
+        return client;
     }
 }
 

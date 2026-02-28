@@ -27,7 +27,10 @@ import com.example.offlineai.R
 import com.example.offlineai.RagQaFragment
 import com.example.offlineai.RagQueryManager
 import com.example.offlineai.RuntimeConfigUtil
+import com.example.offlineai.agent.ActionFormatRegistry
 import com.example.offlineai.agent.AgentPrompts
+import com.example.offlineai.agent.AgentTtsHelper
+import com.example.offlineai.agent.AgentWebView
 import com.example.offlineai.agent.core.AgentEngine
 import com.example.offlineai.agent.model.AgentAction
 import com.example.offlineai.agent.model.ExecutionResult
@@ -52,6 +55,8 @@ class AgentAccessibilityService : AccessibilityService() {
         private const val TAG = "AgentAccessibilityService"
         private const val NOTIFICATION_CHANNEL_ID = "agent_execution_channel"
         private const val NOTIFICATION_ID = 1001
+        private const val AGENT_KB_NAME = "AgentKB"
+        private const val AGENT_KB_TOP_K = 3
         
         @Volatile
         private var instance: AgentAccessibilityService? = null
@@ -64,6 +69,7 @@ class AgentAccessibilityService : AccessibilityService() {
     private var ragQueryManager: RagQueryManager? = null
     private var ragQaFragment: RagQaFragment? = null  // Direct Fragment reference for UI updates
     private var agentEngine: AgentEngine? = null
+    internal var agentWebView: AgentWebView? = null
     private val serviceScope = CoroutineScope(Dispatchers.Main + Job())
     private var agentLoopJob: Job? = null
     internal var floatingWindow: AgentFloatingWindow? = null
@@ -71,17 +77,36 @@ class AgentAccessibilityService : AccessibilityService() {
     private val maxSteps = 20
     private var cachedAppList: List<String>? = null  // Cache app list to avoid repeated queries
     private var savedTemperature: Float? = null  // Save original temperature before Agent starts
+    private var agentTts: AgentTtsHelper? = null  // System TTS for Terminate/AskUser announcements
     
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         initializeFloatingWindow()
+        agentWebView = AgentWebView(applicationContext)
         createNotificationChannel()
         LogManager.logI(TAG, "Accessibility service connected")
     }
     
     private var isAgentActive = false
     private var isWaitingForExperienceSave = false  // Flag to prevent auto-hide when waiting for user to save experience
+    
+    // Current context: Agent's memory for next step (set by AgentEngine, updated after each step)
+    @Volatile
+    var currentContext: String = ""
+    
+    // Last step result: hardcoded fact injected into next prompt to prevent context amnesia
+    // Format: "上一步: [action描述] → [结果]"
+    @Volatile
+    var lastStepResult: String = ""
+    
+    // Data Memory keys: lightweight index injected into prompt each step (values stay in AgentEngine)
+    @Volatile
+    private var dataMemoryKeys: List<String> = emptyList()
+    
+    fun updateDataMemoryKeys(keys: List<String>) {
+        dataMemoryKeys = keys
+    }
     
     fun setAgentActive(active: Boolean) {
         isAgentActive = active
@@ -110,6 +135,8 @@ class AgentAccessibilityService : AccessibilityService() {
         stopAgentLoop()
         floatingWindow?.hide()
         floatingWindow = null
+        agentWebView?.destroy()
+        agentWebView = null
         instance = null
         LogManager.logI(TAG, "Accessibility service destroyed")
     }
@@ -154,6 +181,48 @@ class AgentAccessibilityService : AccessibilityService() {
                 override fun onStepCompleted(stepIndex: Int, thinking: String, action: AgentAction, result: ExecutionResult) {
                     LogManager.logI(TAG, "[AGENT] Step $stepIndex: ${action.javaClass.simpleName} - ${if (result.success) "OK" else "FAIL"}")
                     saveStepToConversationMd(stepIndex, thinking, action, result)
+                    // On terminate: show full expanded text in output area and lock it
+                    if (action is AgentAction.Terminate) {
+                        floatingWindow?.showTerminateResult(action.text)
+                    }
+                    // Update lastStepResult so next buildUserPromptWithHistory can inject hardcoded fact
+                    val actionDesc = when (action) {
+                        is AgentAction.Click -> "click(coordinate=[${action.x},${action.y}])"
+                        is AgentAction.LongPress -> "long_press(coordinate=[${action.x},${action.y}])"
+                        is AgentAction.DoubleClick -> "double_click(coordinate=[${action.x},${action.y}])"
+                        is AgentAction.Type -> "type(text=\"${action.text.take(50)}\")"
+                        is AgentAction.Swipe -> "swipe(direction=${action.direction}" + 
+                            if (action.x != null && action.y != null) ", coordinate=[${action.x},${action.y}])" else ")"
+                        is AgentAction.Drag -> "drag(start=[${action.startX},${action.startY}], end=[${action.endX},${action.endY}])"
+                        is AgentAction.Open -> "open(app=\"${action.appName}\")"
+                        is AgentAction.SystemButton -> "system_button(button=${action.button})"
+                        is AgentAction.Wait -> "wait"
+                        is AgentAction.GetAppList -> "get_app_list"
+                        is AgentAction.WebOpen -> "web_open(url=\"${action.url.take(80)}\")"
+                        is AgentAction.WebGetContent -> "web_get_content"
+                        is AgentAction.WebExecuteJs -> "web_execute_js(script=\"${action.script.take(60)}...\")"
+                        is AgentAction.Terminate -> "terminate(status=${action.status.value})"
+                        is AgentAction.AskUser -> "ask_user(text=\"${action.text.take(40)}\")"
+                        is AgentAction.KbInsert -> "kb_insert"
+                        is AgentAction.KbDelete -> "kb_delete(ids=${action.ids})"
+                        is AgentAction.Context -> "context"  // Should not appear here
+                        is AgentAction.DataMemory -> "data_memory(op=${action.operation}, key=${action.key})"
+                    }
+                    
+                    // Build result string with returnData (critical for web_get_content, get_app_list, etc.)
+                    val resultStr = if (result.success) {
+                        val baseMsg = "Success" + if (result.message.isNotEmpty()) ": ${result.message.take(100)}" else ""
+                        if (result.returnData != null && result.returnData.isNotEmpty()) {
+                            // For web_get_content/get_app_list, returnData is the key output
+                            "$baseMsg\nReturned data: ${result.returnData.take(800)}"
+                        } else {
+                            baseMsg
+                        }
+                    } else {
+                        "Failed" + if (result.message.isNotEmpty()) ": ${result.message.take(150)}" else ""
+                    }
+                    lastStepResult = "Previous step executed: $actionDesc\nResult: $resultStr"
+                    LogManager.logI(TAG, "[LAST_STEP] ${lastStepResult.replace("\n", " | ")}")
                 }
                 
                 override fun onTaskCompleted(success: Boolean, message: String) {
@@ -173,12 +242,9 @@ class AgentAccessibilityService : AccessibilityService() {
                     LogManager.logE(TAG, "[AGENT] Error: $error")
                 }
                 
-                override fun onAnswer(text: String) {
-                    LogManager.logI(TAG, "[AGENT] Answer received")
-                }
-                
-                override fun onAskUser(question: String, callback: (String) -> Unit) {
-                    // Not implemented
+                override suspend fun onAskUser(question: String): String {
+                    LogManager.logI(TAG, "[AGENT] AskUser: showing input UI for question: $question")
+                    return floatingWindow?.showAskUserInputAndWait(question) ?: ""
                 }
             })
         }
@@ -204,6 +270,17 @@ class AgentAccessibilityService : AccessibilityService() {
         LogManager.logI(TAG, "Starting Agent loop: $taskGoal")
         setAgentActive(true)
         currentStep = 0
+        lastStepResult = ""  // Clear last step result for new task
+        
+        // Initialize Agent TTS if enabled
+        val ttsEnabled = ConfigManager.isAgentTtsEnabled(applicationContext)
+        agentTts = if (ttsEnabled) {
+            LogManager.logI(TAG, "[AGENT_TTS] Initializing AgentTtsHelper")
+            AgentTtsHelper(applicationContext)
+        } else {
+            null
+        }
+        agentEngine?.setAgentTts(agentTts)
         
         // Save original temperature and set lower temperature for Agent (reduce hallucination)
         val context = applicationContext
@@ -240,19 +317,22 @@ class AgentAccessibilityService : AccessibilityService() {
                 
                 // Call AgentEngine.executeTask with model inference callback
                 // RAG retrieval is handled by RagQueryManager's full pipeline via QueryRequest
-                agentEngine?.executeTask(taskGoal, apiUrl, model) { instruction, screenshot, history ->
+                agentEngine?.executeTask(taskGoal, apiUrl, model) { instruction, screenshot, _ ->
                     floatingWindow?.updateStatus("Waiting for model...")
-                    val result = callRagQueryManagerSync(instruction, screenshot, history)
+                    val result = callRagQueryManagerSync(instruction, screenshot)
                     
                     // Extract pure model output (remove <debug> tags for Previous Steps)
                     // <debug> is for UI display only, should NOT be sent to model as history
                     val pureModelOutput = result.replace(Regex("<debug>.*?</debug>", RegexOption.DOT_MATCHES_ALL), "").trim()
                     
                     // Update floating window with model output
-                    try {
-                        floatingWindow?.updateOutput(pureModelOutput)
-                    } catch (e: Exception) {
-                        LogManager.logW(TAG, "Failed to update floating window output: ${e.message}")
+                    // Skip during experience summary step to preserve the terminate result text
+                    if (!isExperienceSummaryStep) {
+                        try {
+                            floatingWindow?.updateOutput(pureModelOutput)
+                        } catch (e: Exception) {
+                            LogManager.logW(TAG, "Failed to update floating window output: ${e.message}")
+                        }
                     }
                     
                     pureModelOutput
@@ -262,25 +342,12 @@ class AgentAccessibilityService : AccessibilityService() {
                 showNotification("Agent Completed", "Task finished")
                 
                 // Check if waiting for experience save
+                // Keep floating window visible - user closes manually after reading the result
                 if (isWaitingForExperienceSave) {
                     LogManager.logI(TAG, "[AGENT_EXP] Waiting for user to save experience, keeping floating window visible")
-                    // Don't hide floating window, user needs to interact with save/cancel buttons
                 } else {
-                    // Show countdown before hiding (5 seconds)
-                    for (i in 5 downTo 1) {
-                        try {
-                            floatingWindow?.updateStatus("Task completed! Closing in ${i}s...")
-                        } catch (e: Exception) {
-                            LogManager.logW(TAG, "Failed to update floating window countdown")
-                        }
-                        delay(1000)
-                    }
-                    
-                    try {
-                        floatingWindow?.hide()  // Final hide uses full hide
-                    } catch (e: Exception) {
-                        LogManager.logW(TAG, "Failed to hide floating window")
-                    }
+                    LogManager.logI(TAG, "[AGENT] Task completed, floating window stays open for user to review")
+                    floatingWindow?.updateStatus("Task completed")
                 }
                 
             } catch (e: Exception) {
@@ -299,14 +366,25 @@ class AgentAccessibilityService : AccessibilityService() {
                     LogManager.logW(TAG, "Failed to hide floating window on error")
                 }
             } finally {
+                // Window stays visible regardless - user closes it manually via Stop button.
+                // Do NOT call stopAgentLoop() here: it hides the window, which races with
+                // the show() call above and cuts off the terminate result display.
+                // stopAgentLoop() is triggered by the user's Stop button click.
                 if (isWaitingForExperienceSave) {
-                    // Keep floating window visible for save/cancel interaction
                     LogManager.logI(TAG, "[AGENT_EXP] Keeping floating window for experience save")
-                    floatingWindow?.show()
                 } else {
-                    floatingWindow?.show()
-                    stopAgentLoop()
+                    LogManager.logI(TAG, "[AGENT] Task loop ended, floating window stays for user review")
                 }
+                // Restore temperature and deactivate agent state, but keep window open
+                savedTemperature?.let { temp ->
+                    ConfigManager.setManualTemperature(applicationContext, temp)
+                    LogManager.logI(TAG, "Agent temperature restored to $temp in finally")
+                    savedTemperature = null
+                }
+                isAgentActive = false
+                agentTts?.shutdown()
+                agentTts = null
+                agentEngine?.setAgentTts(null)
             }
         }
     }
@@ -320,6 +398,8 @@ class AgentAccessibilityService : AccessibilityService() {
         agentLoopJob = null
         isAgentActive = false
         cachedAppList = null  // Clear cache when agent stops
+        agentTts?.shutdown()
+        agentTts = null
         
         // If waiting for experience save, user clicked stop = cancel
         if (isWaitingForExperienceSave) {
@@ -349,12 +429,11 @@ class AgentAccessibilityService : AccessibilityService() {
      * This is a blocking call that waits for model response
      */
     private suspend fun callRagQueryManagerSync(
-        instruction: String, 
-        screenshot: Bitmap?,
-        history: List<TrajectoryStep>
+        instruction: String,
+        screenshot: Bitmap?
     ): String {
         val startTime = System.currentTimeMillis()
-        LogManager.logI(TAG, "[AGENT] Step $currentStep: instruction.len=${instruction.length}, screenshot=${screenshot != null}, history=${history.size}")
+        LogManager.logI(TAG, "[AGENT] Step $currentStep: instruction.len=${instruction.length}, screenshot=${screenshot != null}")
         
         currentStep++
         try {
@@ -390,12 +469,19 @@ class AgentAccessibilityService : AccessibilityService() {
                 
                 // Agent module manages its own prompt (dynamic format based on API URL)
                 val noThinking = ConfigManager.getBoolean(context, ConfigManager.KEY_NO_THINKING, false)
+                val userSelectedFormat = ConfigManager.getAgentActionFormat(context)
+                
+                if (currentContext.isNotEmpty() && currentStep == 1) {
+                    LogManager.logI(TAG, "[AGENT_CONTEXT] Initial context (RAG recall): ${currentContext.length} chars")
+                }
+                
                 // Use empty system prompt for experience summary step
                 val systemPrompt = if (isExperienceSummaryStep) {
                     LogManager.logI(TAG, "[AGENT_EXP] Using empty system prompt for experience summary")
                     ""
                 } else {
-                    AgentPrompts.getSystemPromptForApi(apiUrl, model, appNames, !noThinking)
+                    // RAG context is NOT injected into system prompt; it's in currentContext (user prompt)
+                    AgentPrompts.getSystemPromptForApi(apiUrl, model, appNames, !noThinking, userSelectedFormat)
                 }
                 
                 // Log system prompt on first step (full content for debugging)
@@ -404,8 +490,8 @@ class AgentAccessibilityService : AccessibilityService() {
                     LogManager.logI(TAG, "[AGENT][INIT] System Prompt:\n$systemPrompt")
                 }
                 
-                // Build user prompt with history (like MAI-UI/Open-AutoGLM)
-                val userPromptWithHistory = buildUserPromptWithHistory(instruction, history)
+                // Build user prompt with currentContext (currentStep already incremented, so use currentStep - 1 for 0-based index)
+                val userPromptWithHistory = buildUserPromptWithHistory(instruction, currentStep - 1)
                 
                 // Log user prompt for every step (replace image paths with placeholders)
                 val userPromptForLog = userPromptWithHistory.replace(Regex("file://[^\\s)]+"), "[IMAGE:...]")
@@ -504,20 +590,13 @@ class AgentAccessibilityService : AccessibilityService() {
                     LogManager.logE(TAG, "[AGENT] Failed to save user message", e)
                 }
                 
-                // RAG control: experience summary skips RAG, all other steps use normal RAG pipeline
-                val configKnowledgeBase = ConfigManager.getString(context, ConfigManager.KEY_KNOWLEDGE_BASE, "")
-                val searchDepth = ConfigManager.getInt(context, ConfigManager.KEY_SEARCH_DEPTH, 5)
-                val graphRagEnabled = ConfigManager.getBoolean(context, ConfigManager.KEY_GRAPH_RAG_ENABLED, false)
-                
-                // Experience summary: pass empty knowledgeBase to bypass RAG entirely
-                // Normal steps (1~N): pass configured knowledgeBase, let RagQueryManager handle full RAG pipeline
-                val effectiveKnowledgeBase = if (isExperienceSummaryStep) {
-                    LogManager.logI(TAG, "[AGENT_RAG] Experience summary step: skipping RAG")
-                    ""
-                } else {
-                    LogManager.logI(TAG, "[AGENT_RAG] Step $currentStep: using RAG pipeline, kb=$configKnowledgeBase")
-                    configKnowledgeBase
-                }
+                // Agent mode: ALWAYS skip RagQueryManager's RAG pipeline.
+                // Agent owns its own RAG via queryKnowledgeBase() above (AgentKB).
+                // User-configured knowledge base is ignored in Agent mode.
+                val effectiveKnowledgeBase = ""
+                LogManager.logI(TAG, "[AGENT_RAG] Agent mode: knowledgeBase=\"\" (Agent owns its own RAG via AgentKB)")
+                val searchDepth = 0
+                val graphRagEnabled = false
                 
                 val request = RagQueryManager.QueryRequest(
                     apiUrl,
@@ -551,10 +630,13 @@ class AgentAccessibilityService : AccessibilityService() {
                 val pureModelOutput = result.replace(Regex("<debug>.*?</debug>", RegexOption.DOT_MATCHES_ALL), "").trim()
                 
                 // Update floating window with model output
-                try {
-                    floatingWindow?.updateOutput(pureModelOutput)
-                } catch (e: Exception) {
-                    LogManager.logW(TAG, "Failed to update floating window output: ${e.message}")
+                // Skip during experience summary step to preserve the terminate result text
+                if (!isExperienceSummaryStep) {
+                    try {
+                        floatingWindow?.updateOutput(pureModelOutput)
+                    } catch (e: Exception) {
+                        LogManager.logW(TAG, "Failed to update floating window output: ${e.message}")
+                    }
                 }
                 
                 // NOTE: UI update is now handled by polling mechanism (same as non-Agent mode)
@@ -575,6 +657,7 @@ class AgentAccessibilityService : AccessibilityService() {
         }
     }
     
+
     /**
      * Create notification channel for Agent execution status
      */
@@ -638,117 +721,66 @@ class AgentAccessibilityService : AccessibilityService() {
     }
     
     /**
-     * Click at screen position
+     * Execute a block with floating window temporarily hidden.
+     * Handles hide/show latch logic in one place.
      */
-    fun clickAtPosition(x: Int, y: Int): Boolean {
-        // Hide floating window before click (wait for UI rendered)
+    private fun <T> withFloatingWindowHidden(block: () -> T): T {
         val hideLatch = java.util.concurrent.CountDownLatch(1)
-        floatingWindow?.temporaryHide {
-            hideLatch.countDown()
-        } ?: hideLatch.countDown()
-        
+        floatingWindow?.temporaryHide { hideLatch.countDown() } ?: hideLatch.countDown()
         if (!hideLatch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-            LogManager.logW(TAG, "Timeout waiting for floating window to hide before click")
+            LogManager.logW(TAG, "Timeout waiting for floating window to hide")
         }
         
-        val path = Path().apply {
-            moveTo(x.toFloat(), y.toFloat())
-        }
+        val result = block()
         
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 100))
-            .build()
-        
-        val result = dispatchGesture(gesture, null, null)
-        LogManager.logD(TAG, "Click at ($x, $y): ${if (result) "success" else "failed"}")
-        
-        // Show floating window after click (wait for UI rendered)
         val showLatch = java.util.concurrent.CountDownLatch(1)
-        floatingWindow?.temporaryShow {
-            showLatch.countDown()
-        } ?: showLatch.countDown()
-        
+        floatingWindow?.temporaryShow { showLatch.countDown() } ?: showLatch.countDown()
         if (!showLatch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-            LogManager.logW(TAG, "Timeout waiting for floating window to show after click")
+            LogManager.logW(TAG, "Timeout waiting for floating window to show")
         }
         
         return result
+    }
+    
+    /**
+     * Click at screen position
+     */
+    fun clickAtPosition(x: Int, y: Int): Boolean = withFloatingWindowHidden {
+        val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 100))
+            .build()
+        val result = dispatchGesture(gesture, null, null)
+        LogManager.logD(TAG, "Click at ($x, $y): ${if (result) "success" else "failed"}")
+        result
     }
     
     /**
      * Long press at screen position
      */
-    fun longPressAtPosition(x: Int, y: Int, durationMs: Long = 1000): Boolean {
-        // Hide floating window before long press (wait for UI rendered)
-        val hideLatch = java.util.concurrent.CountDownLatch(1)
-        floatingWindow?.temporaryHide {
-            hideLatch.countDown()
-        } ?: hideLatch.countDown()
-        
-        if (!hideLatch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-            LogManager.logW(TAG, "Timeout waiting for floating window to hide before long press")
-        }
-        
-        val path = Path().apply {
-            moveTo(x.toFloat(), y.toFloat())
-        }
-        
+    fun longPressAtPosition(x: Int, y: Int, durationMs: Long = 1000): Boolean = withFloatingWindowHidden {
+        val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
             .build()
-        
         val result = dispatchGesture(gesture, null, null)
         LogManager.logD(TAG, "Long press at ($x, $y): ${if (result) "success" else "failed"}")
-        
-        // Show floating window after long press (wait for UI rendered)
-        val showLatch = java.util.concurrent.CountDownLatch(1)
-        floatingWindow?.temporaryShow {
-            showLatch.countDown()
-        } ?: showLatch.countDown()
-        
-        if (!showLatch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-            LogManager.logW(TAG, "Timeout waiting for floating window to show after long press")
-        }
-        
-        return result
+        result
     }
     
     /**
      * Double click at screen position
      */
-    fun doubleClickAtPosition(x: Int, y: Int): Boolean {
-        // Hide floating window before double click (wait for UI rendered)
-        val hideLatch = java.util.concurrent.CountDownLatch(1)
-        floatingWindow?.temporaryHide {
-            hideLatch.countDown()
-        } ?: hideLatch.countDown()
-        
-        if (!hideLatch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-            LogManager.logW(TAG, "Timeout waiting for floating window to hide before double click")
-        }
-        
+    fun doubleClickAtPosition(x: Int, y: Int): Boolean = withFloatingWindowHidden {
         val path1 = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
         val path2 = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-        
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path1, 0, 100))
             .addStroke(GestureDescription.StrokeDescription(path2, 150, 100))
             .build()
-        
         val result = dispatchGesture(gesture, null, null)
         LogManager.logD(TAG, "Double click at ($x, $y): ${if (result) "success" else "failed"}")
-        
-        // Show floating window after double click (wait for UI rendered)
-        val showLatch = java.util.concurrent.CountDownLatch(1)
-        floatingWindow?.temporaryShow {
-            showLatch.countDown()
-        } ?: showLatch.countDown()
-        
-        if (!showLatch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-            LogManager.logW(TAG, "Timeout waiting for floating window to show after double click")
-        }
-        
-        return result
+        result
     }
     
     /**
@@ -784,9 +816,61 @@ class AgentAccessibilityService : AccessibilityService() {
             }
         }
         
+        // Fallback: retry finding focus with longer wait (browser input fields need time)
         if (focusedNode == null) {
-            LogManager.logW(TAG, "No focused input field found after auto-focus attempt")
-            return "No focused input field. Click the input box first, then type"
+            LogManager.logW(TAG, "No focused input field found, retrying with longer wait...")
+            for (retry in 1..3) {
+                Thread.sleep(500) // Wait longer for browser input to gain focus
+                focusedNode = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                if (focusedNode != null) {
+                    LogManager.logI(TAG, "Found focused input field after retry $retry")
+                    break
+                }
+            }
+        }
+        
+        // Last resort: clipboard + inject Ctrl+A/Ctrl+V for WebView inputs that don't expose FOCUS_INPUT
+        if (focusedNode == null) {
+            LogManager.logW(TAG, "Still no focused input field, trying clipboard+paste for WebView...")
+            return try {
+                val clipboard = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("agent_input", text)
+                clipboard.setPrimaryClip(clip)
+                Thread.sleep(100)
+                val selectOk = performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_ACCESSIBILITY_ALL_APPS).let {
+                    // Use key injection instead - performGlobalAction for select-all isn't reliable
+                    // Try ACTION_PASTE on any accessible node with paste support
+                    val rootNode = rootInActiveWindow
+                    var pasted = false
+                    if (rootNode != null) {
+                        // Try select-all + paste via accessibility actions on focused/editable nodes
+                        val editNode = findEditableNode(rootNode)
+                        if (editNode != null) {
+                            editNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+                            editNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                            Thread.sleep(200)
+                            // Clear existing text via SELECT_ALL then PASTE
+                            editNode.performAction(0x00020000) // ACTION_SELECT_ALL (API 18+)
+                            pasted = editNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                            LogManager.logI(TAG, "[TYPE_WEBVIEW] editNode paste=$pasted, class=${editNode.className}")
+                            @Suppress("DEPRECATION")
+                            editNode.recycle()
+                        }
+                    }
+                    pasted
+                }
+                
+                if (selectOk) {
+                    LogManager.logI(TAG, "[TYPE_WEBVIEW] Clipboard+paste succeeded for WebView input")
+                    null // success
+                } else {
+                    LogManager.logW(TAG, "[TYPE_WEBVIEW] Paste action failed, text in clipboard for manual paste")
+                    "No focused input field (text in clipboard, try manual paste)"
+                }
+            } catch (e: Exception) {
+                LogManager.logE(TAG, "Failed clipboard workaround", e)
+                "No focused input field. Click the input box first, then type"
+            }
         }
         
         val args = Bundle().apply {
@@ -810,12 +894,29 @@ class AgentAccessibilityService : AccessibilityService() {
     
     /**
      * Recursively find the first editable (text input) node in the accessibility tree
+     * Enhanced to support WebView input fields
      */
     private fun findEditableNode(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        // Priority 1: isEditable=true (standard EditText)
         if (node.isEditable) {
             @Suppress("DEPRECATION")
             return AccessibilityNodeInfo.obtain(node)
         }
+        
+        // Priority 2: Check className for input-related views (WebView, EditText, etc.)
+        val className = node.className?.toString() ?: ""
+        val isFocusable = node.isFocusable
+        val isClickable = node.isClickable
+        
+        // WebView or EditText that is focusable/clickable might be an input field
+        if ((className.contains("EditText", ignoreCase = true) || 
+             className.contains("WebView", ignoreCase = true)) && 
+            (isFocusable || isClickable)) {
+            @Suppress("DEPRECATION")
+            return AccessibilityNodeInfo.obtain(node)
+        }
+        
+        // Recursively search children
         for (i in 0 until node.childCount) {
             val child = node.getChild(i) ?: continue
             val found = findEditableNode(child)
@@ -829,40 +930,17 @@ class AgentAccessibilityService : AccessibilityService() {
     /**
      * Swipe gesture
      */
-    fun swipe(startX: Int, startY: Int, endX: Int, endY: Int, durationMs: Long = 300): Boolean {
-        // Hide floating window before swipe (wait for UI rendered)
-        val hideLatch = java.util.concurrent.CountDownLatch(1)
-        floatingWindow?.temporaryHide {
-            hideLatch.countDown()
-        } ?: hideLatch.countDown()
-        
-        if (!hideLatch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-            LogManager.logW(TAG, "Timeout waiting for floating window to hide before swipe")
-        }
-        
+    fun swipe(startX: Int, startY: Int, endX: Int, endY: Int, durationMs: Long = 300): Boolean = withFloatingWindowHidden {
         val path = Path().apply {
             moveTo(startX.toFloat(), startY.toFloat())
             lineTo(endX.toFloat(), endY.toFloat())
         }
-        
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
             .build()
-        
         val result = dispatchGesture(gesture, null, null)
         LogManager.logD(TAG, "Swipe from ($startX, $startY) to ($endX, $endY): ${if (result) "success" else "failed"}")
-        
-        // Show floating window after swipe (wait for UI rendered)
-        val showLatch = java.util.concurrent.CountDownLatch(1)
-        floatingWindow?.temporaryShow {
-            showLatch.countDown()
-        } ?: showLatch.countDown()
-        
-        if (!showLatch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-            LogManager.logW(TAG, "Timeout waiting for floating window to show after swipe")
-        }
-        
-        return result
+        result
     }
     
     /**
@@ -979,15 +1057,15 @@ class AgentAccessibilityService : AccessibilityService() {
     
     /**
      * Build user prompt with history context (like MAI-UI/Open-AutoGLM)
-     * Format: Task Goal + Previous Steps (OBSERVATION + ACTION) + Current Instruction
-     * 
+     * Format: Step N + Task Goal + Last Step Result + currentContext (Agent memory) + Current Instruction
+     *
      * @param instruction Current task goal/instruction
-     * @param history List of previous trajectory steps
-     * @return Formatted user prompt with history
+     * @param stepIndex Current step number (0-based)
+     * @return Formatted user prompt with context memory
      */
     private fun buildUserPromptWithHistory(
-        instruction: String, 
-        history: List<TrajectoryStep>
+        instruction: String,
+        stepIndex: Int
     ): String {
         // Experience summary step: use instruction as-is (already a complete prompt)
         if (isExperienceSummaryStep) {
@@ -996,54 +1074,30 @@ class AgentAccessibilityService : AccessibilityService() {
         
         val prompt = StringBuilder()
         
+        // Step number (1-based for user readability)
+        prompt.append("Step ${stepIndex + 1}\n\n")
+        
         // Task goal (Chinese for better token efficiency)
         prompt.append("任务: $instruction\n\n")
         
-        // Add previous steps if any (include thinking summary + action for better context)
-        if (history.isNotEmpty()) {
-            prompt.append("历史步骤:\n")
-            history.forEach { step ->
-                LogManager.logD(TAG, "[HISTORY_DEBUG] S${step.stepIndex}: thinking.len=${step.thinking.length}, rawModel.len=${step.rawModelOutput.length}, thinking.preview=${step.thinking.take(50)}")
-                prompt.append("S${step.stepIndex}: ")
-                
-                // Include full thinking content for better context
-                if (step.thinking.isNotEmpty()) {
-                    prompt.append("[思考:${step.thinking}] ")
-                }
-                
-                // Action: use rawModelOutput if available, fallback to action description
-                val actionText = step.rawModelOutput.trim().ifEmpty {
-                    // Fallback: generate readable action description from parsed action
-                    when (val action = step.action) {
-                        is AgentAction.Click -> "click(${action.x},${action.y})"
-                        is AgentAction.Type -> "type(${action.text})"
-                        is AgentAction.Swipe -> "swipe(${action.direction})"
-                        is AgentAction.Drag -> "drag(${action.startX},${action.startY}->${action.endX},${action.endY})"
-                        is AgentAction.Open -> "open(${action.appName})"
-                        is AgentAction.SystemButton -> "press(${action.button})"
-                        is AgentAction.Wait -> "wait"
-                        is AgentAction.Terminate -> "terminate(${action.status.value})"
-                        is AgentAction.Answer -> "answer(${action.text})"
-                        else -> action.javaClass.simpleName
-                    }
-                }
-                prompt.append(actionText)
-                
-                // Result: -> OK or -> Failed: reason
-                if (step.executionResult.success) {
-                    prompt.append(" -> OK\n")
-                } else {
-                    prompt.append(" -> Failed: ${step.executionResult.message}\n")
-                }
-            }
-            
-            // Append repetition warning after history (closer to model's attention)
-            prompt.append("\n⚠注意：仔细检查以上历史步骤，如果多次执行相同/相似动作但未取得进展，必须换一种方法！\n")
-            prompt.append("\n")
+        // Inject last step hardcoded fact BEFORE context (highest priority, cannot be forgotten)
+        // This is the "ground truth" the model must acknowledge regardless of its context memory
+        if (lastStepResult.isNotEmpty()) {
+            prompt.append("$lastStepResult\n\n")
+        }
+        
+        // Inject data memory keys index (lightweight, no values)
+        if (dataMemoryKeys.isNotEmpty()) {
+            prompt.append("Data Memory: ${dataMemoryKeys.joinToString(", ")}\n\n")
+        }
+        
+        // Add current context (Agent's memory)
+        if (currentContext.isNotEmpty()) {
+            prompt.append("上下文记忆:\n$currentContext\n\n")
         }
         
         // Current instruction (Chinese)
-        prompt.append("现在，根据当前截图，决定下一步操作以继续任务。\n")
+        prompt.append("根据当前截图或结果返回，决定下一步操作以继续任务。\n")
         
         return prompt.toString()
     }
@@ -1107,8 +1161,14 @@ class AgentAccessibilityService : AccessibilityService() {
                     "Waited"
                 is AgentAction.Terminate ->
                     "Terminated (${action.status.value})"
-                is AgentAction.Answer ->
-                    "Answer: ${action.text}"
+                is AgentAction.AskUser ->
+                    "AskUser: ${action.text}"
+                is AgentAction.WebOpen ->
+                    "WebOpen: ${action.url} (page loaded in background WebView)"
+                is AgentAction.WebGetContent ->
+                    "WebGetContent: extracted page content from background WebView"
+                is AgentAction.WebExecuteJs ->
+                    "WebExecuteJs: ${action.script.take(60)}"
                 else -> action.javaClass.simpleName
             }
             markdown.append(actionDesc)
@@ -1126,61 +1186,12 @@ class AgentAccessibilityService : AccessibilityService() {
             LogManager.logI(TAG, "[AGENT_STEP_HISTORY_DEBUG] Markdown content: ${markdown.toString()}")
             
             // DO NOT append to conversation.md!
-            // Step records are only kept in memory history and included in next user message's "Previous Steps"
             // Appending here would pollute the AI message block in conversation.md
-            LogManager.logI(TAG, "[AGENT_STEP_HISTORY] ✅ Step $stepIndex recorded in memory (not appended to conversation.md to avoid polluting AI message)")
+            LogManager.logI(TAG, "[AGENT_STEP_HISTORY] ✅ Step $stepIndex recorded in memory")
             
         } catch (e: Exception) {
             LogManager.logE(TAG, "[AGENT_STEP_HISTORY] ❌ Failed to save step history", e)
             e.printStackTrace()
-        }
-    }
-    
-    /**
-     * Get RagQueryManager's Fragment reference for UI updates
-     * RagQueryManager uses RagQueryCallback interface to communicate with Fragment
-     * The callback IS the Fragment itself (RagQaFragment implements RagQueryCallback)
-     */
-    private fun RagQueryManager.getFragment(): RagQaFragment? {
-        return try {
-            // RagQueryManager has a 'callback' field which is the Fragment
-            val field = this.javaClass.getDeclaredField("callback")
-            field.isAccessible = true
-            val callback = field.get(this)
-            
-            if (callback == null) {
-                LogManager.logW(TAG, "[AGENT_UI] Callback is null")
-                return null
-            }
-            
-            // Check if callback is directly RagQaFragment
-            if (callback is RagQaFragment) {
-                LogManager.logI(TAG, "[AGENT_UI] ✅ Callback is RagQaFragment directly")
-                return callback
-            }
-            
-            // If callback is anonymous inner class (e.g., RagQaFragment$10),
-            // get the outer class reference (this$0)
-            try {
-                val outerField = callback.javaClass.getDeclaredField("this\$0")
-                outerField.isAccessible = true
-                val outerInstance = outerField.get(callback)
-                
-                if (outerInstance is RagQaFragment) {
-                    LogManager.logI(TAG, "[AGENT_UI] ✅ Got RagQaFragment from anonymous inner class (${callback.javaClass.simpleName})")
-                    return outerInstance
-                } else {
-                    LogManager.logW(TAG, "[AGENT_UI] Outer instance is not RagQaFragment: ${outerInstance?.javaClass?.name}")
-                }
-            } catch (e: NoSuchFieldException) {
-                LogManager.logW(TAG, "[AGENT_UI] Callback is not inner class (no this\$0 field): ${callback.javaClass.name}")
-            }
-            
-            LogManager.logW(TAG, "[AGENT_UI] ❌ Cannot get RagQaFragment from callback: ${callback.javaClass.name}")
-            null
-        } catch (e: Exception) {
-            LogManager.logE(TAG, "[AGENT_UI] Failed to get Fragment reference", e)
-            null
         }
     }
     
@@ -1221,8 +1232,14 @@ class AgentAccessibilityService : AccessibilityService() {
                     "Waited"
                 is AgentAction.Terminate ->
                     "Terminated (${action.status.value})"
-                is AgentAction.Answer ->
-                    "Answer: ${action.text}"
+                is AgentAction.AskUser ->
+                    "AskUser: ${action.text}"
+                is AgentAction.WebOpen ->
+                    "WebOpen: ${action.url} (page loaded in background WebView)"
+                is AgentAction.WebGetContent ->
+                    "WebGetContent: extracted page content from background WebView"
+                is AgentAction.WebExecuteJs ->
+                    "WebExecuteJs: ${action.script.take(60)}"
                 else -> action.javaClass.simpleName
             }
             history.append("ACTION: $actionDesc\n")
@@ -1245,24 +1262,89 @@ class AgentAccessibilityService : AccessibilityService() {
      * Build experience summary prompt from task history
      * This is called by AgentEngine when experience summary is enabled
      */
-    fun buildExperienceSummaryPromptFromHistory(taskHistory: String): String {
+    fun buildExperienceSummaryPromptFromHistory(
+        taskHistory: String,
+        agentKbRecalled: String = "",
+        userSelectedFormat: String = ""
+    ): String {
+        // Get the action format to determine thinking tag
+        val context = applicationContext
+        val apiUrl = ConfigManager.getString(context, ConfigManager.KEY_API_URL, AppConstants.ApiUrl.LOCAL)
+        val model = ConfigManager.getString(context, ConfigManager.KEY_MODEL_NAME, "")
+        
+        val format = if (userSelectedFormat.isEmpty() || userSelectedFormat == "Auto" || userSelectedFormat == "自动") {
+            ActionFormatRegistry.getFormatForApi(apiUrl, model)
+        } else {
+            val registryName = when (userSelectedFormat) {
+                "AutoGLM-Phone" -> "AutoGLM"
+                else -> userSelectedFormat
+            }
+            ActionFormatRegistry.getFormatByName(registryName) ?: ActionFormatRegistry.getFormatForApi(apiUrl, model)
+        }
+        
+        val thinkingTag = format.getThinkingTag()
+        val kbActionDesc = format.getKbActionDescription()
+        
+        // Build recalled experience section
+        val recalledSection = if (agentKbRecalled.isNotEmpty()) {
+            """
+## 知识库中的已有经验（召回，仅供参考）
+以下是从知识库中召回的历史经验，每个文档都有 [ID:xxx] 标签。
+⚠️ 召回结果是相似度匹配，可能包含其他任务的经验，请先判断相关性再决定是否删除。
+$agentKbRecalled"""
+        } else {
+            "\n## 知识库中未找到已有经验。\n"
+        }
+        
         return """
-你是一个Agent经验总结专家。请根据以下Agent任务执行历史，总结出可复用的经验。
+你是 Agent 经验总结专家。基于任务执行历史，生成可复用的经验总结。
 
-任务执行历史：
+## ⚠️ 删除规则（最高优先级）
+**严禁删除与本次任务无关的经验**。召回文档可能包含其他任务的历史经验（误召回），这些经验对其他任务仍有价值，绝对不能删除。
+- **只有**同时满足以下所有条件才可以 kb_delete：
+  1. 该经验与本次任务明确相关（同类型任务、同应用）
+  2. 该经验内容已过时、不准确或与新总结完全冗余
+  3. 不确定是否相关时 → 保留，不删除
+
+## 任务执行历史
 $taskHistory
+$recalledSection
 
-请按以下格式总结：
-1. **任务概述**：本次是什么类型的任务？任务目标和要求是什么？（放在最前面）
-2. **关键操作步骤**：按顺序列出完成任务的关键步骤
-3. **目标应用识别**：如何识别和打开目标应用
-4. **UI元素定位规律**：如何定位关键UI元素（搜索框、按钮等的位置规律）
-5. **需要避免的错误**：根据执行结果中的失败记录，总结需要避免的操作
-6. **最短成功路径**（3-5步）：精简后的最优执行路径
+## 输出要求
+你需要先在<$thinkingTag>**思考内容**</$thinkingTag>标签中思考，然后输出 KB Action。
 
-请用简洁的语言总结，便于未来类似任务参考。不要使用<thinking>或Action:格式，直接输出总结内容。
+### 思考内容
+<$thinkingTag>**思考内容**</$thinkingTag>中必须包含：
+1. 任务分析：这次任务的核心目标是什么，成功/失败的关键因素
+2. 经验提炼：哪些步骤是通用的，哪些是特定场景的
+3. 已有经验评估：逐一判断每个召回文档——是否与本次任务相关？若不相关，跳过（不删除）
+4. KB Action 决策：需要 delete 哪些ID（只删本任务相关且过时的），insert 什么内容
+
+### KB Action 格式
+$kbActionDesc
+
+### KB Action 内容要求
+**1. 处理已有经验**
+- **不相关的经验（其他任务）：绝对不删除，直接跳过**
+- 本任务相关且**已过时/不准确/与新总结完全冗余**：kb_delete(对应ID)
+- 本任务相关且有用的内容：合并到新 kb_insert 中
+- 不确定是否相关或是否过时：保留（不删除）
+
+**2. 新经验内容（kb_insert 的内容不大于500字。最少字表达，去掉修饰词）**
+1. 任务类型+目标（如：打开edge搜索）
+2. 关键步骤序列（如：点击edge图标→搜索框→输入→搜索）
+3. 能直接启动的应用名称
+4. UI元素坐标（关键按钮位置）
+5. 避坑提示（广告、弹窗处理）
+
+**重要**：
+- 控制输出精要不赘述，说重点，全部输出不超过800字
+- 先在<$thinkingTag>**思考内容**</$thinkingTag>思考，再输出 KB Action
+- 可以输出多个 KB Action（如：先 kb_delete 旧的，再 kb_insert 新的）
+- 思考过程中的草稿 KB Action 不会被执行，只有<$thinkingTag>外的 KB Action 才会执行
         """.trimIndent()
     }
+    
     
     /**
      * Called by AgentEngine when experience summary is generated
@@ -1283,135 +1365,138 @@ $taskHistory
     }
     
     /**
-     * Read task history from conversation.md
-     * Extract only the essential info: task goal + each step's thinking and action
-     * Skip debug tags, image references, separators, and other noise
+     * Read task history from in-memory trajectory (more reliable than conversation.md)
+     * Extract the essential info: task goal + each step's model response and action
      */
-    fun readTaskHistoryFromConversationMd(): String {
+    fun readTaskHistoryFromMemory(taskGoal: String, trajectory: List<TrajectoryStep>): String {
         try {
-            val context = applicationContext
-            val chatFolderPath = ConfigManager.getString(
-                context,
-                ConfigManager.KEY_CURRENT_CHAT_FOLDER,
-                ""
-            )
+            val result = StringBuilder()
+            result.append("Task: $taskGoal\n\n")
             
-            if (chatFolderPath.isEmpty()) {
-                LogManager.logE(TAG, "[AGENT_EXP] Chat folder path is empty")
-                return ""
-            }
-            
-            val conversationFile = java.io.File(chatFolderPath, "conversation.md")
-            if (!conversationFile.exists()) {
-                LogManager.logE(TAG, "[AGENT_EXP] conversation.md does not exist")
-                return ""
-            }
-            
-            val allLines = conversationFile.readLines()
-            LogManager.logI(TAG, "[AGENT_EXP] Total lines in conversation.md: ${allLines.size}")
-            
-            // Find the last Agent task start: "## 用户" followed by "![](agent_step_1_*.jpg)" or "![](agent_step_1_*.png)"
-            var taskStartIndex = -1
-            for (i in allLines.size - 1 downTo 0) {
-                val line = allLines[i].trim()
-                if (line.startsWith("## 用户") && i + 2 < allLines.size) {
-                    val nextLine = allLines[i + 2].trim()
-                    if (nextLine.startsWith("![](agent_step_1_") && (nextLine.endsWith(".jpg)") || nextLine.endsWith(".png)"))) {
-                        taskStartIndex = i
-                        LogManager.logI(TAG, "[AGENT_EXP] Found Agent task start at line $i")
-                        break
+            trajectory.forEachIndexed { index, step ->
+                val stepNum = index + 1
+                
+                // Extract first 100 chars from rawModelOutput as thinking summary
+                // Remove all tags to save tokens
+                val cleanText = step.rawModelOutput
+                    .replace(Regex("<thinking>|</thinking>|<tool_call>|</tool_call>"), "")
+                    .replace(Regex("\\s+"), " ")
+                    .trim()
+                if (cleanText.isNotEmpty()) {
+                    val summary = if (cleanText.length > 100) {
+                        cleanText.take(100) + "..."
+                    } else {
+                        cleanText
+                    }
+                    result.append("Step $stepNum 思考: $summary\n")
+                }
+                
+                // Extract action with detailed info
+                result.append("Step $stepNum action: ${step.action}")
+                
+                // Add coordinate info for UI actions
+                when (val action = step.action) {
+                    is AgentAction.Click -> {
+                        result.append(" (coordinates: x=${action.x}, y=${action.y})")
+                    }
+                    is AgentAction.LongPress -> {
+                        result.append(" (coordinates: x=${action.x}, y=${action.y})")
+                    }
+                    is AgentAction.DoubleClick -> {
+                        result.append(" (coordinates: x=${action.x}, y=${action.y})")
+                    }
+                    is AgentAction.Swipe -> {
+                        result.append(" (direction: ${action.direction}")
+                        if (action.x != null && action.y != null) {
+                            result.append(", at: x=${action.x}, y=${action.y}")
+                        }
+                        result.append(")")
+                    }
+                    is AgentAction.Drag -> {
+                        result.append(" (from: x=${action.startX}, y=${action.startY} to: x=${action.endX}, y=${action.endY})")
+                    }
+                    is AgentAction.Type -> {
+                        result.append(" (text length: ${action.text.length} chars)")
+                    }
+                    is AgentAction.Open -> {
+                        result.append(" (app: ${action.appName})")
+                    }
+                    is AgentAction.SystemButton -> {
+                        result.append(" (button: ${action.button})")
+                    }
+                    is AgentAction.GetAppList -> {
+                        // No extra info needed
+                    }
+                    is AgentAction.Terminate -> {
+                        result.append(" (status: ${action.status})")
+                    }
+                    is AgentAction.Context -> {
+                        result.append(" (context length: ${action.text.length} chars)")
+                    }
+                    is AgentAction.AskUser -> {
+                        result.append(" (question/instruction: ${action.text})")
+                    }
+                    is AgentAction.KbInsert -> {
+                        result.append(" (content length: ${action.text.length} chars)")
+                    }
+                    is AgentAction.KbDelete -> {
+                        result.append(" (ids: ${action.ids})")
+                    }
+                    is AgentAction.WebOpen -> {
+                        result.append(" (url: ${action.url})")
+                    }
+                    is AgentAction.WebGetContent -> {
+                        // No extra info needed
+                    }
+                    is AgentAction.WebExecuteJs -> {
+                        result.append(" (script length: ${action.script.length} chars)")
+                    }
+                    is AgentAction.Wait -> {
+                        // No extra info needed
+                    }
+                    is AgentAction.DataMemory -> {
+                        result.append(" (op=${action.operation}, key=${action.key})")
                     }
                 }
-            }
-            
-            if (taskStartIndex == -1) {
-                LogManager.logE(TAG, "[AGENT_EXP] Agent task start not found in conversation.md")
-                return ""
-            }
-            
-            // Extract only essential content: task goal + each step's thinking and action
-            val result = StringBuilder()
-            var taskGoal = ""
-            var stepCount = 0
-            var inDebug = false
-            
-            for (i in taskStartIndex until allLines.size) {
-                val line = allLines[i]
-                val trimmed = line.trim()
+                result.append("\n")
                 
-                // Skip debug sections
-                if (trimmed.startsWith("<debug>")) { inDebug = true; continue }
-                if (trimmed.startsWith("</debug>")) { inDebug = false; continue }
-                if (inDebug) continue
-                
-                // Skip noise lines
-                if (trimmed.startsWith("<!-- MESSAGE_SEPARATOR -->")) continue
-                if (trimmed.startsWith("## 用户")) continue
-                if (trimmed.startsWith("## AI助手")) continue
-                if (trimmed.startsWith("![](agent_step_")) continue
-                if (trimmed.startsWith("Previous Steps:")) continue
-                if (trimmed.startsWith("Step ") && trimmed.contains("ACTION:")) continue
-                if (trimmed.startsWith("ACTION:")) continue
-                // Keep RESULT lines - they contain execution success/failure info
-                if (trimmed.startsWith("NOTE:")) continue
-                if (trimmed.isEmpty()) continue
-                
-                // Capture task goal (first non-noise text line after agent_step_1 image)
-                if (taskGoal.isEmpty() && !trimmed.startsWith("<thinking>") && !trimmed.startsWith("<think>") && !trimmed.startsWith("Action:")) {
-                    taskGoal = trimmed
-                    continue
+                // Add coordinate error if any
+                if (step.coordinateError != null) {
+                    result.append("Step $stepNum coordinate error: ${step.coordinateError}\n")
                 }
                 
-                // Capture thinking lines
-                if (trimmed.startsWith("<thinking>") || trimmed.startsWith("<think>")) {
-                    stepCount++
-                    // Extract thinking content
-                    val thinkContent = trimmed
-                        .replace(Regex("^<thinking>"), "").replace(Regex("</thinking>$"), "")
-                        .replace(Regex("^<think>"), "").replace(Regex("</think>$"), "")
-                        .trim()
-                    result.append("Step $stepCount thinking: $thinkContent\n")
-                    continue
+                // Extract execution result with details
+                if (step.executionResult.success) {
+                    result.append("Step $stepNum result: Success")
+                    // Add returnData if available (e.g., app list)
+                    if (!step.executionResult.returnData.isNullOrEmpty()) {
+                        result.append(" (returned ${step.executionResult.returnData.length} chars of data)")
+                    }
+                    result.append("\n")
+                } else {
+                    result.append("Step $stepNum result: Failed - ${step.executionResult.message}\n")
                 }
                 
-                // Capture Action lines
-                if (trimmed.startsWith("Action:")) {
-                    result.append("Step $stepCount action: $trimmed\n")
-                    continue
-                }
-                
-                // Capture RESULT lines (execution success/failure)
-                if (trimmed.startsWith("RESULT:")) {
-                    result.append("Step $stepCount result: $trimmed\n\n")
-                    continue
-                }
+                result.append("\n")
             }
             
-            // Build final history
-            val history = StringBuilder()
-            if (taskGoal.isNotEmpty()) {
-                history.append("Task: $taskGoal\n\n")
-            }
-            history.append(result)
-            
-            val taskHistory = history.toString().trim()
-            LogManager.logI(TAG, "[AGENT_EXP] Extracted $stepCount steps, length: ${taskHistory.length}")
+            val taskHistory = result.toString().trim()
+            LogManager.logI(TAG, "[AGENT_EXP] Extracted ${trajectory.size} steps from memory, length: ${taskHistory.length}")
             LogManager.logI(TAG, "[AGENT_EXP] Task history:\n$taskHistory")
             
             return taskHistory
             
         } catch (e: Exception) {
-            LogManager.logE(TAG, "[AGENT_EXP] Failed to read task history", e)
+            LogManager.logE(TAG, "[AGENT_EXP] Failed to read task history from memory", e)
             return ""
         }
     }
     
-    
     /**
      * Save experience summary to AgentKB knowledge base.
-     * Reuses the same note saving flow as KnowledgeNoteFragment:
-     * KnowledgeGraphDatabase + InferenceClient.computeEmbedding + NER + knowledge graph.
-     * No chunking — each experience is stored as a single complete entry (same as notes).
+     * Parses model output for kb_delete and kb_insert actions, then executes them.
+     * kb_delete: removes outdated/redundant chunks by ID
+     * kb_insert: adds new experience summary with embedding + NER + knowledge graph
      */
     private fun saveExperienceToAgentKB() {
         LogManager.logI(TAG, "[AGENT_EXP] User clicked save button")
@@ -1422,144 +1507,37 @@ $taskHistory
             return
         }
         
-        floatingWindow?.updateStatus("Saving to AgentKB...")
+        floatingWindow?.updateStatus("Executing KB actions...")
         floatingWindow?.hideSaveButton()
         
         serviceScope.launch {
             try {
                 val context = applicationContext
-                val kbName = "AgentKB"
+                val kbName = AGENT_KB_NAME
                 
-                // Use ConfigManager.getKnowledgeBasePath() — same path as all other knowledge bases
-                val kbBasePath = ConfigManager.getKnowledgeBasePath(context)
-                val kbDir = java.io.File(kbBasePath, kbName)
-                val isNewKb = !kbDir.exists()
-                if (isNewKb) {
-                    LogManager.logI(TAG, "[AGENT_EXP] AgentKB does not exist, creating at: ${kbDir.absolutePath}")
-                    kbDir.mkdirs()
-                }
+                // Parse KB actions: returns at most [last_delete, last_insert] after CoT filtering
+                val kbActions = parseKbActions(experienceSummaryContent)
+                LogManager.logI(TAG, "[AGENT_EXP] Parsed ${kbActions.size} KB action(s)")
                 
-                // Build note title + content (same format as KnowledgeNoteFragment)
-                val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
-                val noteTitle = "Agent Experience $timestamp"
-                val fullText = "Title: $noteTitle\n\nContent: $experienceSummaryContent"
-                LogManager.logI(TAG, "[AGENT_EXP] Note fullText length: ${fullText.length}")
-                
-                // Get embedding model from settings
-                // NOTE: getLastSelectedEmbeddingModel() returns model NAME only (e.g. "Qwen3-Embedding-0.6B-MNN-int4"),
-                // must join with getEmbeddingModelPath() base dir to get absolute path
-                // (same as BuildKnowledgeBaseFragment line 961)
-                val embeddingModelName = ConfigManager.getLastSelectedEmbeddingModel(context)
-                if (embeddingModelName.isNullOrEmpty()) {
-                    LogManager.logE(TAG, "[AGENT_EXP] No embedding model configured in settings")
-                    floatingWindow?.updateStatus("Save failed: no embedding model")
-                    isWaitingForExperienceSave = false
-                    experienceSummaryContent = ""
-                    return@launch
-                }
-                val embeddingModelPath = ConfigManager.getEmbeddingModelPath(context) +
-                    java.io.File.separator + embeddingModelName
-                LogManager.logI(TAG, "[AGENT_EXP] Using embedding model: $embeddingModelPath")
-                
-                withContext(Dispatchers.IO) {
-                    // Generate embedding vector via InferenceClient (same as KnowledgeNoteFragment)
-                    RuntimeConfigUtil.pushToInference(context)
-                    val client = InferenceClient.getInstance(context)
-                    val contentEmbedding = client.computeEmbedding(
-                        embeddingModelPath,
-                        EmbeddingHandler.MemoryMode.LOW.value,
-                        fullText
-                    )
-                    if (contentEmbedding == null || contentEmbedding.isEmpty()) {
-                        throw Exception("Embedding vector is null or empty")
-                    }
-                    LogManager.logI(TAG, "[AGENT_EXP] Embedding generated, dimension: ${contentEmbedding.size}")
-                    
-                    // Open KnowledgeGraphDatabase (auto-creates knowledge_graph.db if new)
-                    val dbPath = java.io.File(kbDir, "knowledge_graph.db").absolutePath
-                    val vectorDb = KnowledgeGraphDatabase(context, dbPath, kbName)
-                    
-                    try {
-                        // Always update metadata (use model NAME, not absolute path)
-                        // This matches TextChunkProcessor.writeKnowledgeBaseMetadata() convention:
-                        // modeldir stores the model folder name (e.g. "Qwen3-Embedding-0.6B-MNN-int4"),
-                        // and RagQueryManager.resolveEmbeddingModelPath() joins it with embeddingModelRoot.
-                        val rerankerModel = ConfigManager.getLastSelectedRerankerModel(context) ?: ""
-                        val metadata = KnowledgeGraphDatabase.DatabaseMetadata(embeddingModelName).apply {
-                            embeddingDimension = contentEmbedding.size
-                            modeldir = embeddingModelName
-                            if (rerankerModel.isNotEmpty()) {
-                                rerankerdir = rerankerModel
+                if (kbActions.isEmpty()) {
+                    LogManager.logW(TAG, "[AGENT_EXP] No KB action found, falling back to direct save")
+                    executeKbInsert(context, kbName, experienceSummaryContent)
+                } else {
+                    // Execute in order: delete first (if any), then insert (if any)
+                    for (action in kbActions) {
+                        when (action) {
+                            is KbActionItem.Delete -> {
+                                executeKbDelete(context, kbName, action.ids)
+                                LogManager.logI(TAG, "[AGENT_EXP] Executed kb_delete: ${action.ids.size} IDs")
                             }
-                        }
-                        vectorDb.updateMetadata(metadata)
-                        LogManager.logI(TAG, "[AGENT_EXP] Metadata updated: embedding=$embeddingModelName, dim=${contentEmbedding.size}")
-                        
-                        // Add complete note to database — no chunking (same as KnowledgeNoteFragment)
-                        val docId = vectorDb.addChunk(fullText, noteTitle, contentEmbedding, "")
-                        val success = docId >= 0
-                        LogManager.logI(TAG, "[AGENT_EXP] addChunk result: docId=$docId, success=$success")
-                        
-                        // NER + knowledge graph via unified API (same as KnowledgeNoteFragment)
-                        if (success) {
-                            try {
-                                val dictPath = ConfigManager.getString(context, ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, null)
-                                val valueNone = context.getString(R.string.common_none)
-                                val customDictPath = if (!dictPath.isNullOrEmpty() && dictPath != valueNone) dictPath else null
-                                
-                                val nerHandler = HanLpNerHandler(customDictPath)
-                                try {
-                                    val nerResult = nerHandler.extractEntities(fullText)
-                                    if (nerResult != null && nerResult.isSuccess) {
-                                        var entities = nerResult.entities
-                                        if (entities != null && entities.isNotEmpty()) {
-                                            // Apply stopwords filter
-                                            val stopwordsPath = ConfigManager.getGraphStopwordsPath(context)
-                                            if (!stopwordsPath.isNullOrEmpty()) {
-                                                try {
-                                                    val matcher = GraphStopwordsMatcher.loadFromFile(stopwordsPath)
-                                                    if (matcher != null) {
-                                                        entities = entities.filter { !matcher.matches(it.text) }
-                                                    }
-                                                } catch (e: Exception) {
-                                                    LogManager.logE(TAG, "[AGENT_EXP] Failed to load stopwords: ${e.message}")
-                                                }
-                                            }
-                                            
-                                            // Single transactional call: entities + chunk-entity links + co-occurrence edges
-                                            vectorDb.addEntitiesAndBuildGraph(docId, entities, nerHandler)
-                                        }
-                                    }
-                                } finally {
-                                    nerHandler.release()
+                            is KbActionItem.Insert -> {
+                                if (action.text.length < 50) {
+                                    LogManager.logW(TAG, "[AGENT_EXP] Insert content too short (${action.text.length} chars)")
                                 }
-                            } catch (e: Exception) {
-                                LogManager.logE(TAG, "[AGENT_EXP] NER/graph error (non-fatal): ${e.message}")
+                                executeKbInsert(context, kbName, action.text)
+                                LogManager.logI(TAG, "[AGENT_EXP] Executed kb_insert: ${action.text.length} chars")
                             }
                         }
-                        
-                        LogManager.logI(TAG, "[AGENT_EXP] Total chunks in AgentKB: ${vectorDb.chunkCount}")
-                    } finally {
-                        vectorDb.close()
-                    }
-                    
-                    // Write metadata.json for compatibility (same as TextChunkProcessor)
-                    try {
-                        val jsonMetadataFile = java.io.File(kbDir, "metadata.json")
-                        val json = org.json.JSONObject()
-                        json.put("knowledgeBase", kbName)
-                        json.put("embeddingModel", embeddingModelName)
-                        json.put("modeldir", embeddingModelName)
-                        val rerankerMdl = ConfigManager.getLastSelectedRerankerModel(context) ?: ""
-                        if (rerankerMdl.isNotEmpty()) {
-                            json.put("rerankerModel", rerankerMdl)
-                        }
-                        json.put("embeddingDimension", contentEmbedding.size)
-                        json.put("updated", System.currentTimeMillis())
-                        java.io.FileWriter(jsonMetadataFile, false).use { it.write(json.toString()) }
-                        LogManager.logD(TAG, "[AGENT_EXP] metadata.json written: ${jsonMetadataFile.absolutePath}")
-                    } catch (e: Exception) {
-                        LogManager.logW(TAG, "[AGENT_EXP] Failed to write metadata.json (non-fatal): ${e.message}")
                     }
                 }
                 
@@ -1580,19 +1558,229 @@ $taskHistory
     }
     
     /**
-     * Start countdown to close floating window after save
+     * Sealed class for parsed KB action items
      */
-    private fun startCountdownToClose() {
-        serviceScope.launch {
-            for (i in 5 downTo 1) {
-                floatingWindow?.updateStatus("Closing in $i...")
-                kotlinx.coroutines.delay(1000)
+    private sealed class KbActionItem {
+        data class Delete(val ids: List<Long>) : KbActionItem()
+        data class Insert(val text: String) : KbActionItem()
+    }
+    
+    /**
+     * Parse KB actions from model output using universal CoT strategy.
+     * 
+     * Universal CoT Strategy (completely generic):
+     * 1. Call format.parseActionsWithCoT() to get all final actions (one per type)
+     * 2. Filter out KB actions (KbDelete, KbInsert)
+     * 3. Convert to KbActionItem and return
+     * 
+     * This is completely generic and works for any combination of action types.
+     * No hardcoded logic - fully reuses ActionFormat's universal CoT implementation.
+     */
+    private fun parseKbActions(modelOutput: String): List<KbActionItem> {
+        val actions = mutableListOf<KbActionItem>()
+        
+        try {
+            val apiUrl = ConfigManager.getApiUrl(applicationContext)
+            val modelName = ConfigManager.getModelName(applicationContext)
+            val format = com.example.offlineai.agent.parser.ActionParser.resolveFormat(apiUrl, modelName, applicationContext)
+            
+            LogManager.logI(TAG, "[AGENT_EXP] Using ${format.getFormatName()} with universal CoT strategy")
+            
+            // Use universal CoT: group by type, take last of each type
+            val (_, finalActions) = format.parseActionsWithCoT(modelOutput)
+            
+            LogManager.logI(TAG, "[AGENT_EXP] Universal CoT returned ${finalActions.size} final action(s)")
+            
+            // Filter and convert KB actions
+            for (action in finalActions) {
+                when (action) {
+                    is AgentAction.KbDelete -> {
+                        val ids = parseIdString(action.ids)
+                        if (ids.isNotEmpty()) {
+                            actions.add(KbActionItem.Delete(ids))
+                            LogManager.logI(TAG, "[AGENT_EXP] Final kb_delete: ${ids.size} IDs")
+                        }
+                    }
+                    is AgentAction.KbInsert -> {
+                        if (action.text.isNotEmpty()) {
+                            actions.add(KbActionItem.Insert(action.text))
+                            LogManager.logI(TAG, "[AGENT_EXP] Final kb_insert: ${action.text.length} chars")
+                        }
+                    }
+                    else -> {
+                        // Ignore non-KB actions
+                        LogManager.logD(TAG, "[AGENT_EXP] Ignoring non-KB action: ${action::class.simpleName}")
+                    }
+                }
             }
             
-            // Close floating window and stop service
-            stopAgentLoop()
-            LogManager.logI(TAG, "[AGENT_EXP] Countdown complete, Agent service stopped")
+        } catch (e: Exception) {
+            LogManager.logE(TAG, "[AGENT_EXP] Failed to parse KB actions", e)
         }
+        
+        return actions
+    }
+    
+    /**
+     * Parse comma-separated ID string into list of Long IDs
+     */
+    private fun parseIdString(idStr: String): List<Long> {
+        return idStr.split(",")
+            .mapNotNull { it.trim().toLongOrNull() }
+    }
+    
+    /**
+     * Execute kb_delete: remove chunks by IDs from AgentKB
+     */
+    private suspend fun executeKbDelete(context: android.content.Context, kbName: String, ids: List<Long>) {
+        withContext(Dispatchers.IO) {
+            try {
+                val kbBasePath = ConfigManager.getKnowledgeBasePath(context)
+                val kbDir = java.io.File(kbBasePath, kbName)
+                val dbFile = java.io.File(kbDir, "knowledge_graph.db")
+                if (!dbFile.exists()) {
+                    LogManager.logW(TAG, "[AGENT_EXP] AgentKB DB not found, skipping delete")
+                    return@withContext
+                }
+                val vectorDb = KnowledgeGraphDatabase(context, dbFile.absolutePath, kbName)
+                try {
+                    val deleted = vectorDb.deleteChunksByIds(ids)
+                    LogManager.logI(TAG, "[AGENT_EXP] kb_delete executed: requested=${ids.size}, deleted=$deleted")
+                } finally {
+                    vectorDb.close()
+                }
+            } catch (e: Exception) {
+                LogManager.logE(TAG, "[AGENT_EXP] kb_delete failed (non-fatal): ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * Execute kb_insert: add new experience text to AgentKB with embedding + NER + graph
+     */
+    private suspend fun executeKbInsert(context: android.content.Context, kbName: String, insertText: String) {
+        withContext(Dispatchers.IO) {
+            val kbBasePath = ConfigManager.getKnowledgeBasePath(context)
+            val kbDir = java.io.File(kbBasePath, kbName)
+            if (!kbDir.exists()) {
+                LogManager.logI(TAG, "[AGENT_EXP] AgentKB does not exist, creating at: ${kbDir.absolutePath}")
+                kbDir.mkdirs()
+            }
+            
+            val timestamp = java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date())
+            val noteTitle = "Agent Experience $timestamp"
+            val fullText = "Title: $noteTitle\n\nContent: $insertText"
+            LogManager.logI(TAG, "[AGENT_EXP] kb_insert: fullText length=${fullText.length}")
+            
+            val embeddingModelName = ConfigManager.getLastSelectedEmbeddingModel(context)
+            if (embeddingModelName.isNullOrEmpty()) {
+                LogManager.logE(TAG, "[AGENT_EXP] No embedding model configured, cannot insert")
+                return@withContext
+            }
+            val embeddingModelPath = ConfigManager.getEmbeddingModelPath(context) +
+                java.io.File.separator + embeddingModelName
+            
+            RuntimeConfigUtil.pushToInference(context)
+            val client = InferenceClient.getInstance(context)
+            val contentEmbedding = client.computeEmbedding(
+                embeddingModelPath,
+                EmbeddingHandler.MemoryMode.LOW.value,
+                fullText
+            )
+            if (contentEmbedding == null || contentEmbedding.isEmpty()) {
+                LogManager.logE(TAG, "[AGENT_EXP] Embedding vector is null or empty, cannot insert")
+                return@withContext
+            }
+            LogManager.logI(TAG, "[AGENT_EXP] Embedding generated, dimension: ${contentEmbedding.size}")
+            
+            val dbPath = java.io.File(kbDir, "knowledge_graph.db").absolutePath
+            val vectorDb = KnowledgeGraphDatabase(context, dbPath, kbName)
+            
+            try {
+                // Update metadata
+                val rerankerModel = ConfigManager.getLastSelectedRerankerModel(context) ?: ""
+                val metadata = KnowledgeGraphDatabase.DatabaseMetadata(embeddingModelName).apply {
+                    embeddingDimension = contentEmbedding.size
+                    modeldir = embeddingModelName
+                    if (rerankerModel.isNotEmpty()) {
+                        rerankerdir = rerankerModel
+                    }
+                }
+                vectorDb.updateMetadata(metadata)
+                
+                // Add chunk
+                val docId = vectorDb.addChunk(fullText, noteTitle, contentEmbedding, "")
+                val success = docId >= 0
+                LogManager.logI(TAG, "[AGENT_EXP] addChunk result: docId=$docId, success=$success")
+                
+                // NER + knowledge graph
+                if (success) {
+                    try {
+                        val dictPath = ConfigManager.getString(context, ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, null)
+                        val valueNone = context.getString(R.string.common_none)
+                        val customDictPath = if (!dictPath.isNullOrEmpty() && dictPath != valueNone) dictPath else null
+                        
+                        val nerHandler = HanLpNerHandler(customDictPath)
+                        try {
+                            val nerResult = nerHandler.extractEntities(fullText)
+                            if (nerResult != null && nerResult.isSuccess) {
+                                var entities = nerResult.entities
+                                if (entities != null && entities.isNotEmpty()) {
+                                    val stopwordsPath = ConfigManager.getGraphStopwordsPath(context)
+                                    if (!stopwordsPath.isNullOrEmpty()) {
+                                        try {
+                                            val matcher = GraphStopwordsMatcher.loadFromFile(stopwordsPath)
+                                            if (matcher != null) {
+                                                entities = entities.filter { !matcher.matches(it.text) }
+                                            }
+                                        } catch (e: Exception) {
+                                            LogManager.logE(TAG, "[AGENT_EXP] Failed to load stopwords: ${e.message}")
+                                        }
+                                    }
+                                    vectorDb.addEntitiesAndBuildGraph(docId, entities, nerHandler)
+                                }
+                            }
+                        } finally {
+                            nerHandler.release()
+                        }
+                    } catch (e: Exception) {
+                        LogManager.logE(TAG, "[AGENT_EXP] NER/graph error (non-fatal): ${e.message}")
+                    }
+                }
+                
+                LogManager.logI(TAG, "[AGENT_EXP] Total chunks in AgentKB: ${vectorDb.chunkCount}")
+            } finally {
+                vectorDb.close()
+            }
+            
+            // Write metadata.json for compatibility
+            try {
+                val jsonMetadataFile = java.io.File(kbDir, "metadata.json")
+                val json = org.json.JSONObject()
+                json.put("knowledgeBase", kbName)
+                json.put("embeddingModel", embeddingModelName)
+                json.put("modeldir", embeddingModelName)
+                val rerankerMdl = ConfigManager.getLastSelectedRerankerModel(context) ?: ""
+                if (rerankerMdl.isNotEmpty()) {
+                    json.put("rerankerModel", rerankerMdl)
+                }
+                json.put("embeddingDimension", contentEmbedding.size)
+                json.put("updated", System.currentTimeMillis())
+                java.io.FileWriter(jsonMetadataFile, false).use { it.write(json.toString()) }
+                LogManager.logD(TAG, "[AGENT_EXP] metadata.json written: ${jsonMetadataFile.absolutePath}")
+            } catch (e: Exception) {
+                LogManager.logW(TAG, "[AGENT_EXP] Failed to write metadata.json (non-fatal): ${e.message}")
+            }
+        }
+    }
+    
+    /**
+     * Close floating window and stop agent after experience is saved.
+     * No countdown - user already clicked save so we close immediately.
+     */
+    private fun startCountdownToClose() {
+        stopAgentLoop()
+        LogManager.logI(TAG, "[AGENT_EXP] Experience saved, Agent service stopped")
     }
     
 }

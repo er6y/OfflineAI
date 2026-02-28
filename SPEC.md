@@ -327,7 +327,18 @@ flowchart TB
       - 所有推理相关类统一移到 `ipc/` 包：`LocalLlmAdapter`、`LocalLlmHandler`、`LocalLLMMNNHandler`、`AsrAdapter`、`TtsAdapter`。
       - `ExternalTtsHandler` 已合并到 `TtsAdapter`，删除冗余文件。
       - `TtsAdapter.synthesizeExternal()` 方法供 `InferenceService.runTts()` 调用，统一 External TTS 入口。
-      - `api/` 包仅保留 `LlmApiAdapter`、`LlmModelFactory`、`StreamingApiClient` 等主进程 API 适配器。
+      - `api/` 包仅保留 `LlmApiAdapter`、`LlmModelFactory`、`StreamingApiClient`、`ApiUtils` 等主进程 API 适配器。
+  - **在线图像生成架构（2026-03 重构）**：
+    - **能力路由**：`LlmApiAdapter.ModelCapability` 枚举（`TEXT_GENERATION` / `IMAGE_GENERATION`）决定请求走流式 LLM 还是同步图像生成。调用方可通过 `callLlmApi(..., capability, callback)` 显式指定；未指定时 `looksLikeImageModel()` 按模型名称做 fallback 启发式检测（包含 `image`/`dall-e`/`wanx`/`flux`/`stable-diffusion`/`cogview` 等关键词）。
+    - **公共工具类 `ApiUtils`**：消除 `StreamingApiClient` 和 `LlmApiAdapter` 之间的重复代码：
+      - `encodeImageToBase64(imagePath)` — 读取图片文件并编码为 Base64 字符串。
+      - `downloadAndSaveImage(context, imageUrl, okHttpClient)` — 下载远程图片并保存到当前聊天文件夹，返回本地路径。
+      - `extractBaseUrl(apiUrl)` — 从用户配置的 API URL 中剥离 `/compatible-mode/v1`、`/v1/chat/completions` 等路径后缀，得到纯 base URL。
+    - **请求流程**：`LlmApiAdapter.handleImageGeneration()` → `buildImageGenRequestBody()`（区分千问 vs OpenAI 格式）→ `StreamingApiClient.imageRequest()`（复用 OkHttp client + `AuthMethodCache` 认证）→ `parseImageUrl()` 解析响应 → `ApiUtils.downloadAndSaveImage()` 下载保存 → 回调 `[IMAGE:path]`。
+    - **千问图像 API 格式**：`content` 数组中 `text` 项**始终必须存在**（API 要求至少一个 text content item）。文生图仅含 `{"text":"..."}`；图生图循环所有输入图片，每张编码后作为独立 `{"image":"data:image/jpeg;base64,..."}` 追加到 content 数组中。
+    - **多图输入支持（UI + API）**：用户可逐张添加多张图片。发送时 `RagQaFragment.prepareAndSaveUserInput` 为每张图片创建独立 `ChatDataItem`：前 N-1 个只含图片（无文字），最后一个含图片+文字。ChatUI 按现有单图逻辑逐条渲染，无需改布局。`ChatHistoryManager` 遍历所有 item 写入 md / 读取 md 时每 item 解析一张图，完全兼容多 item 格式。API 侧 `buildImageGenRequestBody` 循环所有 `imagePaths` 加入请求体。
+    - **线程安全**：`StreamingApiClient.imageRequest()` 的 `onComplete`/`onError` 回调**在调用线程（后台线程）执行**，不切换到主线程。`LlmApiAdapter.handleImageGeneration` 的 `onComplete` 完成图片下载保存后，再通过 `Handler(Looper.getMainLooper()).post()` 切回主线程回调 UI。
+    - **设计原则**：不在适配层重复创建 OkHttpClient；认证逻辑（Bearer / AuthMethodCache）统一由 `StreamingApiClient` 管理；图片编码/下载/保存统一由 `ApiUtils` 提供。
     - **停止与 5 秒超时 kill 策略**：
       - 正常 Stop：RagQaFragment 停止分支调用 `InferenceClient.requestStopWithTimeout(5000)`，该方法先通过 Binder 调 `IInferenceService.stopAll()`，在推理子进程内部仅执行协作式 `shouldStop`/`stop_requested_` 停止（不直接打断 JNI 线程）。
       - 超时兜底：`InferenceClient` 在主进程启动一个 ~5 秒的定时器；若期间收到 `onComplete/onError`（说明 LLM 已干净退出），定时器会被取消；否则 5 秒到期且仍有 `hasActiveTask=true` 时，通过 AIDL 调用 `IInferenceService.forceKillSelf()`，在推理进程中执行 `Process.killProcess(Process.myPid())`，只杀掉 `:inference` 进程而不影响 UI 进程。
@@ -720,13 +731,19 @@ flowchart TB
                                           ↓
                               callRagQueryManagerSync() → RagQueryManager → 模型推理
                                           ↓
-                              ActionExecutor → 执行点击/滑动/输入等动作
+                              ActionParser → ActionFormat.parseAction() → AgentAction
+                                          ↓
+                              UnifiedActionExecutor.execute(AgentAction) → UI 自动化
      ```
    - **核心组件**：
      - `AgentManager.java`：Java 桥接层，处理 MediaProjection 权限、前台服务启动、Kotlin 协程桥接
      - `AgentAccessibilityService.kt`：无障碍服务，托管 Agent 循环，管理悬浮窗和截图保存
      - `AgentEngine.kt`：核心编排器，管理执行循环和状态（`isRunning()` 是唯一真相源）
      - `AgentPrompts.kt`：系统提示词管理，支持缓存避免重复构建
+     - `ActionFormat.kt`：统一 Action 接口 + 4种格式实现（MAI-UI/AutoGLM/Doubao/OpenAI FuncCall），`parseAction()` 直接返回 `AgentAction`
+     - `ActionParser.kt`：薄包装层，负责格式选择和坐标校验，委托 ActionFormat 解析
+     - `UnifiedActionExecutor.kt`：统一动作执行器，接收 `AgentAction` 执行 UI 操作
+     - `ActionTypes.kt`：`AgentAction` sealed class 定义所有动作类型（Click/Type/Swipe/Drag/AskUser/KB 等）
    - **状态管理**：
      - `AgentEngine.isRunning()`：Agent 执行状态的**唯一真相源**
      - `AgentManager.isAgentRunning()`：委托查询方法，供 Java 层调用
@@ -735,7 +752,69 @@ flowchart TB
      - `prepareAndSaveUserInput()`：保存初始任务目标（Step 0）
      - `callRagQueryManagerSync()`：保存每个 Agent Step（含截图、Previous Steps）
    - **初始状态**：`AgentEngine.executeTask()` 在第一次截图前自动按 Home 键（`pressHome()` + 1秒等待），确保模型第一眼看到桌面而非 OfflineAI 界面，省去模型自行切换的步骤
-   - **Scroll/Swipe 方向语义**：`scroll down` / `swipe down` = **页面内容向下滚**（看到更下面的内容）= 手指从下往上滑（start.y 大, end.y 小）。三处执行器统一修正：`ActionExecutor.kt`、`ActionFormat.kt`（scroll→drag转换）、`UnifiedActionExecutor.kt`
+   - **Scroll/Swipe 方向语义**（与手机手势一致，`UnifiedActionExecutor.kt` 实现）：
+    - `swipe up`：手指从**下往上**滑（startY > endY） → 页面**上滚**，查看下方更多内容
+    - `swipe down`：手指从**上往下**滑（startY < endY） → 页面**下滚**，回到上方内容/下拉刷新
+    - `swipe left/right`：切换页面/标签
+    - **在邮件/列表中查看更多内容用 `swipe up`**
+    - 历史 Bug：曾将 UP/DOWN 坐标反转（UP = 手指从上往下），已修复
+  - **三层记忆架构**：
+    - **Context Action**（执行状态记忆）：承上启下，记录任务进展/策略/坐标/错误，每步覆盖，1000-2500字，不存原始业务数据
+    - **Data Memory**（数据 KV 存储）：任务级 KV Map，专门存储多步骤提取的业务数据（邮件内容、搜索结果等），每任务清空
+    - **RAG 经验库**（长期记忆）：任务完成后总结写入，下次相似任务第一步注入
+  - **Data Memory 机制**（`AgentAction.DataMemory`，`AgentEngine.dataMemory`）：
+    - **定位**：解决信息收集任务中业务数据写入 context 导致 token 暴涨问题，将原始数据与执行状态分离存储
+    - **操作**：`set(key, value)`存入 / `get(key)`读取（返回完整内容）/ `list()`查看已有 key / `delete(key)` / `clear()`
+    - **生命周期**：每次 `executeTask()` 调用时清空，不跨任务持久化
+    - **轻量注入**：每步提示词只注入 `Data Memory: key1, key2, ...`（~30字符），value 不注入 prompt，按需通过 get 读取
+    - **占位符展开**：`terminate` 的 `text` 字段中可用 `{{key}}` 引用已存入数据，`AgentEngine.expandPlaceholders()` 在执行前自动替换为实际内容
+    - **context 严格分离要求**：context 只写状态与策略，**严禁把邮件正文/项目数据等业务内容写入 context**；`CONTEXT_ACTION_REQUIREMENTS` ⚠️条明确禁止
+    - **context 已处理项目清单**：context ①条要求记录"已处理项目清单（含名称+状态）"，防止重复操作同一项目（如重复下载同一课程）；模型应在 context 中明确写出已完成的具体项目名称，返回列表后据此跳过已处理项目
+    - **Data Memory 为唯一可信状态**：每步提示词注入的 `Data Memory: [key列表]` 是唯一真相，context 中自称"已存入"不算数；提示词明确要求"以 Data Memory 索引为准"
+    - **set 成功反馈机制**：Pure step（仅 context+data_memory 无 UI 操作）执行后，系统将 `data_memory set success: key. Data Memory now: key1, key2` 注入 `lastStepResult`，让模型下步能核实实际存储状态
+    - **Pure step 死循环防护**（`consecutivePureSteps` 计数器，`AgentEngine.kt`）：
+      - 每次 Pure step（无 UI 操作）时计数器 +1；执行任何 UI 操作后重置为 0
+      - 连续 Pure step ≥ 2 次时，在 `lastStepResult` 追加系统强制警告，明确列出真实 Data Memory key 列表，要求模型补存缺失 key 或立即 terminate
+      - 根本问题：模型 context 幻觉（说"已存4个"）与 Data Memory 真实状态（只有2个key）矛盾时，模型不知道信哪个，陷入反复 set 同一 key 的死循环；硬注入警告强制纠正
+    - **提示词引导**（`AgentPrompts.kt` 规则区）：set/get/list 用法、Data Memory 为唯一可信状态、set 后系统返回确认、所有目标 key 齐全后立即 terminate、禁止重复 set 同一 key
+    - **四种格式均支持**：MAI-UI JSON、AutoGLM do()、AutoGLM action()、OpenAI FuncCall 格式均已添加解析分支
+    - **ActionParser terminate 丢失根本原因修复**（`OpenAiFuncCallFormat.extractAllActions`，`ActionFormat.kt`）：
+      - **问题**：原正则 `\{(?:[^{}]|(?:\{[^{}]*\}))*\}` 只支持 2 层 JSON 嵌套；`tool_calls` 结构为 3 层（外层→name/parameters→status/text），正则无法匹配完整外层 JSON 对象，`json.has("tool_calls")` 分支永远走不到；terminate text 含 `\n` 等特殊字符也导致子对象匹配失败
+      - **修复**：用括号平衡扫描器 `extractTopLevelJsonObjects()` 替代正则，逐字符跟踪 `depth`/`inString`/`escape` 状态，支持任意嵌套深度和 text 字段内任意字符，不再静默丢弃 terminate
+    - **TTS 被过早 shutdown 导致只朗读开头几个字**（`AgentTtsHelper.kt`，`AgentEngine.kt`）：
+      - **问题**：`agentTts.speak()` 是异步 fire-and-forget，调用后立即 `break` 出循环，协程 job 结束触发 `finally`→`stopAgentLoop()`→`agentTts.shutdown()`→`tts.stop()`，TTS 播放被强制终止
+      - **修复**：`AgentTtsHelper` 新增 `awaitSpeechDone()` 挂起函数，通过 `UtteranceProgressListener.onDone` 回调 resume；AgentEngine terminate 处理中 `speak()` 后调用 `agentTts?.awaitSpeechDone()`，确保完整朗读后再 break
+    - **TTS 与经验总结并发设计**（`AgentEngine.kt`，terminate 分支）：
+      - **正确流程**：① 显示 terminate 文本 → ② `CoroutineScope(Dispatchers.Default).launch` 异步启动 TTS（返回 `ttsJob`）→ ③ 串行执行经验总结（如启用）→ ④ `ttsJob?.join()` 等 TTS 播完 → ⑤ 结束
+      - **并发收益**：TTS 播放（数秒）与经验总结推理（数秒）同时进行，不互相等待，总耗时取两者最大值而非之和
+      - **保证 TTS 播完**：无论有无经验总结，两处 `break` 前都调 `ttsJob?.join()`，TTS 必定播完才结束 Agent task
+      - **用户停止不管**：用户点 Stop 按钮取消 `agentLoopJob` 协程，`ttsJob.join()` 响应协程取消立即返回，属于用户主动中断，不强制等待
+    - **TTS awaitSpeechDone 竞态修复**（`AgentTtsHelper.kt`）：
+      - **问题**：`onDone` 回调来自 TTS 引擎后台线程，`awaitSpeechDone()` 在协程线程注册 callback，若 `onDone` 在 callback 注册前触发则协程永久挂起
+      - **修复**：新增 `speechLock` + `speechAlreadyDone` 标志，`speakNow()` 重置标志，`onDone`/`onError` 在锁内检查并设置标志或调用 callback；`awaitSpeechDone()` 在锁内原子检查 `speechAlreadyDone`，已完成则立即返回；`shutdown()` 也在锁内唤醒挂起的等待者，避免永久阻塞
+    - **悬浮窗 terminate 结果展示**（`AgentFloatingWindow.kt`，`AgentAccessibilityService.kt`）：
+      - 新增 `showTerminateResult(text)` 方法，清空 step output，以纯白色/11sp 展示展开后完整 terminate text，scroll 到顶部
+      - `onStepCompleted` 回调中检测 `AgentAction.Terminate` 后调用 `showTerminateResult(action.text)`（传 expandedAction 确保 placeholder 已展开）
+      - 经验总结推理步骤（`isExperienceSummaryStep=true`）跳过 `updateOutput()`，不覆盖 terminate 展示内容
+      - **经验总结不覆盖悬浮窗 terminate text**（`AgentAccessibilityService.kt`）：`updateOutput` 有**两处调用点**，必须同时保护：①外层 `modelInferenceCallback` Lambda（第330行）；②`callRagQueryManagerSync` 内部的 `withContext(Dispatchers.IO)` 块（第634行）。两处都需要 `if (!isExperienceSummaryStep)` 保护，漏掉任意一处经验总结内容就会覆盖 terminate 文本。`onExperienceSummaryGenerated` 只调 `updateStatus("Experience summary ready")`，不触碰 output 文字区域
+    - **悬浮窗 output 区域固定尺寸+可滚动**（`agent_floating_window.xml`，`AgentFloatingWindow.kt`）：
+      - **问题**：`ScrollView` 设为 `wrap_content`，模型输出字多时悬浮窗高度无限拉伸，覆盖屏幕
+      - **修复**：XML 中 `ScrollView` 高度固定为 **120dp**（运行中显示精简输出）；terminate 后 `showTerminateResult()` 代码动态扩为 **200dp**，给完整结果留更多空间；`overScrollMode=always` 保证滚动指示器可见
+      - **悬浮窗宽度**：`layoutExpanded` 固定宽度 **215dp**（320dp 减少约 1/3），避免遮挡过多屏幕内容；`AskUser` 时 ScrollView 压缩至 60dp，terminate 后扩为 200dp，确认后恢复 120dp
+    - **经验总结提示词禁止误删无关经验**（`AgentAccessibilityService.buildExperienceSummaryPromptFromHistory()`）：
+      - **问题**：RAG 召回结果是相似度匹配，可能召回其他任务的历史经验（误召回）；原提示词虽有"不相关保留"规则但优先级低，模型倾向于清理"旧经验"，将无关经验一并删除
+      - **修复**：在提示词**最前面**新增 `## ⚠️ 删除规则（最高优先级）`，明确"严禁删除与本次任务无关的经验"；kb_delete 的三个必要条件（同类型任务、内容过时、不确定时保留）前置为约束；召回区块标题改为"召回，仅供参考"并加警示语"召回结果是相似度匹配，可能包含其他任务经验，请先判断相关性"；思考步骤明确要求"逐一判断相关性，不相关直接跳过"
+    - **去掉倒计时自动关窗**：任务完成后悬浮窗保持显示，用户自行点击 Stop 关闭；保存经验后也直接 stopAgentLoop() 不倒计时
+    - **保存按钮文字**：中文"保存" → "保存经验"，英文"Save" → "Save Experience"
+    - **finally 块 show/stopAgentLoop 竞态修复**（`AgentAccessibilityService.kt`）：
+      - **问题**：原 `finally` 里先调 `floatingWindow?.show()` 再调 `stopAgentLoop()`，后者内部调 `floatingWindow?.hide()`，导致 show→hide 竞态，窗口闪烁后立刻消失；此外温度恢复在 `stopAgentLoop` 里，正常完成流程下会被执行两次（finally 和 用户点Stop各一次）
+      - **修复**：`finally` 里直接做最小清理（温度恢复、isAgentActive=false、TTS shutdown），不调 `stopAgentLoop()`；窗口保持开放，等用户点 Stop 按钮触发 `stopAgentLoop()` 关窗；`savedTemperature` 用完置 null，保证幂等安全
+    - **ScrollView maxHeight 修复**（`AgentFloatingWindow.kt`，`agent_floating_window.xml`）：
+      - **问题**：`android:maxHeight` 不被 ScrollView 支持，XML 里设置无效，内容会无限撑高
+      - **修复**：移除 XML 中 `android:maxHeight`；`showTerminateResult()` 里用代码设置 `layoutParams.height = 200dp`，normal step 的 `updateOutput()` 保持 wrap_content；terminate 时固定高度确保 ScrollView 可滚动
+    - **AskUser lastStepResult 未包含用户输入修复**（`AgentEngine.kt`）：
+      - **问题**：`memory.addStep` 和 `onStepCompleted`（触发 `lastStepResult` 赋值）在 `onAskUser()` 挂起等待之前调用，导致下一步提示词里 `lastStepResult = "AskUser: waiting for user"`，模型完全看不到用户输入内容；同时多余地注入了一个 Wait contextStep（冗余）
+      - **修复**：先调 `onAskUser()` 拿到用户回复，再组装 `askResultMsg = "AskUser completed. User replied: $userResponse"`，然后 `memory.addStep` + `onStepCompleted`；这样 `lastStepResult` 正确包含用户实际输入，下一步提示词中模型可见；移除多余的 contextStep 注入（用户回复已在 executionResult.message 里）
    - **Type 动作容错机制**：`inputTextWithReason()` 替代原 `inputText()`，增加自动聚焦和详细错误反馈：
      1. **自动聚焦**：当 `findFocus(FOCUS_INPUT)` 返回 null 时，递归遍历 accessibility tree 查找 `isEditable` 节点，执行 `ACTION_FOCUS` + `ACTION_CLICK` 尝试聚焦，等待 300ms 后重试
      2. **详细错误信息**：失败时返回具体原因（如 `"No focused input field. Click the input box first, then type"`），通过 `ActionExecutor`/`UnifiedActionExecutor` 传递给模型历史
@@ -744,33 +823,96 @@ flowchart TB
    - **截图处理**：截图缩放至 612×1388（50% 常见设备分辨率）并以 JPEG quality=85 保存（文件名：`agent_step_{step}_{timestamp}.jpg`），相比全分辨率 PNG 节省约 80% 体积和 API token 消耗。常量定义在 `ConfigManager.AGENT_SCREENSHOT_WIDTH/HEIGHT/JPEG_QUALITY`。模型坐标使用归一化 [0-999] 范围，与截图分辨率无关，缩放不影响坐标解析
    - **性能优化**：
      - APP 列表在 `AgentAccessibilityService.cachedAppList` 中缓存，整个 Agent 循环复用同一列表
-     - `ActionExecutor` 异步加载 APP 列表（`CoroutineScope(Dispatchers.IO)`），避免阻塞主线程启动
+     - `UnifiedActionExecutor` 异步加载 APP 列表（`CoroutineScope(Dispatchers.IO)`），避免阻塞主线程启动
      - 首次使用时如未加载完成会同步等待（Agent 执行时才需要）
      - 截图缩放至 612×1388 JPEG q=85，Base64 体积从 ~6MB 降至 ~500KB，大幅减少 API token 消耗
    - **历史记录自动管理**：勾选 Agent 模式时，系统自动将历史轮数设置为 0，避免历史对话干扰 Agent 推理；取消勾选时自动恢复默认历史轮数。
-   - **步骤历史增强与重复行为防护**：
-     - **历史格式**：`buildUserPromptWithHistory()` 为每步生成 `S{n}: [思考:{摘要}] {动作} -> OK/Failed` 格式，thinking 摘要截取前 80 字符以控制 token 消耗
-     - **动作文本提取**：`AgentEngine` 优先提取 `<tool_call>` 内容，fallback 提取 `Action:` 行（兼容 Doubao UI-TARS 等不使用 tool_call 标签的格式），再 fallback 从解析后的 `AgentAction` 对象生成可读描述
-     - **重复行为警告**：历史步骤后追加 `⚠注意：仔细检查以上历史步骤，如果多次执行相同/相似动作但未取得进展，必须换一种方法！`，放在用户提示词中紧跟历史步骤之后，利用模型对末尾内容注意力更强的特性
-     - **系统提示词配合**：`AgentPrompts.getSystemPromptForApi()` 规则中包含 `历史步骤判断，如果多次重复同一/相似动作，说明此方法行不通，需要尝试别的方法`
+   - **Context Action 记忆机制**（替代旧的步骤历史）：
+     - **设计目标**：让模型主动管理自己的记忆，每步输出一个 `context` action 覆盖前一步，而不是被动累积步骤历史，Token 效率更高
+     - **`context` action**：`AgentAction.Context(text)`，不执行任何 UI 操作，只更新 `currentContext`；`needsScreenshot() = false`
+     - **`currentContext` 字段**（`AgentEngine` + `AgentAccessibilityService` 各持一份）：
+       - 任务开始：`currentContext = "RAG召回: $cachedAgentKbContext"`
+       - 每步：从解析结果提取 `AgentAction.Context`，更新 `currentContext`（1500 字软限制，超出截断并 warn；提示词要求 1000 字以上）
+       - 缺失 context：所有步骤（含第一步）统一 warn 并复用上一步 context，不中断任务（宽松模式）
+       - 任务结束：`currentContext = ""`
+     - **Prompt 流向**：`buildUserPromptWithHistory()` 只输出 `currentContext`（无历史步骤列表）；系统提示词**不再注入 RAG 召回**
+     - **context 内容要求**（`AgentPrompts.CONTEXT_ACTION_REQUIREMENTS`，单一数据源，4 种格式共引用）：
+       - 包含：RAG 召回对本任务的相关参考、任务进展、错误/坐标/策略、继承以往 context 的重要历史和下一步
+       - 删除和本任务无关及过时信息；**1000 字符以上**（系统提示词和规则两处统一为 1000 字，低于此值会导致记忆不足和死循环）
+       - 防循环要求：同一操作失败 2 次后必须在 context 中说明已尝试次数和下一步切换策略
+     - **每步输出格式**（以 MAI-UI 为例）：
+       ```
+       <tool_call>{"action":"context","text":"..."}</tool_call>
+       <tool_call>{"action":"click","coordinate":[x,y]}</tool_call>
+       ```
+     - **解析机制**：`ActionParser.parseActions()` 返回 `List<AgentAction>`；`AgentEngine` 先提取所有 `Context` action 更新记忆，再取第一个非 context action 执行
+     - **Prompt 结构**（`buildUserPromptWithHistory()`，每步注入三层信息）：
+       1. `任务: $instruction` — 任务目标
+       2. `【上一步事实】$lastStepResult` — **硬编码的客观事实**（由系统记录，模型无法忘记或篡改），包含完整 action 参数和执行结果
+       3. `上下文记忆: $currentContext` — 模型自我维护的记忆
+     - **`lastStepResult` 字段**（`AgentAccessibilityService`）：
+       - **写入时机**：`onStepCompleted` 回调中由系统写入，新任务开始时清空
+       - **格式**：`Previous step executed: <action_with_params>\nResult: <success/fail + message + returnData>`
+       - **完整参数示例**：
+         - `click(coordinate=[500,300])` — 包含实际坐标
+         - `type(text="search query")` — 包含输入文本
+         - `web_open(url="https://...")` — 包含完整 URL
+         - `web_get_content` — 执行结果中包含 `returnData`（最多 800 字符的页面内容）
+       - **returnData 注入**：对于 `web_get_content`/`get_app_list` 等返回结构化数据的 action，`returnData` 会追加到结果中（`Returned data: ...`），确保模型能看到实际获取的内容
+       - **设计目的**：在模型自身 context 记忆出错/截断时提供基础真相防止死循环；特别是 web 操作，模型必须看到上一步实际获取的页面内容才能决定下一步
+     - **经验总结**：不再传 step 历史，改为 `"任务目标: $taskGoal\n\n最新上下文记忆:\n$currentContext"` + 原始 RAG 召回（用于 KB dedup）
    - **应用打开策略**：统一在 `AppNameMapper.kt` 管理应用启动策略，采用三层优先级：
      1. **Intent Action**（系统应用，如 Dialer/Camera/Settings）- 最佳跨设备兼容性
      2. **包名映射**（第三方应用，如微信/淘宝）- 预定义常用应用
      3. **模糊匹配**（已安装应用）- 兜底方案
    - 编译前运行 `android_env.cmd` 确保工具链环境正确，避免 Gradle 找不到 JDK 或 SDK 路径。
    - 构建命令：`gradlew assembleRelease -PKEYPSWD=abc-1234`（使用 Release 构建，密码为 key.jks 文件密码）。
+   - **Action 动作空间精简原则**：
+     - **保留动作**：Click/LongPress/DoubleClick/Type/Swipe/Drag/Open/SystemButton/Wait/Terminate/AskUser/GetAppList/KbInsert/KbDelete/WebOpen/WebGetContent/WebExecuteJs
+     - **已删除**：`Answer`（用 Terminate 替代）、旧版 `AskUser`（用新版 AskUser 替代）、`Confirm`（用 AskUser 替代）、`Interact`/`Note`/`CallApi`（占位符，无实际用途）
+     - **4种格式已对齐**：MAI-UI/AutoGLM/Doubao/OpenAI FuncCall 均支持相同的核心动作集，ask_user 在各格式中均已解析实现
+   - **AskUser 交互设计**：
+     - **触发**：模型输出 `ask_user` action，携带 `text` 字段（给用户的问题或操作说明）
+     - **截图控制设计**（单一 flag，三处联动）：
+       - **决策时机**：循环顶部截图**之前**，`val needsScreenshot = lastAction?.needsScreenshot() ?: true`，基于上一步 action 决定；`lastAction==null`（第一步）默认截图
+       - **传递方式**：`screenshot = if (needsScreenshot) captureScreen() else null`，直接控制传给 `callRagQueryManagerSync` 的参数
+       - **三处联动**（`callRagQueryManagerSync` 内，均由 `screenshot != null` 控制）：① 存不存 jpg 文件；② 写不写 conversation.md 截图引用；③ 传不传 imagePaths 给模型
+       - **扩展方式**：未来新增不需截图的 action，只需在 `ActionTypes.kt` override `needsScreenshot() = false`，无需改其他任何地方
+       - **经验总结路径**：直接传 `null` 给 `modelInferenceCallback`，三处自动跳过
+     - **挂起流程**：`AgentEngine` 主循环捕获 AskUser → `callback.onAskUser()` 挂起协程 → `AgentFloatingWindow.showAskUserInputAndWait()` 展示 UI → 用户输入/确认 → 恢复协程
+     - **用户回复注入**：非空回复以 `rawModelOutput = "[User response]: $text"` 形式存入 TrajectoryStep，作为历史上下文传给模型下一步
+     - **悬浮窗 AskUser UI**（`agent_floating_window.xml` / `AgentFloatingWindow.kt`）：
+       - `layoutTakeOver`：半透明区域，默认 `GONE`，AskUser 时显示（布局名保持不变避免大范围修改）
+       - `textViewTakeOverQuestion`：显示模型的问题/说明文字
+       - `editTextTakeOverInput`：可选文本输入框（`textMultiLine`，提示"输入回复（可为空）"，可直接留空确认）
+       - `buttonTakeOverConfirm`：确认按钮，点击后隐藏 UI、恢复协程、传递输入文本
+       - **焦点切换**：显示时移除 `FLAG_NOT_FOCUSABLE`（让 EditText 可接收键盘输入），隐藏后恢复 `FLAG_NOT_FOCUSABLE`
+     - **AgentManager.java 路径**（无悬浮窗）：`onAskUser` 直接同步返回空字符串
+     - **使用场景**（系统提示词规则中已说明）：①密码/验证码等敏感信息；②无法自动操作需用户手动完成；③意图歧义需澄清；④需要用户决策
+   - **Agent TTS 语音播报**：
+     - **开关**：设置页代理设置区域"代理语音 (Agent TTS)"，`ConfigManager.KEY_AGENT_TTS_ENABLED`，默认关
+     - **触发时机**：仅 `Terminate`（任务完成/失败）和 `AskUser`（播报问题文本）两种 action
+     - **Terminate 播报**：固定文案"任务完成"或"任务失败"，`AgentEngine` 中 Terminate 分支调用
+     - **AskUser 播报**：播报 `response.action.text`，与悬浮窗 UI 同步展示（非阻塞 fire-and-forget）
+     - **实现**：`AgentTtsHelper.kt` 封装 Android `TextToSpeech`，语言 `Locale.CHINESE`（中英混合设备引擎自动处理）；`startAgentLoop` 时按开关初始化，`stopAgentLoop` 时 `shutdown()`；`AgentEngine.setAgentTts()` 注入引用
+     - **线程安全**：TTS 初始化异步，初始化前调用的 text 进入 `pendingTexts` 队列，初始化完成后自动 flush
+     - **Terminate 顺序与异步化修复**（`AgentEngine.kt`）：
+       - **问题1**：原顺序 speak()→awaitSpeechDone()（阻塞）→ onStepCompleted（悬浮窗才显示），用户要等 TTS 播完才看到 terminate text
+       - **问题2**：awaitSpeechDone() 在 agentLoopJob 协程里同步阻塞，经验总结也在同一协程，TTS 播放期间经验总结无法启动
+       - **修复**：正确执行顺序：memory.addStep → onStepCompleted（悬浮窗立即显示 terminate text）→ `CoroutineScope(Dispatchers.Default).launch { speak(); awaitSpeechDone() }`（TTS 独立协程，与经验总结并发）
+       - **生命周期**：ttsScope 为游离 scope，agentTts.shutdown() 解除 awaitSpeechDone 阻塞，协程自然退出，不泄漏
    - **经验总结功能**（Agent 任务完成后自动生成可复用经验）：
      - **设计原则**：完全复用 Agent Step 流程（`modelInferenceCallback` → `callRagQueryManagerSync`），经验总结作为 Terminate 后的额外一步，不额外造轮子
      - **触发条件**：Terminate action 且成功，经验总结开关已启用
+     - **不截图**：经验总结是纯文本 KB 操作，`modelInferenceCallback` 传入 `null` 截图，避免不必要的截图开销
      - **核心流程**（`AgentEngine.executeTask()` 中 Terminate 分支）：
        ```
        Terminate(success) + 经验开关启用
          → 切回 OfflineAI 前台
-         → 截图
-         → readTaskHistoryFromConversationMd() 提取精简历史
+         → readTaskHistoryFromMemory() 提取精简历史（无需截图）
          → buildExperienceSummaryPromptFromHistory() 构建提示词
-         → modelInferenceCallback(summaryPrompt, screenshot, emptyList())
-           （复用 Agent Step 流程：写 conversation.md + 调模型 + 刷新 ChatUI）
+         → modelInferenceCallback(summaryPrompt, null, emptyList())
+          （复用 Agent Step 流程：写 conversation.md + 调模型 + 刷新 ChatUI，截图传null）
          → onExperienceSummaryGenerated() 显示保存按钮
          → 等待用户保存或取消
        ```
@@ -779,37 +921,77 @@ flowchart TB
        - 逐行解析，**只提取**每步的 `<thinking>` 内容、`Action:` 行和 `RESULT:` 行（执行成功/失败及原因）
        - **过滤掉**：`<debug>`、`<!-- MESSAGE_SEPARATOR -->`、`![](agent_step_*)`、`## 用户/AI助手` 标题、`Previous Steps` 等噪声
        - 输出格式：`Task: {目标}\nStep N thinking: ...\nStep N action: ...\nStep N result: RESULT: Success/Failed - ...\n`
-     - **系统提示词**：经验总结时 `isExperienceSummaryStep=true`，`callRagQueryManagerSync` 检测到后系统提示词置空（Agent 的 UI-TARS 系统提示词不适用于经验总结），同时传空 `knowledgeBase` 跳过 RAG 召回（经验总结不需要知识库上下文）
-     - **用户提示词**：`buildUserPromptWithHistory` 检测到 `isExperienceSummaryStep=true` 时直接返回 `instruction` 原文，跳过 `"任务: "` 前缀包裹和 `"现在，根据当前截图，决定下一步操作以继续任务。"` 后缀追加（经验总结 prompt 已是完整自包含的提示词）
-     - **提示词模板**：`buildExperienceSummaryPromptFromHistory()` 要求模型按以下顺序输出：
-       1. 任务概述（任务类型、目标和要求，放在最前面）
-       2. 关键操作步骤
-       3. 目标应用识别
-       4. UI元素定位规律
-       5. 需要避免的错误（根据 RESULT 中的失败记录）
-       6. 最短成功路径（3-5步）
+     - **系统提示词**：经验总结时 `isExperienceSummaryStep=true`，`callRagQueryManagerSync` 检测到后系统提示词置空（Agent 的 UI-TARS 系统提示词不适用于经验总结）
+     - **用户提示词**：`buildUserPromptWithHistory` 检测到 `isExperienceSummaryStep=true` 时直接返回 `instruction` 原文，跳过 `"任务: "` 前缀包裹和后缀追加
+     - **提示词模板**：`buildExperienceSummaryPromptFromHistory(taskHistory, agentKbRecalled, userSelectedFormat)` 包含三部分：
+       1. 任务执行历史（从 conversation.md 提取的精简记录）
+       2. AgentKB 已有经验（带 `[ID:xxx]` 标签，便于模型判断是否需要删除）
+       3. KB Action 格式说明（根据用户选择的 action 格式动态生成 `kb_delete`/`kb_insert` 的语法示例）
+     - **模型输出格式**：模型不再输出纯文本总结，而是输出 `kb_delete` 和 `kb_insert` action 命令：
+       - 先输出 `kb_delete`（删除过时/冗余/不准确的旧经验，按 `[ID:xxx]` 标识）
+       - 再输出 `kb_insert`（插入新的经验总结，500字以内）
+       - 支持4种格式：MAI-UI（`<tool_call>JSON</tool_call>`）、AutoGLM（`do(action=...)`）、Doubao（`Action: kb_xxx(...)`）、OpenAI FuncCall（`{"name":"kb_xxx","parameters":{...}}`）
      - **悬浮窗交互**：
        - 经验生成后：`isWaitingForExperienceSave=true`，悬浮窗保持可见，显示保存/停止按钮
-       - 保存按钮：保存到 AgentKB → 倒计时关闭
+       - 保存按钮：解析 action → 执行 kb_delete/kb_insert → 倒计时关闭
        - 停止按钮（作为取消）：清除 `isWaitingForExperienceSave` → 隐藏悬浮窗
        - `finally` 块：检查 `isWaitingForExperienceSave`，为 true 时不调用 `stopAgentLoop()`
-     - **知识库保存**：`saveExperienceToAgentKB()` 完全复用 `KnowledgeNoteFragment` 的笔记保存流程：
+     - **Agent KB 管理架构**（Agent 自主管理知识库，不依赖 RagQueryManager 的 RAG 管线）：
+       - **Agent 自有 RAG**：`KnowledgeGraphDatabase.queryKnowledgeBase(context, "AgentKB", queryText, topK)` 静态方法，Agent 独立调用，不经过 RagQueryManager。返回带 `[ID:xxx]` 的格式化文本，任何异常返回空字符串不阻塞流程
+       - **一次查询、全程复用**：`AgentEngine.executeTask()` 在任务开始时查询一次 AgentKB（`cachedAgentKbContext`），结果通过 `AgentAccessibilityService.cachedAgentKbContext` 字段传递给所有 Step 和经验总结步骤复用。任务结束（`finally`/`stop()`）时清空缓存。这避免了 N 步 × embedding 计算的重复开销
+       - **Agent Step 1~N**：`callRagQueryManagerSync` 直接读 `cachedAgentKbContext` 拼入系统提示词 → `knowledgeBase=""` 跳过 RagQueryManager 的 RAG 管线 → 只走 LLM 调用
+       - **经验总结步骤**：`AgentEngine` 直接用 `cachedAgentKbContext`（已含 `[ID:xxx]`）传给 `buildExperienceSummaryPromptFromHistory()` → 模型输出 action → 用户点保存 → 解析执行
+       - **设计决策**：Agent 模式下**始终**不使用用户配置的知识库（`effectiveKnowledgeBase=""`），Agent 只用自己的 AgentKB。这确保 Agent 对 RAG 完全可控
+     - **知识库保存**：`saveExperienceToAgentKB()` 解析模型输出中的 KB action 并执行：
+       - **Action 解析**：`parseKbActions()` 支持4种格式，自动检测匹配，回退到直接保存整个内容
+       - **kb_delete**：`executeKbDelete()` → `KnowledgeGraphDatabase.deleteChunksByIds(ids)` 完整清理（删除 document → CASCADE 删 chunk_entities → 更新 entity frequency → 清理 entity_edges chunk_ids JSON → 移除空边和孤立实体）
+       - **kb_insert**：`executeKbInsert()` → 生成 embedding → `addChunk()` → NER + `addEntitiesAndBuildGraph()` → 更新 metadata（SQLite + `metadata.json` 双写）
        - 路径：`ConfigManager.getKnowledgeBasePath()/AgentKB/`（与所有知识库统一路径）
-       - 存储：`KnowledgeGraphDatabase.addChunk()` 写入 `knowledge_graph.db`（不分片，整条经验作为一个 chunk）
-       - 向量化：`InferenceClient.computeEmbedding()` 生成嵌入向量
-       - **嵌入模型路径拼接**：`ConfigManager.getLastSelectedEmbeddingModel()` 返回的是模型名（如 `Qwen3-Embedding-0.6B-MNN-int4`），**必须**与 `ConfigManager.getEmbeddingModelPath()` 拼接为绝对路径后传给 `computeEmbedding()`，与 `BuildKnowledgeBaseFragment` 第961行保持一致
-       - **Metadata 写入规范**：`embedding_model` 和 `modeldir` 字段**必须存模型名**（如 `Qwen3-Embedding-0.6B-MNN-int4`），不能存绝对路径。`RagQueryManager.resolveEmbeddingModelPath()` 会将 `modeldir` 与 `embeddingModelRoot` 拼接为绝对路径。每次保存经验都更新 metadata（SQLite + `metadata.json` 双写），与 `TextChunkProcessor.writeKnowledgeBaseMetadata()` 约定一致
-       - **知识图谱**：调用 `KnowledgeGraphDatabase.addEntitiesAndBuildGraph(chunkId, entities, nerHandler)` 统一 API，单事务完成实体写入 + chunk-entity 关联 + 共现边构建（与 `KnowledgeNoteFragment` 共用同一方法，不重复实现）
-       - 元数据：首次创建 AgentKB 时，从 `ConfigManager.getLastSelectedEmbeddingModel/RerankerModel()` 读取模型配置写入 metadata
-     - **Agent RAG 召回**（完全复用 `RagQueryManager` 管线，Agent 不干涉 RAG 内部流程）：
-       - **Step 1~N**：每步正常传 `configKnowledgeBase`，走完整 RAG 流程（embedding → vector search → Graph RAG → prompt 构建 → LLM 调用）。首次加载 embedding 模型较慢（~6s），后续每步召回约 600ms，成本可接受
-       - **经验总结步骤**：`isExperienceSummaryStep=true` 时传空 `knowledgeBase`，`RagQueryManager` 自动走无 KB 路径（`runDirectLlmWithoutKnowledgeBase`），完全跳过 RAG
-       - 用户在 RAG 问答页面选择 AgentKB 即可启用经验召回，所有 RAG 设置（召回数量、重排、图谱使能等）完全复用
+       - **嵌入模型路径拼接**：`ConfigManager.getLastSelectedEmbeddingModel()` 返回模型名，**必须**与 `ConfigManager.getEmbeddingModelPath()` 拼接为绝对路径
+       - **Metadata 写入规范**：`embedding_model` 和 `modeldir` 字段**必须存模型名**（不能存绝对路径）
+     - **KB Action 类型**（`ActionTypes.kt` 中 `AgentAction` sealed class）：
+       - `AgentAction.KbInsert(text)`：text 为经验内容
+       - `AgentAction.KbDelete(ids)`：ids 为逗号分隔的 chunk ID
+       - 在 `UnifiedActionExecutor` 中为 no-op（返回 success），实际执行在 `saveExperienceToAgentKB` 保存流程中
+       - **格式提示词**：每个 `ActionFormat` 实现提供 `getKbActionDescription()` 方法，`getKbActionFormatDescription()` 直接调用，无需 switch-case
      - **关键教训**：
        - 复用 `modelInferenceCallback` 即复用整个 Agent Step 流程（截图保存、conversation.md 记录、模型调用、ChatUI 刷新）
-       - 复用 `KnowledgeNoteFragment` 笔记流程即获得完整的向量化 + NER + 知识图谱能力
-       - 复用 `RagQueryManager` RAG 流程即获得完整的向量检索 + reranker + Graph RAG 能力
-       - 模块化和复用的重要性：Agent 只做编排，不重复实现已有功能
+       - Agent 自主 RAG（`queryKnowledgeBase` 静态方法）比透传 RagQueryManager 更可控：查询文本是 instruction 而非整个 prompt，返回带 ID 便于删除
+       - KB Action 让模型自主决定知识库的增删，而非盲目追加，避免知识库膨胀和信息过时
+   - **Web Action 架构（2026-03-06 重构）**：
+     - **设计目标**：Agent 需要独立的后台 WebView 来执行 web 操作（`web_open`/`web_get_content`/`web_execute_js`），不依赖用户手动打开知识图谱页面，确保内容能通过 `ExecutionResult.returnData` 传给模型
+     - **旧架构问题**（已废弃）：
+       - 通过 broadcast 发送到 `KnowledgeGraphViewerFragment` 的 WebView，依赖该 Fragment 处于活跃状态
+       - `web_open` 发送 broadcast 后立即返回成功，无法等待页面加载完成
+       - `web_get_content` 通过 JS 注入提取内容，但回调通过 broadcast 发送，`UnifiedActionExecutor` 无法接收，`returnData` 始终为空
+       - 模型无法获取网页内容，导致 web 操作失效
+     - **新架构（Agent 专用后台 WebView）**：
+       - **AgentWebView.kt**：封装后台 WebView，支持 `loadUrl`/`getContent`/`executeJs` 三个 suspend 函数，使用 coroutine cancellable continuation 挂起等待结果
+         - `loadUrl(url)`：加载 URL 并等待 `onPageFinished`，超时 15s，返回 Boolean
+         - `getContent()`：注入 JS 提取页面内容（title/url/text/links/buttons/inputs），通过 `AgentBridge.onContentReady()` 回调，超时 8s，返回 JSON 字符串
+         - `executeJs(script)`：执行任意 JS 并返回结果，超时 5s
+         - WebView 配置：`javaScriptEnabled=true`，`domStorageEnabled=true`，自定义 UserAgent
+       - **AgentAccessibilityService.kt**：在 `onServiceConnected` 初始化 `agentWebView`，`onDestroy` 销毁，提供 `internal var agentWebView` 字段供 `UnifiedActionExecutor` 访问
+       - **UnifiedActionExecutor.kt**：`executeWebOpen`/`executeWebGetContent`/`executeWebExecuteJs` 改为调用 `agentWebView` 的 suspend 方法，真正等待结果并通过 `ExecutionResult.returnData` 返回
+       - **内容传递验证**（日志分析）：
+         - `web_open` → `[PAGE_LOADED]` → `ExecutionResult(success=true, message="Opened URL: ... (page loaded)")`
+         - `web_get_content` → `[JS_BRIDGE] Content received: 4549 chars` → `ExecutionResult(success=true, returnData="{...JSON...}")`
+         - 模型下一步收到 `返回数据: {...}` 包含真实网页内容（验证通过）
+     - **历史记录优化**（2026-03-06）：
+       - **问题**：`saveStepToConversationMd` 和 `buildTaskHistoryForSummary` 的 `actionDesc` when 块缺失 `WebOpen`/`WebGetContent`/`WebExecuteJs` 分支，走 `else -> action.javaClass.simpleName`，导致历史记录只显示 `S0: WebOpen -> OK`，模型不知道 URL 是什么、页面是否还在后台
+       - **影响**：模型在 `web_open` 后不知道页面已在 `AgentWebView` 中，重复发出 `web_open` 动作，浪费推理时间（实测 31.5s thinking）
+       - **修复**：补全 when 分支，历史记录变为 `S0: WebOpen: https://... (page loaded in background WebView) -> OK`，模型明确知道页面状态
+     - **截图优化（2026-03-06）**：
+       - **问题**：`AgentEngine` 在 `needsScreenshot() = false` 时虽然跳过新截图，但仍复用 `lastScreenshot` 传给 `modelInferenceCallback`，导致 `AgentAccessibilityService` 保存重复截图文件
+       - **影响**：`web_open`/`web_get_content`/`web_execute_js` 虽然设置了 `needsScreenshot() = false`，但下一步仍然保存截图到 `agent_step_N_xxx.jpg`
+       - **修复**：`needsScreenshot() = false` 时传 `null` 给 `modelInferenceCallback`，删除未使用的 `lastScreenshot` 变量
+       - **Terminate 优化**：`Terminate.needsScreenshot() = false`，任务已结束无需截图
+       - **Wait 保持截图**：`Wait` 等待 UI 稳定后应截图查看新状态，保持 `needsScreenshot() = true`
+     - **关键设计决策**：
+       - Agent 专用 WebView 与用户知识图谱 WebView 完全隔离，互不干扰
+       - 使用 coroutine suspension 而非 broadcast 确保同步等待，避免竞态条件
+       - `returnData` 机制确保结构化数据（app list、web content）能传给模型，而非依赖截图
+       - `needsScreenshot()` 控制截图开销，返回结构化数据的 action 无需截图
 8. **x86_64 模拟器兼容性（TTS 模块）**：
    - **问题**：x86_64 Android 模拟器上 `std::locale` 初始化会崩溃（SIGABRT: misaligned pointer when deallocating）
    - **影响范围**：所有使用 `std::regex`、`std::stringstream`、`std::wstring_convert`、`std::codecvt` 的代码
@@ -10213,52 +10395,54 @@ String fullResponse = fullResponseAccumulator.toString();
 
 ---
 
-### I.6 Agent动态Action格式系统（2026-02-01）
+### I.6 Agent动态Action格式系统（2026-02-01，2026-03-01 重构）
 
-**设计目标**：支持多种Prompt风格（MAI-UI、AutoGLM），根据模型自动选择合适的格式，便于后续扩展。
+**设计目标**：支持多种Prompt风格，根据模型自动选择合适的格式。添加新 Action 只需修改单一数据结构 + 对应格式文件。
 
-#### 架构设计
+#### 架构设计（2026-03-01 重构后）
+
+**数据流**：`模型输出` → `ActionParser.parse()` → `ActionFormat.parseAction()` → `AgentAction` → `UnifiedActionExecutor.execute()`
 
 **核心组件**：
 
-1. **ActionFormat接口**（`ActionFormat.kt`）
-   - 定义统一的格式接口：`getSystemPrompt()`, `parseAction()`, `isCompatibleWith()`
-   - 统一的Action数据类：支持所有动作类型（click、swipe、drag、type等）
-   - ActionType枚举：16种动作类型
+1. **AgentAction sealed class**（`ActionTypes.kt`）
+   - 唯一的动作数据结构，所有格式解析直接产出 AgentAction
+   - 包含：Click, LongPress, DoubleClick, Type, Swipe, Drag, Open, SystemButton, Wait, Terminate, Answer, AskUser, TakeOver, Confirm, GetAppList, KbInsert, KbDelete, Note, CallApi, Interact
+   - 已删除中间层 `Action` data class 和 `ActionType` enum（重构前的冗余转换层）
 
-2. **格式实现类**：
-   - **MaiUiFormat**：JSON格式 `{"action":"click","coordinate":[x,y]}`
-   - **AutoGlmFormat**：函数式格式 `do(action="Tap", element=[x,y])`
+2. **ActionFormat 接口 + 4种实现**（`ActionFormat.kt`）
+   - `parseAction()` 直接返回 `Pair<String?, AgentAction?>`（无中间转换）
+   - `getKbActionDescription()` 返回该格式的 KB Action 提示词（经验总结用）
+   - **MaiUiFormat**：JSON格式 `<tool_call>{"action":"click","coordinate":[x,y]}</tool_call>`
+   - **AutoGlmFormat**：函数式 `do(action="Tap", element=[x,y])` / `finish(message="...")`
+   - **DoubaoUiTarsFormat**：`Action: click(point='<point>x y</point>')`
+   - **OpenAiFuncCallFormat**：`{"name":"click","parameters":{"coordinate":[x,y]}}`
 
-3. **ActionFormatRegistry**（`ActionFormatRegistry.kt`）
-   - 格式注册表：管理所有可用格式
-   - 自动选择：根据模型名自动选择格式（GLM系列→AutoGLM，其他→MAI-UI）
-   - 可扩展：支持注册新格式
+3. **ActionParser**（`ActionParser.kt`）
+   - 薄包装层：格式选择 + 坐标校验（clamp to [0-999]），不做动作转换
+   - `resolveFormat()` 根据用户设置 / API URL / 模型名选择格式
 
 4. **UnifiedActionExecutor**（`UnifiedActionExecutor.kt`）
-   - 统一执行层：接收统一的Action对象
-   - 坐标转换：归一化坐标[0-999]→实际像素坐标
-   - 屏幕适配：自动适配不同分辨率设备
+   - 直接接收 `AgentAction`，执行 UI 自动化（点击/滑动/输入等）
+   - 坐标转换：归一化[0-999] → 实际像素坐标
+   - 已删除旧 `ActionExecutor.kt`（冗余执行器）
 
-5. **AgentManager**（`AgentManager.kt`）
-   - 协调器：管理格式选择、解析、执行
-   - 模型感知：根据模型名自动配置
-   - 统一接口：`setModel()`, `getSystemPrompt()`, `parseAction()`, `executeAction()`
+5. **ActionFormatRegistry**（`ActionFormat.kt` 底部）
+   - 格式注册表 + 自动选择逻辑（API URL / 模型名匹配）
 
-6. **AgentPrompts**（修改）
-   - 新方法：`getSystemPromptForModel(modelName, apps, useThinking)`
-   - 自动选择：根据模型名选择合适的Prompt格式
+#### 添加新 Action 的步骤
+1. `ActionTypes.kt`：在 `AgentAction` sealed class 中添加子类
+2. `ActionFormat.kt`：在每个格式的 `getFormatDescription()` 添加提示词，`parseAction()` 添加解析分支
+3. `UnifiedActionExecutor.kt`：在 `execute()` 的 when 分支中添加执行逻辑
 
 #### 格式对比
 
-| 特性 | MAI-UI | AutoGLM |
-|------|--------|---------|
-| **输出格式** | `<tool_call>{"action":"click"}</tool_call>` | `<answer>do(action="Tap")</answer>` |
-| **坐标系统** | 归一化[0-999] | 归一化[0-999] |
-| **滑动方式** | 方向+可选坐标 | 起点+终点 |
-| **适用模型** | 通用（默认） | GLM系列 |
-| **解析方式** | JSON解析 | 正则表达式 |
-| **高级功能** | answer, take_over, confirm | Take_over, Interact, Note |
+| 特性 | MAI-UI | AutoGLM | Doubao UI-TARS | OpenAI FuncCall |
+|------|--------|---------|----------------|-----------------|
+| **输出格式** | `<tool_call>{JSON}</tool_call>` | `do(action="Tap")` | `Action: click(...)` | `{"name":"click","parameters":{}}` |
+| **坐标系统** | 归一化[0-999] | 归一化[0-999] | 像素(自动clamp) | 归一化[0-999] |
+| **适用模型** | 通用（默认） | GLM系列 | Doubao/Seed/UI-TARS | 手动选择 |
+| **解析方式** | JSON | 正则 | 正则 | JSON |
 
 #### 坐标系统（统一）
 
@@ -10283,104 +10467,67 @@ fun normalizedToPixel(xNorm: Int, yNorm: Int): Pair<Int, Int> {
 - ✅ 自动适配所有分辨率
 - ✅ 与MAI-UI、Open-AutoGLM保持一致
 
-#### 使用示例
+#### 使用示例（AgentEngine 内部流程）
 
 ```kotlin
-// 1. 创建AgentManager
-val agentManager = AgentManager(context)
+// ActionParser 解析模型输出 → 直接得到 AgentAction
+val response: AgentResponse? = ActionParser.parse(modelOutput, apiUrl, modelName, context)
+// response.thinking = "观察到..."
+// response.action = AgentAction.Click(500, 500)
 
-// 2. 设置模型（自动选择格式）
-agentManager.setModel("glm-4v-plus")  // 自动使用AutoGLM格式
-// 或
-agentManager.setModel("gpt-4o")  // 自动使用MAI-UI格式
-
-// 3. 获取System Prompt
-val systemPrompt = agentManager.getSystemPrompt(availableApps, useThinking = true)
-
-// 4. 解析模型输出
-val parseResult = agentManager.parseAction(modelResponse)
-when (parseResult) {
-    is AgentManager.ParseResult.Success -> {
-        val thinking = parseResult.thinking
-        val action = parseResult.action
-        
-        // 5. 执行动作
-        val result = agentManager.executeAction(action)
-        if (result.success) {
-            // 成功
-        }
-    }
-    is AgentManager.ParseResult.Failure -> {
-        // 解析失败
-    }
-}
+// UnifiedActionExecutor 执行 AgentAction
+val result: ExecutionResult = executor.execute(response.action)
+// result.success / result.message / result.returnData
 ```
 
 #### 扩展新格式
 
 ```kotlin
-// 1. 实现ActionFormat接口
-class CustomFormat : ActionFormat {
+// 1. 实现 BaseActionFormat（继承获得 extractThinking 等工具方法）
+class CustomFormat : BaseActionFormat() {
     override fun getFormatName() = "Custom"
+    override fun getFormatDescription(): String = "..."
+    override fun getCorrectExample(): String = "..."
+    override fun getErrorHint(): String = "..."
+    override fun getThinkingTag(): String = "thinking"
+    override fun getKbActionDescription(): String = "..."
     
-    override fun getSystemPrompt(apps: List<String>, useThinking: Boolean): String {
-        // 返回自定义Prompt
+    override fun parseAction(response: String): Pair<String?, AgentAction?>? {
+        // 直接返回 AgentAction，无需中间层
     }
     
-    override fun parseAction(response: String): Pair<String?, Action?>? {
-        // 解析自定义格式
-    }
-    
-    override fun isCompatibleWith(modelName: String): Boolean {
-        // 判断是否适用于该模型
-    }
+    override fun isCompatibleWith(modelName: String): Boolean = false
 }
 
-// 2. 注册格式
-ActionFormatRegistry.registerFormat(CustomFormat())
+// 2. 在 ActionFormatRegistry.formats 列表中注册
 ```
 
-#### 模型检测规则
+#### 关键优化（2026-03-01 重构）
 
-**AutoGLM格式**（`AutoGlmFormat.isCompatibleWith()`）：
-- 模型名包含 "glm"（不区分大小写）
-- 模型名包含 "chatglm"
-- 模型名包含 "autoglm"
-
-**MAI-UI格式**（默认）：
-- 所有其他模型
-
-#### 关键优化
-
-1. **统一数据结构**：所有格式解析为相同的Action对象
-2. **格式隔离**：各格式独立实现，互不影响
-3. **自动选择**：根据模型名自动配置，无需手动切换
-4. **易于扩展**：新增格式只需实现接口并注册
-5. **向后兼容**：保留旧的AgentPrompts方法（标记为Deprecated）
+1. **零转换层**：`parseAction()` 直接返回 `AgentAction`，删除了 `Action` → `AgentAction` 转换（~200行代码）
+2. **单一执行器**：删除旧 `ActionExecutor.kt`，统一使用 `UnifiedActionExecutor`
+3. **KB 格式自描述**：每个 ActionFormat 自带 `getKbActionDescription()`，无需外部 switch-case
+4. **坐标校验集中化**：`ActionParser.validateCoordinates()` 统一 clamp 所有坐标到 [0-999]
+5. **废弃代码清理**：删除 `getFragment()` 反射、`readTaskHistoryFromConversationMd()` 等不再使用的方法
+6. **UI 手势封装**：`withFloatingWindowHidden()` 高阶函数统一浮窗隐藏/显示逻辑
 
 #### 相关文件
 
-**新增文件**：
-- `app/src/main/java/com/example/offlineai/agent/ActionFormat.kt`
-- `app/src/main/java/com/example/offlineai/agent/MaiUiFormat.kt`
-- `app/src/main/java/com/example/offlineai/agent/AutoGlmFormat.kt`
-- `app/src/main/java/com/example/offlineai/agent/ActionFormatRegistry.kt`
-- `app/src/main/java/com/example/offlineai/agent/UnifiedActionExecutor.kt`
-- `app/src/main/java/com/example/offlineai/agent/AgentManager.kt`
+**核心文件**：
+- `ActionFormat.kt`：接口 + 4种格式实现 + ActionFormatRegistry
+- `ActionTypes.kt`：`AgentAction` sealed class + `AgentResponse` + `ExecutionResult`
+- `ActionParser.kt`：薄包装层（格式选择 + 坐标校验）
+- `UnifiedActionExecutor.kt`：统一执行器
 
-**修改文件**：
-- `app/src/main/java/com/example/offlineai/agent/AgentPrompts.kt`
+**已删除文件**（重构清理）：
+- `ActionExecutor.kt`：被 UnifiedActionExecutor 替代
 
 #### 参考项目
 
-- **MAI-UI**：https://github.com/Alibaba-NLP/MAI-UI
-  - Prompt设计：`MAI-UI/src/prompt.py`
-  - JSON格式，简洁清晰
-  
-- **Open-AutoGLM**：https://github.com/THUDM/AutoGLM
-  - Handler设计：`Open-AutoGLM/phone_agent/actions/handler.py`
-  - 函数式格式，功能丰富
+- **MAI-UI**：https://github.com/Alibaba-NLP/MAI-UI — JSON格式
+- **Open-AutoGLM**：https://github.com/THUDM/AutoGLM — 函数式格式
+- **Doubao UI-TARS**：字节跳动 Doubao-1.5-UI-TARS — 像素坐标格式
 
-**设计日期**：2026年2月1日
+**设计日期**：2026年2月1日（初版），2026年3月1日（P1重构）
 
 ---

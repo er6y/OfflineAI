@@ -1,47 +1,56 @@
 package com.example.offlineai.agent
 
+import com.example.offlineai.agent.model.AgentAction
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Action format interface for different prompt styles
+ * Action format interface for different prompt styles.
+ * Each format defines: prompt template + parsing logic + KB action descriptions.
+ * To add a new action: update AgentAction sealed class, add prompt text here, add parse branch here.
  */
 interface ActionFormat {
-    /**
-     * Get the format name (e.g., "MAI-UI", "AutoGLM")
-     */
     fun getFormatName(): String
-    
-    /**
-     * Get format description (output format + action list)
-     * Note: Does not include thinking tags, those are added by AgentPrompts
-     */
     fun getFormatDescription(): String
-    
-    /**
-     * Get correct output example for this format
-     */
     fun getCorrectExample(): String
-    
-    /**
-     * Get error hint message when parsing fails
-     */
     fun getErrorHint(): String
-    
-    /**
-     * Get thinking tag name for this format
-     */
     fun getThinkingTag(): String
     
     /**
-     * Parse action from model response
-     * @return Pair of (thinking, action) or null if parsing failed
+     * Parse actions with universal CoT strategy.
+     * 
+     * Universal CoT Strategy (completely generic, no hardcoded types):
+     * 1. Strip thinking tag content (drafts)
+     * 2. Extract ALL actions from cleaned content
+     * 3. Group actions by type (Click, Type, KbDelete, KbInsert, etc.)
+     * 4. Take LAST action from each group
+     * 5. Return all final actions (may be multiple types)
+     * 
+     * Examples:
+     * - KB scenario: returns [last KbDelete, last KbInsert]
+     * - Step with 1 type: returns [last Click]
+     * - Step with N types: returns [last Click, last Type, ...]
+     * 
+     * @return Pair of (thinking text, list of final actions - one per type)
      */
-    fun parseAction(response: String): Pair<String?, Action?>?
+    fun parseActionsWithCoT(response: String): Pair<String?, List<AgentAction>>
     
     /**
-     * Check if this format should be used for the given model
+     * Parse action from model response (legacy single-action method).
+     * Default implementation: calls parseActionsWithCoT and returns the last action.
+     * @return Pair of (thinking, AgentAction) or null if parsing failed.
      */
+    fun parseAction(response: String): Pair<String?, AgentAction?>? {
+        val (thinking, actions) = parseActionsWithCoT(response)
+        return if (actions.isNotEmpty()) Pair(thinking, actions.last()) else null
+    }
+    
     fun isCompatibleWith(modelName: String): Boolean
+    
+    /**
+     * Get KB action format description for experience summary prompts.
+     */
+    fun getKbActionDescription(): String
 }
 
 /**
@@ -68,104 +77,69 @@ abstract class BaseActionFormat : ActionFormat {
         }
         return null
     }
-}
-
-/**
- * Unified action data class
- */
-data class Action(
-    val type: ActionType,
-    val coordinate: IntArray? = null,
-    val startCoordinate: IntArray? = null,
-    val endCoordinate: IntArray? = null,
-    val text: String? = null,
-    val direction: String? = null,
-    val button: String? = null,
-    val status: String? = null,
-    val duration: Int? = null,
-    val message: String? = null,
-    val isSensitive: Boolean = false
-) {
-    override fun equals(other: Any?): Boolean {
-        if (this === other) return true
-        if (javaClass != other?.javaClass) return false
-
-        other as Action
-
-        if (type != other.type) return false
-        if (coordinate != null) {
-            if (other.coordinate == null) return false
-            if (!coordinate.contentEquals(other.coordinate)) return false
-        } else if (other.coordinate != null) return false
-        if (startCoordinate != null) {
-            if (other.startCoordinate == null) return false
-            if (!startCoordinate.contentEquals(other.startCoordinate)) return false
-        } else if (other.startCoordinate != null) return false
-        if (endCoordinate != null) {
-            if (other.endCoordinate == null) return false
-            if (!endCoordinate.contentEquals(other.endCoordinate)) return false
-        } else if (other.endCoordinate != null) return false
-        if (text != other.text) return false
-        if (direction != other.direction) return false
-        if (button != other.button) return false
-        if (status != other.status) return false
-        if (duration != other.duration) return false
-        if (message != other.message) return false
-        if (isSensitive != other.isSensitive) return false
-
-        return true
+    
+    /**
+     * Strip ALL thinking tag content from response (both <thinking> and <think>).
+     * Returns the cleaned text with only action content remaining.
+     * This ensures CoT drafts inside thinking tags are never matched as real actions.
+     */
+    protected fun stripThinking(response: String): String {
+        var cleaned = response
+        for (tag in listOf("thinking", "think")) {
+            cleaned = cleaned.replace(Regex("<$tag>.*?</$tag>", RegexOption.DOT_MATCHES_ALL), "")
+            cleaned = cleaned.replace(Regex("<$tag>.*", RegexOption.DOT_MATCHES_ALL), "")
+        }
+        return cleaned.trim()
     }
-
-    override fun hashCode(): Int {
-        var result = type.hashCode()
-        result = 31 * result + (coordinate?.contentHashCode() ?: 0)
-        result = 31 * result + (startCoordinate?.contentHashCode() ?: 0)
-        result = 31 * result + (endCoordinate?.contentHashCode() ?: 0)
-        result = 31 * result + (text?.hashCode() ?: 0)
-        result = 31 * result + (direction?.hashCode() ?: 0)
-        result = 31 * result + (button?.hashCode() ?: 0)
-        result = 31 * result + (status?.hashCode() ?: 0)
-        result = 31 * result + (duration ?: 0)
-        result = 31 * result + (message?.hashCode() ?: 0)
-        result = 31 * result + isSensitive.hashCode()
-        return result
+    
+    /**
+     * Extract ALL actions from cleaned response (to be implemented by subclasses).
+     * This should return ALL actions found in the response, without any filtering.
+     */
+    protected abstract fun extractAllActions(cleaned: String): List<AgentAction>
+    
+    /**
+     * Universal CoT implementation: group by action type, take last of each type.
+     * This is completely generic and works for any combination of action types.
+     */
+    override fun parseActionsWithCoT(response: String): Pair<String?, List<AgentAction>> {
+        val thinking = extractThinking(response, getThinkingTag())
+        val cleaned = stripThinking(response)
+        
+        // Extract all actions from cleaned content
+        val allActions = extractAllActions(cleaned)
+        
+        // Group by action type (using class name as key)
+        val groupedByType = allActions.groupBy { it::class.simpleName ?: "Unknown" }
+        
+        // Take last action from each group
+        val finalActions = groupedByType.values.mapNotNull { it.lastOrNull() }
+        
+        return Pair(thinking, finalActions)
     }
 }
 
-/**
- * Action types
- */
-enum class ActionType {
-    CLICK,
-    LONG_PRESS,
-    DOUBLE_CLICK,
-    TYPE,
-    SWIPE,
-    DRAG,
-    OPEN,
-    SYSTEM_BUTTON,
-    WAIT,
-    TERMINATE,
-    ANSWER,
-    TAKE_OVER,
-    CONFIRM,
-    NOTE,
-    CALL_API,
-    INTERACT
+// Package-level helpers shared by all format implementations and companion objects
+internal fun parseSwipeDirection(dir: String): AgentAction.Swipe.Direction? = when (dir.lowercase()) {
+    "up" -> AgentAction.Swipe.Direction.UP
+    "down" -> AgentAction.Swipe.Direction.DOWN
+    "left" -> AgentAction.Swipe.Direction.LEFT
+    "right" -> AgentAction.Swipe.Direction.RIGHT
+    else -> null
 }
 
-/**
- * Action execution result
- */
-data class ActionResult(
-    val success: Boolean,
-    val shouldFinish: Boolean,
-    val message: String? = null,
-    val requiresConfirmation: Boolean = false
-)
+internal fun parseSystemButton(btn: String): AgentAction.SystemButton.Button? = when (btn.lowercase()) {
+    "back" -> AgentAction.SystemButton.Button.BACK
+    "home" -> AgentAction.SystemButton.Button.HOME
+    "menu" -> AgentAction.SystemButton.Button.MENU
+    "enter" -> AgentAction.SystemButton.Button.ENTER
+    else -> null
+}
 
 // ============================================================================
-// Format Implementations (扩展新格式时复制其中一个作为模板修改)
+// Format Implementations
+// To add a new action: 1) Add to AgentAction sealed class  2) Add prompt text in getFormatDescription()
+//                       3) Add parse branch in parseAction()  4) Add execute branch in UnifiedActionExecutor
 // ============================================================================
 
 /**
@@ -184,21 +158,18 @@ class MaiUiFormat : BaseActionFormat() {
     }
     
     override fun getErrorHint(): String {
-        return """ERROR: Failed to parse your output. Please follow the format strictly:
-<tool_call>{"action":"click","coordinate":[500,500]}</tool_call>
-
-Common mistakes:
-❌ do(action="click", coordinate=[500,500])  // Wrong format!
-❌ 点击坐标[500,500]  // Not JSON!
-❌ {"action":"click","coordinate":[500,500]}  // Missing <tool_call> tags!
-✅ <tool_call>{"action":"click","coordinate":[500,500]}</tool_call>  // Correct!"""
+        return "ERROR: 解析动作Action失败. 严格按照系统提示词中 ## 动作列表 格式输出！"
     }
     
     override fun getFormatDescription(): String {
         return """**输出格式**：
-<tool_call>{"action":"[Action_Name]","coordinate":[x,y]|"text":"文本"|"button":"back/home/menu/enter"|"duration":3}</tool_call>
+<tool_call>{"action":"context","text":"..."}</tool_call>
+<tool_call>{"action":"[Action_Name]",...}</tool_call>
+
+${AgentPrompts.CONTEXT_ACTION_REQUIREMENTS}
 
 ## 动作列表
+{"action":"context","text":"当前状态、关键信息、错误、坐标、策略"}
 {"action":"click","coordinate":[x,y]}
 {"action":"long_press","coordinate":[x,y]}
 {"action":"double_click","coordinate":[x,y]}
@@ -209,74 +180,105 @@ Common mistakes:
 {"action":"system_button","button":"back/home/menu/enter"}
 {"action":"wait","duration":3}
 {"action":"terminate","status":"success/fail","text":"总结"}
-{"action":"answer","text":"回答内容"}
-{"action":"take_over","text":"需要用户协助的原因"}
-{"action":"confirm","coordinate":[x,y],"text":"敏感操作说明"}
+{"action":"ask_user","text":"给用户的问题或操作说明"}
+{"action":"get_app_list"}
+{"action":"web_open","url":"https://example.com"}
+{"action":"web_get_content"}
+{"action":"web_execute_js","script":"document.querySelector('#login').click()"}
+{"action":"data_memory","operation":"set","key":"name","value":"content"}
+{"action":"data_memory","operation":"get","key":"name"}
+{"action":"data_memory","operation":"list"}
 严格按照以上JSON格式输出"""
     }
     
-    override fun parseAction(response: String): Pair<String?, Action?>? {
-        try {
-            val thinking = extractThinking(response)
-            
-            val toolCallMatch = Regex("<tool_call>\\s*(.+?)\\s*</tool_call>", RegexOption.DOT_MATCHES_ALL)
-                .find(response) ?: return null
-            
-            val jsonStr = toolCallMatch.groupValues[1].trim()
-            val json = JSONObject(jsonStr)
-            
-            val actionType = json.getString("action")
-            val action = when (actionType) {
-                "click" -> Action(
-                    type = ActionType.CLICK,
-                    coordinate = json.getJSONArray("coordinate").let { intArrayOf(it.getInt(0), it.getInt(1)) }
-                )
-                "long_press" -> Action(
-                    type = ActionType.LONG_PRESS,
-                    coordinate = json.getJSONArray("coordinate").let { intArrayOf(it.getInt(0), it.getInt(1)) }
-                )
-                "double_click" -> Action(
-                    type = ActionType.DOUBLE_CLICK,
-                    coordinate = json.getJSONArray("coordinate").let { intArrayOf(it.getInt(0), it.getInt(1)) }
-                )
-                "type" -> Action(type = ActionType.TYPE, text = json.getString("text"))
-                "swipe" -> Action(
-                    type = ActionType.SWIPE,
-                    direction = json.getString("direction"),
-                    coordinate = if (json.has("coordinate")) {
-                        json.getJSONArray("coordinate").let { intArrayOf(it.getInt(0), it.getInt(1)) }
-                    } else null
-                )
-                "drag" -> Action(
-                    type = ActionType.DRAG,
-                    startCoordinate = json.getJSONArray("start_coordinate").let { intArrayOf(it.getInt(0), it.getInt(1)) },
-                    endCoordinate = json.getJSONArray("end_coordinate").let { intArrayOf(it.getInt(0), it.getInt(1)) }
-                )
-                "open" -> Action(type = ActionType.OPEN, text = json.getString("text"))
-                "system_button" -> Action(type = ActionType.SYSTEM_BUTTON, button = json.getString("button"))
-                "wait" -> Action(type = ActionType.WAIT, duration = if (json.has("duration")) json.getInt("duration") else 1)
-                "terminate" -> Action(type = ActionType.TERMINATE, status = json.getString("status"), text = json.getString("text"))
-                "answer" -> Action(type = ActionType.ANSWER, text = json.getString("text"))
-                "take_over" -> Action(type = ActionType.TAKE_OVER, text = json.getString("text"))
-                "confirm" -> Action(
-                    type = ActionType.CONFIRM,
-                    coordinate = json.getJSONArray("coordinate").let { intArrayOf(it.getInt(0), it.getInt(1)) },
-                    text = json.getString("text"),
-                    isSensitive = true
-                )
-                else -> return null
-            }
-            
-            return Pair(thinking, action)
-        } catch (e: Exception) {
-            return null
+    override fun getKbActionDescription(): String = """```
+{"action":"kb_delete","ids":"ID1,ID2,..."}
+{"action":"kb_insert","text":"Your experience summary here"}
+```
+Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags above)."""
+    
+    override fun extractAllActions(cleaned: String): List<AgentAction> {
+        val actions = mutableListOf<AgentAction>()
+        
+        // Extract all JSON objects (supports multiple <tool_call> tags)
+        val jsonPattern = Regex("\\{\\s*\"action\"\\s*:.*?\\}", RegexOption.DOT_MATCHES_ALL)
+        for (match in jsonPattern.findAll(cleaned)) {
+            try {
+                val json = JSONObject(match.value.trim())
+                parseMaiUiJson(json)?.let { actions.add(it) }
+            } catch (_: Exception) {}
         }
+        
+        return actions
     }
     
     override fun isCompatibleWith(modelName: String): Boolean {
         return !modelName.contains("glm", ignoreCase = true) &&
                !modelName.contains("chatglm", ignoreCase = true) &&
                !modelName.contains("autoglm", ignoreCase = true)
+    }
+    
+    companion object {
+        /**
+         * Parse MAI-UI JSON into AgentAction. Shared by parseAction() and KB action parsing.
+         */
+        fun parseMaiUiJson(json: JSONObject): AgentAction? {
+            val actionType = json.optString("action", "")
+            if (actionType.isEmpty()) return null
+            
+            return when (actionType) {
+                "click" -> {
+                    val c = json.getJSONArray("coordinate")
+                    AgentAction.Click(c.getInt(0), c.getInt(1))
+                }
+                "long_press" -> {
+                    val c = json.getJSONArray("coordinate")
+                    AgentAction.LongPress(c.getInt(0), c.getInt(1))
+                }
+                "double_click" -> {
+                    val c = json.getJSONArray("coordinate")
+                    AgentAction.DoubleClick(c.getInt(0), c.getInt(1))
+                }
+                "type" -> AgentAction.Type(json.getString("text"))
+                "swipe" -> {
+                    val dir = parseSwipeDirection(json.getString("direction")) ?: return null
+                    val c = if (json.has("coordinate")) json.getJSONArray("coordinate") else null
+                    AgentAction.Swipe(dir, c?.getInt(0), c?.getInt(1))
+                }
+                "drag" -> {
+                    val sc = json.getJSONArray("start_coordinate")
+                    val ec = json.getJSONArray("end_coordinate")
+                    AgentAction.Drag(sc.getInt(0), sc.getInt(1), ec.getInt(0), ec.getInt(1))
+                }
+                "open" -> AgentAction.Open(json.getString("text"))
+                "system_button" -> {
+                    val btn = parseSystemButton(json.optString("button", "").ifEmpty { json.optString("text", "") }) ?: return null
+                    AgentAction.SystemButton(btn)
+                }
+                "wait" -> AgentAction.Wait
+                "terminate" -> {
+                    val st = when (json.optString("status", "fail").lowercase()) {
+                        "success" -> AgentAction.Terminate.Status.SUCCESS
+                        else -> AgentAction.Terminate.Status.FAIL
+                    }
+                    AgentAction.Terminate(st, json.optString("text", ""))
+                }
+                "context" -> AgentAction.Context(json.getString("text"))
+                "ask_user" -> AgentAction.AskUser(json.getString("text"))
+                "get_app_list" -> AgentAction.GetAppList
+                "kb_insert" -> AgentAction.KbInsert(json.optString("text", ""))
+                "kb_delete" -> AgentAction.KbDelete(json.optString("ids", ""))
+                "web_open" -> AgentAction.WebOpen(json.getString("url"))
+                "web_get_content" -> AgentAction.WebGetContent
+                "web_execute_js" -> AgentAction.WebExecuteJs(json.getString("script"))
+                "data_memory" -> AgentAction.DataMemory(
+                    operation = json.optString("operation", "list"),
+                    key = json.optString("key").takeIf { it.isNotEmpty() },
+                    value = json.optString("value").takeIf { it.isNotEmpty() }
+                )
+                else -> null
+            }
+        }
     }
 }
 
@@ -296,134 +298,148 @@ do(action="Tap", element=[500,500])"""
     }
     
     override fun getErrorHint(): String {
-        return """ERROR: Failed to parse your output. Please follow the format strictly:
-<think>推理说明</think>
-do(action="Tap", element=[500,500])
-
-Common mistakes:
-❌ {"action":"click","coordinate":[500,500]}  // Wrong format! This is MAI-UI format!
-❌ 点击坐标[500,500]  // Not a function call!
-❌ <answer>do(action="Tap", element=[500,500])</answer>  // Don't use <answer> tags!
-✅ <think>推理</think>
-do(action="Tap", element=[500,500])  // Correct!"""
+        return "ERROR: 解析动作Action失败. 严格按照系统提示词中 ## 动作列表 格式输出！"
     }
     
     override fun getFormatDescription(): String {
         return """**输出格式**：
 <think>推理说明</think>
-do(action="[Action_Name]", element=[x,y]|text="文本内容"|start=[x1,y1], end=[x2,y2]|duration="x seconds"|message="需要用户协助")
+do(action="Context", text="...")
+do(action="[Action_Name]", element=[x,y]|text="文本"|"button":"back/home/menu/enter"|"duration":3)
+
+${AgentPrompts.CONTEXT_ACTION_REQUIREMENTS}
 
 ## 动作列表
+do(action="Context", text="当前状态、关键信息、错误、坐标、策略")
 do(action="Launch", app="应用名")
 do(action="Tap", element=[x,y])
 do(action="Tap", element=[x,y], message="敏感操作说明")
-do(action="Type", text="文本内容")
+do(action="Type", text="文本")
 do(action="Swipe", start=[x1,y1], end=[x2,y2])
 do(action="Long Press", element=[x,y])
 do(action="Double Tap", element=[x,y])
 do(action="Back")
 do(action="Home")
 do(action="Wait", duration="x seconds")
-do(action="Take_over", message="需要用户协助")
-do(action="Interact")
+do(action="Ask_user", message="给用户的问题或操作说明")
+do(action="Get_App_List")
+do(action="Web_Open", url="https://example.com")
+do(action="Web_Get_Content")
+do(action="Web_Execute_Js", script="document.querySelector('#login').click()")
+do(action="Data_Memory", operation="set", key="name", value="content")
+do(action="Data_Memory", operation="get", key="name")
+do(action="Data_Memory", operation="list")
 finish(message="任务完成总结")
 
 注意：直接输出do()或finish()，不要使用<answer>标签！"""
     }
     
-    override fun parseAction(response: String): Pair<String?, Action?>? {
-        try {
-            // Extract thinking first using robust tag detection (handles <think> and <thinking>)
-            val thinking = extractThinking(response, "think")
-            
-            // Rule 1: Check for finish(message=
-            if (response.contains("finish(message=")) {
-                val parts = response.split("finish(message=", limit = 2)
-                val actionStr = "finish(message=" + parts[1]
-                val action = parseFinish(actionStr)
-                return if (action != null) Pair(thinking, action) else null
-            }
-            
-            // Rule 2: Check for do(action=
-            if (response.contains("do(action=")) {
-                val parts = response.split("do(action=", limit = 2)
-                val actionStr = "do(action=" + parts[1]
-                val action = parseDo(actionStr)
-                return if (action != null) Pair(thinking, action) else null
-            }
-            
-            // Rule 3: Fallback to legacy <answer> tag parsing
-            if (response.contains("<answer>")) {
-                val answerMatch = Regex("<answer>\\s*(.+?)\\s*</answer>", RegexOption.DOT_MATCHES_ALL)
-                    .find(response) ?: return null
-                val actionStr = answerMatch.groupValues[1].trim()
-                val action = if (actionStr.startsWith("do(")) {
-                    parseDo(actionStr)
-                } else if (actionStr.startsWith("finish(")) {
-                    parseFinish(actionStr)
-                } else null
-                return if (action != null) Pair(thinking, action) else null
-            }
-            
-            return null
-        } catch (e: Exception) {
-            return null
+    override fun getKbActionDescription(): String = """```
+do(action="KB_Delete", ids="ID1,ID2,...")
+do(action="KB_Insert", text="Your experience summary here")
+```
+Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags above)."""
+    
+    override fun extractAllActions(cleaned: String): List<AgentAction> {
+        val actions = mutableListOf<AgentAction>()
+        
+        // Extract all do(...) actions
+        val doPattern = Regex("""do\(action="[^"]+"[^)]*\)""")
+        for (match in doPattern.findAll(cleaned)) {
+            parseDo(match.value)?.let { actions.add(it) }
         }
+        
+        // Extract all finish(...) actions
+        val finishPattern = Regex("""finish\(message="[^"]+"\)""")
+        for (match in finishPattern.findAll(cleaned)) {
+            parseFinish(match.value)?.let { actions.add(it) }
+        }
+        
+        // Extract actions from <answer> tags
+        val answerPattern = Regex("<answer>\\s*(.+?)\\s*</answer>", RegexOption.DOT_MATCHES_ALL)
+        for (match in answerPattern.findAll(cleaned)) {
+            val actionStr = match.groupValues[1].trim()
+            when {
+                actionStr.startsWith("do(") -> parseDo(actionStr)?.let { actions.add(it) }
+                actionStr.startsWith("finish(") -> parseFinish(actionStr)?.let { actions.add(it) }
+            }
+        }
+        
+        return actions
     }
     
-    private fun parseDo(actionStr: String): Action? {
+    private fun parseDo(actionStr: String): AgentAction? {
         try {
-            val actionMatch = Regex("""action="([^"]+)"""").find(actionStr) ?: return null
+            val actionMatch = Regex("""action="([^"]+)""").find(actionStr) ?: return null
             val actionType = actionMatch.groupValues[1]
             
             return when (actionType) {
                 "Launch" -> {
-                    val appMatch = Regex("""app="([^"]+)"""").find(actionStr) ?: return null
-                    Action(type = ActionType.OPEN, text = appMatch.groupValues[1])
+                    val appMatch = Regex("""app="([^"]+)""").find(actionStr) ?: return null
+                    AgentAction.Open(appMatch.groupValues[1])
                 }
                 "Tap" -> {
                     val elementMatch = Regex("""element=\[(\d+),(\d+)\]""").find(actionStr) ?: return null
-                    val x = elementMatch.groupValues[1].toInt()
-                    val y = elementMatch.groupValues[2].toInt()
-                    val messageMatch = Regex("""message="([^"]+)"""").find(actionStr)
-                    Action(
-                        type = ActionType.CLICK,
-                        coordinate = intArrayOf(x, y),
-                        message = messageMatch?.groupValues?.get(1),
-                        isSensitive = messageMatch != null
-                    )
+                    AgentAction.Click(elementMatch.groupValues[1].toInt(), elementMatch.groupValues[2].toInt())
                 }
                 "Type" -> {
-                    val textMatch = Regex("""text="([^"]+)"""").find(actionStr) ?: return null
-                    Action(type = ActionType.TYPE, text = textMatch.groupValues[1])
+                    val textMatch = Regex("""text="([^"]+)""").find(actionStr) ?: return null
+                    AgentAction.Type(textMatch.groupValues[1])
                 }
                 "Swipe" -> {
                     val coordMatch = Regex("""start=\[(\d+),(\d+)\],\s*end=\[(\d+),(\d+)\]""").find(actionStr) ?: return null
-                    Action(
-                        type = ActionType.DRAG,
-                        startCoordinate = intArrayOf(coordMatch.groupValues[1].toInt(), coordMatch.groupValues[2].toInt()),
-                        endCoordinate = intArrayOf(coordMatch.groupValues[3].toInt(), coordMatch.groupValues[4].toInt())
+                    AgentAction.Drag(
+                        coordMatch.groupValues[1].toInt(), coordMatch.groupValues[2].toInt(),
+                        coordMatch.groupValues[3].toInt(), coordMatch.groupValues[4].toInt()
                     )
                 }
                 "Long Press" -> {
                     val elementMatch = Regex("""element=\[(\d+),(\d+)\]""").find(actionStr) ?: return null
-                    Action(type = ActionType.LONG_PRESS, coordinate = intArrayOf(elementMatch.groupValues[1].toInt(), elementMatch.groupValues[2].toInt()))
+                    AgentAction.LongPress(elementMatch.groupValues[1].toInt(), elementMatch.groupValues[2].toInt())
                 }
                 "Double Tap" -> {
                     val elementMatch = Regex("""element=\[(\d+),(\d+)\]""").find(actionStr) ?: return null
-                    Action(type = ActionType.DOUBLE_CLICK, coordinate = intArrayOf(elementMatch.groupValues[1].toInt(), elementMatch.groupValues[2].toInt()))
+                    AgentAction.DoubleClick(elementMatch.groupValues[1].toInt(), elementMatch.groupValues[2].toInt())
                 }
-                "Back" -> Action(type = ActionType.SYSTEM_BUTTON, button = "back")
-                "Home" -> Action(type = ActionType.SYSTEM_BUTTON, button = "home")
-                "Wait" -> {
-                    val durationMatch = Regex("""duration="(\d+)\s*seconds?"""").find(actionStr)
-                    Action(type = ActionType.WAIT, duration = durationMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1)
+                "Back" -> AgentAction.SystemButton(AgentAction.SystemButton.Button.BACK)
+                "Home" -> AgentAction.SystemButton(AgentAction.SystemButton.Button.HOME)
+                "Wait" -> AgentAction.Wait
+                "Context" -> {
+                    val textMatch = Regex("""text="([^"]+)""").find(actionStr) ?: return null
+                    AgentAction.Context(textMatch.groupValues[1])
                 }
-                "Take_over" -> {
-                    val messageMatch = Regex("""message="([^"]+)"""").find(actionStr) ?: return null
-                    Action(type = ActionType.TAKE_OVER, text = messageMatch.groupValues[1])
+                "Ask_user" -> {
+                    val messageMatch = Regex("""message="([^"]+)""").find(actionStr) ?: return null
+                    AgentAction.AskUser(messageMatch.groupValues[1])
                 }
-                "Interact" -> Action(type = ActionType.INTERACT)
+                "Get_App_List" -> AgentAction.GetAppList
+                "Data_Memory" -> {
+                    val opMatch = Regex("""operation="([^"]+)""").find(actionStr)
+                    val keyMatch = Regex("""key="([^"]+)""").find(actionStr)
+                    val valueMatch = Regex("""value="([^"]+)""").find(actionStr)
+                    AgentAction.DataMemory(
+                        operation = opMatch?.groupValues?.get(1) ?: "list",
+                        key = keyMatch?.groupValues?.get(1),
+                        value = valueMatch?.groupValues?.get(1)
+                    )
+                }
+                "KB_Insert" -> {
+                    val textMatch = Regex("""text="([^"]+)""").find(actionStr) ?: return null
+                    AgentAction.KbInsert(textMatch.groupValues[1])
+                }
+                "KB_Delete" -> {
+                    val idsMatch = Regex("""ids="([^"]+)""").find(actionStr) ?: return null
+                    AgentAction.KbDelete(idsMatch.groupValues[1])
+                }
+                "Web_Open" -> {
+                    val urlMatch = Regex("""url="([^"]+)""").find(actionStr) ?: return null
+                    AgentAction.WebOpen(urlMatch.groupValues[1])
+                }
+                "Web_Get_Content" -> AgentAction.WebGetContent
+                "Web_Execute_Js" -> {
+                    val scriptMatch = Regex("""script="([^"]+)""").find(actionStr) ?: return null
+                    AgentAction.WebExecuteJs(scriptMatch.groupValues[1])
+                }
                 else -> null
             }
         } catch (e: Exception) {
@@ -431,10 +447,10 @@ finish(message="任务完成总结")
         }
     }
     
-    private fun parseFinish(actionStr: String): Action? {
+    private fun parseFinish(actionStr: String): AgentAction? {
         try {
-            val messageMatch = Regex("""message="([^"]+)"""").find(actionStr) ?: return null
-            return Action(type = ActionType.TERMINATE, status = "success", text = messageMatch.groupValues[1])
+            Regex("""message="([^"]+)""").find(actionStr) ?: return null
+            return AgentAction.Terminate(AgentAction.Terminate.Status.SUCCESS)
         } catch (e: Exception) {
             return null
         }
@@ -464,24 +480,19 @@ Action: click(point='<point>500 500</point>')"""
     }
     
     override fun getErrorHint(): String {
-        return """ERROR: Failed to parse your output. Please follow the format strictly:
-<thinking>推理说明</thinking>
-Action: click(point='<point>500 500</point>')
-
-Common mistakes:
-❌ do(action="Tap", element=[500,500])  // Wrong format! This is AutoGLM format!
-❌ {"action":"click","coordinate":[500,500]}  // Wrong format! This is MAI-UI format!
-❌ click(500, 500)  // Missing <point> tags!
-✅ <thinking>推理</thinking>
-Action: click(point='<point>500 500</point>')  // Correct!"""
+        return "ERROR: 解析动作Action失败. 严格按照系统提示词中 ## 动作列表 格式输出！"
     }
     
     override fun getFormatDescription(): String {
         return """**输出格式**：
 <thinking>推理说明</thinking>
+Action: context(content='...')
 Action: [action_name](point='<point>x y</point>'|content='文本'|start_point='<point>x1 y1</point>', end_point='<point>x2 y2</point>')
 
+${AgentPrompts.CONTEXT_ACTION_REQUIREMENTS}
+
 ## 动作列表
+Action: context(content='当前状态、关键信息、错误、坐标、策略')
 Action: click(point='<point>x y</point>')
 Action: left_double(point='<point>x y</point>')
 Action: right_single(point='<point>x y</point>')
@@ -490,135 +501,125 @@ Action: type(content='文本内容')
 Action: scroll(point='<point>x y</point>', direction='down|up|left|right')
 Action: hotkey(key='ctrl c')
 Action: wait()
+Action: get_app_list()
+Action: web_open(url='https://example.com')
+Action: web_get_content()
+Action: web_execute_js(script='document.querySelector("#login").click()')
+Action: data_memory(operation='set', key='name', value='content')
+Action: data_memory(operation='get', key='name')
+Action: data_memory(operation='list')
 Action: finished(content='任务完成总结')
+Action: ask_user(message='给用户的问题或操作说明')
 
 注意：坐标使用像素格式，系统会自动转换为归一化坐标"""
     }
     
-    override fun parseAction(response: String): Pair<String?, Action?>? {
-        try {
-            // Extract thinking (use "thinking" tag to be compatible with existing system)
-            val thinking = extractThinking(response, "thinking")
+    override fun getKbActionDescription(): String = """```
+Action: kb_delete(ids='ID1,ID2,...')
+Action: kb_insert(content='Your experience summary here')
+```
+Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags above)."""
+    
+    override fun extractAllActions(cleaned: String): List<AgentAction> {
+        val actions = mutableListOf<AgentAction>()
+        
+        val actionPattern = Regex("""Action:\s*(.+)""", RegexOption.MULTILINE)
+        for (match in actionPattern.findAll(cleaned)) {
+            val actionStr = match.groupValues[1].trim()
             
-            // Find Action: line
-            val actionPattern = Regex("""Action:\s*(.+)""", RegexOption.MULTILINE)
-            val actionMatch = actionPattern.find(response) ?: return null
-            val actionStr = actionMatch.groupValues[1].trim()
-            
-            // Parse different action types
-            val action = when {
-                actionStr.startsWith("click(") -> parseClick(actionStr)
-                actionStr.startsWith("left_double(") -> parseLeftDouble(actionStr)
-                actionStr.startsWith("right_single(") -> parseRightSingle(actionStr)
-                actionStr.startsWith("drag(") -> parseDrag(actionStr)
-                actionStr.startsWith("type(") -> parseType(actionStr)
+            val action: AgentAction? = when {
+                actionStr.startsWith("click(") -> parsePoint(actionStr)?.let { (x, y) -> AgentAction.Click(x, y) }
+                actionStr.startsWith("left_double(") -> parsePoint(actionStr)?.let { (x, y) -> AgentAction.DoubleClick(x, y) }
+                actionStr.startsWith("right_single(") -> parsePoint(actionStr)?.let { (x, y) -> AgentAction.LongPress(x, y) }
+                actionStr.startsWith("drag(") -> parseDragPoints(actionStr)
+                actionStr.startsWith("type(") -> {
+                    Regex("""content='([^']+)'""").find(actionStr)?.let { AgentAction.Type(it.groupValues[1]) }
+                }
                 actionStr.startsWith("scroll(") -> parseScroll(actionStr)
                 actionStr.startsWith("hotkey(") -> parseHotkey(actionStr)
-                actionStr.startsWith("wait(") -> Action(type = ActionType.WAIT, duration = 5)
-                actionStr.startsWith("finished(") -> parseFinished(actionStr)
+                actionStr.startsWith("wait(") -> AgentAction.Wait
+                actionStr.startsWith("context(") -> {
+                    Regex("""content='([^']+)'""").find(actionStr)?.let { AgentAction.Context(it.groupValues[1]) }
+                }
+                actionStr.startsWith("get_app_list(") -> AgentAction.GetAppList
+                actionStr.startsWith("kb_insert(") -> {
+                    Regex("""content='([^']+)'""").find(actionStr)?.let { AgentAction.KbInsert(it.groupValues[1]) }
+                }
+                actionStr.startsWith("kb_delete(") -> {
+                    Regex("""ids='([^']+)'""").find(actionStr)?.let { AgentAction.KbDelete(it.groupValues[1]) }
+                }
+                actionStr.startsWith("web_open(") -> {
+                    Regex("""url='([^']+)'""").find(actionStr)?.let { AgentAction.WebOpen(it.groupValues[1]) }
+                }
+                actionStr.startsWith("web_get_content(") -> AgentAction.WebGetContent
+                actionStr.startsWith("web_execute_js(") -> {
+                    Regex("""script='([^']+)'""").find(actionStr)?.let { AgentAction.WebExecuteJs(it.groupValues[1]) }
+                }
+                actionStr.startsWith("data_memory(") -> {
+                    val opMatch = Regex("""operation='([^']+)'""").find(actionStr)
+                    val keyMatch = Regex("""key='([^']*)'""").find(actionStr)
+                    val valueMatch = Regex("""value='([^']*)'""").find(actionStr)
+                    AgentAction.DataMemory(
+                        operation = opMatch?.groupValues?.get(1) ?: "list",
+                        key = keyMatch?.groupValues?.get(1)?.takeIf { it.isNotEmpty() },
+                        value = valueMatch?.groupValues?.get(1)?.takeIf { it.isNotEmpty() }
+                    )
+                }
+                actionStr.startsWith("finished(") -> {
+                    AgentAction.Terminate(AgentAction.Terminate.Status.SUCCESS)
+                }
+                actionStr.startsWith("ask_user(") -> {
+                    Regex("""message='([^']*)'""")
+                        .find(actionStr)?.let { AgentAction.AskUser(it.groupValues[1]) }
+                        ?: Regex("""message="([^"]*)""""").find(actionStr)?.let { AgentAction.AskUser(it.groupValues[1]) }
+                }
                 else -> null
             }
             
-            return if (action != null) Pair(thinking, action) else null
-        } catch (e: Exception) {
-            return null
+            action?.let { actions.add(it) }
         }
+        
+        return actions
     }
     
-    private fun parseClick(actionStr: String): Action? {
-        val pointPattern = Regex("""point='<point>(\d+)\s+(\d+)</point>'""")
-        val match = pointPattern.find(actionStr) ?: return null
-        val x = match.groupValues[1].toInt()
-        val y = match.groupValues[2].toInt()
-        // Convert pixel coordinates to 0-999 normalized (assuming screen is ~1000px)
-        // For safety, clamp to 0-999 range
-        val normalizedX = x.coerceIn(0, 999)
-        val normalizedY = y.coerceIn(0, 999)
-        return Action(type = ActionType.CLICK, coordinate = intArrayOf(normalizedX, normalizedY))
+    private fun parsePoint(actionStr: String): Pair<Int, Int>? {
+        val match = Regex("""point='<point>(\d+)\s+(\d+)</point>'""").find(actionStr) ?: return null
+        return Pair(match.groupValues[1].toInt().coerceIn(0, 999), match.groupValues[2].toInt().coerceIn(0, 999))
     }
     
-    private fun parseLeftDouble(actionStr: String): Action? {
-        val pointPattern = Regex("""point='<point>(\d+)\s+(\d+)</point>'""")
-        val match = pointPattern.find(actionStr) ?: return null
-        val x = match.groupValues[1].toInt().coerceIn(0, 999)
-        val y = match.groupValues[2].toInt().coerceIn(0, 999)
-        return Action(type = ActionType.DOUBLE_CLICK, coordinate = intArrayOf(x, y))
-    }
-    
-    private fun parseRightSingle(actionStr: String): Action? {
-        val pointPattern = Regex("""point='<point>(\d+)\s+(\d+)</point>'""")
-        val match = pointPattern.find(actionStr) ?: return null
-        val x = match.groupValues[1].toInt().coerceIn(0, 999)
-        val y = match.groupValues[2].toInt().coerceIn(0, 999)
-        return Action(type = ActionType.LONG_PRESS, coordinate = intArrayOf(x, y))
-    }
-    
-    private fun parseDrag(actionStr: String): Action? {
-        val dragPattern = Regex("""start_point='<point>(\d+)\s+(\d+)</point>',\s*end_point='<point>(\d+)\s+(\d+)</point>'""")
-        val match = dragPattern.find(actionStr) ?: return null
-        val x1 = match.groupValues[1].toInt().coerceIn(0, 999)
-        val y1 = match.groupValues[2].toInt().coerceIn(0, 999)
-        val x2 = match.groupValues[3].toInt().coerceIn(0, 999)
-        val y2 = match.groupValues[4].toInt().coerceIn(0, 999)
-        return Action(
-            type = ActionType.DRAG,
-            startCoordinate = intArrayOf(x1, y1),
-            endCoordinate = intArrayOf(x2, y2)
+    private fun parseDragPoints(actionStr: String): AgentAction? {
+        val match = Regex("""start_point='<point>(\d+)\s+(\d+)</point>',\s*end_point='<point>(\d+)\s+(\d+)</point>'""")
+            .find(actionStr) ?: return null
+        return AgentAction.Drag(
+            match.groupValues[1].toInt().coerceIn(0, 999), match.groupValues[2].toInt().coerceIn(0, 999),
+            match.groupValues[3].toInt().coerceIn(0, 999), match.groupValues[4].toInt().coerceIn(0, 999)
         )
     }
     
-    private fun parseType(actionStr: String): Action? {
-        val contentPattern = Regex("""content='([^']+)'""")
-        val match = contentPattern.find(actionStr) ?: return null
-        return Action(type = ActionType.TYPE, text = match.groupValues[1])
-    }
-    
-    private fun parseScroll(actionStr: String): Action? {
-        val pointPattern = Regex("""point='<point>(\d+)\s+(\d+)</point>'""")
-        val directionPattern = Regex("""direction='(down|up|left|right)'""")
-        val pointMatch = pointPattern.find(actionStr) ?: return null
-        val directionMatch = directionPattern.find(actionStr) ?: return null
-        
+    private fun parseScroll(actionStr: String): AgentAction? {
+        val pointMatch = Regex("""point='<point>(\d+)\s+(\d+)</point>'""").find(actionStr) ?: return null
+        val dirMatch = Regex("""direction='(down|up|left|right)'""").find(actionStr) ?: return null
         val x = pointMatch.groupValues[1].toInt().coerceIn(0, 999)
         val y = pointMatch.groupValues[2].toInt().coerceIn(0, 999)
-        val direction = directionMatch.groupValues[1]
-        
-        // Convert scroll to drag action
-        // "scroll down" = page content moves down = finger swipes UP (start.y big, end.y small)
-        // "scroll up" = page content moves up = finger swipes DOWN (start.y small, end.y big)
-        val (x1, y1, x2, y2) = when (direction) {
-            "down" -> intArrayOf(x, y + 200, x, y - 200)
-            "up" -> intArrayOf(x, y - 200, x, y + 200)
-            "left" -> intArrayOf(x + 200, y, x - 200, y)
-            "right" -> intArrayOf(x - 200, y, x + 200, y)
+        val (x1, y1, x2, y2) = when (dirMatch.groupValues[1]) {
+            "down" -> intArrayOf(x, (y + 200).coerceIn(0, 999), x, (y - 200).coerceIn(0, 999))
+            "up" -> intArrayOf(x, (y - 200).coerceIn(0, 999), x, (y + 200).coerceIn(0, 999))
+            "left" -> intArrayOf((x + 200).coerceIn(0, 999), y, (x - 200).coerceIn(0, 999), y)
+            "right" -> intArrayOf((x - 200).coerceIn(0, 999), y, (x + 200).coerceIn(0, 999), y)
             else -> return null
         }
-        
-        return Action(
-            type = ActionType.DRAG,
-            startCoordinate = intArrayOf(x1.coerceIn(0, 999), y1.coerceIn(0, 999)),
-            endCoordinate = intArrayOf(x2.coerceIn(0, 999), y2.coerceIn(0, 999))
-        )
+        return AgentAction.Drag(x1, y1, x2, y2)
     }
     
-    private fun parseHotkey(actionStr: String): Action? {
-        val keyPattern = Regex("""key='([^']+)'""")
-        val match = keyPattern.find(actionStr) ?: return null
+    private fun parseHotkey(actionStr: String): AgentAction? {
+        val match = Regex("""key='([^']+)'""").find(actionStr) ?: return null
         val keys = match.groupValues[1].lowercase()
-        
-        // Map hotkeys to system buttons or special actions
         return when {
-            keys.contains("back") || keys == "esc" -> Action(type = ActionType.SYSTEM_BUTTON, button = "back")
-            keys.contains("home") -> Action(type = ActionType.SYSTEM_BUTTON, button = "home")
-            keys.contains("enter") -> Action(type = ActionType.SYSTEM_BUTTON, button = "enter")
-            else -> null // Unsupported hotkey
+            keys.contains("back") || keys == "esc" -> AgentAction.SystemButton(AgentAction.SystemButton.Button.BACK)
+            keys.contains("home") -> AgentAction.SystemButton(AgentAction.SystemButton.Button.HOME)
+            keys.contains("enter") -> AgentAction.SystemButton(AgentAction.SystemButton.Button.ENTER)
+            else -> null
         }
-    }
-    
-    private fun parseFinished(actionStr: String): Action? {
-        val contentPattern = Regex("""content='([^']+)'""")
-        val match = contentPattern.find(actionStr) ?: return null
-        return Action(type = ActionType.TERMINATE, status = "success", text = match.groupValues[1])
     }
     
     override fun isCompatibleWith(modelName: String): Boolean {
@@ -626,6 +627,191 @@ Action: finished(content='任务完成总结')
                modelName.contains("seed", ignoreCase = true) ||
                modelName.contains("ui-tars", ignoreCase = true)
     }
+}
+
+/**
+ * OpenAI Function Call Format Implementation
+ * Uses OpenAI function call format: {"name":"tool_name", "parameters":{...}}
+ * Supports both single call and batch calls via tool_calls array
+ */
+class OpenAiFuncCallFormat : BaseActionFormat() {
+    
+    override fun getFormatName(): String = "OpenAI FuncCall"
+    
+    override fun getThinkingTag(): String = "thinking"
+    
+    override fun getCorrectExample(): String {
+        return """<thinking>观察到屏幕中央有"确定"按钮，位置约50%,50%，坐标[500,500]，需要点击</thinking>
+{"name":"click","parameters":{"coordinate":[500,500]}}"""
+    }
+    
+    override fun getErrorHint(): String {
+        return "ERROR: 解析动作Action失败. 严格按照系统提示词中 ## 动作列表 格式输出！"
+    }
+    
+    override fun getFormatDescription(): String {
+        return """**输出格式**：OpenAI Function Call 格式
+单个调用：{"name":"[function_name]","parameters":{...}}
+批量调用：{"tool_calls":[{"name":"context","parameters":{"text":"..."}},{"name":"[function_name]","parameters":{...}}]}
+
+${AgentPrompts.CONTEXT_ACTION_REQUIREMENTS}
+
+## 可用OpenAI Function Call函数列表
+{"name":"context","parameters":{"text":"当前状态、关键信息、错误、坐标、策略"}}
+{"name":"click","parameters":{"coordinate":[x,y]}}
+{"name":"long_press","parameters":{"coordinate":[x,y]}}
+{"name":"double_click","parameters":{"coordinate":[x,y]}}
+{"name":"type","parameters":{"text":"文本内容"}}
+{"name":"swipe","parameters":{"direction":"up/down/left/right","coordinate":[x,y]}}
+{"name":"drag","parameters":{"start":[x1,y1],"end":[x2,y2]}}
+{"name":"open","parameters":{"text":"应用名"}}
+{"name":"system_button","parameters":{"button":"back/home/menu/enter"}}
+{"name":"wait","parameters":{"duration":3}}
+{"name":"terminate","parameters":{"status":"success/fail","text":"总结"}}
+{"name":"ask_user","parameters":{"text":"给用户的问题或操作说明"}}
+{"name":"get_app_list","parameters":{}}
+{"name":"web_open","parameters":{"url":"https://example.com"}}
+{"name":"web_get_content","parameters":{}}
+{"name":"web_execute_js","parameters":{"script":"document.querySelector('#login').click()"}}
+{"name":"data_memory","parameters":{"operation":"set","key":"name","value":"content"}}
+{"name":"data_memory","parameters":{"operation":"get","key":"name"}}
+{"name":"data_memory","parameters":{"operation":"list"}}
+
+注意：支持批量调用，使用 tool_calls 数组"""
+    }
+    
+    override fun getKbActionDescription(): String = 
+    """OpenAI Function Call列表：
+{"name":"kb_delete","parameters":{"ids":"ID1,ID2,..."}}
+{"name":"kb_insert","parameters":{"text":"Your experience summary here"}}
+Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags above)."""
+    
+    override fun extractAllActions(cleaned: String): List<AgentAction> {
+        val actions = mutableListOf<AgentAction>()
+
+        // Use bracket-balance scanning to extract top-level JSON objects of any nesting depth.
+        // The old depth-limited regex "\{(?:[^{}]|(?:\{[^{}]*\}))*\}" only handled 2 levels,
+        // causing tool_calls JSON (3+ levels deep) or text fields with newlines to be silently dropped.
+        for (jsonStr in extractTopLevelJsonObjects(cleaned)) {
+            try {
+                val json = JSONObject(jsonStr)
+
+                // Handle tool_calls array format
+                if (json.has("tool_calls")) {
+                    val toolCalls = json.getJSONArray("tool_calls")
+                    for (i in 0 until toolCalls.length()) {
+                        parseFuncCall(toolCalls.getJSONObject(i))?.let { actions.add(it) }
+                    }
+                } else {
+                    // Handle single function call format
+                    parseFuncCall(json)?.let { actions.add(it) }
+                }
+            } catch (_: Exception) {}
+        }
+
+        return actions
+    }
+
+    /**
+     * Extract all top-level JSON objects from text using bracket-balance scanning.
+     * Handles arbitrary nesting depth and text fields containing newlines or special characters.
+     * Skips content inside quoted strings so braces within JSON values don't confuse the scanner.
+     */
+    private fun extractTopLevelJsonObjects(text: String): List<String> {
+        val results = mutableListOf<String>()
+        var i = 0
+        while (i < text.length) {
+            if (text[i] == '{') {
+                val start = i
+                var depth = 0
+                var inString = false
+                var escape = false
+                while (i < text.length) {
+                    val c = text[i]
+                    when {
+                        escape -> escape = false
+                        c == '\\' && inString -> escape = true
+                        c == '"' -> inString = !inString
+                        !inString && c == '{' -> depth++
+                        !inString && c == '}' -> {
+                            depth--
+                            if (depth == 0) {
+                                results.add(text.substring(start, i + 1))
+                                break
+                            }
+                        }
+                    }
+                    i++
+                }
+            }
+            i++
+        }
+        return results
+    }
+    
+    private fun parseFuncCall(json: JSONObject): AgentAction? {
+        try {
+            val name = json.getString("name")
+            val params = json.getJSONObject("parameters")
+            
+            return when (name) {
+                "click" -> {
+                    val c = params.getJSONArray("coordinate")
+                    AgentAction.Click(c.getInt(0), c.getInt(1))
+                }
+                "long_press" -> {
+                    val c = params.getJSONArray("coordinate")
+                    AgentAction.LongPress(c.getInt(0), c.getInt(1))
+                }
+                "double_click" -> {
+                    val c = params.getJSONArray("coordinate")
+                    AgentAction.DoubleClick(c.getInt(0), c.getInt(1))
+                }
+                "type" -> AgentAction.Type(params.getString("text"))
+                "swipe" -> {
+                    val dir = parseSwipeDirection(params.getString("direction")) ?: return null
+                    val c = if (params.has("coordinate")) params.getJSONArray("coordinate") else null
+                    AgentAction.Swipe(dir, c?.getInt(0), c?.getInt(1))
+                }
+                "drag" -> {
+                    val s = params.getJSONArray("start")
+                    val e = params.getJSONArray("end")
+                    AgentAction.Drag(s.getInt(0), s.getInt(1), e.getInt(0), e.getInt(1))
+                }
+                "open" -> AgentAction.Open(params.getString("text"))
+                "system_button" -> {
+                    val btn = parseSystemButton(params.getString("button")) ?: return null
+                    AgentAction.SystemButton(btn)
+                }
+                "wait" -> AgentAction.Wait
+                "terminate" -> {
+                    val st = when (params.optString("status", "fail").lowercase()) {
+                        "success" -> AgentAction.Terminate.Status.SUCCESS
+                        else -> AgentAction.Terminate.Status.FAIL
+                    }
+                    AgentAction.Terminate(st, params.optString("text", ""))
+                }
+                "context" -> AgentAction.Context(params.getString("text"))
+                "ask_user" -> AgentAction.AskUser(params.getString("text"))
+                "get_app_list" -> AgentAction.GetAppList
+                "kb_insert" -> AgentAction.KbInsert(params.optString("text", ""))
+                "kb_delete" -> AgentAction.KbDelete(params.optString("ids", ""))
+                "web_open" -> AgentAction.WebOpen(params.getString("url"))
+                "web_get_content" -> AgentAction.WebGetContent
+                "web_execute_js" -> AgentAction.WebExecuteJs(params.getString("script"))
+                "data_memory" -> AgentAction.DataMemory(
+                    operation = params.optString("operation", "list"),
+                    key = params.optString("key").takeIf { it.isNotEmpty() },
+                    value = params.optString("value").takeIf { it.isNotEmpty() }
+                )
+                else -> null
+            }
+        } catch (e: Exception) {
+            return null
+        }
+    }
+    
+    override fun isCompatibleWith(modelName: String): Boolean = false
 }
 
 // ============================================================================
@@ -650,6 +836,7 @@ object ActionFormatRegistry {
         registerFormat(MaiUiFormat())
         registerFormat(AutoGlmFormat())
         registerFormat(DoubaoUiTarsFormat())
+        registerFormat(OpenAiFuncCallFormat())
     }
     
     /**

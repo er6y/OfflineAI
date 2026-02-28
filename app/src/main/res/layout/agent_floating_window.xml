@@ -6,7 +6,7 @@
     <!-- Expanded view -->
     <LinearLayout
         android:id="@+id/layoutExpanded"
-        android:layout_width="280dp"
+        android:layout_width="240dp"
         android:layout_height="wrap_content"
         android:orientation="vertical"
         android:background="@drawable/agent_floating_window_bg"
@@ -79,16 +79,70 @@
             android:textSize="11sp"
             android:paddingBottom="8dp" />
 
-        <TextView
-            android:id="@+id/textViewOutput"
+        <ScrollView
+            android:id="@+id/scrollViewOutput"
+            android:layout_width="match_parent"
+            android:layout_height="100dp"
+            android:paddingBottom="8dp"
+            android:scrollbars="vertical"
+            android:fadeScrollbars="false"
+            android:overScrollMode="always">
+
+            <TextView
+                android:id="@+id/textViewOutput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="#99FFFFFF"
+                android:textSize="10sp" />
+
+        </ScrollView>
+
+        <!-- TakeOver UI: shown when model requests user intervention -->
+        <LinearLayout
+            android:id="@+id/layoutTakeOver"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text=""
-            android:textColor="#99FFFFFF"
-            android:textSize="10sp"
-            android:maxLines="6"
-            android:ellipsize="end"
-            android:paddingBottom="8dp" />
+            android:orientation="vertical"
+            android:visibility="gone"
+            android:background="#33FFFFFF"
+            android:padding="8dp"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:id="@+id/textViewTakeOverQuestion"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:paddingBottom="6dp" />
+
+            <EditText
+                android:id="@+id/editTextTakeOverInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="输入回复（可为空）"
+                android:textColorHint="#99FFFFFF"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:background="#55000000"
+                android:padding="6dp"
+                android:inputType="textMultiLine"
+                android:minLines="2"
+                android:maxLines="4"
+                android:gravity="top" />
+
+            <Button
+                android:id="@+id/buttonTakeOverConfirm"
+                android:layout_width="match_parent"
+                android:layout_height="36dp"
+                android:text="确认继续"
+                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:background="@drawable/agent_button_bg"
+                android:layout_marginTop="6dp" />
+        </LinearLayout>
 
         <!-- Control buttons -->
         <LinearLayout
