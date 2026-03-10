@@ -147,10 +147,20 @@ flowchart TB
         - UI 被 kill 时通知失败不影响主流程，重建后自动恢复
       - **主要 API**：`RagQueryManager.appendInferenceLog()`、`resetLogConsumerCursorAfterPersist()`、`getNewLogsForConsumer()`。
 - **EmbeddingHandler / RerankerHandler**：MNN 一站式嵌入与重排管理器。需求：以单例形式常驻模型，适配构建任务（高负载）与问答（低延迟）两种场景，支持中断与模式切换。设计：统一调用 MnnInference JNI，维护 native handle 生命周期，确保线程安全（synchronized + AtomicBoolean）与内存模式管理。**主要 API**：`EmbeddingHandler.loadModel()`、`computeEmbedding()`、`stopInference()`；`RerankerHandler.loadModel()`、`setInstruction()`、`rerank()`、`setScoreCallback()`。**关键数据结构**：`EmbeddingHandler.MemoryMode`、`RerankerHandler.RerankResult`、`RerankerHandler.ScoreCallback`。
-- **KnowledgeBaseService**：管理知识库目录结构与元信息。需求：提供新建/删除/重命名/校验接口，维护 SQLite 数据文件、文档快照、临时中间文件。设计：封装路径拼接与权限校验，所有写操作记录日志便于排查权限问题。**主要 API**：`createKnowledgeBase()`、`deleteKnowledgeBase()`、`loadMetadata()`、`validatePath()`。**关键数据结构**：`KnowledgeBaseService.Metadata`（记录 embedding 模型、创建时间、统计信息）。
-- **TextChunkProcessor + DocumentParser**：文档解析与分块管线。需求：支持主流办公格式（PDF/Office/TXT/Markdown/JSON），按配置执行分块与重叠策略，并在失败时可恢复。设计：解析阶段使用 DocumentParser 抽取文本，分块阶段依据 chunkSize/overlap/minChunkSize 生成 TextChunk 集合，写入中间文件供断点续跑，随后驱动 EmbeddingHandler 写入向量库。**主要 API**：`processFiles()`、`extractTextFromFiles()`、`processChunksToVectors()`、`DocumentParser.extractText()`。**关键数据结构**：`TextChunkProcessor.TextChunk`、`ProgressCallback`、`NotificationProgressCallback`。
+- **KnowledgeBaseService**：管理知识库目录结构与元信息。需求：提供新建/删除/重命名/校验接口，维护 SQLite 数据文件、文档快照、临时中间文件。设计：封装路径拼接与权限校验，所有写操作记录日志便于排查权限问题。知识库元信息除 SQLite `metadata` 表外，还必须同步落地 `metadata.json`，字段保持与 Android 兼容，便于目录级扫描、模型路径恢复与历史库兼容；CLI 作为脚本/Agent 接口时必须遵循稳定输出契约：文本模式下 `query` 仅将最终模型回答或 `--no-llm` 的召回文本写入 `stdout`，`build/note` 不占用 `stdout`，所有日志统一写入 `stderr`；`--output json` 模式下 `stdout` 仅输出单个 UTF-8 JSON 结果对象，便于 Linux/Windows 脚本和多智能体调用链稳定解析。**主要 API**：`createKnowledgeBase()`、`deleteKnowledgeBase()`、`loadMetadata()`、`validatePath()`。**关键数据结构**：`KnowledgeBaseService.Metadata`（记录 embedding 模型、创建时间、统计信息）。
+  - **BM25+RRF 混合召回（Python + Android Java 双端对齐）**：针对精确配置项/技术术语查询场景，纯向量召回易被语义相近但内容无关的文档污染。解决方案：在向量搜索后、GraphRAG 前插入 BM25+RRF 混合步骤，Python 与 Java 实现完全对齐。
+    - **实现位置**：Python 侧 `py_mnn_kb.py`（`_bm25_tokenize/_build_bm25_index/_bm25_score/_rrf_fusion`）；Android 侧 `RagQueryManager.java`（内部类 `Bm25Index/Bm25RetrievalResult` + 方法 `bm25Tokenize/buildBm25Index/bm25Score/bm25Search/runBm25Retrieval/rrfFusion/getOrBuildBm25Index`）。数据获取：`KnowledgeGraphDatabase.getAllChunksForBm25()`（只取 id/content/source，不加载 embedding blob 节省内存）。开关：`ConfigManager.isBm25Enabled()` 读 `.config` 文件 `bm25_enabled`（默认 true，无设置页面开关，合理：普通用户无需感知）。
+    - **Tokenizer 对齐**：首字符必须是 ASCII 字母/数字（镜像 Python `[A-Za-z0-9][A-Za-z0-9_\-.]*`），续接可含 `_-.`，strip 首尾 `._-` 后 ≥2 字符保留；CJK 单字 unigram + bigram，补充平面字符（`U+20000-U+2A6DF`）用 `codePoint + Character.toChars()` 处理，两端完全一致，无需 jieba/HanLP。
+    - **索引与缓存**：构建时预计算每文档 `tf_map + dl`；缓存到 `RagQueryManager.bm25Cache`（`Map<String, Bm25Index>`，双重检查锁 + `bm25CacheLock`），以 KB 名称 + chunk 数量为 key，build/add_note 后自动失效；`Bm25Index` 所有字段 `final`，构建后只读，线程间共享安全。
+    - **Java 并发架构**：独立 `bm25Executor`（单线程守护线程，与 `ragQueryExecutor` 隔离避免死锁）。在 `computeEmbedding` 之前提交 `bm25Executor.submit(() -> runBm25Retrieval(...))`，整条 BM25 链路（DB 读/缓存 + 索引构建 + scoring + topK）完全并发于 embedding IPC 调用（~1s）+ vectorSearch（~50ms）；主线程在 Step 2b 只做 `future.get()` + `rrfFusion`，实际等待时间理论接近 0ms（缓存命中）。早期 return 路径均有 `bm25Future.cancel(false)` 清理。`vecResults.isEmpty()` 时跳过 future，守护线程自动回收。
+    - **`Bm25RetrievalResult`**：封装 `results/corpusSize/cacheHit`，使 BM25 侧所有状态以只读对象传递，主线程无需了解 BM25 内部状态。
+    - **RRF 融合**：公式 `score = 1/(k+rank_vec) + 1/(k+rank_bm25)`，k=60；缺失项惩罚 rank = `len*2+1`；全边界覆盖（top_k=0/单路为空/top_k 超总数），Python/Java 均经验证。
+    - **候选池设计**（`search_depth=6`）：向量 `6+20=26` → BM25 `max(26*2,60)=60` → RRF union 排序取前 26 → GraphRAG 最终选 6。`search_depth` 唯一控制最终输出数。
+    - **性能**：Python 2400 chunk 缓存命中约 94ms；Java 同规模缓存命中 BM25 scoring 约 50ms，且完全隐藏在 embedding 时间内。首次构建约 300-500ms，仅发生一次。
+    - **效果**：`onfi速率680MT/s` 正确 chunk 从纯向量 #7 提升至 #2；`PCIE速率gen2x2` pcie_link_ctl 从 #6+ 提升至 #1；`ECC功能` BM25+RRF+Graph 效果最佳。BM25+RRF+Graph 三路融合整体最优，跨平台 KB 迁移完全兼容。
+- **TextChunkProcessor + DocumentParser**：文档解析与分块管线。需求：支持主流办公格式（PDF/Office/TXT/Markdown/JSON），按配置执行分块与重叠策略，并在失败时可恢复。设计：解析阶段使用 DocumentParser 抽取文本，分块阶段依据 chunkSize/overlap/minChunkSize 生成 TextChunk 集合，写入中间文件供断点续跑，随后驱动 EmbeddingHandler 写入向量库。PC 对齐实现要求在正式向量化前先完成文件级提取与 chunk 规划，提前得到 `totalFiles / totalUnits / totalChunks` 作为全局进度基线；允许对“文件提取 + chunk 规划”使用有限线程池并行，但图谱构建仍保持“embedding 写 documents → 内存累计 entities/edges → hub 过滤 → 单次 flush”的顺序，不允许为图谱优化而反复回读数据库。**主要 API**：`processFiles()`、`extractTextFromFiles()`、`processChunksToVectors()`、`DocumentParser.extractText()`。**关键数据结构**：`TextChunkProcessor.TextChunk`、`ProgressCallback`、`NotificationProgressCallback`。
 - **ChatHistoryManager**：会话与附件管理。需求：记录聊天 Markdown、图像缩略图、AI 语音音频、Diffusion 输出，一并落地到 chathistory/<session> 中。设计：以 Markdown + 元数据形式存储，加载时解析音频/图像链接恢复 UI 状态，提供历史迁移与分享能力。**主要 API**：`saveChat()`、`loadChat()`、`appendAudioRecord()`、`convertChatToMarkdown()`。**关键数据结构**：`ChatHistoryManager.ChatRecord`、`ChatDataItem`、音频/图像文件命名规范。
-- **ProgressManager / StateDisplayManager**：状态广播与多语言文案中心。ProgressManager 负责知识库构建等长任务的阶段进度与耗时统计；StateDisplayManager 统一管理中英文文案，将业务状态映射为 UI 可读提示，减少界面硬编码。**主要 API**：`ProgressManager.initFileProcessing()`、`updateFileProgress()`、`initVectorization()`、`markCompleted()`；`StateDisplayManager.getDialogDisplay()`、`getButtonDisplay()`。**关键数据结构**：`ProgressManager.ProgressData`、`StateDisplayManager.DisplayEntry`。
+- **ProgressManager / StateDisplayManager**：状态广播与多语言文案中心。ProgressManager 负责知识库构建等长任务的阶段进度与耗时统计；StateDisplayManager 统一管理中英文文案，将业务状态映射为 UI 可读提示，减少界面硬编码。知识库构建进度必须同时暴露文件级、提取单元级、chunk 级三套计数，并提供 `elapsed / ETA / embedding_sec / graph_sec / hub_filter_sec / flush_sec` 这类阶段耗时，便于区分瓶颈究竟位于 embedding、NER 建边还是最终图谱落库。**主要 API**：`ProgressManager.initFileProcessing()`、`updateFileProgress()`、`initVectorization()`、`markCompleted()`；`StateDisplayManager.getDialogDisplay()`、`getButtonDisplay()`。**关键数据结构**：`ProgressManager.ProgressData`、`StateDisplayManager.DisplayEntry`。
 - **LogManager**：统一日志输出、文件滚动、logcat 捕获。需求：Release 默认强制写盘，支持多线程安全写入与大小限制（1MB 自动裁剪）。设计：使用单线程写入队列，超过容量自动裁剪头部，并支持手动导出。
 - **AcceleratorDiagnostics**：加速器检测与策略管理。需求：启动时检测设备是否支持 Vulkan/OpenCL/NNAPI/KleidiAI，并结合 Settings 中的偏好决定实际后端，同时提供日志可观测性。设计：通过 JNI 获取硬件能力、编译宏信息，按优先级回退到 CPU，并在日志中标记可用性和降级原因。**主要 API**：`initializeGPUHandling()`、`performAcceleratorConfigCheck()`、`logHardwareCaps()`。**关键数据结构**：后端能力快照（Vulkan/NNAPI flags）、`AcceleratorDiagnostics.Result`。
 
@@ -432,14 +442,6 @@ flowchart TB
     - `ChatHistoryFilter.java`：Line 34-44（定义 debug 标记过滤模式）、Line 56-67（`filterText()` 优先移除 debug 标记）。
   **Debug日志输出**：在ChatUI的Debug Console中输出完整流程状态，包括ASR模型名称、语音文件路径、图片信息、转换结果、RAG检索日志、LLM调用状态等，便于用户了解处理流程。
 - **调试与可观测性**：需求是问题排查时能快速定位检索和推理异常。设计：RagQaFragment 提供 debug 面板输出 Embedding/Rerank 详细分数、Prompt token 长度、API 请求/响应日志、ASR转换状态，LogManager 统一收集。**主要 API**：`updateProgressPlainText()`、`updateChatMessage()`、`LogManager.d()`、`RagQueryManager.callback.onProgressUpdate()`。**关键数据结构**：调试字符串缓存、日志文件。
-
-### 3.2 知识库构建
-- **入口与交互**：知识库选择器支持新建与切换，文件列表支持多选、清空、查看累计大小。需求：长任务中界面需保持可操作（查看日志、暂停），构建完成后要附带统计（向量条数、耗时）。设计：通过 ProgressManager 在 UI/前台通知/日志三处同步进度，构建完成后刷新知识库摘要。
-- **文档处理**：支持 PDF/Office/TXT/Markdown/JSON 等格式。需求：解析时保留文档结构（标题、表格、列表），对 JSON 特殊格式（instruction、对话等）需按语义拆分。设计：DocumentParser 针对不同格式采用专用解析器，输出结构化段落，后续由 TextChunkProcessor 处理。
-- **分块策略**：chunkSize/overlap/minChunkSize 可配置。需求：既要保证上下文连贯又要限制单块长度。设计：采用“自然段优先 + 长段二次切分”策略，重叠区用于保留衔接，Chunk 元数据记录来源段落与页码。
-- **向量化与重排**：现统一走 MNN Embedding/Reranker。需求：支持低内存模式与高性能模式切换，自动过滤异常向量，并与 LLM 共用统一的后端选择（CPU/OpenCL/Vulkan/NNAPI）。设计：EmbeddingHandler loadModel 时指定 memory mode（`LOW` / `NORMAL` / `HIGH` 三档，对应 JNI 侧的 `"low"` / `"normal"` / `"high"`），并通过 `SettingsFragment.getBackendPreference()` 读取全局后端偏好，使用与 LocalLLMMNNHandler 相同的映射规则（`CPU`→`cpu`、`OPENCL`→`opencl`、`VULKAN`→`vulkan`、`NNAPI`→`npu`）设置 `backendType`；知识库构建默认使用 `NORMAL`，RAG 问答与知识库笔记默认使用 `LOW` 以降低常驻内存压力，并在 computeEmbedding 后调用 VectorAnomalyHandler 校验；RerankerHandler 同样在构建 runtime config 时从设置读取后端偏好，保证 Reranker 与 Embedding、LLM 使用一致的后端；重排结果低于阈值时记录日志提醒。**主要 API**：`EmbeddingHandler.getModel()`、`computeEmbedding()`、`VectorAnomalyHandler.detectAndFix()`、`RerankerHandler.rerank()`。**关键数据结构**：`TextChunkProcessor.TextChunk`、`SQLiteVectorDatabaseHandler.SearchResult`。
-- **数据落盘**：向量与原文统一存入 `KnowledgeGraphDatabase` 管理的 SQLite 文件（规范命名为 `knowledge_graph.db`），配套保存 `intermediate_chunks.json` 做断点续建，成功后清理临时文件。设计：`TextChunkProcessor` 在每阶段结束写入 checkpoint，失败时可回滚后续阶段。**主要 API**：`KnowledgeGraphDatabase.addChunk()`、`TextChunkProcessor.saveIntermediateChunks()`、`deleteIntermediateFile()`。**关键数据结构**：`intermediate_chunks.json`、`KnowledgeGraphDatabase.SearchResult`、SQLite 表。
-- **日志/诊断**：构建过程强制写入日志文件，包含解析、分块、向量化统计；UI 调试窗口实时输出当前文件、耗时、错误信息，便于查找格式或权限问题。
 - **进度与日志模型（2025-11-16 重构 + Graph/HUB 扩展）**：统一使用 `ProgressManager` + `UnifiedForegroundService.ProgressCallback` 提供结构化进度与文本日志。设计：
   - `ProgressManager` 作为单例，集中维护知识库构建的数值状态与配置快照：
     - 三阶段进度：
@@ -1024,6 +1026,270 @@ flowchart TB
        - arm64：**完全保持原有行为**（`ContainsNumber()` 和 `ConcatList()` 使用 regex/stringstream，性能最优）
    - **验证方法**：在 x86_64 模拟器上测试 TTS 加载和生成流程，确保无崩溃
    - **注意**：arm64 真机不受影响，所有架构使用相同代码逻辑
+
+---
+
+## 10. py_mnn_kb — Python 端知识库（PC 对齐）
+
+### 10.1 概述与设计目标
+
+`py_mnn_kb/` 是 Android OfflineAI RAG 系统的 Python PC 端对齐实现，提供三个接口供 PC 工具链和 Agent 调用：
+
+- `build_kb(files, kb_name)` — 从文件列表构建知识库
+- `add_note(text, kb_name)` — 直接插入文本笔记
+- `query_kb(prompt, kb_name)` — RAG 召回，返回拼接上下文字符串
+
+**设计目标**：数据库格式完全兼容（schema、序列化、余弦算法均与 Android Java 对齐）；所有算法与 Java 实现逐行对齐。
+
+> ✅ **向量对齐已解决**：PC pyMNN 使用 Android-aligned `chat_template` 后，cos(Android, pyMNN) = **~0.991**，可直接查询 Android-built KB。详见 §10.13。
+
+### 10.2 文件结构
+
+```
+py_mnn_kb/
+├── config.json            # 配置文件（embedding 路径、RAG 参数、LLM API）
+├── py_mnn_kb.py           # 核心库 + CLI 入口（单文件，含 build/note/query 子命令）
+├── requirements.txt       # Python 依赖
+├── README.md              # 含 OpenClaw Skill 用法说明
+├── example_stop.json      # 停用词文件（从 app/src/main/assets/ 复制）
+├── example_terms.json     # 专业术语示例
+└── knowledge_bases/       # 知识库存储目录（自动创建）
+    └── <kb_name>/
+        ├── knowledge_graph.db
+        └── metadata.json
+```
+
+### 10.3 embedding 驱动（pyMNN + Android-aligned chat_template）
+
+`EmbeddingClient` 唯一后端：**pyMNN**（`MNN.llm`）+ Android-aligned `chat_template`。
+
+**关键对齐点**：在加载模型前，将 `llm_config.json` 中的 `jinja.chat_template` 替换为与 Android `EmbeddingHandler` 完全一致的简化模板（`_create_android_aligned_model_dir`）。替换后 tokenization 与 Android 完全一致，向量 cos ~0.991。
+
+- API：`mnn_llm.create(aligned_config_path, True)` → `llm.load()` → `llm.set_config(runtime_json)` → `llm.txt_embedding(text)`
+- runtime config：`memory=low, power=high, precision=low, thread_num=4`（与 Android `buildRuntimeConfig` 一致）
+- 返回值：MNN VARP，通过 `MNN.numpy.array(var).flatten()` 转为 Python `float` list
+- **注意**：旧版 API `Embedding.createEmbedding()` 在 MNN 3.x 已不存在，必须用 `mnn_llm.create(config, True)`
+
+**Python 环境**：使用 conda 创建于项目根目录 `.env`：
+```
+conda create -p d:\yilei.wang\OfflineAI\.env python=3.10 -y
+conda activate d:\yilei.wang\OfflineAI\.env
+pip install -r py_mnn_kb/requirements.txt
+```
+
+### 10.5 数据库 schema 与序列化对齐
+
+| 关键点 | Android Java | Python |
+|---|---|---|
+| 向量 BLOB 序列化 | `ByteBuffer.LITTLE_ENDIAN.putFloat()` | `struct.pack("<Nf", *vector)` |
+| 余弦相似度 | `dot(a,b)/(norm(a)*norm(b))` | 同算法 |
+| 边排序（一致性） | `if fromId > toId swap`（用 entity ID int 比较） | 同逻辑（int ID 比较） |
+| 实体频率加权平均 | `(oldConf*oldFreq + conf) / newFreq` | 同算法 |
+| 元数据字段 | `embedding_model`、`embedding_dimension`、`hub_threshold` | 同字段名 |
+
+### 10.6 NER 与停用词对齐
+
+| 组件 | Android | Python |
+|---|---|---|
+| 分词/NER | HanLP `StandardTokenizer` | jieba `posseg` |
+| 自定义词典 | JSON `{word, nature, frequency, aliases[]}` | 同格式，`jieba.add_word()` 注册 |
+| 别名规范化 | `aliasToCanonical` Map | 同结构 Dict，`normalize_text()` |
+| 停用词加载 | `GraphStopwordsMatcher.loadFromFile()` | 同 JSON 结构 |
+| 停用词匹配 | `exact` → `prefix.startsWith` → `regex.matcher().matches()` | `exact` → `prefix.startswith` → `re.fullmatch()`（**全串匹配，非子串**） |
+| `shouldSkip()` 词性 | `w/u/c/p/d/e`，单字过滤 | 同规则 |
+
+**关键实现点**：Java `Pattern.matcher(text).matches()` 是全串匹配，Python 必须用 `re.fullmatch()` 而非 `re.search()` 或 `re.match()`，否则短模式会错误过滤长实体。
+
+### 10.7 Hub 实体过滤对齐
+
+Hub 实体基于**边度数 + 总边权**计算，不是实体频率字段：
+
+```sql
+SELECT entity_text, COUNT(DISTINCT neighbor) AS degree, SUM(weight) AS total_weight
+FROM (
+  SELECT from_entity AS entity_text, to_entity AS neighbor, weight FROM entity_edges WHERE collection=?
+  UNION ALL
+  SELECT to_entity AS entity_text, from_entity AS neighbor, weight FROM entity_edges WHERE collection=?
+) AS edges
+GROUP BY entity_text
+```
+
+**Hub 判定规则**（对齐 Java `getHubEntities`）：
+- 普通实体：`degree >= threshold OR total_weight >= threshold`
+- **受保护实体**（自定义词典词条）：使用 `fallback = threshold * 5`，超过才判为 Hub
+  - 防止技术术语（Starblaze-tech.json 中的词条）被误判为噪声 Hub 删除
+- `getHubEntities` 用于查询期只读过滤（不修改 DB）
+- `applyHubThreshold` 用于构建期永久删除（删 entities + edges + chunk_entities）
+
+### 10.8 InMemoryGraphBuilder（构建期）
+
+构建 KB 时使用内存图构建器，对齐 Java `TextChunkProcessor.InMemoryGraphBuilder`：
+
+```
+build_kb 流程：
+1. 逐 chunk 嵌入 + 插入 documents 行
+2. NER 提取实体 → stopwords 过滤 → InMemoryGraphBuilder.add_chunk_entities()
+   - 内存中 upsert 实体、链接 chunk→entity、构建双向共现边
+   - 同时在线追踪 hub 候选（online_hub_stats）
+3. 全部文件处理完毕后：InMemoryGraphBuilder.apply_hub_filter(hub_threshold_build)
+   - 从内存中删除 hub 实体及其边
+4. 一次性事务写入 SQLite（flush_to_db）
+   - 先清空旧 entities/entity_edges/chunk_entities，再批量 INSERT
+```
+
+优势：避免 N² 次 SQLite 事务；Hub 过滤在写 DB 前完成，DB 中不含 Hub 脏数据。
+
+### 10.9 Graph RAG 融合对齐
+
+完整复刻 Android `RagQueryManager.runGraphRagPipeline()`：
+
+1. Hub 实体过滤（边度数+权重计算，自定义词典词条用 5x fallback 阈值保护）
+2. 查询实体提取（置信度阈值 + 停用词三段过滤）
+3. 种子实体来自：查询 NER 实体 + Top-5 向量召回块的实体
+4. 1-hop 图扩展（UNION ALL 双向边查询，最小边权过滤）
+5. 候选扩展：从扩展实体找到额外的关联文档块（max_expand_chunks 上限）
+6. 融合评分：`finalScore = α·vecNorm + β·graphNorm + γ·overlapNorm`
+   - graphScore = `log1p(sum_weights) * overlapRatio`（见下方精度修复）
+   - 三项各做 Min-Max 归一化
+7. 权重预设（`graph_rag_weight_preset`）：
+   - `0` = 向量优先 (0.9/0.1/0.0)
+   - `1` = 均衡 (0.7/0.2/0.1)（默认）
+   - `2` = 图谱增强 (0.4/0.4/0.2)
+
+#### GraphRAG 召回精度修复（overlapRatio，双端同步）
+
+**问题根因**：图谱扩展后，"hub 关联型"文档（如 DDR 配置类文档，通过通用 hub 实体间接扩展）即便与查询实体（如 ONFI）毫无重叠，也因为 `log1p(sum_weights)` 累积了大量图谱边权，而在 `graphNorm` 维度获得高分，最终覆盖真正相关文档排名。
+
+**修复方案**（Java + Python 双端对齐）：
+
+```
+overlapRatio = entityOverlap / max(1, seedEntityCount)
+graphScore   = log1p(sum_weights) * overlapRatio
+```
+
+- `seedEntityCount` = `queryEntityTexts.size()`（即查询种子实体集大小）
+- overlap=0 的候选 graphScore 归零，不再被图谱权重抬高
+- overlap>0 的候选按比例调整，仍保留图谱信息
+
+**实现位置**：
+- Java：`RagQueryManager.java` `runGraphRagPipeline()` 中 `c.graphScore` 计算行
+- Python：`py_mnn_kb.py` `run_graph_rag_pipeline()` 中 `cand["graph_score"]` 计算行
+
+**效果验证**（ONFI 查询）：无 overlap 的 DDR hub 文档 graphScore 降为 0，有 overlap 的真相关文档排名提升。
+
+### 10.10 JSON 训练集处理
+
+`JsonDatasetProcessor` 自动识别并按语义分块：
+
+| 格式 | 识别字段 | 输出格式 |
+|---|---|---|
+| Alpaca | `instruction` + `output/response` | `Instruction: ...\nInput: ...\nOutput: ...` |
+| CoT | `question` + `chain_of_thought`/`answer` | `Question: ...\nReasoning: ...\nAnswer: ...` |
+| DPO | `chosen` + `rejected` | `Prompt: ...\nResponse: ...`（只取 chosen）|
+| Conversation | `conversations`/`messages` | `role: content\n...`（多轮拼接）|
+
+### 10.11 config.json 参数对齐
+
+所有 RAG 参数与 Android `ConfigManager` 默认值严格一致：
+
+| config.json 键 | Android 默认值 | 说明 |
+|---|---|---|
+| `graph_ner.custom_dict_path` | 用户配置 | 指向 `Starblaze-tech.json` |
+| `graph_ner.stopwords_path` | 用户配置 | 指向 `example_stop.json` |
+| `chunking.chunk_size` | 500 | 分块大小 |
+| `chunking.chunk_overlap` | 100 | 分块重叠 |
+| `chunking.min_chunk_size` | 10 | 最小块过滤 |
+| `retrieval.search_depth` | 20 | 向量召回数 |
+| `retrieval.graph_rag_vector_expand` | 20 | 粗召回放大倍数 |
+| `retrieval.graph_min_edge_weight` | 2 | 最小边权 |
+| `retrieval.graph_max_expand_entities` | 50 | 最大扩展实体数 |
+| `retrieval.graph_entity_confidence_threshold` | 0.7 | 实体置信度阈值 |
+| `retrieval.graph_hub_threshold_build` | 1000 | 构建期 Hub 阈值 |
+| `retrieval.graph_hub_threshold_query` | 300 | 查询期 Hub 阈值 |
+| `retrieval.graph_max_expand_chunks` | 50 | 最大扩展 chunks |
+
+### 10.12 优化与注意事项
+
+- **embedding 后端**：唯一使用 pyMNN（`MNN.llm`）+ Android-aligned `chat_template`。MNN 3.x 正确 API 为 `mnn_llm.create(config, True)` → `llm.load()` → `llm.set_config(runtime_json)` → `llm.txt_embedding(text)`，`VARP` 通过 `MNN.numpy.array(var).flatten()` 转换。
+- **向量对齐**：`_create_android_aligned_model_dir` 在临时目录替换 `llm_config.json` 的 `jinja.chat_template` 为 Android 简化版，确保 tokenization 与 Android 一致，cos(Android, pyMNN) ~0.991。
+- **stopping 词 regex 语义**：必须用 `re.fullmatch()`（全串匹配），对应 Java `Pattern.matcher().matches()`；不可用 `re.search()`（子串匹配）。
+- **Hub 计算依据**：边度数+总权重（来自 `entity_edges` 表），不是 `entities.frequency` 字段。
+- **entity_edges.weight 类型**：为 `REAL`（浮点），原 `INTEGER` 已修正，存储小数精度边权不丢失。
+- **add_edge 重复调用修复**：`add_entities_and_build_graph` 每对实体只调一次 `add_edge`（内部已 swap），避免权重 ×2 bug。
+- **entity_edges.chunk_ids 字段对齐**：Java `EdgeStats.chunkIds` 为 `Set<Long>`，flush 时序列化为 JSON 数组写入 `chunk_ids` 列。Python `InMemoryGraphBuilder._edge_map` value 已从纯 weight float 改为 `{"weight": int, "chunk_ids": set}`，`flush_to_db` 使用 `json.dumps(sorted(chunk_ids))` 写入，`add_edge` 直写路径同样维护 `chunk_ids` JSON 数组（增量 merge）。
+- **add_edge 文本序排序**：Java `makeEdgeKey(a, b)` 使用 `a.compareTo(b) <= 0` 决定 from/to；Python `add_edge` 已同步为 `if from_text > to_text: swap`，保证两端 canonical ordering 一致。`InMemoryGraphBuilder.add_chunk_entities` 同样使用 `if ft > tt: swap` 对齐。
+- **flush_to_db `chunk_entities` 清除方式**：对齐 Java `flushToDatabase()` 的行为：`db.delete("chunk_entities", null, null)` 是**全表清空**（不按 collection 过滤），因为 `chunk_entities` 表无 `collection` 字段，依赖外键 `chunk_id` 隐式关联。Python `flush_to_db` 同步为 `DELETE FROM chunk_entities`（全表清除）。⚠️ 单库单 collection 场景无问题；多 collection 共库场景不适用，需注意。
+- **SQLite 事务**：`flush_to_db` 和 `apply_hub_threshold` 均用 `isolation_level=None` + 手动 `BEGIN/COMMIT` 保证 WAL 模式下事务安全，`finally` 块恢复原 `isolation_level`。
+- **受保护实体 5x fallback**：`Starblaze-tech.json` 中的词条不会被普通 Hub 阈值误删，只有超过 5x 阈值才会被移除。
+- **InMemoryGraphBuilder**：构建期全程内存操作，最后一次性写库；`add_note` 同样使用此机制，确保 Hub 过滤后才落盘。
+- **模型路径**：`config.json` 中路径支持相对路径（相对于 config.json 所在目录），便于跨机器迁移。
+- **数据库互通验证**：数据库 schema、序列化、余弦算法两端完全一致；但向量空间不兼容（见 §10.13），Android-built KB 无法在 PC 端撤回。
+- **jieba vs HanLP**：jieba 是 Python 侧的工程替代，NER 质量略低于 HanLP，但词性过滤规则、词典格式、别名规范化完全对齐。
+- **LLM API**：`config.json` 的 `llm_api` 节使用 DeepSeek API（`deepseek-chat`，`max_tokens` 16384），仅用于 CLI query 生成阶段；`query_kb()` 本身只返回召回上下文字符串。
+- **Windows 控制台编码**：`py_mnn_kb.py` 顶部 `main()` 强制 `sys.stdout.reconfigure(encoding='utf-8')` 修复 PowerShell 中文乱码；`conda run 2>&1` 管道会绕过此设置，建议在 IDE 终端直接运行。
+- **单文件化**：`py_mnn_kb_demo.py` 已于 2025-03 合并到 `py_mnn_kb.py`，直接通过 `python py_mnn_kb.py build/note/query/status ...` 调用 CLI。
+- **模型自动下载**：`ensure_model_downloaded()` 在 `KnowledgeBase._init_components()` 中调用，首次运行自动从 ModelScope 下载 `Qwen3-Embedding-0.6B-MNN-int4` 全部文件，只下载缺失文件，已存在则跳过。
+- **非阻塞 build 设计**：`build` 命令通过 `subprocess.Popen` + `DETACHED_PROCESS`（Windows）/ `start_new_session`（Linux）启动后台子进程，主进程立即返回。状态通过两个文件维护：`build.pid`（子进程 PID）+ `build_status.json`（`state/progress/message/error/stats`）。子进程通过 `progress_callback` 实时更新 status 文件（原子替换 `.tmp`）。`_is_build_running()` 通过 `psutil.pid_exists(pid)` 检查进程是否存活，crash 自动降级为 error 状态。`note`/`query` 命令在执行前先调用 `_is_build_running()` 守卫，building 中直接返回进度拒绝执行，避免并发写 DB 冲突。`status` 命令无需初始化 KB，瞬间返回。后台进程 stderr 重定向到 `build.log`（父终端不再打印，避免 Windows DETACHED_PROCESS 下句柄冲突）。
+
+### 10.13 PC 与 Android 向量对齐：chat_template 是根因
+
+#### 根因（最终结论）
+
+**`chat_template` 不一致导致 tokenization 不同，进而向量完全不同（cos ~0.49）。**
+
+MNN `Embedding::txt_embedding(text)` 内部调用 `apply_chat_template(text, add_system_prompt=true)`，将原始文本包装成对话格式后再 tokenize。Android `EmbeddingHandler` 的实际 template 是简化版（直接拼接 message content），而 PC pyMNN 默认加载 Qwen3 完整 jinja 模板（含 `<|im_start|>system\n<|im_end|>\n` 等特殊 token），导致两端 token 序列不同，输出向量方向完全偏离。
+
+#### 调用链分析
+
+```
+Android EmbeddingHandler.computeEmbedding(text):
+  → MnnInference.computeEmbedding(handle, text)
+    → JNI: embedding->txt_embedding(text)
+      → apply_chat_template(text, add_system_prompt=true)
+        → messages = [{role:system, content:""}, {role:user, content:text}]
+        → jinja render: template = "{{ messages|map(attribute='content')|join('') }}"
+        → result = "" + text = text          ← 直接拼接，无特殊 token
+      → tokenizer_encode(text)              ← 纯文本 tokenization
+
+PC pyMNN（默认，未对齐）:
+  → llm.txt_embedding(text)
+    → apply_chat_template 使用 Qwen3 完整 jinja 模板
+    → result = "<|im_start|>system\n<|im_end|>\n<|im_start|>user\ntext<|im_end|>\n<|im_start|>assistant\n"
+    → tokenizer_encode(以上带特殊 token 的字符串)  ← token 序列完全不同
+```
+
+#### 修复方案
+
+`_create_android_aligned_model_dir(model_dir)` 在临时目录中创建模型副本，将 `llm_config.json` 的 `jinja.chat_template` 替换为 Android 版简化模板：
+
+```python
+# _build_android_embedding_chat_template() 用 chr() 拼接避免 jinja 花括号解析歧义
+llm_cfg["jinja"] = {
+    "chat_template": "...",   # {{ messages | map(attribute='content') | join('') }}
+    "eos": "<|im_end|>"
+}
+```
+
+替换后 `EmbeddingClient` 用此临时目录加载模型，两端 tokenization 完全一致。
+
+#### 验证结果
+
+| chunk id | cos(Android, pyMNN-aligned) |
+|---|---|
+| 1 | 0.9912 |
+| 2 | 0.9921 |
+| 3 | 0.9924 |
+| 4 | 0.9923 |
+| 5 | 0.9905 |
+| **Mean** | **0.9917** |
+
+修复前（Qwen3 完整 jinja 模板）：cos ~0.49；修复后：cos ~0.991。
+
+#### 注意事项
+
+- Android 侧 `llm_config.json` 中的 `jinja.chat_template` 就是该简化模板，**不需要修改 Android 任何代码**。
+- `_create_android_aligned_model_dir` 用 `hardlink` + 临时目录，避免复制大型模型文件（`.mnn.weight` 约 277MB），进程退出时自动清理。
+- **PC pyMNN 与 Android KB 可以直接互查**（无需重建 KB），cosine 偏差 ~0.009 完全在可接受范围。
 
 ---
 
@@ -7300,10 +7566,16 @@ if (is_json_string) {
 
 **问题**：LOW 和 HIGH 模式生成的向量能否互相匹配？
 
-**答案**：✅ **完全兼容**
+**答案**：✅ **在同一端（同一编译产物）内完全兼容**
 - 两种模式都是 INT4 → FP32 反量化 → 计算
 - 精度完全一致，只是反量化时机不同
 - 召回（LOW）和创建（HIGH）的向量可以正常匹配
+
+**跨平台兼容性（Android vs PC pyMNN）**：❌ **不兼容**
+- Android 编译开启 `MNN_CPU_WEIGHT_DEQUANT_GEMM=ON`，走直接在量化权重上 GEMM 的内核
+- PC pyMNN Windows 包未开启此选项，走先 dequant 再 GEMM 的路径
+- 同一模型、同一输入，两端输出向量 cosine ~0.49，无法互相召回
+- **结论**：Android-built KB 必须在 Android 上查询；PC-built KB 必须在 PC 上查询
 
 ### 最佳实践
 
@@ -10531,3 +10803,217 @@ class CustomFormat : BaseActionFormat() {
 **设计日期**：2026年2月1日（初版），2026年3月1日（P1重构）
 
 ---
+
+## I. py_mnn_kb Python端知识库工具
+
+### I.1 概述
+
+`py_mnn_kb` 是 PC 端 Python 知识库构建与查询工具，与 Android 端 `KnowledgeGraphDatabase` / `TextChunkProcessor` / `RagQueryManager` 逻辑完全对齐，用于 PC 端离线构建知识库后直接部署到 Android。
+
+**核心文件**：
+- `py_mnn_kb/py_mnn_kb.py`：核心库 + CLI 入口（`KnowledgeBase`、`KnowledgeGraphDB`、`EmbeddingClient`、`InMemoryGraphBuilder`、`ensure_model_downloaded`、`main()` 等）
+- `py_mnn_kb/config.json`：配置（embedding 模型路径、分块参数、检索参数、LLM API）
+
+**三个对外接口**（与 Android Agent Skill 对齐）：
+```python
+kb.build_kb(files, kb_name)    # 构建/追加知识库
+kb.add_note(text, kb_name)     # 插入笔记
+kb.query_kb(prompt, kb_name)   # RAG 检索，返回 context 字符串
+```
+
+### I.2 数据库 collection 设计
+
+SQLite 数据库中 `documents`、`entities`、`entity_edges` 三张表均有 `collection` 字段，用于多知识库共用一个 DB 文件时的数据隔离。
+
+**重要**：`collection` 字段以**数据库内实际存储的值**为准，不强制与目录名或参数名匹配。
+- `KnowledgeGraphDB.__init__()` 接收 `collection` 参数**仅作为新库创建时的初始值**
+- `_detect_collection()` 在初始化后自动从数据库读取实际 collection 名称
+- 好处：复制/重命名 KB 目录时无需手动更新数据库内的 collection 字段
+
+```python
+def _detect_collection(self) -> str:
+    row = self.conn.execute("SELECT DISTINCT collection FROM documents LIMIT 1").fetchone()
+    if row:
+        return row[0]   # 使用数据库内实际值
+    return self._provided_collection  # 空库才用传入值
+```
+
+### I.3 build_kb 构建流程
+
+对齐 Android `TextChunkProcessor.processFilesAndBuildKnowledgeBase()`：
+
+1. **文件规划阶段**（`_build_file_plan`）：并行解析所有文件，提取文本单元，按 `chunk_size/overlap/min_chunk_size` 分块，统计 chunk 数量
+2. **向量化阶段**：逐 chunk 调用 `EmbeddingClient.compute_embedding()`，插入 `documents` 表
+3. **图谱构建阶段**：NER 提取实体，经停用词过滤后，通过 `InMemoryGraphBuilder` 在内存中累计实体和共现边（避免 N² SQLite 事务）
+4. **Hub 过滤阶段**：`apply_hub_filter(hub_threshold_build)` 移除度数过高的 hub 实体（默认 1000），同时支持在线 runtime hub 剪枝
+5. **落库阶段**：`flush_to_db()` 单事务写入所有实体/边
+6. **元数据更新**：写入 SQLite `metadata` 表及外部 `metadata.json`
+
+**追加语义**：若 KB 已存在，`documents` 表追加写入；图谱表（`entities`/`entity_edges`/`chunk_entities`）全量重建（`DELETE + INSERT`），保证图谱一致性。
+
+### I.4 add_note 笔记插入流程
+
+对齐 Android `KnowledgeNoteFragment` 笔记写入逻辑：
+
+1. 将 `title + "\n\n" + content` 合并为完整文本
+2. 向量化后插入 `documents` 表（1 chunk = 1 note）
+3. NER 提取实体，调用 `db.add_entities_and_build_graph()` **增量**更新实体/边（不重建全量图谱）
+4. 调用 `db.apply_hub_threshold()` 检查并移除新增的 hub 实体
+
+**注意**：笔记插入与 build 的图谱处理策略不同：
+- build：InMemoryGraphBuilder 全量重建
+- add_note：直接在 DB 上增量追加边，不重建
+
+### I.5 向量化 chat_template 对齐
+
+`EmbeddingClient` 使用与 Android `EmbeddingHandler` 完全相同的简化 chat_template：
+
+```python
+{{ messages | map(attribute='content') | join('') }}
+```
+
+通过 `_ensure_android_embedding_model_config()` 在临时目录替换 `llm_config.json` 实现，确保 PC 构建的向量与 Android 端余弦相似度 ≥ 0.99。
+
+### I.6 BM25 + RRF 混合检索
+
+与 Android 端完全对齐的参数：
+- BM25 参数：`k1=1.5`，`b=0.75`
+- Tokenization：ASCII 字母数字 token + CJK unigram/bigram（含扩展平面）
+- RRF：`k=60`，缺失项 penalty rank = `len*2+1`
+- BM25 index 缓存：以 `kb_name + chunk_count` 为 key，chunk 数量变化时自动失效
+
+### I.7 关键注意事项与最佳实践
+
+1. **复制/重命名 KB 目录**：直接复制目录即可，无需手动修改数据库内的 collection 字段（`_detect_collection` 自动处理）
+2. **build 追加**：向现有 KB 追加文档后，图谱会全量重建（保证图谱一致性），documents 表追加
+3. **笔记召回**：单条笔记在大型 KB（2000+条）中可能被技术文档的 GraphRAG 实体关联推挤出 Top10，用更精确的关键词可命中（向量相似度准确）
+4. **元数据文件**：`metadata.json` 记录 `embeddingModel`、`embeddingDimension`、`hubThreshold`、`runtimeHubEntities` 等，Android 端加载 KB 时读取，**不参与查询过滤逻辑**
+5. **环境**：需激活 `conda activate d:\yilei.wang\OfflineAI\.env` 运行
+
+**设计日期**：2026年3月（初版）
+
+---
+
+## H.X External TTS rebase 兼容性修复（2026-03）
+
+### 问题背景
+
+MNN 上游 rebase 后 External TTS 出现两个问题：
+1. **BertVits2 "怪叫"**：推理能运行但音频异常
+2. **Supertonic TTS 崩溃**：`std::runtime_error: Failed to open unicode indexer file`
+
+### 根本原因
+
+**上游 C++ 层路径处理逻辑**（`mnn_tts_sdk.cpp`）：
+```cpp
+// C++ 读取 config.json 中的 cache_folder，拼接为完整路径
+auto cache_folder = config_folder + "/" + config.cache_folder_;
+```
+`cache_folder_` 在官方模型包中是**相对路径**（如 `"cache"`），拼接结果为 `model_dir/cache` → 正确。
+
+**我们 `TtsAdapter.java` 的错误逻辑**（rebase 前遗留）：
+```java
+// ❌ 把绝对路径写回 config.json
+config.put("cache_folder", cacheDir.getAbsolutePath());  // /data/user/0/.../tts
+Files.write(configFile.toPath(), config.toString(2).getBytes());
+```
+C++ 读到绝对路径后继续拼接 → `model_dir//data/user/0/.../tts` → **双重绝对路径**
+→ `GetOrCreateHashDirectory()` 返回空字符串 → RuntimeManager 缓存失效 → 推理精度退化 → **怪叫**
+
+**Supertonic 崩溃原因**：config.json 被我们写坏（cache_folder 变绝对路径）后，
+C++ 侧路径逻辑混乱，加上模型文件 `mnn_models/unicode_indexer.json` 按照标准目录结构存在，
+上游代码直接 `throw` 而非容错，导致崩溃。
+
+### MnnLlmChat 为何可以工作
+
+完整调用链追踪：
+```
+TtsService.init(modelDir)
+  → nativeLoadResourcesFromFile(ptr, modelDir, "", "")
+  → TTSService::LoadTtsResources(resPath, "", "")
+  → MNNTTSSDK(resPath)   // cacheDir 参数在 tts_service.cpp 中完全未使用
+  → 读取 config.json 中原始相对路径的 cache_folder
+  → 正确拼接 model_dir/cache
+```
+MnnLlmChat **从不修改模型目录的 config.json**，C++ 层用原始相对路径自行拼接，一切正常。
+
+### 修复方案（只改 TtsAdapter.java，不动上游代码）
+
+**原则**：适配层职责边界清晰——Java 层只负责验证模型目录完整性和读取采样率，
+路径管理完全交给 C++ 层（和 MnnLlmChat 一致）。
+
+**删除的错误逻辑**：
+- ❌ 解析 config.json 中 `model_dir`/`precision` 字段拼接子目录（上游不需要）
+- ❌ 把绝对 `cache_folder` 写回 config.json（导致 C++ 路径拼接错误）
+- ❌ 在（可能错误的）子目录中查找 `.mnn` 文件做验证
+
+**保留的正确逻辑**：
+- ✅ 验证模型根目录存在
+- ✅ 验证 `config.json` 存在（C++ 层必须有此文件）
+- ✅ 只读取 `sample_rate` 用于 Java 层 WAV 写入（不写回）
+- ✅ 传 `ttsModelDir.getAbsolutePath()` 给 native（与 MnnLlmChat 完全一致）
+
+**关键文件**：`app/src/main/java/com/example/offlineai/ipc/TtsAdapter.java`，`ensureExternalTtsLoaded()` 方法
+
+### Supertonic 模型包实际目录结构
+
+实际下载的 `taobao-mnn/supertonic-tts-mnn` 模型包布局：
+```
+supertonic-tts-mnn/
+├── config.json              # 模型配置（含 precision: "int8"）
+├── configuration.json
+├── unicode_indexer.json     # 在根目录！（上游代码预期在 mnn_models/ 下）
+├── voice_styles/
+└── mnn_models/
+    ├── tts.json
+    └── int8/                # 精度子目录是 int8，不是 fp16
+        ├── duration_predictor.mnn
+        ├── text_encoder.mnn
+        ├── vector_estimator.mnn
+        └── vocoder.mnn
+```
+
+上游 C++ 代码（`mnn_supertonic_tts_impl.cpp`）硬编码 `unicode_indexer.json` 在 `mnn_models/` 下，
+而实际模型包放在根目录，导致崩溃。
+
+### BertVits2 怪叫的真实原因
+
+`config.json` 里的 `cache_folder` 字段**已经是绝对路径**（被我们之前的 `TtsAdapter.java` 写入），
+而 `mnn_tts_sdk.cpp` 仍然做 `config_folder + "/" + cache_folder_` 拼接，
+导致 cache 目录无效 → RuntimeManager 权重缓存失败 → 推理精度退化 → 怪叫。
+
+### Supertonic 中文鸟语的根因
+
+`tts.json` 里 `"split": "opensource-en"` 说明该模型**只训练了英文**。
+`unicode_indexer.json` 只包含英文字符 Unicode 映射，中文字符 `unicode_to_index_` 找不到 → fallback 到 index 0 → 模型收到全零输入 → 鸟语。
+
+**这是模型本身的语言限制，不是代码 bug，无需修复代码。**
+要支持中文，需要换用中文/多语言 Supertonic 模型包。
+
+### unicode_indexer.json 布局兼容修复（Java 层）
+
+**原则：不改上游 C++ 代码，在 Java 层解决模型包布局差异。**
+
+上游 C++ 代码（`mnn_supertonic_tts_impl.cpp`）硬编码路径 `models_dir_ + "/mnn_models/unicode_indexer.json"`，
+而我们的模型包把文件放在根目录。
+
+**修复位置**：`TtsAdapter.java` → `ensureExternalTtsLoaded()`，在加载前检查并一次性复制：
+
+```java
+// Fix Supertonic model layout: C++ expects unicode_indexer.json under mnn_models/
+// but some model packages place it in the root directory. Copy once if needed.
+File indexerInMnnModels = new File(mnnModelsDir, "unicode_indexer.json");
+File indexerInRoot = new File(ttsModelDir, "unicode_indexer.json");
+if (!indexerInMnnModels.exists() && indexerInRoot.exists() && mnnModelsDir.exists()) {
+    Files.copy(indexerInRoot.toPath(), indexerInMnnModels.toPath());
+}
+```
+
+**优点**：上游 `libs/mnn` 无任何修改，模型包文件一次复制后后续自动命中 `mnn_models/`。
+
+### 关键原则
+
+- **不修改 `libs/mnn` 上游代码**（除 SPEC.md 中记录的历史必要 fork 改动之外）
+- 路径布局兼容、配置适配等问题一律在 `TtsAdapter.java` Java 层解决
+- config.json 只读，不写回（`sample_rate` 读取仅用于 Java 层 WAV 写入）
+

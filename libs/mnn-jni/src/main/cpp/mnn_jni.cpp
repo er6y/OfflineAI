@@ -509,9 +509,35 @@ public:
                     // Parse runtime config
                     json runtime_config = json::parse(config_json_);
                     
-                    // Merge runtime config into model config (runtime takes precedence)
-                    for (auto& [key, value] : runtime_config.items()) {
-                        merged_config[key] = value;
+                    // Deep merge runtime config into model config (runtime takes precedence)
+                    // CRITICAL: Use recursive merge to handle nested objects like jinja.context
+                    std::function<void(json&, const json&)> deep_merge = [&](json& target, const json& source) {
+                        for (auto it = source.begin(); it != source.end(); ++it) {
+                            if (it.value().is_object() && target.contains(it.key()) && target[it.key()].is_object()) {
+                                // Recursively merge nested objects
+                                deep_merge(target[it.key()], it.value());
+                            } else {
+                                // Overwrite or add new key
+                                target[it.key()] = it.value();
+                            }
+                        }
+                    };
+                    deep_merge(merged_config, runtime_config);
+                    
+                    // Debug: Log complete merged config to verify deep merge
+                    LOGI("[CONFIG][MERGE] Complete merged config:");
+                    LOGI("%s", merged_config.dump(2).c_str());
+                    
+                    // Debug: Log critical thinking-related config
+                    if (merged_config.contains("jinja") && merged_config["jinja"].contains("context") && merged_config["jinja"]["context"].contains("enable_thinking")) {
+                        LOGI("[CONFIG][MERGE] enable_thinking = %s", merged_config["jinja"]["context"]["enable_thinking"].get<bool>() ? "true" : "false");
+                    } else {
+                        LOGI("[CONFIG][MERGE] enable_thinking = NOT_FOUND");
+                    }
+                    if (merged_config.contains("assistant_prompt_template")) {
+                        LOGI("[CONFIG][MERGE] assistant_prompt_template = %s", merged_config["assistant_prompt_template"].get<std::string>().c_str());
+                    } else {
+                        LOGI("[CONFIG][MERGE] assistant_prompt_template = NOT_FOUND");
                     }
                     
                     // Save merged config to temporary file

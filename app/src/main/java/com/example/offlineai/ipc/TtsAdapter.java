@@ -735,67 +735,43 @@ public class TtsAdapter {
                     return false;
                 }
 
-                // Build cache path first
-                String modelName = ttsModelDir.getName();
-                File cacheDir = new File(context.getCacheDir(), "mnn/" + modelName + "/tts");
-                if (!cacheDir.exists()) {
-                    cacheDir.mkdirs();
-                }
-
-                // Read config.json to get actual model path (read-only, don't modify)
-                File actualModelDir = ttsModelDir;  // Default: use root directory
+                // Validate model has config.json (C++ layer reads it to locate all files)
+                // Do NOT modify config.json - let C++ use its original relative paths
                 File configFile = new File(ttsModelDir, "config.json");
-                if (configFile.exists()) {
-                    try {
-                        String configContent = new String(java.nio.file.Files.readAllBytes(configFile.toPath()));
-                        org.json.JSONObject config = new org.json.JSONObject(configContent);
-                        
-                        // Get model_dir and precision from config
-                        String modelDir = config.optString("model_dir", "");
-                        String precision = config.optString("precision", "");
-                        
-                        if (!modelDir.isEmpty()) {
-                            File subDir = new File(ttsModelDir, modelDir);
-                            if (!precision.isEmpty()) {
-                                subDir = new File(subDir, precision);
-                            }
-                            
-                            if (subDir.exists() && subDir.isDirectory()) {
-                                actualModelDir = subDir;
-                                LogManager.logI(TAG, "[TTS] Using model path from config: " + actualModelDir.getAbsolutePath());
-                            } else {
-                                LogManager.logW(TAG, "[TTS] Config specifies non-existent path: " + subDir + ", fallback to root");
-                            }
-                        }
-
-                        // Read sample_rate
-                        if (config.has("sample_rate")) {
-                            ttsSampleRate = config.getInt("sample_rate");
-                            LogManager.logI(TAG, "[TTS] Read sample_rate from config: " + ttsSampleRate + " Hz");
-                        }
-
-                        // CRITICAL: Write cache_folder back to config.json (required for TTS to work properly)
-                        config.put("cache_folder", cacheDir.getAbsolutePath());
-                        java.nio.file.Files.write(configFile.toPath(),
-                                config.toString(2).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                        LogManager.logI(TAG, "[TTS] Updated config.json: cache_folder=" + cacheDir.getAbsolutePath());
-                    } catch (Exception e) {
-                        LogManager.logW(TAG, "[TTS] Failed to parse config.json, using root directory", e);
-                    }
-                } else {
-                    LogManager.logI(TAG, "[TTS] No config.json found, using root directory");
-                }
-
-                // Check for .mnn files in actual model directory
-                File[] mnnFiles = actualModelDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".mnn"));
-                if (mnnFiles == null || mnnFiles.length == 0) {
-                    LogManager.logE(TAG, "[TTS] No .mnn files found in: " + actualModelDir);
+                if (!configFile.exists()) {
+                    LogManager.logE(TAG, "[TTS] No config.json found in: " + ttsModelDir);
                     externalTtsLoadFailed = true;
                     currentExternalModelPath = modelPath;
                     return false;
                 }
 
-                LogManager.logI(TAG, String.format("[TTS] Found %d .mnn file(s) in: %s", mnnFiles.length, actualModelDir.getAbsolutePath()));
+                // Read sample_rate only (read-only, never write back)
+                try {
+                    String configContent = new String(java.nio.file.Files.readAllBytes(configFile.toPath()));
+                    org.json.JSONObject config = new org.json.JSONObject(configContent);
+                    if (config.has("sample_rate")) {
+                        ttsSampleRate = config.getInt("sample_rate");
+                        LogManager.logI(TAG, "[TTS] Read sample_rate from config: " + ttsSampleRate + " Hz");
+                    }
+                } catch (Exception e) {
+                    LogManager.logW(TAG, "[TTS] Failed to read sample_rate from config.json", e);
+                }
+
+                // Fix Supertonic model layout: C++ expects unicode_indexer.json under mnn_models/
+                // but some model packages place it in the root directory. Copy once if needed.
+                File mnnModelsDir = new File(ttsModelDir, "mnn_models");
+                File indexerInMnnModels = new File(mnnModelsDir, "unicode_indexer.json");
+                File indexerInRoot = new File(ttsModelDir, "unicode_indexer.json");
+                if (!indexerInMnnModels.exists() && indexerInRoot.exists() && mnnModelsDir.exists()) {
+                    try {
+                        java.nio.file.Files.copy(indexerInRoot.toPath(), indexerInMnnModels.toPath());
+                        LogManager.logI(TAG, "[TTS] Copied unicode_indexer.json to mnn_models/ for C++ compatibility");
+                    } catch (Exception e) {
+                        LogManager.logW(TAG, "[TTS] Failed to copy unicode_indexer.json", e);
+                    }
+                }
+
+                LogManager.logI(TAG, "[TTS] Model root: " + ttsModelDir.getAbsolutePath());
 
                 // Create TtsService instance
                 Class<?> ttsClass = Class.forName("com.taobao.meta.avatar.tts.TtsService");

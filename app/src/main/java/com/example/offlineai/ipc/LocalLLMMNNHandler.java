@@ -276,9 +276,45 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // Read model config.json to get default parameters
         modelFileParams = readModelConfigParams(configFile);
         
-        // Build MNN configuration (use null for params during initialization)
+        // CRITICAL: Build MNN configuration with runtime config BEFORE createSession
+        // This ensures enable_thinking and assistant_prompt_template are set during model loading
+        RuntimeConfig runtimeConfig = RuntimeConfigHolder.get();
+        boolean thinkingEnabled = runtimeConfig != null && !runtimeConfig.noThinking;
+        int maxNewTokens = runtimeConfig != null ? runtimeConfig.maxNewTokens : ConfigManager.DEFAULT_MAX_NEW_TOKENS;
+        
+        // Build base MNN config
         String mnnConfig = buildMnnConfig(null);
-        LogManager.logI(TAG, "MNN Config: " + mnnConfig);
+        
+        // Merge runtime config into mnnConfig JSON
+        try {
+            org.json.JSONObject configObj = new org.json.JSONObject(mnnConfig);
+            
+            // Add thinking mode config
+            if (!thinkingEnabled) {
+                org.json.JSONObject jinjaObj = configObj.optJSONObject("jinja");
+                if (jinjaObj == null) {
+                    jinjaObj = new org.json.JSONObject();
+                    configObj.put("jinja", jinjaObj);
+                }
+                org.json.JSONObject contextObj = jinjaObj.optJSONObject("context");
+                if (contextObj == null) {
+                    contextObj = new org.json.JSONObject();
+                    jinjaObj.put("context", contextObj);
+                }
+                contextObj.put("enable_thinking", false);
+                
+                // Force empty <think></think> in template
+                configObj.put("assistant_prompt_template", "<|im_start|>assistant\\n<think>\\n</think>%s<|im_end|>\\n");
+            }
+            
+            // Add max_new_tokens
+            configObj.put("max_new_tokens", maxNewTokens);
+            
+            mnnConfig = configObj.toString();
+            LogManager.logI(TAG, "[INIT] MNN Config with runtime params: " + mnnConfig);
+        } catch (org.json.JSONException e) {
+            LogManager.logW(TAG, "[INIT] Failed to merge runtime config: " + e.getMessage());
+        }
         
         // Create MNN session - MNN backend will handle both embedded and external weights
         llmSessionHandle = MnnInference.createSession(modelPath, mnnConfig);
@@ -1230,47 +1266,53 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         }
         // Non-Omni models: System/External TTS handled by TtsAdapter in RagQaFragment
         
-        // ========== Configure thinking mode (Qwen3/Qwen3.5 support) ==========
+        // ========== Configure thinking mode and max_new_tokens (Qwen3/Qwen3.5 support) ==========
         // Reference: MNN iOS app LLMInferenceEngineWrapper.mm Line 637-643
         // Qwen3 defaults to enable_thinking=true, must explicitly disable if needed
         // Qwen3.5: Does NOT support /think /nothink soft switch, MUST use enable_thinking parameter
+        // 
+        // CRITICAL: Merge both configs into ONE updateConfig() call to avoid config_json_ overwrite bug
+        // Bug: C++ updateConfig() does config_json_ = new_config (not merge), so second call loses first config
         RuntimeConfig cfgForThinking = RuntimeConfigHolder.get();
         
         // Debug: Log RuntimeConfig state
         if (cfgForThinking == null) {
-            LogManager.logW(TAG, "[THINKING][DEBUG] RuntimeConfig is NULL! Using default (thinking enabled)");
+            LogManager.logW(TAG, "[CONFIG][DEBUG] RuntimeConfig is NULL! Using default (thinking enabled)");
         } else {
-            LogManager.logI(TAG, "[THINKING][DEBUG] RuntimeConfig.noThinking = " + cfgForThinking.noThinking);
+            LogManager.logI(TAG, "[CONFIG][DEBUG] RuntimeConfig.noThinking = " + cfgForThinking.noThinking);
         }
         
         boolean thinkingEnabled = !(cfgForThinking != null && cfgForThinking.noThinking);
-        LogManager.logI(TAG, "[THINKING][DEBUG] Calculated thinkingEnabled = " + thinkingEnabled);
+        int maxNewTokens = RuntimeConfigHolder.getMaxNewTokensOrDefault(ConfigManager.DEFAULT_MAX_NEW_TOKENS);
+        
+        LogManager.logI(TAG, "[CONFIG][DEBUG] Calculated thinkingEnabled = " + thinkingEnabled);
+        LogManager.logI(TAG, "[CONFIG][DEBUG] maxNewTokens = " + maxNewTokens);
         
         try {
-            String thinkingConfig = String.format(
-                "{\"jinja\":{\"context\":{\"enable_thinking\":%s}}}",
-                thinkingEnabled ? "true" : "false"
-            );
-            LogManager.logI(TAG, "[THINKING][DEBUG] Sending config JSON: " + thinkingConfig);
-            MnnInference.updateConfig(llmSessionHandle, thinkingConfig);
-            LogManager.logI(TAG, "[THINKING] Thinking mode " + (thinkingEnabled ? "ENABLED" : "DISABLED") + " (Qwen3.5: no soft switch support)");
+            // Merge thinking mode and max_new_tokens into ONE config JSON
+            // CRITICAL: Qwen3.5 requires BOTH enable_thinking AND assistant_prompt_template to disable thinking
+            // Reference: MNN llm_demo.cpp Line 100
+            String mergedConfig;
+            if (thinkingEnabled) {
+                // Thinking enabled: only set enable_thinking and max_new_tokens
+                mergedConfig = String.format(
+                    "{\"jinja\":{\"context\":{\"enable_thinking\":true}},\"max_new_tokens\":%d}",
+                    maxNewTokens
+                );
+            } else {
+                // Thinking disabled: set enable_thinking=false AND force empty <think></think> in template
+                mergedConfig = String.format(
+                    "{\"jinja\":{\"context\":{\"enable_thinking\":false}},\"assistant_prompt_template\":\"<|im_start|>assistant\\n<think>\\n</think>%%s<|im_end|>\\n\",\"max_new_tokens\":%d}",
+                    maxNewTokens
+                );
+            }
+            LogManager.logI(TAG, "[CONFIG][DEBUG] Sending merged config JSON: " + mergedConfig);
+            MnnInference.updateConfig(llmSessionHandle, mergedConfig);
+            LogManager.logI(TAG, "[CONFIG] Thinking mode " + (thinkingEnabled ? "ENABLED" : "DISABLED") + ", max_new_tokens=" + maxNewTokens);
         } catch (Exception e) {
-            LogManager.logW(TAG, "[THINKING] Failed to set thinking mode: " + e.getMessage());
+            LogManager.logW(TAG, "[CONFIG] Failed to set config: " + e.getMessage());
         }
         // =============================================================
-        
-        // ========== Configure max_new_tokens (runtime parameter) ==========
-        // CRITICAL: C++ layer reads max_new_tokens from config_json_ at inference time
-        // Must set this via updateConfig() to override the default 2048
-        int maxNewTokens = RuntimeConfigHolder.getMaxNewTokensOrDefault(ConfigManager.DEFAULT_MAX_NEW_TOKENS);
-        try {
-            String maxTokensConfig = String.format("{\"max_new_tokens\":%d}", maxNewTokens);
-            MnnInference.updateConfig(llmSessionHandle, maxTokensConfig);
-            LogManager.logI(TAG, "[INFERENCE] max_new_tokens set to " + maxNewTokens);
-        } catch (Exception e) {
-            LogManager.logW(TAG, "[INFERENCE] Failed to set max_new_tokens: " + e.getMessage());
-        }
-        // ==================================================================
         
         currentTask = executorService.submit(() -> {
             try {

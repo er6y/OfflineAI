@@ -75,7 +75,7 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
         long startTime = System.currentTimeMillis();
         
         // 1. Documents table (text chunks + vectors)
-        db.execSQL("CREATE TABLE " + TABLE_DOCUMENTS + " (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS " + TABLE_DOCUMENTS + " (" +
             "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
             "collection TEXT NOT NULL, " +
             "content TEXT NOT NULL, " +
@@ -84,10 +84,10 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
             "embedding BLOB NOT NULL, " +
             "created_at INTEGER DEFAULT (strftime('%s', 'now'))" +
             ")");
-        db.execSQL("CREATE INDEX idx_doc_collection ON " + TABLE_DOCUMENTS + "(collection)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_doc_collection ON " + TABLE_DOCUMENTS + "(collection)");
         
         // 2. Entities table (unique entities with stats)
-        db.execSQL("CREATE TABLE " + TABLE_ENTITIES + " (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS " + TABLE_ENTITIES + " (" +
             "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
             "collection TEXT NOT NULL, " +
             "entity_text TEXT NOT NULL, " +
@@ -99,13 +99,13 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
             "last_seen INTEGER DEFAULT (strftime('%s', 'now')), " +
             "UNIQUE(collection, entity_text, entity_type)" +
             ")");
-        db.execSQL("CREATE INDEX idx_entity_text ON " + TABLE_ENTITIES + "(entity_text)");
-        db.execSQL("CREATE INDEX idx_entity_type ON " + TABLE_ENTITIES + "(entity_type)");
-        db.execSQL("CREATE INDEX idx_entity_collection ON " + TABLE_ENTITIES + "(collection)");
-        db.execSQL("CREATE INDEX idx_entity_freq ON " + TABLE_ENTITIES + "(frequency DESC)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_entity_text ON " + TABLE_ENTITIES + "(entity_text)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_entity_type ON " + TABLE_ENTITIES + "(entity_type)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_entity_collection ON " + TABLE_ENTITIES + "(collection)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_entity_freq ON " + TABLE_ENTITIES + "(frequency DESC)");
         
         // 3. Entity edges table (co-occurrence graph)
-        db.execSQL("CREATE TABLE " + TABLE_EDGES + " (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS " + TABLE_EDGES + " (" +
             "id INTEGER PRIMARY KEY AUTOINCREMENT, " +
             "collection TEXT NOT NULL, " +
             "from_entity TEXT NOT NULL, " +
@@ -116,13 +116,13 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
             "updated_at INTEGER DEFAULT (strftime('%s', 'now')), " +
             "UNIQUE(collection, from_entity, to_entity)" +
             ")");
-        db.execSQL("CREATE INDEX idx_edge_from ON " + TABLE_EDGES + "(from_entity)");
-        db.execSQL("CREATE INDEX idx_edge_to ON " + TABLE_EDGES + "(to_entity)");
-        db.execSQL("CREATE INDEX idx_edge_collection ON " + TABLE_EDGES + "(collection)");
-        db.execSQL("CREATE INDEX idx_edge_weight ON " + TABLE_EDGES + "(weight DESC)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_edge_from ON " + TABLE_EDGES + "(from_entity)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_edge_to ON " + TABLE_EDGES + "(to_entity)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_edge_collection ON " + TABLE_EDGES + "(collection)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_edge_weight ON " + TABLE_EDGES + "(weight DESC)");
         
         // 4. Chunk-Entity mapping table (many-to-many)
-        db.execSQL("CREATE TABLE " + TABLE_CHUNK_ENTITIES + " (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS " + TABLE_CHUNK_ENTITIES + " (" +
             "chunk_id INTEGER NOT NULL, " +
             "entity_text TEXT NOT NULL, " +
             "entity_type TEXT NOT NULL, " +
@@ -130,25 +130,25 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
             "FOREIGN KEY(chunk_id) REFERENCES " + TABLE_DOCUMENTS + "(id) ON DELETE CASCADE, " +
             "PRIMARY KEY(chunk_id, entity_text, entity_type)" +
             ")");
-        db.execSQL("CREATE INDEX idx_ce_chunk ON " + TABLE_CHUNK_ENTITIES + "(chunk_id)");
-        db.execSQL("CREATE INDEX idx_ce_entity ON " + TABLE_CHUNK_ENTITIES + "(entity_text)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_ce_chunk ON " + TABLE_CHUNK_ENTITIES + "(chunk_id)");
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_ce_entity ON " + TABLE_CHUNK_ENTITIES + "(entity_text)");
         
         // 5. Metadata table (database info)
-        db.execSQL("CREATE TABLE " + TABLE_METADATA + " (" +
+        db.execSQL("CREATE TABLE IF NOT EXISTS " + TABLE_METADATA + " (" +
             "key TEXT PRIMARY KEY, " +
             "value TEXT" +
             ")");
         
-        // Insert initial metadata
+        // Insert initial metadata (use CONFLICT_IGNORE for PC-built DB compatibility)
         ContentValues meta = new ContentValues();
         meta.put("key", "schema_version");
         meta.put("value", String.valueOf(DB_VERSION));
-        db.insert(TABLE_METADATA, null, meta);
+        db.insertWithOnConflict(TABLE_METADATA, null, meta, SQLiteDatabase.CONFLICT_IGNORE);
         
         meta = new ContentValues();
         meta.put("key", "created_at");
         meta.put("value", String.valueOf(System.currentTimeMillis()));
-        db.insert(TABLE_METADATA, null, meta);
+        db.insertWithOnConflict(TABLE_METADATA, null, meta, SQLiteDatabase.CONFLICT_IGNORE);
         
         long duration = System.currentTimeMillis() - startTime;
         LogManager.logI(TAG, String.format("[DB_CREATE] Schema created in %dms", duration));
@@ -1497,15 +1497,56 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
     
     /**
      * Get database metadata
+     * Priority: 1) External metadata.json file, 2) DB metadata table
      * @return DatabaseMetadata object
      */
     public DatabaseMetadata getMetadata() {
+        DatabaseMetadata metadata = new DatabaseMetadata("unknown");
+        
+        // Priority 1: Try to read external metadata.json file
+        try {
+            File dbFile = new File(getDatabaseName());
+            File kbDir = dbFile.getParentFile();
+            if (kbDir != null) {
+                File metadataJsonFile = new File(kbDir, "metadata.json");
+                if (metadataJsonFile.exists()) {
+                    String jsonContent = readFileContent(metadataJsonFile);
+                    if (jsonContent != null && !jsonContent.trim().isEmpty()) {
+                        org.json.JSONObject json = new org.json.JSONObject(jsonContent);
+                        
+                        if (json.has("embeddingModel")) {
+                            metadata.embeddingModel = json.getString("embeddingModel");
+                        }
+                        if (json.has("modeldir")) {
+                            metadata.setModeldir(json.getString("modeldir"));
+                        }
+                        if (json.has("rerankerModel")) {
+                            metadata.setRerankerdir(json.getString("rerankerModel"));
+                        }
+                        if (json.has("embeddingDimension")) {
+                            metadata.setEmbeddingDimension(json.getInt("embeddingDimension"));
+                        }
+                        if (json.has("hubThreshold")) {
+                            metadata.setHubThreshold(json.getInt("hubThreshold"));
+                        }
+                        if (json.has("runtimeHubEntities")) {
+                            metadata.setRuntimeHubEntities(json.getString("runtimeHubEntities"));
+                        }
+                        
+                        LogManager.logD(TAG, "Loaded metadata from external metadata.json file");
+                        return metadata;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LogManager.logW(TAG, "Failed to read external metadata.json, falling back to DB metadata table", e);
+        }
+        
+        // Priority 2: Fallback to DB metadata table
         SQLiteDatabase db = getReadableDatabase();
         Cursor cursor = null;
         
         try {
-            DatabaseMetadata metadata = new DatabaseMetadata("unknown");
-            
             cursor = db.query(TABLE_METADATA, 
                 new String[]{"key", "value"}, 
                 null, null, null, null, null);
@@ -1544,15 +1585,33 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
                 }
             }
             
+            LogManager.logD(TAG, "Loaded metadata from DB metadata table");
             return metadata;
             
         } catch (Exception e) {
-            LogManager.logE(TAG, "Failed to get metadata", e);
+            LogManager.logE(TAG, "Failed to get metadata from DB", e);
             return new DatabaseMetadata("unknown");
         } finally {
             if (cursor != null) {
                 cursor.close();
             }
+        }
+    }
+    
+    /**
+     * Helper method to read file content
+     */
+    private String readFileContent(File file) {
+        StringBuilder content = new StringBuilder();
+        try (java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(file))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                content.append(line);
+            }
+            return content.toString();
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to read file: " + file.getAbsolutePath(), e);
+            return null;
         }
     }
     
@@ -1859,6 +1918,58 @@ public class KnowledgeGraphDatabase extends SQLiteOpenHelper {
                 try { vectorDb.close(); } catch (Exception ignore) {}
             }
         }
+    }
+
+    // ========== BM25 Support ==========
+
+    /**
+     * Lightweight chunk list for BM25 index building.
+     * Returns id + content only (no embedding blob) to minimize memory usage.
+     * Mirrors Python KnowledgeGraphDB.get_all_chunks_for_bm25().
+     */
+    public static class ChunkForBm25 {
+        public final long id;
+        public final String content;
+        public final String source;
+
+        public ChunkForBm25(long id, String content, String source) {
+            this.id = id;
+            this.content = content != null ? content : "";
+            this.source = source != null ? source : "";
+        }
+    }
+
+    /**
+     * Fetch all chunks (id, content, source) for BM25 index building.
+     * Does NOT load embedding blobs, keeping memory footprint small.
+     */
+    public List<ChunkForBm25> getAllChunksForBm25() {
+        SQLiteDatabase db = getReadableDatabase();
+        List<ChunkForBm25> result = new ArrayList<>();
+        long startTime = System.currentTimeMillis();
+        Cursor cursor = null;
+        try {
+            cursor = db.query(
+                TABLE_DOCUMENTS,
+                new String[]{"id", "content", "source"},
+                "collection=?",
+                new String[]{collection},
+                null, null, "id ASC"
+            );
+            while (cursor.moveToNext()) {
+                long id = cursor.getLong(0);
+                String content = cursor.getString(1);
+                String source = cursor.getString(2);
+                result.add(new ChunkForBm25(id, content, source));
+            }
+            long duration = System.currentTimeMillis() - startTime;
+            LogManager.logI(TAG, String.format("[BM25] Loaded %d chunks for BM25 in %dms", result.size(), duration));
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[BM25] getAllChunksForBm25 failed", e);
+        } finally {
+            if (cursor != null) cursor.close();
+        }
+        return result;
     }
 
     /**

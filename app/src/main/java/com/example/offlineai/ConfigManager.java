@@ -104,6 +104,7 @@ public class ConfigManager {
     public static final String KEY_GRAPH_HUB_THRESHOLD_BUILD = "graph_hub_threshold_build";   // 构建阶段 Hub 过滤阈值
     public static final String KEY_GRAPH_HUB_THRESHOLD_QUERY = "graph_hub_threshold_query";   // 查询阶段 Hub 过滤阈值
     public static final String KEY_GRAPH_STOPWORDS_PATH = "graph_stopwords_path"; // 图谱停用词表路径
+    public static final String KEY_BM25_ENABLED = "bm25_enabled"; // BM25+RRF hybrid retrieval switch
     
     // 设置相关的键
     public static final String KEY_DATA_ROOT_PATH = "data_root_path"; // 数据根目录
@@ -211,6 +212,8 @@ public class ConfigManager {
     public static final int DEFAULT_GRAPH_MAX_EXPAND_CHUNKS = 50;
     public static final int DEFAULT_GRAPH_RAG_WEIGHT_PRESET = 1;
     public static final int DEFAULT_GRAPH_RAG_VECTOR_EXPAND = 20; // Graph RAG 模式下向量粗召回默认扩大量（K+20）
+    public static final boolean DEFAULT_BM25_ENABLED = true; // BM25+RRF hybrid retrieval (default on)
+
     // 旧版单一 Hub 阈值默认值（仅用于向后兼容，不再直接展示在设置界面）
     public static final int DEFAULT_GRAPH_HUB_THRESHOLD = 100; // Legacy hub threshold (0=disabled)
     // 新版：构建/召回独立默认值
@@ -1296,6 +1299,16 @@ public class ConfigManager {
      */
     public static void setGraphStopwordsPath(Context context, String path) {
         setString(context, KEY_GRAPH_STOPWORDS_PATH, path == null ? "" : path);
+    }
+
+    /**
+     * Whether BM25+RRF hybrid retrieval is enabled.
+     * Mirrors Python config retrieval.bm25_enabled.
+     * @param context Context
+     * @return true if BM25+RRF hybrid retrieval is enabled (default: true)
+     */
+    public static boolean isBm25Enabled(Context context) {
+        return getBoolean(context, KEY_BM25_ENABLED, DEFAULT_BM25_ENABLED);
     }
 
     /**

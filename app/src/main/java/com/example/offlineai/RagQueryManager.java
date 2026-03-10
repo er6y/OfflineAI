@@ -170,6 +170,20 @@ public class RagQueryManager {
     private String graphRagDictPath;
     // Graph RAG limits for seed entities on manager side to avoid explosion
     private static final int GRAPH_RAG_MAX_SEED_ENTITIES_MANAGER = 32;
+
+    // BM25 index cache: kbName -> Bm25Index
+    // Invalidated when chunk count changes (mirrors Python KnowledgeBase._bm25_cache)
+    private final Map<String, Bm25Index> bm25Cache = new HashMap<>();
+    private final Object bm25CacheLock = new Object();
+
+    // Dedicated single-thread executor for BM25 index pre-warm / scoring.
+    // Runs concurrently with embedding (IPC call) to hide index-build latency.
+    // Separate from ragQueryExecutor to avoid deadlock (pipeline runs on ragQueryExecutor).
+    private final ExecutorService bm25Executor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "RagQueryManager-BM25-Thread");
+        t.setDaemon(true);
+        return t;
+    });
     
     // TtsAdapter reference - Manager holds this to survive UI destruction
     // Set via setTtsAdapter() when Fragment creates/updates TtsAdapter
@@ -1237,7 +1251,7 @@ public class RagQueryManager {
             emitStreamingChunkFromManager("[RAG] Knowledge Base: " + knowledgeBase + "; Retrieval count: " + retrievalCount + "\n");
 
             java.util.List<KnowledgeGraphDatabase.SearchResult> searchResults =
-                    runRagRetrievalPipeline(foundModelPath, finalUserPrompt, vectorDb, vectorTopK);
+                    runRagRetrievalPipeline(foundModelPath, finalUserPrompt, vectorDb, vectorTopK, knowledgeBase);
             if (searchResults == null) {
                 searchResults = new java.util.ArrayList<>();
             }
@@ -1927,8 +1941,11 @@ public class RagQueryManager {
      * This method focuses purely on business logic:
      *  - use the inference process to generate the query embedding;
      *  - call the vector database to execute searchSimilar;
+     *  - optionally run BM25+RRF hybrid retrieval (controlled by bm25_enabled config);
      *  - update manager-side RAG result state (documents and similarity info);
      *  - do not close the provided vectorDb (caller owns its lifecycle).
+     *
+     * Mirrors Python KnowledgeBase.query_kb() Steps 2 + 2b.
      */
     @NonNull
     public List<KnowledgeGraphDatabase.SearchResult> runRagRetrievalPipeline(
@@ -1936,6 +1953,22 @@ public class RagQueryManager {
             @NonNull String userQuery,
             @NonNull KnowledgeGraphDatabase vectorDb,
             int vectorTopK
+    ) throws InterruptedException {
+        return runRagRetrievalPipeline(embeddingModelPath, userQuery, vectorDb, vectorTopK,
+                vectorDb.getCollection());
+    }
+
+    /**
+     * Overload that accepts explicit kbName for BM25 cache keying.
+     * Prefer this when the caller already knows the knowledge base name.
+     */
+    @NonNull
+    public List<KnowledgeGraphDatabase.SearchResult> runRagRetrievalPipeline(
+            @NonNull String embeddingModelPath,
+            @NonNull String userQuery,
+            @NonNull KnowledgeGraphDatabase vectorDb,
+            int vectorTopK,
+            @NonNull String kbName
     ) throws InterruptedException {
         List<KnowledgeGraphDatabase.SearchResult> empty = new ArrayList<>();
         try {
@@ -1951,6 +1984,18 @@ public class RagQueryManager {
             com.example.offlineai.RuntimeConfigUtil.pushToInference(appContext);
             InferenceClient inferenceClient = InferenceClient.getInstance(appContext);
 
+            // Submit FULL BM25 retrieval (index build/cache + scoring) to bm25Executor BEFORE
+            // computeEmbedding, so the entire BM25 pipeline runs concurrently with the ~1s IPC
+            // embedding call and the subsequent vector search.
+            // On cache hit: near-instant index lookup + O(corpus) scoring.
+            // On first build: DB read + index construction + scoring, all hidden behind embedding.
+            // bm25TopK computed here so the lambda captures a local int (no shared mutable state).
+            final boolean bm25EnabledEarly = ConfigManager.isBm25Enabled(appContext);
+            final int bm25TopKEarly = Math.max((vectorTopK > 0 ? vectorTopK : 1) * 2, 60);
+            final Future<Bm25RetrievalResult> bm25Future = bm25EnabledEarly
+                    ? bm25Executor.submit(() -> runBm25Retrieval(vectorDb, kbName, userQuery, bm25TopKEarly))
+                    : null;
+
             emitStreamingChunkFromManager("[RAG] Generating query vector...\n");
 
             float[] queryVector = inferenceClient.computeEmbedding(
@@ -1960,6 +2005,7 @@ public class RagQueryManager {
             );
 
             if (queryVector == null) {
+                if (bm25Future != null) bm25Future.cancel(false);
                 String msg = "Failed to generate query vector: null result";
                 LogManager.logW(TAG, "[RAG][MGR] " + msg);
                 emitProgressFromManager(msg);
@@ -1970,6 +2016,7 @@ public class RagQueryManager {
 
             // Check stop flag after embedding
             if (shouldStop()) {
+                if (bm25Future != null) bm25Future.cancel(false);
                 LogManager.logI(TAG, "[RAG][MGR] Stop requested after embedding, aborting before search");
                 emitProgressFromManager("Operation stopped by user");
                 return empty;
@@ -1977,19 +2024,50 @@ public class RagQueryManager {
 
             emitStreamingChunkFromManager("[RAG] Searching similar text blocks...\n");
 
-            int topK = vectorTopK;
-            if (topK <= 0) {
-                topK = 1;
-            }
+            int topK = vectorTopK > 0 ? vectorTopK : 1;
 
-            List<KnowledgeGraphDatabase.SearchResult> searchResults =
+            // Step 2: Vector search
+            List<KnowledgeGraphDatabase.SearchResult> vecResults =
                     vectorDb.searchSimilar(queryVector, topK);
 
             // Check stop flag after search
             if (shouldStop()) {
+                if (bm25Future != null) bm25Future.cancel(false);
                 LogManager.logI(TAG, "[RAG][MGR] Stop requested after search, returning empty result");
                 emitProgressFromManager("Operation stopped by user");
                 return empty;
+            }
+
+            // Step 2b: BM25 + RRF fusion (mirrors Python query_kb Step 2b)
+            // bm25Future ran concurrently with computeEmbedding + vectorSearch.
+            // By this point the full BM25 pipeline (index build/cache + scoring) is done or very close.
+            // Main thread only needs: future.get() + rrfFusion.
+            List<KnowledgeGraphDatabase.SearchResult> searchResults = vecResults;
+            if (bm25EnabledEarly && bm25Future != null && !vecResults.isEmpty()) {
+                long bm25Start = System.currentTimeMillis();
+                Bm25RetrievalResult bm25Result = null;
+                try {
+                    bm25Result = bm25Future.get();
+                } catch (java.util.concurrent.ExecutionException ex) {
+                    LogManager.logW(TAG, "[BM25] Retrieval failed, falling back to vec-only: " + ex.getMessage());
+                }
+
+                if (bm25Result != null && !bm25Result.results.isEmpty()) {
+                    // RRF fusion: merged candidate pool passed to GraphRAG (same topK as vector)
+                    searchResults = rrfFusion(vecResults, bm25Result.results, topK, 60);
+
+                    long waitMs = System.currentTimeMillis() - bm25Start; // near-zero if BM25 finished first
+                    List<Long> bm25Top5 = new ArrayList<>();
+                    for (int i = 0; i < Math.min(5, bm25Result.results.size()); i++) bm25Top5.add(bm25Result.results.get(i).id);
+                    List<Long> rrfTop5 = new ArrayList<>();
+                    for (int i = 0; i < Math.min(5, searchResults.size()); i++) rrfTop5.add(searchResults.get(i).id);
+                    LogManager.logI(TAG, String.format(
+                            "[BM25+RRF](cache=%s): corpus=%d, bm25_top5=%s, rrf_top5=%s, wait=%dms",
+                            bm25Result.cacheHit ? "hit" : "built",
+                            bm25Result.corpusSize, bm25Top5, rrfTop5, waitMs));
+                    emitStreamingChunkFromManager(String.format("[RAG] BM25+RRF hybrid (corpus=%d)\n",
+                            bm25Result.corpusSize));
+                }
             }
 
             List<String> docs = new ArrayList<>();
@@ -2511,7 +2589,10 @@ public class RagQueryManager {
                     if (gScore < 0.0f) {
                         gScore = 0.0f;
                     }
-                    c.graphScore = (float) Math.log1p(gScore);
+                    // Adjust graph score by overlap ratio: candidates with no query-entity overlap
+                    // get graphScore=0, preventing hub-entity pollution from unrelated documents.
+                    float overlapRatio = (float) overlap / (float) Math.max(1, queryEntityTexts.size());
+                    c.graphScore = (float) Math.log1p(gScore) * overlapRatio;
                 } else {
                     c.entityOverlap = 0;
                     c.graphScore = 0.0f;
@@ -2928,15 +3009,22 @@ public class RagQueryManager {
             if (modeldir != null && !modeldir.isEmpty()) {
                 File modeldirFile = new File(embeddingModelRoot, modeldir);
                 if (modeldirFile.exists() && modeldirFile.isDirectory()) {
-                    File[] files = modeldirFile.listFiles();
-                    if (files != null) {
-                        for (File file : files) {
-                            // MNN models use .mnn format or config.json
-                            if (file.isFile() && (file.getName().endsWith(".mnn") ||
-                                                 file.getName().equals("config.json"))) {
-                                foundModelPath = file.getAbsolutePath();
-                                LogManager.logD(TAG, "Using model from modeldir: " + foundModelPath);
-                                break;
+                    // First try to find embedding.mnn explicitly
+                    File embeddingMnn = new File(modeldirFile, "embedding.mnn");
+                    if (embeddingMnn.exists() && embeddingMnn.isFile()) {
+                        foundModelPath = embeddingMnn.getAbsolutePath();
+                        LogManager.logD(TAG, "Found embedding.mnn in modeldir: " + foundModelPath);
+                    } else {
+                        // Fallback: look for any .mnn file or config.json
+                        File[] files = modeldirFile.listFiles();
+                        if (files != null) {
+                            for (File file : files) {
+                                if (file.isFile() && (file.getName().endsWith(".mnn") ||
+                                                     file.getName().equals("config.json"))) {
+                                    foundModelPath = file.getAbsolutePath();
+                                    LogManager.logD(TAG, "Using model from modeldir: " + foundModelPath);
+                                    break;
+                                }
                             }
                         }
                     }
@@ -3163,6 +3251,354 @@ public class RagQueryManager {
         } catch (Exception e) {
             LogManager.logE(TAG, "[MGR] Error shutting down ragQueryExecutor", e);
         }
+        try {
+            bm25Executor.shutdownNow();
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[MGR] Error shutting down bm25Executor", e);
+        }
+    }
+
+    // ========== BM25 + RRF Hybrid Retrieval ==========
+    // Mirrors Python _bm25_tokenize / _build_bm25_index / _bm25_score / _rrf_fusion in py_mnn_kb.py
+
+    /**
+     * Pre-built BM25 index for one knowledge base.
+     * Cached per KB name + chunk count; rebuilt on count change.
+     */
+    private static class Bm25Index {
+        final List<KnowledgeGraphDatabase.ChunkForBm25> chunks;
+        /** Per-document term-frequency maps */
+        final List<Map<String, Integer>> docTf;
+        /** Per-document length (token count) */
+        final int[] docDl;
+        /** Document frequency: term -> number of docs containing it */
+        final Map<String, Integer> df;
+        final double avgDl;
+        final int N;
+        final int chunkCount; // snapshot used for cache invalidation
+        // BM25 k1 / b constants (same as Python defaults)
+        static final double K1 = 1.5;
+        static final double B  = 0.75;
+
+        Bm25Index(List<KnowledgeGraphDatabase.ChunkForBm25> chunks,
+                  List<Map<String, Integer>> docTf, int[] docDl,
+                  Map<String, Integer> df, double avgDl, int chunkCount) {
+            this.chunks     = chunks;
+            this.docTf      = docTf;
+            this.docDl      = docDl;
+            this.df         = df;
+            this.avgDl      = avgDl;
+            this.N          = chunks.size();
+            this.chunkCount = chunkCount;
+        }
+    }
+
+    /**
+     * Result of one complete BM25 retrieval run.
+     * Carries both the ranked results and diagnostic metadata for logging.
+     */
+    private static class Bm25RetrievalResult {
+        /** Top-K BM25 results, sorted by score descending (similarity=0.0f). */
+        final List<KnowledgeGraphDatabase.SearchResult> results;
+        /** Total corpus size used for scoring. */
+        final int corpusSize;
+        /** Whether the index was served from cache (true) or freshly built (false). */
+        final boolean cacheHit;
+
+        Bm25RetrievalResult(List<KnowledgeGraphDatabase.SearchResult> results,
+                            int corpusSize, boolean cacheHit) {
+            this.results    = results;
+            this.corpusSize = corpusSize;
+            this.cacheHit   = cacheHit;
+        }
+    }
+
+    /**
+     * Tokenize text for BM25: ASCII alphanumeric tokens (>=2 chars, lower-cased) +
+     * individual CJK characters + CJK bigrams.
+     * Mirrors Python _bm25_tokenize() exactly:
+     *   regex r'[A-Za-z0-9][A-Za-z0-9_\-.]*' → first char must be alnum.
+     *   CJK range \u4e00-\u9fff \u3400-\u4dbf \u20000-\u2a6df (supplementary via codePoint).
+     */
+    static List<String> bm25Tokenize(String text) {
+        List<String> tokens = new ArrayList<>();
+        if (text == null || text.isEmpty()) return tokens;
+
+        // ASCII tokens: first char must be letter or digit (mirrors Python regex [A-Za-z0-9][A-Za-z0-9_\-.]*)
+        // Continuation chars may include _ - .
+        StringBuilder asciiBuf = new StringBuilder();
+        boolean inToken = false;
+        for (int i = 0; i <= text.length(); i++) {
+            char c = i < text.length() ? text.charAt(i) : 0;
+            boolean isAlnum = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+            boolean isCont  = isAlnum || c == '_' || c == '-' || c == '.';
+            if (!inToken) {
+                // First char must be alnum to start a token
+                if (isAlnum) {
+                    asciiBuf.append(c);
+                    inToken = true;
+                }
+            } else {
+                if (isCont) {
+                    asciiBuf.append(c);
+                } else {
+                    // End of token: strip leading/trailing ._- then emit if length >= 2
+                    String tok = asciiBuf.toString().toLowerCase(Locale.US)
+                            .replaceAll("^[._\\-]+|[._\\-]+$", "");
+                    if (tok.length() >= 2) tokens.add(tok);
+                    asciiBuf.setLength(0);
+                    inToken = false;
+                    // Current char may start a new token
+                    if (isAlnum) {
+                        asciiBuf.append(c);
+                        inToken = true;
+                    }
+                }
+            }
+        }
+
+        // CJK character unigrams + bigrams
+        // Use String (not char) to correctly handle supplementary plane U+20000-U+2A6DF
+        List<String> cjk = new ArrayList<>();
+        for (int i = 0; i < text.length(); ) {
+            int cp = text.codePointAt(i);
+            if ((cp >= 0x4E00 && cp <= 0x9FFF)
+                    || (cp >= 0x3400 && cp <= 0x4DBF)
+                    || (cp >= 0x20000 && cp <= 0x2A6DF)) {
+                cjk.add(new String(Character.toChars(cp)));
+            }
+            i += Character.charCount(cp);
+        }
+        for (int i = 0; i < cjk.size(); i++) {
+            tokens.add(cjk.get(i));
+            if (i + 1 < cjk.size()) {
+                tokens.add(cjk.get(i) + cjk.get(i + 1));
+            }
+        }
+        return tokens;
+    }
+
+    /**
+     * Build BM25 index from a list of chunks.
+     * Pre-computes per-document tf_map and dl to speed up query-time scoring.
+     * Mirrors Python _build_bm25_index().
+     */
+    private static Bm25Index buildBm25Index(
+            List<KnowledgeGraphDatabase.ChunkForBm25> chunks, int chunkCount) {
+        int N = chunks.size();
+        List<Map<String, Integer>> docTf = new ArrayList<>(N);
+        int[] docDl = new int[N];
+        Map<String, Integer> df = new HashMap<>();
+        long totalLen = 0;
+
+        for (int i = 0; i < N; i++) {
+            List<String> tokens = bm25Tokenize(chunks.get(i).content);
+            Map<String, Integer> tf = new HashMap<>();
+            for (String t : tokens) {
+                tf.put(t, tf.getOrDefault(t, 0) + 1);
+            }
+            docTf.add(tf);
+            docDl[i] = tokens.size();
+            totalLen += tokens.size();
+            for (String t : tf.keySet()) {
+                df.put(t, df.getOrDefault(t, 0) + 1);
+            }
+        }
+        double avgDl = N > 0 ? (double) totalLen / N : 1.0;
+        return new Bm25Index(chunks, docTf, docDl, df, avgDl, chunkCount);
+    }
+
+    /**
+     * Compute BM25 score for a single document.
+     * Mirrors Python _bm25_score().
+     */
+    private static double bm25Score(Bm25Index idx, List<String> queryTokens, int docI) {
+        Map<String, Integer> tf = idx.docTf.get(docI);
+        int dl = idx.docDl[docI];
+        double score = 0.0;
+        for (String term : queryTokens) {
+            int tfVal = tf.getOrDefault(term, 0);
+            if (tfVal == 0) continue;
+            int nq = idx.df.getOrDefault(term, 0);
+            double idf = Math.log((idx.N - nq + 0.5) / (nq + 0.5) + 1.0);
+            double num = tfVal * (Bm25Index.K1 + 1.0);
+            double den = tfVal + Bm25Index.K1 * (1.0 - Bm25Index.B + Bm25Index.B * dl / Math.max(idx.avgDl, 1.0));
+            score += idf * num / den;
+        }
+        return score;
+    }
+
+    /**
+     * Run BM25 search over cached index; return top-K results sorted by score descending.
+     * Results carry similarity=0.0f (filled in by rrfFusion from vec side if intersecting).
+     */
+    private static List<KnowledgeGraphDatabase.SearchResult> bm25Search(
+            Bm25Index idx, String query, int topK) {
+        List<String> queryTokens = bm25Tokenize(query);
+        if (queryTokens.isEmpty()) return new ArrayList<>();
+
+        // Score all docs; store original chunk index (not id) for O(1) retrieval
+        int N = idx.chunks.size();
+        int[] hitIdx = new int[N];
+        double[] sc  = new double[N];
+        int hitCount = 0;
+        for (int i = 0; i < N; i++) {
+            double s = bm25Score(idx, queryTokens, i);
+            if (s > 0) {
+                hitIdx[hitCount] = i;
+                sc[hitCount]     = s;
+                hitCount++;
+            }
+        }
+
+        // Sort hit slots by score descending, take top-K
+        int k = Math.min(topK, hitCount);
+        Integer[] order = new Integer[hitCount];
+        for (int i = 0; i < hitCount; i++) order[i] = i;
+        Arrays.sort(order, (a, b2) -> Double.compare(sc[b2], sc[a]));
+
+        List<KnowledgeGraphDatabase.SearchResult> results = new ArrayList<>(k);
+        for (int i = 0; i < k; i++) {
+            int slot = order[i];
+            KnowledgeGraphDatabase.ChunkForBm25 ch = idx.chunks.get(hitIdx[slot]);
+            results.add(new KnowledgeGraphDatabase.SearchResult(ch.id, ch.content, ch.source, 0.0f));
+        }
+        return results;
+    }
+
+    /**
+     * Reciprocal Rank Fusion of vector and BM25 ranked lists.
+     * Mirrors Python _rrf_fusion() with penalty rank = len*2+1 and all edge cases.
+     *
+     * @param vecResults  vector search results (ordered by similarity desc)
+     * @param bm25Results BM25 results (ordered by bm25 score desc)
+     * @param topK        number of fused results to return
+     * @param rrfK        RRF constant k (default 60)
+     * @return merged list sorted by RRF score descending
+     */
+    private static List<KnowledgeGraphDatabase.SearchResult> rrfFusion(
+            List<KnowledgeGraphDatabase.SearchResult> vecResults,
+            List<KnowledgeGraphDatabase.SearchResult> bm25Results,
+            int topK, int rrfK) {
+        if (topK <= 0) return new ArrayList<>();
+        // Degenerate cases
+        if (vecResults.isEmpty()) {
+            return new ArrayList<>(bm25Results.subList(0, Math.min(topK, bm25Results.size())));
+        }
+        if (bm25Results.isEmpty()) {
+            return new ArrayList<>(vecResults.subList(0, Math.min(topK, vecResults.size())));
+        }
+
+        // Build id -> SearchResult (vec takes priority for similarity)
+        Map<Long, KnowledgeGraphDatabase.SearchResult> idToChunk = new HashMap<>();
+        for (KnowledgeGraphDatabase.SearchResult r : bm25Results) {
+            idToChunk.put(r.id, new KnowledgeGraphDatabase.SearchResult(r.id, r.content, r.source, r.similarity));
+        }
+        for (KnowledgeGraphDatabase.SearchResult r : vecResults) {
+            KnowledgeGraphDatabase.SearchResult existing = idToChunk.get(r.id);
+            if (existing != null) {
+                existing.similarity = r.similarity; // vec similarity takes priority
+            } else {
+                idToChunk.put(r.id, new KnowledgeGraphDatabase.SearchResult(r.id, r.content, r.source, r.similarity));
+            }
+        }
+
+        // Build rank maps (1-indexed)
+        Map<Long, Integer> vecRank  = new HashMap<>();
+        Map<Long, Integer> bm25Rank = new HashMap<>();
+        for (int i = 0; i < vecResults.size();  i++) vecRank.put(vecResults.get(i).id,   i + 1);
+        for (int i = 0; i < bm25Results.size(); i++) bm25Rank.put(bm25Results.get(i).id, i + 1);
+
+        // Penalty ranks for missing items: len*2+1 (strictly worse than last-rank item)
+        int vecPenalty  = vecResults.size()  * 2 + 1;
+        int bm25Penalty = bm25Results.size() * 2 + 1;
+
+        // Compute RRF scores for union of all IDs
+        Set<Long> allIds = new HashSet<>(idToChunk.keySet());
+        final Map<Long, Double> rrfScores = new HashMap<>();
+        for (long cid : allIds) {
+            int rv = vecRank.getOrDefault(cid,  vecPenalty);
+            int rb = bm25Rank.getOrDefault(cid, bm25Penalty);
+            rrfScores.put(cid, 1.0 / (rrfK + rv) + 1.0 / (rrfK + rb));
+        }
+
+        // Sort by RRF score descending, take topK
+        List<Long> sorted = new ArrayList<>(allIds);
+        sorted.sort((a, b) -> Double.compare(rrfScores.get(b), rrfScores.get(a)));
+
+        List<KnowledgeGraphDatabase.SearchResult> result = new ArrayList<>();
+        int limit = Math.min(topK, sorted.size());
+        for (int i = 0; i < limit; i++) {
+            result.add(idToChunk.get(sorted.get(i)));
+        }
+        return result;
+    }
+
+    /**
+     * Get or build BM25 index for the given KB, with double-checked cache.
+     * Cache key: kbName; invalidated when chunk count changes.
+     * Mirrors Python KnowledgeBase._bm25_cache logic.
+     *
+     * Thread safety:
+     *  - First check under lock: fast path for cache hits.
+     *  - Build (DB read + index construction) happens outside lock.
+     *  - Second check under lock: only write cache if no concurrent build won the race.
+     *  - Bm25Index is immutable after construction (all fields final), safe to share.
+     *
+     * @return pair: (index, cacheHit=true if served from cache)
+     */
+    private Bm25Index getOrBuildBm25Index(KnowledgeGraphDatabase vectorDb, String kbName,
+                                           boolean[] outCacheHit) {
+        int currentCount = vectorDb.getChunkCount();
+        synchronized (bm25CacheLock) {
+            Bm25Index cached = bm25Cache.get(kbName);
+            if (cached != null && cached.chunkCount == currentCount) {
+                if (outCacheHit != null) outCacheHit[0] = true;
+                return cached;
+            }
+        }
+        // Build outside lock to avoid blocking other threads during DB read + index construction
+        long t0 = System.currentTimeMillis();
+        List<KnowledgeGraphDatabase.ChunkForBm25> chunks = vectorDb.getAllChunksForBm25();
+        Bm25Index idx = buildBm25Index(chunks, currentCount);
+        long buildMs = System.currentTimeMillis() - t0;
+        LogManager.logI(TAG, String.format("[BM25] Index built: kb=%s, corpus=%d, time=%dms",
+                kbName, chunks.size(), buildMs));
+        synchronized (bm25CacheLock) {
+            Bm25Index cached = bm25Cache.get(kbName);
+            if (cached == null || cached.chunkCount != currentCount) {
+                bm25Cache.put(kbName, idx);
+            } else {
+                // Another thread built the same version concurrently; use theirs.
+                idx = cached;
+            }
+        }
+        if (outCacheHit != null) outCacheHit[0] = false;
+        return idx;
+    }
+
+    /**
+     * Run the complete BM25 retrieval pipeline for one query:
+     *   1. Get or build (cached) BM25 index.
+     *   2. Score all documents and return top-bm25TopK results.
+     *
+     * This method is designed to run entirely on bm25Executor, concurrently with
+     * computeEmbedding + vectorSearch on the RAG query thread.
+     * All inputs are either immutable (query string, topK int) or thread-safe reads
+     * (SQLiteDatabase.getReadableDatabase is safe for concurrent reads).
+     *
+     * @param vectorDb  KB database (read-only operations only)
+     * @param kbName    KB name for cache keying
+     * @param query     user query string
+     * @param bm25TopK  number of BM25 results to return
+     * @return Bm25RetrievalResult with ranked results + diagnostics
+     */
+    private Bm25RetrievalResult runBm25Retrieval(KnowledgeGraphDatabase vectorDb,
+                                                   String kbName, String query, int bm25TopK) {
+        boolean[] cacheHit = {false};
+        Bm25Index idx = getOrBuildBm25Index(vectorDb, kbName, cacheHit);
+        List<KnowledgeGraphDatabase.SearchResult> results = bm25Search(idx, query, bm25TopK);
+        return new Bm25RetrievalResult(results, idx.N, cacheHit[0]);
     }
 }
 
