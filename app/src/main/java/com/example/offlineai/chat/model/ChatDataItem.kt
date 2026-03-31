@@ -34,6 +34,28 @@ class ChatDataItem {
     var displayText: String? = null
         get() = field?:""
 
+    // Keep markdown rendering once activated during streaming.
+    // This prevents payload updates from downgrading rendered formulas to plain text.
+    var markdownLocked: Boolean = false
+
+    // Whether current streaming text tail contains unclosed LaTeX formula.
+    // When true, UI should keep previous rendered content stable.
+    var hasUnclosedLatex: Boolean = false
+
+    // Last stable text snapshot that is safe for markdown rendering.
+    // During unclosed formula streaming, render this prefix and keep tail as plain text.
+    var stableMarkdownText: String? = null
+
+    // Cache key for the last text passed to markdown.setMarkdown().
+    // When the normalized text equals this key, setMarkdown is skipped to avoid redundant LaTeX re-parse.
+    @JvmField
+    var cachedSpannedKey: String? = null
+
+    // Cached plain tail appended after stable markdown prefix during unclosed LaTeX streaming.
+    // Used to append only delta chars and avoid rebuilding previously rendered prefix.
+    @JvmField
+    var streamingPlainTail: String = ""
+
     var thinkingText: String? = null
 
     // Debug section (for debug information)
@@ -53,6 +75,7 @@ class ChatDataItem {
         this.type = type
         this.text = text
         this.displayText = text
+        this.stableMarkdownText = text
     }
 
     constructor(type: Int) {

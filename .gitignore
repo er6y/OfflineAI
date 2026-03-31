@@ -139,4 +139,5 @@ app/release/
 # !libs/mnn/source/backend/cpu/CPUGroupNorm.hpp
 # !libs/mnn/source/backend/cpu/README_CUSTOM_OPS.md
 /allinone
-/.env/share/zoneinfo/Pacific
+
+/.env

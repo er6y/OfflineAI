@@ -141,6 +141,13 @@ public class LlmModelFactory {
                 "http://localhost:11434",
                 new String[]{}
         ));
+        
+        // MiniMax API
+        modelProviders.put("minimax", new ModelProvider(
+                "MiniMax API",
+                "https://api.minimaxi.com/v1",
+                new String[]{}
+        ));
     }
     
     /**
@@ -178,6 +185,8 @@ public class LlmModelFactory {
                 return modelProviders.get("zhipu");
             case OLLAMA:
                 return modelProviders.get("ollama");
+            case MINIMAX:
+                return modelProviders.get("minimax");
             case OPENAI:
             default:
                 return modelProviders.get("openai");

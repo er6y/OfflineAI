@@ -145,6 +145,15 @@ flowchart TB
         - `popNewLogs()` 内部会推进 cursor，无需外部调用 `advanceLogConsumerToEnd()`
         - 落 MD 时清空 buffer，确保 buffer 只存未落盘内容
         - UI 被 kill 时通知失败不影响主流程，重建后自动恢复
+        - **流式 Markdown 渲染策略（2026-03-24）**：为避免公式/富文本实时抖动，增量阶段仍走 plain text；段落边界触发 full markdown render。段落边界检测同时支持：1）当前 chunk 包含 `\n\n`；2）跨 chunk 边界（上一个 chunk 以 `\n` 结尾且当前 chunk 以 `\n` 开头）。该策略兼容 UI 轮询按单换行拆分数据的实现，避免“双换行触发不生效”。
+        - **触发后保持策略（2026-03-26）**：引入 `markdownStreamingActivated`。首次命中段落边界后，当前 query 的后续 chunk 持续走 full markdown render（不再回退 payload 纯文本更新），避免“刚触发就被下一段 plain text 覆盖”的体感问题；在 query 开始与结束重置该状态。
+        - **RecyclerView 绑定防闪烁策略（2026-03-26）**：`onBindViewHolder(holder, position, payloads)` 在 payload 非空时禁止调用 `super.onBindViewHolder(...)`。原因：`super` 可能触发一次 full bind（markdown），随后业务 payload 分支再次 plain-text bind，造成同帧“渲染→还原”闪烁。修复后改为：payload 为空手动走 full bind，payload 非空仅走增量 bind。
+        - **消息级渲染锁（2026-03-26）**：在 `ChatDataItem` 增加 `markdownLocked`。一旦流式命中段落边界并进入 markdown 模式，即将该消息置为锁定；`AssistantViewHolder` 的 payload 增量绑定检测到 `markdownLocked=true` 时继续调用 `markdown.setMarkdown(...)`，确保已闭合公式不会在后续 payload 更新中退回为纯文本显示。
+        - **闭合公式快速激活（2026-03-26）**：针对“短文本公式无双换行”的场景，新增 `hasClosedLatexFormula()` 检测（支持 `$...$` 与 `$$...$$`，忽略转义 `\$`）。一旦检测到至少一个闭合公式，即立即激活 markdown streaming 模式并锁定消息渲染状态，避免已闭合公式在后续 chunk 到来时出现“已渲染 → 纯文本 → 再渲染”的反复闪烁。
+        - **未闭合公式冻结策略（2026-03-26）**：新增 `hasUnclosedLatexFormula()` 与消息状态 `hasUnclosedLatex`。当出现“旧公式已渲染 + 新公式尚未闭合”时，禁止 full markdown 重渲染，payload 分支也不刷新 markdown，保持已渲染内容稳定；待新公式闭合后再恢复 markdown 渲染，从而消除“旧公式跟着新公式一起闪”的问题。
+        - **稳定前缀渲染策略（2026-03-26）**：新增 `stableMarkdownText` 作为“最后一次公式状态稳定快照”。在未闭合阶段采用“前缀 markdown + 尾部 plain 增量追加”：前缀使用 `markdown.setMarkdown(...)` 渲染并保持稳定，尾部仅追加 delta 文本，避免每帧重排旧公式且不出现“界面卡住不更新”。实现上不能使用 `toMarkdown()+setText` 代替 `setMarkdown(...)`，否则 JLatexMath 异步公式图片回调不会触发，公式会退化为原始文本。
+        - **状态域一致性修复（2026-03-26）**：`hasClosedLatex/hasUnclosedLatex/stableMarkdownText` 统一基于 `displayText` 计算与维护，而不是 raw `text`。根因是 `displayText` 经过 `CollapsibleTextParser` 处理（含 trim/块剥离），若稳定前缀来自 raw text 会出现前缀锚点失配，触发 fallback 全量渲染，导致“新公式未闭合时旧公式反复重渲染”。
+        - **去重渲染策略（2026-03-26）**：在 `ChatDataItem` 中缓存 `cachedSpannedKey`（实际为最近一次 `setMarkdown` 的 normalized 文本 key）；key 未变化时直接跳过 `setMarkdown`，避免每个流式帧重复 LaTeX 全文重排。
       - **主要 API**：`RagQueryManager.appendInferenceLog()`、`resetLogConsumerCursorAfterPersist()`、`getNewLogsForConsumer()`。
 - **EmbeddingHandler / RerankerHandler**：MNN 一站式嵌入与重排管理器。需求：以单例形式常驻模型，适配构建任务（高负载）与问答（低延迟）两种场景，支持中断与模式切换。设计：统一调用 MnnInference JNI，维护 native handle 生命周期，确保线程安全（synchronized + AtomicBoolean）与内存模式管理。**主要 API**：`EmbeddingHandler.loadModel()`、`computeEmbedding()`、`stopInference()`；`RerankerHandler.loadModel()`、`setInstruction()`、`rerank()`、`setScoreCallback()`。**关键数据结构**：`EmbeddingHandler.MemoryMode`、`RerankerHandler.RerankResult`、`RerankerHandler.ScoreCallback`。
 - **KnowledgeBaseService**：管理知识库目录结构与元信息。需求：提供新建/删除/重命名/校验接口，维护 SQLite 数据文件、文档快照、临时中间文件。设计：封装路径拼接与权限校验，所有写操作记录日志便于排查权限问题。知识库元信息除 SQLite `metadata` 表外，还必须同步落地 `metadata.json`，字段保持与 Android 兼容，便于目录级扫描、模型路径恢复与历史库兼容；CLI 作为脚本/Agent 接口时必须遵循稳定输出契约：文本模式下 `query` 仅将最终模型回答或 `--no-llm` 的召回文本写入 `stdout`，`build/note` 不占用 `stdout`，所有日志统一写入 `stderr`；`--output json` 模式下 `stdout` 仅输出单个 UTF-8 JSON 结果对象，便于 Linux/Windows 脚本和多智能体调用链稳定解析。**主要 API**：`createKnowledgeBase()`、`deleteKnowledgeBase()`、`loadMetadata()`、`validatePath()`。**关键数据结构**：`KnowledgeBaseService.Metadata`（记录 embedding 模型、创建时间、统计信息）。
@@ -166,6 +175,14 @@ flowchart TB
 
 ### 2.3 推理与原生层
 - **LocalLLMMNNHandler**：MNN 推理枢纽，需求是对不同模型类型（纯文本 LLM、视觉-语言、Diffusion、TTS）进行统一探测、配置构建、推理调度，并处理流式回调与停止控制。设计：通过检测模型目录内文件（llm.mnn、visual.mnn、text_encoder.mnn、audio.mnn、talker.mnn）判定功能，使用 MnnInference.ConfigBuilder 构建 runtime config，注册回调处理文本 token、图像/音频输出，支持 dit_steps/dit_solver、KV Cache 等高级参数。**主要 API**：`findModelFile()`、`initialize()`、`generate()`、`stopGeneration()`、`buildMnnConfig()`、`handleStreamingToken()`。**关键数据结构**：`LocalLlmHandler.InferenceParams`、`MnnInference.ConfigBuilder`、`StreamingCallback`。
+  - **MNN upstream 同步（2026-03）**：`libs/mnn` 已 rebase 到 `upstream/master@9d4b21e1`，并保留本地扩展提交（ZImage/LongCat/Sana/Flux2Klein）。冲突点集中在 LLM 引擎构建与 forward 输出处理：
+    - `transformers/llm/engine/CMakeLists.txt`：采用 upstream 的可见性属性集合（`CXX_VISIBILITY_PRESET/C_VISIBILITY_PRESET/VISIBILITY_INLINES_HIDDEN`），增强跨平台导出一致性。
+    - `transformers/llm/engine/src/llm.cpp`：合并“输出有效性校验”与“LongCat hidden_states 导出”，并按 `has_talker` 动态选择 hidden_states 索引，避免 `talker_embeds` 场景下输出索引错位。
+  - **本次 upstream 对 OfflineAI 的直接收益**：
+    - LLM：修复 jinja context 透传、状态检查和 Windows 编译问题；采样器重构并增强 penalty 控制；新增 LLM benchmark profile，有助于排查推理性能瓶颈。
+    - TTS：`token2wav` 异步流程拆分为 DiT/Vocoder 三阶段并行管线，降低长文本语音生成尾延迟风险。
+    - OpenCL/Metal/CPU：新增 TopKV2、OpenCL kernel 创建保护、NEON+fp16 LinearAttention 优化，提升移动端稳定性与吞吐。
+    - Core/MNNChat：修复 Pipeline 编译问题、Android streaming 终止回归、本地模型添加崩溃，减少 App 集成层异常。
   - **Diffusion 引擎架构（MNN upstream rebase 2025-02）**：
     - **继承体系**：官方 upstream 将 Diffusion 引擎重构为抽象基类 + 子类模式，我们的 fork 在此基础上扩展了 ZImage 和 LongCat 子类：
       ```
@@ -9836,9 +9853,155 @@ C++: inferenceWithHistory() → 读取 config_json_ → 使用 512
    - 查看 C++ 日志：`[INFERENCE] max_new_tokens set to 512`
    - 查看生成日志：`Generation loop finished: current_size=XXX`
 
+### Thinking 模式控制架构（Qwen3/Qwen3.5）
+
+**控制参数**：`jinja.context.enable_thinking`（布尔值）
+
+**Java 配置链路**：
+```
+UI checkbox (RagQaFragment)
+  → ConfigManager.setNoThinking(!isChecked)        // no_thinking=true 表示禁用
+  → RuntimeConfigUtil.buildRuntimeConfig()          // 读取 noThinking 字段
+  → RuntimeConfigHolder.set(runtimeConfig)          // 跨进程通过 Parcelable 传递
+  → performHistoryInference()                       // 推理前
+    → updateConfig("{\"jinja\":{\"context\":{\"enable_thinking\":false}}}")
+```
+
+**关键设计决策**：
+- `enable_thinking` **只在每次推理前**通过 `updateConfig()` 设置，不在 `initializeLLM()` 中设置
+- 原因：`InferenceService` 进程持久存活，模型会被复用（`REUSING loaded model`），`initializeLLM` 不会每次都执行；而 `RuntimeConfig` 中的 `noThinking` 值是最新的用户设置，推理前读取时机正确
+- `config_runtime_merged.json` 文件中的 `enable_thinking` 值是加载时写入的历史快照，**不反映运行时实际生效值**，不要以该文件判断 thinking 是否生效
+
+**NER 推理特例**：NER 推理（图谱构建）强制 `enable_thinking=false`，不受用户开关影响
+
+**Qwen3.5 Chat Template Bug 自动修复（2026-03-17）**：
+
+官方 Qwen3.5-0.8B-MNN 模型的 `llm_config.json` 中 `chat_template` 存在 bug：
+```jinja
+{%- if add_generation_prompt %}
+    {{- '<|im_start|>assistant\n<think>\n' }}
+{%- endif %}
+```
+此代码无条件输出 `<think>` 标签，导致即使 `enable_thinking=false` 时，模型仍会生成 thinking 内容，浪费算力。
+
+**自动修复逻辑**（`libs/mnn-jni/src/main/cpp/mnn_jni.cpp:528-586`）：
+- 在模型加载时（`createSession`）读取 `llm_config.json`
+- 检测 Qwen3.5 特有 buggy pattern：`'<|im_start|>assistant\\n<think>\\n'`
+- 自动替换为：
+  ```jinja
+  {%- if add_generation_prompt %}
+      {{- '<|im_start|>assistant\n' }}
+      {%- if enable_thinking is defined and enable_thinking is true %}
+          {{- '<think>\n' }}
+      {%- endif %}
+  {%- endif %}
+  ```
+- 写回 `llm_config.json`，下次加载自动生效
+- 安全性：只修复包含特定 pattern 的模板，不影响其他模型
+
+**修复效果**：
+- `enable_thinking=true`：输出 `<|im_start|>assistant\n<think>\n`（正常 thinking 模式）
+- `enable_thinking=false`：只输出 `<|im_start|>assistant\n`（无 thinking，直接回答）
+
+**已反馈给 Qwen MNN 团队**
+
 ---
 
-## H.12 Chat UI 滚动跳动问题（2025-11-05）
+## H.12 Chat UI Markdown 流式渲染修复（2026-03-17）
+
+### 问题现象
+
+流式输出时 Markdown 渲染不一致：
+1. **流式结束后不渲染**：输出完成后有时不触发 Markdown 渲染，显示纯文本
+2. **流式中无渲染**：整个流式过程中完全不渲染，用户看不到格式化内容
+
+### 根本原因
+
+**RecyclerView 的 payload 机制**：
+- `updateRecentItem()` 调用 `notifyItemChanged(pos, payload)`（带 payload）
+- `AssistantViewHolder.bind()` 检测到 payload 时走**增量更新路径**（只更新 `TextView.text`，不调用 `markdown.setMarkdown()`）
+- 流式结束时调用 `updateRecentItem()` → 仍然是增量更新 → **不触发 Markdown 渲染**
+
+**相关代码**（`ChatViewHolders.kt`）：
+```kotlin
+fun bind(message: ChatMessage, modelName: String, payloads: List<Any>) {
+    if (payloads.isNotEmpty()) {
+        // 增量更新路径：只更新纯文本，不渲染 Markdown
+        textViewResponse.text = message.text
+        return
+    }
+    // 完整绑定路径：渲染 Markdown
+    markwon.setMarkdown(textViewResponse, message.text)
+}
+```
+
+### 解决方案
+
+#### 1. 流式结束强制 Markdown 渲染
+
+**文件**：`RagQaFragment.java` Line 2158-2171
+
+**修复逻辑**：
+```java
+// 流式结束后，强制触发完整 Markdown 渲染
+// 调用 notifyItemChanged(pos) WITHOUT payload → 触发完整 bind() → markdown.setMarkdown()
+int lastPos = chatMessages.size() - 1;
+if (lastPos >= 0) {
+    chatAdapter.notifyItemChanged(lastPos);  // 无 payload
+}
+LogManager.logD(TAG, "Force full markdown render after streaming complete");
+```
+
+**关键点**：
+- `notifyItemChanged(pos)` **不带 payload** → RecyclerView 调用 `bind(message, modelName, emptyList())`
+- `payloads.isEmpty()` → 走完整绑定路径 → `markwon.setMarkdown()`
+
+#### 2. 流式中段落边界触发渲染
+
+**文件**：`RagQaFragment.java` Line 4302-4312
+
+**修复逻辑**：
+```java
+// 检测双换行 (\n\n) - 模型段落边界
+// 在段落边界触发完整 Markdown 渲染，避免等到流式结束
+boolean hasDoubleNewline = chunk != null && chunk.contains("\n\n");
+if (hasDoubleNewline) {
+    // 完整渲染路径：notifyItemChanged without payload
+    int lastPos = chatMessages.size() - 1;
+    if (lastPos >= 0 && chatAdapter != null) {
+        chatAdapter.notifyItemChanged(lastPos);
+    }
+} else {
+    // 增量更新路径：updateRecentItem (plain text, 避免抖动)
+    chatAdapter.updateRecentItem(lastMsg);
+}
+```
+
+**设计考虑**：
+- **`\n\n` 触发渲染**：模型通常在段落间输出双换行，此时触发渲染可以让用户看到部分格式化内容
+- **单 token 不渲染**：避免每个 token 都触发 Markdown 渲染导致界面抖动
+- **性能平衡**：段落级渲染频率适中（通常几秒一次），不影响流畅度
+
+### 修复效果
+
+**流式结束后**：
+- ✅ 自动触发完整 Markdown 渲染
+- ✅ 代码块、列表、加粗等格式正确显示
+
+**流式过程中**：
+- ✅ 遇到 `\n\n` 时触发段落级渲染
+- ✅ 用户可以实时看到部分格式化内容
+- ✅ 单 token 更新仍然是纯文本（避免抖动）
+
+### 相关问题
+
+此修复同时解决了折叠区域（`<think>`/`<debug>`/`<performance>`）在流式中不显示的问题：
+- `CollapsibleTextParser` 在每次 `performUpdateChatMessage` 时解析标签
+- 段落边界触发渲染后，折叠区域的 UI 元素（展开/收起按钮）正确显示
+
+---
+
+## H.13 Chat UI 滚动跳动问题（2025-11-05）
 
 ### 问题现象
 
@@ -10659,11 +10822,32 @@ String fullResponse = fullResponseAccumulator.toString();
 - 直接使用模型名作为 `model` 参数
 - 可通过API动态获取模型列表，或手动添加
 
+**MiniMax API 配置**（2026-03-24新增）：
+- **Base URL**: `https://api.minimaxi.com/v1`
+- **兼容性**: 完全兼容 OpenAI API 格式
+- **支持的模型**: 
+  - MiniMax-M2.7（推荐）
+  - MiniMax-M2.7-highspeed
+  - MiniMax-M2.5
+  - MiniMax-M2.5-highspeed
+  - MiniMax-M2.1
+  - MiniMax-M2.1-highspeed
+  - MiniMax-M2
+- **特殊功能**: 
+  - 支持 `reasoning_split=True` 参数，将思考内容分离到 `reasoning_details` 字段
+  - 原生 API 的 `content` 字段包含 `<think>` 标签内容（需完整保留）
+- **使用方式**: 
+  1. 在 API 地址下拉选择"MiniMax API"或手动输入 `https://api.minimaxi.com/v1`
+  2. 输入 MiniMax API Key
+  3. 在模型下拉选择或手动添加模型名（如 `MiniMax-M2.7`）
+- **参考文档**: https://platform.minimaxi.com/docs/api-reference/text-openai-api
+
 **相关代码**：
-- `app/src/main/java/com/example/offlineai/api/LlmApiAdapter.java`：endpoint构建逻辑
+- `app/src/main/java/com/example/offlineai/api/LlmApiAdapter.java`：endpoint构建逻辑，MINIMAX 类型检测
+- `app/src/main/java/com/example/offlineai/api/LlmModelFactory.java`：MiniMax 提供商配置
 - `app/src/main/java/com/example/offlineai/RagQaFragment.java`：自定义模型管理
 
-**配置日期**：2026年1月31日
+**配置日期**：2026年1月31日，2026年3月24日（新增 MiniMax）
 
 ---
 

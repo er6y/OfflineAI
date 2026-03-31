@@ -241,6 +241,9 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     // Query completion tracking (to prevent premature UI collapse before polling finishes)
     private volatile boolean queryCompleted = false; // LLM query completed, waiting for buffer polling to finish
     private volatile long lastDataReadTime = 0; // Last time data was read from buffer (to ensure UI render time)
+    // Once a paragraph boundary is detected, keep full markdown rendering enabled
+    // for the rest of current streaming query to avoid instant fallback to plain text.
+    private volatile boolean markdownStreamingActivated = false;
     
     // Audio decoding state tracking (for selected audio files)
     private final AtomicBoolean isAudioDecoding = new AtomicBoolean(false); // Audio decoding in progress
@@ -1054,6 +1057,86 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             ragQueryManager.setTtsAdapter(ttsAdapter);
             LogManager.logD(TAG, "[TTS] TtsAdapter set to Manager after callback update");
         }
+    }
+
+    /**
+     * Detect whether current text already contains at least one closed LaTeX formula.
+     * Supports inline '$...$' and block '$$...$$'. Escaped '\$' is ignored.
+     */
+    private boolean hasClosedLatexFormula(String text) {
+        if (text == null || text.isEmpty()) {
+            return false;
+        }
+
+        boolean inSingle = false;
+        boolean inDouble = false;
+
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c != '$') {
+                continue;
+            }
+            if (i > 0 && text.charAt(i - 1) == '\\') {
+                continue;
+            }
+
+            boolean isDouble = (i + 1 < text.length() && text.charAt(i + 1) == '$');
+            if (isDouble) {
+                if (!inSingle) {
+                    inDouble = !inDouble;
+                    if (!inDouble) {
+                        return true;
+                    }
+                }
+                i++; // Skip second '$' in '$$'
+            } else {
+                if (!inDouble) {
+                    inSingle = !inSingle;
+                    if (!inSingle) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Detect whether current text ends in an unclosed LaTeX state.
+     * Supports inline '$...$' and block '$$...$$'. Escaped '\$' is ignored.
+     */
+    private boolean hasUnclosedLatexFormula(String text) {
+        if (text == null || text.isEmpty()) {
+            return false;
+        }
+
+        boolean inSingle = false;
+        boolean inDouble = false;
+
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c != '$') {
+                continue;
+            }
+            if (i > 0 && text.charAt(i - 1) == '\\') {
+                continue;
+            }
+
+            boolean isDouble = (i + 1 < text.length() && text.charAt(i + 1) == '$');
+            if (isDouble) {
+                if (!inSingle) {
+                    inDouble = !inDouble;
+                }
+                i++; // Skip second '$' in '$$'
+            } else {
+                if (!inDouble) {
+                    inSingle = !inSingle;
+                }
+            }
+        }
+
+        return inSingle || inDouble;
     }
     
     // The following methods are copied from MainActivity and adjusted for Fragment needs
@@ -2045,6 +2128,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     private void initializeSendingState() {
         isTaskRunning = true;
         isTaskCancelled = false;
+        markdownStreamingActivated = false;
         // [Important] Do not reset global stop flag, maintain previous stop state
         LogManager.logD(TAG, "Initializing sending state - task running: " + isTaskRunning + ", cancelled: " + isTaskCancelled + ", global stop flag unchanged: " + globalStopFlag);
         LogManager.logI(TAG, "[STATE] initializeSendingState - thread=" + Thread.currentThread().getName() + ", ts=" + System.currentTimeMillis());
@@ -2066,6 +2150,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         // Reset queryCompleted flag
         queryCompleted = false;
         lastDataReadTime = 0;
+        markdownStreamingActivated = false;
         LogManager.logI(TAG, "[RESET_STATE][FLAGS] Reset queryCompleted=false, lastDataReadTime=0");
         
         // NOTE: For local models (LLM/Diffusion), history is persisted by manager/handler
@@ -2155,11 +2240,17 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                     mainHandler.post(() -> {
                         try {
                             if (getActivity() != null && isAdded() && !isDetached()) {
-                                chatAdapter.updateRecentItem(lastMsg);
-                                LogManager.logD(TAG, "Auto-collapsed collapsible sections after streaming complete");
+                                // Force full markdown re-render by calling notifyItemChanged WITHOUT payload.
+                                // updateRecentItem() uses a payload → plain text only (streaming path).
+                                // notifyItemChanged(pos) without payload triggers full bind() → markdown.setMarkdown().
+                                int lastPos = chatMessages.size() - 1;
+                                if (lastPos >= 0) {
+                                    chatAdapter.notifyItemChanged(lastPos);
+                                }
+                                LogManager.logD(TAG, "Force full markdown render after streaming complete");
                             }
                         } catch (Exception e) {
-                            LogManager.logE(TAG, "Failed to auto-collapse sections", e);
+                            LogManager.logE(TAG, "Failed to force markdown render after streaming", e);
                         }
                     });
                 }
@@ -4280,6 +4371,11 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 }
             }
             
+            String previousDisplayText = lastMsg.getDisplayText();
+            if (previousDisplayText == null) {
+                previousDisplayText = currentText;
+            }
+
             lastMsg.text = newText;
 
             // Parse collapsible sections during streaming
@@ -4288,9 +4384,60 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             CollapsibleTextParser.INSTANCE.parseAndPopulate(newText, lastMsg);
             
             lastMsg.setLoading(false);
+
+            String newDisplayText = lastMsg.getDisplayText();
+            if (newDisplayText == null) {
+                newDisplayText = "";
+            }
             
-            // Incremental update
-            chatAdapter.updateRecentItem(lastMsg);
+            // Detect paragraph boundaries during streaming.
+            // IMPORTANT: \n\n may be split across chunks by polling/splitting logic.
+            // Example: previous chunk ends with "\n", current chunk starts with "\n".
+            boolean hasDoubleNewlineInChunk = chunk != null && chunk.contains("\n\n");
+            boolean hasCrossChunkDoubleNewline = chunk != null
+                    && !chunk.isEmpty()
+                    && currentText.endsWith("\n")
+                    && chunk.charAt(0) == '\n';
+            boolean hasClosedLatex = hasClosedLatexFormula(newDisplayText);
+            boolean hasUnclosedLatex = hasUnclosedLatexFormula(newDisplayText);
+            lastMsg.setHasUnclosedLatex(hasUnclosedLatex);
+            if (lastMsg.getStableMarkdownText() == null) {
+                lastMsg.setStableMarkdownText(previousDisplayText);
+            }
+            if (!hasUnclosedLatex) {
+                lastMsg.setStableMarkdownText(newDisplayText);
+            }
+
+            if ((hasDoubleNewlineInChunk || hasCrossChunkDoubleNewline || hasClosedLatex) && !markdownStreamingActivated) {
+                markdownStreamingActivated = true;
+                lastMsg.setMarkdownLocked(true);
+                if (hasClosedLatex) {
+                    LogManager.logD(TAG, "[STREAM_RENDER] Markdown streaming mode activated by closed LaTeX formula");
+                } else {
+                    LogManager.logD(TAG, "[STREAM_RENDER] Markdown streaming mode activated");
+                }
+            }
+
+            boolean shouldFullMarkdownRender = (markdownStreamingActivated
+                    || hasDoubleNewlineInChunk
+                    || hasCrossChunkDoubleNewline
+                    || hasClosedLatex)
+                    && !hasUnclosedLatex;
+
+            if (shouldFullMarkdownRender) {
+                // Full bind path: notifyItemChanged without payload → markdown.setMarkdown()
+                int lastPos = chatMessages.size() - 1;
+                if (lastPos >= 0 && chatAdapter != null) {
+                    chatAdapter.notifyItemChanged(lastPos);
+                }
+                if (hasDoubleNewlineInChunk || hasCrossChunkDoubleNewline || hasClosedLatex) {
+                    LogManager.logD(TAG, "[STREAM_RENDER] Full markdown render triggered at paragraph boundary");
+                }
+            } else {
+                // Incremental update path; when hasUnclosedLatex=true,
+                // ViewHolder keeps previous markdown output stable to avoid flicker.
+                chatAdapter.updateRecentItem(lastMsg);
+            }
             
             // Smart auto-scroll: only scroll if user is at bottom
             smartScrollToBottom();

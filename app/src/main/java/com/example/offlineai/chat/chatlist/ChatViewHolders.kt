@@ -6,6 +6,7 @@ import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.text.SpannableStringBuilder
 import android.text.TextUtils
 import android.view.ActionMode
 import android.view.Menu
@@ -336,12 +337,20 @@ object ChatViewHolders {
             applyGlobalTextSize()
             
             if (!payloads.isNullOrEmpty()) {
-                // Incremental update (streaming) - use plain text to avoid layout jitter
-                // Markdown rendering is deferred until streaming completes
+                // Incremental update (streaming)
                 updateCollapsibleSections(data)
                 if (data.displayText != null) {
-                    // Use plain text during streaming to prevent font/size changes causing jitter
-                    viewText.text = data.displayText
+                    if (data.markdownLocked) {
+                        if (data.hasUnclosedLatex) {
+                            bindFrozenMarkdownPrefix(data)
+                        } else {
+                            // Stable formula state: apply markdown with Spanned cache to avoid re-parse.
+                            setMarkdownCached(viewText, data)
+                        }
+                    } else {
+                        // Early streaming: plain text only, no LaTeX parse cost.
+                        viewText.text = data.displayText
+                    }
                     viewText.visibility = View.VISIBLE
                 }
                 return
@@ -354,7 +363,7 @@ object ChatViewHolders {
             if (TextUtils.isEmpty(data.displayText)) {
                 viewText.visibility = View.GONE
             } else {
-                markdown.setMarkdown(viewText, normalizeLatex(data.displayText!!))
+                setMarkdownCached(viewText, data)
                 viewText.visibility = View.VISIBLE
             }
 
@@ -493,6 +502,68 @@ object ChatViewHolders {
             }
             
             return result
+        }
+
+        /**
+         * Apply markdown to viewText, skipping re-render if text is unchanged.
+         * Must use setMarkdown() (not toMarkdown+setText) because JLatexMath needs
+         * setMarkdown to register its async ImageSpan callbacks for formula rendering.
+         * The skip-if-same optimization prevents redundant LaTeX re-parse on every
+         * streaming frame when displayText hasn't actually changed.
+         */
+        private fun setMarkdownCached(tv: TextView, data: ChatDataItem) {
+            val text = normalizeLatex(data.displayText ?: "")
+            if (data.cachedSpannedKey == text) {
+                // Same text as last render: skip entirely to avoid redundant LaTeX parse.
+                return
+            }
+            // Full markdown path owns the whole text; clear any frozen-tail cache.
+            data.streamingPlainTail = ""
+            data.cachedSpannedKey = text
+            markdown.setMarkdown(tv, text)
+        }
+
+        private fun bindFrozenMarkdownPrefix(data: ChatDataItem) {
+            val fullText = data.displayText ?: ""
+            val stableText = data.stableMarkdownText ?: ""
+
+            if (stableText.isEmpty() || !fullText.startsWith(stableText)) {
+                // Fallback: no stable prefix, render full text normally (cache-protected).
+                setMarkdownCached(viewText, data)
+                return
+            }
+
+            // Stable prefix exists: keep it rendered as markdown, then append tail incrementally as plain text.
+            // This keeps old formulas stable while still showing in-progress unclosed formula tail.
+            val normalizedStable = normalizeLatex(stableText)
+            if (data.cachedSpannedKey != normalizedStable) {
+                data.streamingPlainTail = ""
+                data.cachedSpannedKey = normalizedStable
+                markdown.setMarkdown(viewText, normalizedStable)
+            }
+
+            val tailText = fullText.substring(stableText.length)
+            if (tailText.isEmpty()) {
+                data.streamingPlainTail = ""
+                return
+            }
+
+            val previousTail = data.streamingPlainTail
+            if (tailText.startsWith(previousTail)) {
+                // Append only delta chars to avoid touching already-rendered prefix.
+                val delta = tailText.substring(previousTail.length)
+                if (delta.isNotEmpty()) {
+                    viewText.append(delta)
+                }
+                data.streamingPlainTail = tailText
+                return
+            }
+
+            // Tail was rewritten (parser trim or stream correction). Rebuild as prefix + full current tail.
+            data.streamingPlainTail = tailText
+            data.cachedSpannedKey = normalizedStable
+            markdown.setMarkdown(viewText, normalizedStable)
+            viewText.append(tailText)
         }
         
         private fun applyGlobalTextSize() {

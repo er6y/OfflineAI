@@ -15,6 +15,7 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ConcurrentHashMap;
@@ -69,6 +70,7 @@ public class LlmApiAdapter {
         ZHIPU,       // 智谱 API
         OLLAMA,      // Ollama API
         MIMO,        // 小米 MiMo API (uses api-key header)
+        MINIMAX,     // MiniMax API
         LOCAL        // 本地模型
     }
     
@@ -125,6 +127,8 @@ public class LlmApiAdapter {
             return ApiType.ZHIPU;
         } else if (apiUrl.contains("xiaomimimo")) {
             return ApiType.MIMO;
+        } else if (apiUrl.contains("minimax")) {
+            return ApiType.MINIMAX;
         } else {
             return ApiType.OPENAI;
         }
@@ -178,12 +182,23 @@ public class LlmApiAdapter {
         LogManager.logD(TAG, "检测到API类型: " + apiType.name());
         LogManager.logD(TAG, "[STREAM] onStart - source=api, model=" + model + ", thread=" + Thread.currentThread().getName());
         
+        // MiniMax Chat Completion API does NOT support multimodal image input
+        // MiniMax's OpenAI-compatible API only supports text chat
+        final List<String> finalImagePaths;
+        if (apiType == ApiType.MINIMAX && imagePaths != null && !imagePaths.isEmpty()) {
+            LogManager.logW(TAG, "[MINIMAX] MiniMax Chat API does not support image input, clearing " + imagePaths.size() + " image(s)");
+            LogManager.logW(TAG, "[MINIMAX] If you need image understanding, please use MiniMax-VL-01 model or Hailuo AI with vision capabilities");
+            finalImagePaths = null;
+        } else {
+            finalImagePaths = imagePaths;
+        }
+        
         try {
             // Check endpoint cache first
             String cachedEndpoint = endpointCache.get(apiUrl);
             if (cachedEndpoint != null) {
                 LogManager.logD(TAG, "Using cached endpoint: " + cachedEndpoint);
-                makeStreamingRequestWithSeparatePrompts(cachedEndpoint, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, apiType, callback, null);
+                makeStreamingRequestWithSeparatePrompts(cachedEndpoint, apiKey, model, systemPrompt, userPrompt, finalImagePaths, audioPaths, apiType, callback, null);
                 return;
             }
             
@@ -192,7 +207,7 @@ public class LlmApiAdapter {
                 String vendorEndpoint = getFullApiUrl(apiUrl, apiType);
                 LogManager.logD(TAG, "Using DOUBAO vendor endpoint directly: " + vendorEndpoint);
                 
-                makeStreamingRequestWithSeparatePrompts(vendorEndpoint, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, apiType, new ApiCallback() {
+                makeStreamingRequestWithSeparatePrompts(vendorEndpoint, apiKey, model, systemPrompt, userPrompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
                     @Override
                     public void onSuccess(String response) {
                         endpointCache.put(apiUrl, vendorEndpoint);
@@ -217,7 +232,7 @@ public class LlmApiAdapter {
             String standardEndpoint = getStandardEndpoint(apiUrl);
             LogManager.logD(TAG, "Trying standard endpoint: " + standardEndpoint);
             
-            makeStreamingRequestWithSeparatePrompts(standardEndpoint, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, apiType, new ApiCallback() {
+            makeStreamingRequestWithSeparatePrompts(standardEndpoint, apiKey, model, systemPrompt, userPrompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
                 @Override
                 public void onSuccess(String response) {
                     endpointCache.put(apiUrl, standardEndpoint);
@@ -241,7 +256,7 @@ public class LlmApiAdapter {
                     String vendorEndpoint = getFullApiUrl(apiUrl, apiType);
                     LogManager.logD(TAG, "Trying vendor endpoint: " + vendorEndpoint);
                     
-                    makeStreamingRequestWithSeparatePrompts(vendorEndpoint, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, apiType, new ApiCallback() {
+                    makeStreamingRequestWithSeparatePrompts(vendorEndpoint, apiKey, model, systemPrompt, userPrompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
                         @Override
                         public void onSuccess(String response) {
                             endpointCache.put(apiUrl, vendorEndpoint);
@@ -284,6 +299,16 @@ public class LlmApiAdapter {
                 + ", thread=" + Thread.currentThread().getName());
         
         try {
+            // MiniMax Chat Completion API does NOT support multimodal image input
+            final List<String> finalImagePaths;
+            if (apiType == ApiType.MINIMAX && imagePaths != null && !imagePaths.isEmpty()) {
+                LogManager.logW(TAG, "[MINIMAX] MiniMax Chat API does not support image input, clearing " + imagePaths.size() + " image(s)");
+                LogManager.logW(TAG, "[MINIMAX] If you need image understanding, please use MiniMax-VL-01 model or Hailuo AI with vision capabilities");
+                finalImagePaths = null;
+            } else {
+                finalImagePaths = imagePaths;
+            }
+            
             // 如果是本地模型，使用本地适配器
             if (apiType == ApiType.LOCAL) {
                 LogManager.logD(TAG, "使用本地模型(多进程): " + model);
@@ -314,7 +339,7 @@ public class LlmApiAdapter {
                         callback.onError(errorMessage);
                     }
                 };
-                client.runLlmTask(model, prompt, imagePaths, audioPaths, proxyCb);
+                client.runLlmTask(model, prompt, finalImagePaths, audioPaths, proxyCb);
                 return;
             }
             
@@ -322,7 +347,7 @@ public class LlmApiAdapter {
             String cachedEndpoint = endpointCache.get(apiUrl);
             if (cachedEndpoint != null) {
                 LogManager.logD(TAG, "Using cached endpoint: " + cachedEndpoint);
-                makeStreamingRequest(cachedEndpoint, apiKey, model, prompt, imagePaths, audioPaths, apiType, callback);
+                makeStreamingRequest(cachedEndpoint, apiKey, model, prompt, finalImagePaths, audioPaths, apiType, callback);
                 return;
             }
             
@@ -331,7 +356,7 @@ public class LlmApiAdapter {
                 String vendorEndpoint = getFullApiUrl(apiUrl, apiType);
                 LogManager.logD(TAG, "Using DOUBAO vendor endpoint directly: " + vendorEndpoint);
                 
-                makeStreamingRequest(vendorEndpoint, apiKey, model, prompt, imagePaths, audioPaths, apiType, new ApiCallback() {
+                makeStreamingRequest(vendorEndpoint, apiKey, model, prompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
                     @Override
                     public void onSuccess(String response) {
                         endpointCache.put(apiUrl, vendorEndpoint);
@@ -358,7 +383,7 @@ public class LlmApiAdapter {
             
             AtomicBoolean retryWithVendor = new AtomicBoolean(false);
             
-            makeStreamingRequest(standardEndpoint, apiKey, model, prompt, imagePaths, audioPaths, apiType, new ApiCallback() {
+            makeStreamingRequest(standardEndpoint, apiKey, model, prompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
                 @Override
                 public void onSuccess(String response) {
                     // Standard endpoint works, cache it
@@ -385,7 +410,7 @@ public class LlmApiAdapter {
                     String vendorEndpoint = getFullApiUrl(apiUrl, apiType);
                     LogManager.logD(TAG, "Trying vendor endpoint: " + vendorEndpoint);
                     
-                    makeStreamingRequest(vendorEndpoint, apiKey, model, prompt, imagePaths, audioPaths, apiType, new ApiCallback() {
+                    makeStreamingRequest(vendorEndpoint, apiKey, model, prompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
                         @Override
                         public void onSuccess(String response) {
                             // Vendor endpoint works, cache it
@@ -444,6 +469,7 @@ public class LlmApiAdapter {
             case DOUBAO:
             case QIANWEN:
             case ZHIPU:
+            case MINIMAX:
             case OPENAI:
             default:
                 // 标准 OpenAI 兼容格式：用户地址 + /chat/completions
@@ -486,7 +512,8 @@ public class LlmApiAdapter {
             case MOONSHOT:
             case ZHIPU:
             case MIMO:
-                // 这些API使用messages数组（智谱API兼容OpenAI格式）
+            case MINIMAX:
+                // 这些API使用messages数组（智谱API、MiniMax兼容OpenAI格式）
                 JSONArray messages = new JSONArray();
                 messages.put(new JSONObject().put("role", "user").put("content", prompt));
                 requestBody.put("messages", messages);
@@ -647,7 +674,12 @@ public class LlmApiAdapter {
     private void makeStreamingRequest(String fullApiUrl, String apiKey, String model, String prompt,
                                       java.util.List<String> imagePaths, java.util.List<String> audioPaths,
                                       ApiType apiType, ApiCallback callback, ErrorCallbackWithStatus errorCallbackWithStatus) {
-        streamingClient.streamRequest(fullApiUrl, apiKey, model, prompt, imagePaths, audioPaths, new StreamingApiClient.StreamingCallback() {
+        boolean noThinking = ConfigManager.getNoThinking(context);
+        boolean thinkingEnabled = !noThinking;
+        
+        LogManager.logD(TAG, "[THINKING] makeStreamingRequest: noThinking=" + noThinking + ", thinkingEnabled=" + thinkingEnabled + ", apiType=" + apiType.name());
+        
+        streamingClient.streamRequest(fullApiUrl, apiKey, model, prompt, imagePaths, audioPaths, apiType, thinkingEnabled, new StreamingApiClient.StreamingCallback() {
             @Override
             public void onToken(String token) {
                 callback.onStreamingData(token);
@@ -685,7 +717,12 @@ public class LlmApiAdapter {
                                                          String systemPrompt, String userPrompt,
                                                          java.util.List<String> imagePaths, java.util.List<String> audioPaths,
                                                          ApiType apiType, ApiCallback callback, ErrorCallbackWithStatus errorCallbackWithStatus) {
-        streamingClient.streamRequest(fullApiUrl, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, new StreamingApiClient.StreamingCallback() {
+        boolean noThinking = ConfigManager.getNoThinking(context);
+        boolean thinkingEnabled = !noThinking;
+        
+        LogManager.logD(TAG, "[THINKING] makeStreamingRequestWithSeparatePrompts: noThinking=" + noThinking + ", thinkingEnabled=" + thinkingEnabled + ", apiType=" + apiType.name());
+        
+        streamingClient.streamRequest(fullApiUrl, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, apiType, thinkingEnabled, new StreamingApiClient.StreamingCallback() {
             @Override
             public void onToken(String token) {
                 callback.onStreamingData(token);

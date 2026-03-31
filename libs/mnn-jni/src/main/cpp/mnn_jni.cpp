@@ -9,6 +9,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <regex>
 #include <unistd.h>  // for chdir, getcwd
 #include <cerrno>    // for errno
 #include <sys/stat.h> // for stat
@@ -523,6 +524,66 @@ public:
                         }
                     };
                     deep_merge(merged_config, runtime_config);
+                    
+                    // CRITICAL FIX: Auto-fix Qwen3.5 chat_template bug in llm_config.json
+                    // MNN reads chat_template from llm_config.json, NOT config.json
+                    // Official Qwen3.5 template has a bug: when enable_thinking=false, it outputs empty <think></think> tags
+                    // This misleads the model to generate thinking content anyway, wasting compute.
+                    // Fix: Remove the else branch so NO <think> tag is output when enable_thinking=false
+                    std::string llm_config_path = model_dir_with_slash + "llm_config.json";
+                    std::ifstream llm_config_file(llm_config_path);
+                    if (llm_config_file.is_open()) {
+                        json llm_config;
+                        llm_config_file >> llm_config;
+                        llm_config_file.close();
+                        
+                        if (llm_config.contains("jinja") && llm_config["jinja"].contains("chat_template")) {
+                            std::string chat_template = llm_config["jinja"]["chat_template"].get<std::string>();
+                            
+                            // SAFETY CHECK: Only fix if template contains the EXACT buggy Qwen3.5 pattern
+                            bool is_qwen35_buggy_template = (
+                                chat_template.find("'<|im_start|>assistant\\n<think>\\n'") != std::string::npos
+                            );
+                            
+                            if (is_qwen35_buggy_template) {
+                                // Qwen3.5 template ends with:
+                                // {%- if add_generation_prompt %}
+                                //     {{- '<|im_start|>assistant\n<think>\n' }}
+                                // {%- endif %}
+                                //
+                                // This ALWAYS outputs <think> tag, even when enable_thinking=false
+                                // Fix: Add conditional check for enable_thinking
+                                
+                                std::regex buggy_pattern(
+                                    R"(\{%- if add_generation_prompt %\}\s*\{\{- '<\|im_start\|>assistant\\n<think>\\n' \}\}\s*\{%- endif %\})"
+                                );
+                                
+                                std::string fixed_template = std::regex_replace(chat_template, buggy_pattern,
+                                    "{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n    {%- if enable_thinking is defined and enable_thinking is true %}\n        {{- '<think>\\n' }}\n    {%- endif %}\n{%- endif %}");
+                                
+                                if (fixed_template != chat_template) {
+                                    llm_config["jinja"]["chat_template"] = fixed_template;
+                                    
+                                    // Write fixed llm_config.json back
+                                    std::ofstream llm_config_out(llm_config_path);
+                                    if (llm_config_out.is_open()) {
+                                        llm_config_out << llm_config.dump(4);
+                                        llm_config_out.close();
+                                        LOGI("[TEMPLATE_FIX] Fixed Qwen3.5 llm_config.json - added enable_thinking check");
+                                        LOGI("[TEMPLATE_FIX] When enable_thinking=false, NO <think> tag will be output");
+                                    } else {
+                                        LOGW("[TEMPLATE_FIX] Failed to write fixed llm_config.json");
+                                    }
+                                } else {
+                                    LOGW("[TEMPLATE_FIX] Qwen3.5 pattern detected but regex replacement failed");
+                                }
+                            } else {
+                                LOGI("[TEMPLATE_FIX] Not a Qwen3.5 buggy template, skipping fix");
+                            }
+                        }
+                    } else {
+                        LOGI("[TEMPLATE_FIX] llm_config.json not found, skipping template fix");
+                    }
                     
                     // Debug: Log complete merged config to verify deep merge
                     LOGI("[CONFIG][MERGE] Complete merged config:");

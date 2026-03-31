@@ -60,6 +60,9 @@ public class LocalLlmAdapter {
     // TTS音频路径（最后一次推理产生的）
     private volatile String lastTtsAudioPath = null;
     
+    // Track last noThinking value to detect changes requiring model reload
+    private volatile Boolean lastNoThinking = null;
+    
     /**
      * 调用本地模型进行推理（添加防重复调用机制）
      * 简化的状态处理逻辑：
@@ -125,10 +128,22 @@ public class LocalLlmAdapter {
                 case READY:
                     // 模型已就绪，检查是否为目标模型
                     if (modelName.equals(currentModelName)) {
-                        LogManager.logI(TAG, "✓ REUSING loaded model: " + modelName + " (no reload needed)");
-                        // Send debug info to UI: reusing model
-                        callback.onStreamingData("[LLM] Reusing local model: " + modelName + "\n");
-                        executeInference(prompt, finalImagePaths, finalAudioPaths, callback);
+                        // Check if noThinking changed - if so, must reload model so enable_thinking takes effect
+                        // enable_thinking is baked into jinja template at createLLM()/load() time via config_runtime_merged.json
+                        RuntimeConfig currentCfg = RuntimeConfigHolder.get();
+                        boolean currentNoThinking = currentCfg != null && currentCfg.noThinking;
+                        boolean thinkingChanged = lastNoThinking != null && lastNoThinking != currentNoThinking;
+                        lastNoThinking = currentNoThinking;
+                        if (thinkingChanged) {
+                            LogManager.logI(TAG, "⚠ THINKING MODE CHANGED (noThinking: " + !currentNoThinking + "→" + currentNoThinking + "), reloading model to apply enable_thinking");
+                            callback.onStreamingData("[LLM] Reloading model (thinking mode changed)...\n");
+                            loadModelAndInference(modelName, prompt, finalImagePaths, finalAudioPaths, callback);
+                        } else {
+                            lastNoThinking = currentNoThinking;
+                            LogManager.logI(TAG, "✓ REUSING loaded model: " + modelName + " (no reload needed)");
+                            callback.onStreamingData("[LLM] Reusing local model: " + modelName + "\n");
+                            executeInference(prompt, finalImagePaths, finalAudioPaths, callback);
+                        }
                     } else {
                         LogManager.logI(TAG, "⚠ SWITCHING model: " + currentModelName + " → " + modelName + " (will unload and reload)");
                         // Send debug info to UI: loading model

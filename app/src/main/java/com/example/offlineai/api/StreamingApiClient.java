@@ -81,8 +81,38 @@ public class StreamingApiClient {
             userPrompt = prompt.substring(firstEmptyLineIndex + 2).trim();
         }
         
+        // Call new method with separated prompts (no thinking control for legacy)
+        streamRequest(apiUrl, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, null, null, callback);
+    }
+    
+    /**
+     * 发送流式API请求（支持thinking控制）- 接受单个prompt，自动分离system和user
+     * @param apiUrl API地址
+     * @param apiKey API密钥
+     * @param model 模型名称
+     * @param prompt 提示内容（可能包含system和user prompt拼接）
+     * @param imagePaths 图片路径列表（可选）
+     * @param audioPaths 音频路径列表（可选，暂不支持）
+     * @param apiType API类型（用于thinking参数注入）
+     * @param thinkingEnabled 是否启用thinking模式（null表示不控制）
+     * @param callback 回调接口
+     */
+    public void streamRequest(String apiUrl, String apiKey, String model, String prompt, 
+                             List<String> imagePaths, List<String> audioPaths,
+                             LlmApiAdapter.ApiType apiType, Boolean thinkingEnabled,
+                             StreamingCallback callback) {
+        // Auto-split prompt by \n\n (may cause issues with Agent prompts)
+        String systemPrompt = "";
+        String userPrompt = prompt;
+        
+        if (prompt != null && prompt.contains("\n\n")) {
+            int firstEmptyLineIndex = prompt.indexOf("\n\n");
+            systemPrompt = prompt.substring(0, firstEmptyLineIndex).trim();
+            userPrompt = prompt.substring(firstEmptyLineIndex + 2).trim();
+        }
+        
         // Call new method with separated prompts
-        streamRequest(apiUrl, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, callback);
+        streamRequest(apiUrl, apiKey, model, systemPrompt, userPrompt, imagePaths, audioPaths, apiType, thinkingEnabled, callback);
     }
     
     /**
@@ -94,11 +124,14 @@ public class StreamingApiClient {
      * @param userPrompt 用户提示词
      * @param imagePaths 图片路径列表（可选）
      * @param audioPaths 音频路径列表（可选，暂不支持）
+     * @param apiType API类型（用于thinking参数注入）
+     * @param thinkingEnabled 是否启用thinking模式（null表示不控制）
      * @param callback 回调接口
      */
     public void streamRequest(String apiUrl, String apiKey, String model, 
                              String systemPrompt, String userPrompt,
                              List<String> imagePaths, List<String> audioPaths,
+                             LlmApiAdapter.ApiType apiType, Boolean thinkingEnabled,
                              StreamingCallback callback) {
         try {
             LogManager.logD(TAG, "准备发送流式请求: " + apiUrl);
@@ -183,6 +216,75 @@ public class StreamingApiClient {
             
             requestBody.put("messages", messages);
             requestBody.put("stream", true);
+            
+            // ========== Configure thinking mode based on API type ==========
+            if (thinkingEnabled != null && apiType != null) {
+                // Qwen3/Qwen3.5/百炼云: Uses enable_thinking in extra_body
+                if (apiType == LlmApiAdapter.ApiType.QIANWEN) {
+                    try {
+                        JSONObject extraBody = new JSONObject();
+                        extraBody.put("enable_thinking", thinkingEnabled);
+                        requestBody.put("extra_body", extraBody);
+                        LogManager.logI(TAG, "[THINKING] Qwen extra_body set: enable_thinking=" + thinkingEnabled);
+                    } catch (JSONException e) {
+                        LogManager.logE(TAG, "Failed to set enable_thinking", e);
+                    }
+                }
+                
+                // 火山引擎(豆包): Uses thinking field in request body
+                if (apiType == LlmApiAdapter.ApiType.DOUBAO) {
+                    try {
+                        JSONObject thinking = new JSONObject();
+                        if (thinkingEnabled) {
+                            thinking.put("type", "enable");
+                            thinking.put("budget_tokens", 1024);
+                        } else {
+                            thinking.put("type", "disable");
+                        }
+                        requestBody.put("thinking", thinking);
+                        LogManager.logI(TAG, "[THINKING] Doubao thinking set: enabled=" + thinkingEnabled);
+                    } catch (JSONException e) {
+                        LogManager.logE(TAG, "Failed to set thinking parameter", e);
+                    }
+                }
+                
+                // DeepSeek: May support enable_thinking in extra_body
+                if (apiType == LlmApiAdapter.ApiType.DEEPSEEK) {
+                    try {
+                        JSONObject extraBody = new JSONObject();
+                        extraBody.put("enable_thinking", thinkingEnabled);
+                        requestBody.put("extra_body", extraBody);
+                        LogManager.logI(TAG, "[THINKING] DeepSeek extra_body set: enable_thinking=" + thinkingEnabled);
+                    } catch (JSONException e) {
+                        LogManager.logE(TAG, "Failed to set enable_thinking for DeepSeek", e);
+                    }
+                }
+                
+                // Moonshot: May support enable_thinking in extra_body
+                if (apiType == LlmApiAdapter.ApiType.MOONSHOT) {
+                    try {
+                        JSONObject extraBody = new JSONObject();
+                        extraBody.put("enable_thinking", thinkingEnabled);
+                        requestBody.put("extra_body", extraBody);
+                        LogManager.logI(TAG, "[THINKING] Moonshot extra_body set: enable_thinking=" + thinkingEnabled);
+                    } catch (JSONException e) {
+                        LogManager.logE(TAG, "Failed to set enable_thinking for Moonshot", e);
+                    }
+                }
+                
+                // OPENAI兼容格式: 本地部署的Qwen、DeepSeek等模型（通过vLLM等）
+                // 大多数OpenAI兼容的推理服务（如vLLM）支持extra_body.enable_thinking参数
+                if (apiType == LlmApiAdapter.ApiType.OPENAI) {
+                    try {
+                        JSONObject extraBody = new JSONObject();
+                        extraBody.put("enable_thinking", thinkingEnabled);
+                        requestBody.put("extra_body", extraBody);
+                        LogManager.logI(TAG, "[THINKING] OpenAI-compatible extra_body set: enable_thinking=" + thinkingEnabled);
+                    } catch (JSONException e) {
+                        LogManager.logE(TAG, "Failed to set enable_thinking for OpenAI-compatible API", e);
+                    }
+                }
+            }
             
             LogManager.logI(TAG, "[DEBUG_REQUEST] Request body size: " + requestBody.toString().length() + " bytes");
             

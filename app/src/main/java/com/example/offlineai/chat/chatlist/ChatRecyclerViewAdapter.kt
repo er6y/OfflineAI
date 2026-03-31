@@ -92,7 +92,10 @@ class ChatRecyclerViewAdapter(
         position: Int,
         payloads: List<Any>
     ) {
-        super.onBindViewHolder(holder, position, payloads)
+        if (payloads.isEmpty()) {
+            onBindViewHolder(holder, position)
+            return
+        }
         val viewType = getItemViewType(position)
         if (viewType == ChatViewHolders.HEADER) {
             (holder as ChatViewHolders.HeaderViewHolder).bind(items[position])
