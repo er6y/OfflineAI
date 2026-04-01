@@ -109,6 +109,11 @@ public class ConfigManager {
     // 设置相关的键
     public static final String KEY_DATA_ROOT_PATH = "data_root_path"; // 数据根目录
     public static final String KEY_CURRENT_CHAT_FOLDER = "current_chat_folder"; // 当前对话文件夹路径
+    public static final String KEY_RAG_CHAT_FOLDER = "rag_chat_folder"; // RAG模式当前对话文件夹
+    public static final String KEY_AGENT_API_URL = "agent_api_url"; // Agent页面独立API URL
+    public static final String KEY_AGENT_MODEL_NAME = "agent_model_name"; // Agent页面独立模型
+    public static final String KEY_AGENT_CHAT_FOLDER = "agent_chat_folder"; // Agent固定对话目录
+    public static final String KEY_AGENT_HISTORY_ROUNDS = "agent_history_rounds"; // Agent历史轮数（默认0）
     public static final String KEY_SEARCH_DEPTH = "search_depth";
     public static final String KEY_RERANK_COUNT = "rerank_count";
     public static final String KEY_RETRIEVAL_COUNT = "retrieval_count";
@@ -118,6 +123,7 @@ public class ConfigManager {
     // LLM 推理相关的键
     public static final String KEY_MAX_SEQUENCE_LENGTH = "maxSequenceLength"; // 最大序列长度
     public static final String KEY_NO_THINKING = "no_thinking"; // 是否禁用思考模式
+    public static final String KEY_AGENT_NO_THINKING = "agent_no_thinking"; // Agent模式是否禁用思考模式
     public static final String KEY_AGENT_MODE_ENABLED = "agent_mode_enabled"; // Agent模式是否启用
     public static final String KEY_AGENT_ACTION_FORMAT = "agent_action_format"; // Agent动作格式选择 (Auto/MAI-UI/AutoGLM-Phone/Doubao-1.5-UI-TARS)
     public static final String KEY_AGENT_EXPERIENCE_SUMMARY = "agent_experience_summary"; // Agent经验总结开关
@@ -1475,6 +1481,13 @@ public class ConfigManager {
     }
 
     /**
+     * 获取Agent固定对话目录路径：<chat_history>/agent
+     */
+    public static String getAgentChatFolderPath(Context context) {
+        return new File(getChatHistoryPath(context), "agent").getAbsolutePath();
+    }
+
+    /**
      * 获取检索数
      * @param context 上下文
      * @return 检索数
@@ -1527,6 +1540,7 @@ public class ConfigManager {
                 KEY_TTS_MODEL.equals(key) ||
                 KEY_MODEL_NAME.equals(key) ||
                 KEY_NO_THINKING.equals(key) ||
+                KEY_AGENT_NO_THINKING.equals(key) ||
                 KEY_DIFFUSION_STEPS.equals(key) ||
                 KEY_DIFFUSION_MEMORY_MODE.equals(key) ||
                 KEY_DIFFUSION_SEED.equals(key) ||
@@ -1578,6 +1592,24 @@ public class ConfigManager {
     public static boolean getNoThinking(Context context) {
         return getBoolean(context, KEY_NO_THINKING, DEFAULT_NO_THINKING);
     }
+
+    /**
+     * 获取是否禁用思考模式（按页面模式隔离）
+     * @param context 上下文
+     * @param isAgentMode 是否为Agent模式
+     * @return 是否禁用思考模式
+     */
+    public static boolean getNoThinking(Context context, boolean isAgentMode) {
+        if (!isAgentMode) {
+            return getNoThinking(context);
+        }
+        JSONObject config = loadConfig(context);
+        if (config.has(KEY_AGENT_NO_THINKING)) {
+            return getBoolean(context, KEY_AGENT_NO_THINKING, DEFAULT_NO_THINKING);
+        }
+        // Backward compatibility: if agent key is missing, fallback to legacy global key.
+        return getNoThinking(context);
+    }
     
     /**
      * 设置是否禁用思考模式
@@ -1586,6 +1618,16 @@ public class ConfigManager {
      */
     public static void setNoThinking(Context context, boolean noThinking) {
         setBoolean(context, KEY_NO_THINKING, noThinking);
+    }
+
+    /**
+     * 设置是否禁用思考模式（按页面模式隔离）
+     * @param context 上下文
+     * @param noThinking 是否禁用思考模式
+     * @param isAgentMode 是否为Agent模式
+     */
+    public static void setNoThinking(Context context, boolean noThinking, boolean isAgentMode) {
+        setBoolean(context, isAgentMode ? KEY_AGENT_NO_THINKING : KEY_NO_THINKING, noThinking);
     }
     
     /**
@@ -1948,6 +1990,30 @@ public class ConfigManager {
      */
     public static void setCurrentChatFolder(Context context, String folderPath) {
         setString(context, KEY_CURRENT_CHAT_FOLDER, folderPath);
+    }
+
+    public static String getAgentApiUrl(Context context) {
+        return getString(context, KEY_AGENT_API_URL, "");
+    }
+
+    public static void setAgentApiUrl(Context context, String apiUrl) {
+        setString(context, KEY_AGENT_API_URL, apiUrl);
+    }
+
+    public static String getAgentModelName(Context context) {
+        return getString(context, KEY_AGENT_MODEL_NAME, "");
+    }
+
+    public static void setAgentModelName(Context context, String modelName) {
+        setString(context, KEY_AGENT_MODEL_NAME, modelName);
+    }
+
+    public static String getAgentChatFolder(Context context) {
+        return getString(context, KEY_AGENT_CHAT_FOLDER, getAgentChatFolderPath(context));
+    }
+
+    public static void setAgentChatFolder(Context context, String folderPath) {
+        setString(context, KEY_AGENT_CHAT_FOLDER, folderPath);
     }
     
     /**

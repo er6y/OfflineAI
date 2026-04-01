@@ -12,4 +12,8 @@
         android:id="@+id/navigation_kb_note"
         android:icon="@drawable/ic_kb_note"
         android:title="@string/navigation_kb_note" />
+    <item
+        android:id="@+id/navigation_agent"
+        android:icon="@drawable/ic_agent"
+        android:title="@string/navigation_agent" />
 </menu>

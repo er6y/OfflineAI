@@ -136,6 +136,7 @@
     <string name="navigation_rag_qa">AI Q&amp;A</string>
     <string name="navigation_build_kb">Build Knowledge Base</string>
     <string name="navigation_kb_note">Knowledge Base Notes</string>
+    <string name="navigation_agent">Claw Agent</string>
 
     <!-- Menu items -->
     <string name="menu_view_log">View Log</string>

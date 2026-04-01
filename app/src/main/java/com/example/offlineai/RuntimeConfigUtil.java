@@ -30,8 +30,8 @@ public final class RuntimeConfigUtil {
         config.maxNewTokens = ConfigManager.getMaxNewTokens(appCtx);
 
         // Thinking and manual parameters
-        config.noThinking = ConfigManager.getNoThinking(appCtx);
         config.agentModeEnabled = ConfigManager.getBoolean(appCtx, ConfigManager.KEY_AGENT_MODE_ENABLED, false);
+        config.noThinking = ConfigManager.getNoThinking(appCtx, config.agentModeEnabled);
         config.priorityManualParams = ConfigManager.getPriorityManualParams(appCtx);
         config.manualTemperature = ConfigManager.getManualTemperature(appCtx);
         config.manualTopK = ConfigManager.getManualTopK(appCtx);

@@ -28,7 +28,7 @@ flowchart TB
 ```
 
 ### 2.1 表层 UI（多 Fragment 构成的三分屏）
-- **MainActivity**：负责应用级生命周期管理、语言切换（基于 attachBaseContext 重建 Locale）、权限弹窗（存储/录音/电池优化）、统一的 ViewPager2 容器与底部导航。需求关注：启动时需恢复上次打开的页签，保证后台返回后状态与滚动位置保持一致。设计要点：所有耗时初始化（日志配置、加速器检测）放在 onCreate 早期完成，保证 Fragment 创建前依赖就绪。**主要 API**：`requestRequiredPermissions()`、`initializeConfig()`、`performAcceleratorConfigCheck()`、`bindToKnowledgeBaseBuilderService()`、`onProgressUpdate()`。**关键数据结构**：`UnifiedForegroundService.LocalBinder`、`StateDisplayManager`。**布局示意**：
+- **MainActivity**：负责应用级生命周期管理、语言切换（基于 attachBaseContext 重建 Locale）、权限弹窗（存储/录音/电池优化）、统一的 ViewPager2 容器与底部导航。需求关注：启动时需恢复上次打开的页签，保证后台返回后状态与滚动位置保持一致。设计要点：所有耗时初始化（日志配置、加速器检测）放在 onCreate 早期完成，保证 Fragment 创建前依赖就绪。**主要 API**：`requestRequiredPermissions()`、`initializeConfig()`、`performAcceleratorConfigCheck()`、`bindToKnowledgeBaseBuilderService()`、`onProgressUpdate()`。**关键数据结构**：`UnifiedForegroundService.LocalBinder`、`StateDisplayManager`。**RAG/Agent 导航映射（2026-03）**：底部导航扩展为 4 个入口（`RAG问答 / 构建知识库 / 知识库笔记 / 智能体`），其中 `RAG问答` 与 `智能体` 两个入口都映射到 `ViewPager position=0` 的同一 `RagQaFragment` 实例，通过 `switchMode(PageMode.RAG|AGENT)` 切换页面模式，避免复制 Fragment 逻辑。**布局示意**：
   ```mermaid
   flowchart TB
       subgraph MainActivity
@@ -36,12 +36,20 @@ flowchart TB
               "Toolbar"
           ]
           ViewPager["ViewPager2\n├ RagQaFragment\n├ BuildKnowledgeBase\n├ KnowledgeNote\n└ Settings/Help/Log"]
-          BottomNav["BottomNavigationView (3 Tabs)"]
+          BottomNav["BottomNavigationView (4 Tabs)\nRAG/BuildKB/KBNote/Agent"]
           Toolbar --> ViewPager
           ViewPager --> BottomNav
       end
   ```
-- **RagQaFragment**：主问答工作台，需求包括模型选择（本地/在线统一下拉）、知识库绑定、系统提示词/历史管理、附件输入（支持最多 3 张图片、语音录制）、流式输出（带 Markdown 渲染与折叠块）。设计思路：发送流程拆为输入校验→准备数据（知识检索、上下文组装）→推理，期间通过状态机控制发送按钮、停止按钮互斥显示并与进度日志联动。**主要 API**：`prepareAndSendMessage()`、`stopOngoingTask()`、`updateProgressPlainText()`、`loadSelectedKnowledgeBase()`、`handleStreamingChunk()`。**关键数据结构**：`ChatDataItem`、`ChatRecyclerViewAdapter`、`ImageThumbnailAdapter`、`VoiceRecordingDialog`。**布局示意**：
+- **RagQaFragment**：主问答工作台，需求包括模型选择（本地/在线统一下拉）、知识库绑定、系统提示词/历史管理、附件输入（支持最多 3 张图片、语音录制）、流式输出（带 Markdown 渲染与折叠块）。设计思路：发送流程拆为输入校验→准备数据（知识检索、上下文组装）→推理，期间通过状态机控制发送按钮、停止按钮互斥显示并与进度日志联动。**模式化设计（2026-03）**：同一 Fragment 支持 `RAG` 与 `AGENT` 两种页面模式。`RAG` 模式保留完整检索参数；`AGENT` 模式隐藏知识库下拉、检索数、重排数、系统提示词、GraphRAG 控件，并强制这类参数不参与请求快照构建（置空/置0）。**主要 API**：`switchMode(PageMode)`、`applyModeUiVisibility()`、`switchChatFolderByMode()`、`prepareAndSendMessage()`、`stopOngoingTask()`、`updateProgressPlainText()`、`loadSelectedKnowledgeBase()`、`handleStreamingChunk()`。**关键数据结构**：`ChatDataItem`、`ChatRecyclerViewAdapter`、`ImageThumbnailAdapter`、`VoiceRecordingDialog`。**模式切换实现要点（2026-03修复）**：① `BottomNavigationView` 需设置 `app:labelVisibilityMode="labeled"` 才能让全部 Tab 始终显示文字（默认 auto 模式下超过3个 Tab 仅高亮项显示）；② 聊天区顶部约束改为 `Barrier`（`barrierConfigBottom`，`barrierAllowsGoneWidgets=false`）并锚定到当前可见配置区底部，确保 RAG 模式不覆盖知识库/系统提示词区，Agent 模式又能自动上移到模型行下方；③ API URL / 模型名称按模式隔离：`loadApiUrlList()` 初始选择和 `ApiUrlAdapter` 的 selectListener 均按 `isAgentMode()` 分支读写 `KEY_API_URL`/`KEY_AGENT_API_URL`，`spinnerApiUrl.setOnItemSelectedListener` 也同样分支；④ `switchMode()` 内部加 `isSwitchingMode` 布尔标志（try-finally 保证释放），`loadConfig()` 调用 `setSpinnerSelection(spinnerApiUrl,...)` 触发 listener 时因标志置 true 而跳过保存与 `fetchModelsForApi()`，防止重入链；⑤ `setupApiUrlSwitchListener()` 保持 no-op，不得在此处重新设置 listener 覆盖 onCreateView 中带 mode 判断的版本；⑥ 模型下拉与搜索深度控件去除循环约束（`spinnerApiModel` 不再与 `textViewSearchDepthLabel` 形成互相依赖），避免 Agent 隐藏搜索深度后模型下拉被挤压或不可见；⑦ 模型行与重排行采用完整水平约束链（`start/end` 双向闭合），防止 label/Spinner 因链路断裂出现 0 宽、重叠或“消失”。
+- **RagQa 布局补充（2026-04）**：`spinnerBackendPreference` 需与 `editTextApiKey` 使用一致的右侧锚点（`app:layout_constraintEnd_toStartOf="@+id/textViewThinkingModeLabel"`），避免 Agent 模式选择本地模型时后端偏好下拉横向扩张并与“思考模式”复选框区域重叠。
+- **RagQa 模式隔离补充（2026-04）**：思考模式改为按页面模式隔离持久化：RAG 使用 `KEY_NO_THINKING`，Agent 使用 `KEY_AGENT_NO_THINKING`；`RagQaFragment` 的复选框读写、`LlmApiAdapter` 请求发起、`RuntimeConfigUtil` 快照构建、`AgentAccessibilityService` 系统提示组装均按当前模式读取，避免两个页面互相串改。
+- **Agent 请求约束补充（2026-04）**：Agent 页面隐藏的 RAG 字段在请求快照层强制置空（`knowledgeBase=""`、`systemPrompt=""`、`searchDepth=0`、`graphRag=false`），避免误带入知识库检索链。
+- **RagQa 历史隔离补充（2026-04）**：`loadChatHistory()` 在文件夹不存在或历史文件为空时，主动清空 `chatMessages` 并调用 `chatAdapter.updateModelNameAndItems()` 刷新 UI，避免从 RAG 切回 Agent 时旧聊天记录残留在界面上。
+- **RagQa 切换同步补充（2026-04）**：`switchMode()` 在 `loadConfig()` 后强制调用 `fetchModelsForApi()` 刷新模型列表，确保 API 地址和模型下拉框正确显示当前模式保存的配置值；`onResume()` 增加模式同步逻辑，读取 `KEY_AGENT_MODE_ENABLED` 配置，若当前 UI 模式与配置不一致则自动切换，确保 Agent 任务结束后切回前台仍保持在 Agent 模式。
+- **RagQa 启动与下拉同步补充（2026-04）**：`MainActivity.initializeMainUI()` 启动阶段先读取 `KEY_AGENT_MODE_ENABLED`，用其初始化 `currentRagPageNavId` 并在监听器注册后执行 `bottomNavigation.setSelectedItemId(currentRagPageNavId)`，避免启动后被默认 RAG 导航覆盖；`spinnerApiUrl` 在弹出前（`ACTION_DOWN`）执行 `syncApiUrlSpinnerFromModeConfig()`，按当前模式重新加载 URL 列表并同步选中项，同时 `setSpinnerSelection()` 对 `ApiUrlAdapter` 额外同步 `selectedPosition`，确保弹出菜单高亮与当前模式配置一致。
+- **底部导航命名补充（2026-04）**：`navigation_agent` 文案调整为 `Claw` 语义并补齐中英文资源；`ic_agent.xml` 改用 OpenXLaw 风格龙虾钳造型矢量图标（对称交叉钳子+椭圆身体+扇形尾巴）。
+**布局示意**：
   ```mermaid
   flowchart TB
       subgraph RagQaFragment

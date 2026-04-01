@@ -131,6 +131,7 @@
     <string name="navigation_rag_qa">AI问答</string>
     <string name="navigation_build_kb">构建知识库</string>
     <string name="navigation_kb_note">知识库笔记</string>
+    <string name="navigation_agent">Claw智能体</string>
 
     <!-- 菜单项 -->
     <string name="menu_view_log">查看日志</string>

@@ -674,7 +674,8 @@ public class LlmApiAdapter {
     private void makeStreamingRequest(String fullApiUrl, String apiKey, String model, String prompt,
                                       java.util.List<String> imagePaths, java.util.List<String> audioPaths,
                                       ApiType apiType, ApiCallback callback, ErrorCallbackWithStatus errorCallbackWithStatus) {
-        boolean noThinking = ConfigManager.getNoThinking(context);
+        boolean isAgentMode = ConfigManager.getBoolean(context, ConfigManager.KEY_AGENT_MODE_ENABLED, false);
+        boolean noThinking = ConfigManager.getNoThinking(context, isAgentMode);
         boolean thinkingEnabled = !noThinking;
         
         LogManager.logD(TAG, "[THINKING] makeStreamingRequest: noThinking=" + noThinking + ", thinkingEnabled=" + thinkingEnabled + ", apiType=" + apiType.name());
@@ -717,7 +718,8 @@ public class LlmApiAdapter {
                                                          String systemPrompt, String userPrompt,
                                                          java.util.List<String> imagePaths, java.util.List<String> audioPaths,
                                                          ApiType apiType, ApiCallback callback, ErrorCallbackWithStatus errorCallbackWithStatus) {
-        boolean noThinking = ConfigManager.getNoThinking(context);
+        boolean isAgentMode = ConfigManager.getBoolean(context, ConfigManager.KEY_AGENT_MODE_ENABLED, false);
+        boolean noThinking = ConfigManager.getNoThinking(context, isAgentMode);
         boolean thinkingEnabled = !noThinking;
         
         LogManager.logD(TAG, "[THINKING] makeStreamingRequestWithSeparatePrompts: noThinking=" + noThinking + ", thinkingEnabled=" + thinkingEnabled + ", apiType=" + apiType.name());

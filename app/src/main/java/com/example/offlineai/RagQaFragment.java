@@ -140,6 +140,11 @@ import java.util.Locale;
 @SuppressWarnings("deprecation")
 public class RagQaFragment extends Fragment implements StatefulFragment {
 
+    public enum PageMode {
+        RAG,
+        AGENT
+    }
+
     private static final String TAG = "OfflineAI_RagQa"; // Add TAG for log printing
     private static final String LOG_FILE = "api_log.txt"; // Log file name
     private static final int MAX_IMAGES = 3; // Maximum number of images allowed
@@ -163,12 +168,16 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     private TextView textViewApiKeyLabel; // Label for API Key / Backend Preference
     private Spinner spinnerApiModel;
     private Spinner spinnerKnowledgeBase;
+    private TextView textViewKnowledgeBaseLabel;
     private EditText editTextSystemPrompt;
+    private TextView textViewSystemPromptLabel;
     private EditText editTextUserPrompt;
     private Button buttonSendStop;
     private Button buttonNewChat;
     private Spinner spinnerSearchDepth; // Search depth dropdown
+    private TextView textViewSearchDepthLabel;
     private Spinner spinnerRerankCount; // Rerank count dropdown
+    private TextView textViewRerankCountLabel;
     
     // Voice recording components
     private AudioService audioRecorder;
@@ -183,11 +192,14 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     private TextView textViewResponse; // Response text view
     private CheckBox checkBoxThinkingMode; // Thinking mode checkbox
     private CheckBox checkBoxGraphRagMode;
+    private TextView textViewGraphRagLabel;
     private RecyclerView recyclerViewImageThumbnails; // Media thumbnail container (images and audio)
     private MediaThumbnailAdapter mediaThumbnailAdapter; // Media thumbnail adapter
     // 避免程序化设置复选框状态时触发监听器造成误保存
     private boolean isUpdatingUiFromConfig = false;
     private boolean isInitializingKnowledgeBaseSpinner = false;
+    // Prevent re-entrant switchMode calls triggered by loadConfig spinner updates
+    private boolean isSwitchingMode = false;
     
     // Chat UI components
     private RecyclerView recyclerViewChat; // Chat message list
@@ -225,9 +237,11 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     
     // Agent related
     private AgentManager agentManager;
+    private TextView textViewAgentModeLabel;
     private CheckBox checkBoxAgentMode;
     private final AtomicBoolean isAgentEnabled = new AtomicBoolean(false);
     private final AtomicBoolean isAgentExecuting = new AtomicBoolean(false);
+    private PageMode currentMode = null; // Will be initialized from ConfigManager in onCreateView
     
     // Audio compression state tracking (for ANR prevention)
     private final AtomicBoolean isUserAudioCompressing = new AtomicBoolean(false); // User audio compression in progress
@@ -351,14 +365,20 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         textViewApiKeyLabel = view.findViewById(R.id.textViewApiKeyLabel); // API Key label
         spinnerApiModel = view.findViewById(R.id.spinnerApiModel);
         spinnerKnowledgeBase = view.findViewById(R.id.spinnerKnowledgeBase);
+        textViewKnowledgeBaseLabel = view.findViewById(R.id.textViewKnowledgeBaseLabel);
         editTextSystemPrompt = view.findViewById(R.id.editTextSystemPrompt);
+        textViewSystemPromptLabel = view.findViewById(R.id.textViewSystemPromptLabel);
         editTextUserPrompt = view.findViewById(R.id.editTextUserPrompt);
         buttonSendStop = view.findViewById(R.id.buttonSendStop);
         buttonNewChat = view.findViewById(R.id.buttonNewChat);
         spinnerSearchDepth = view.findViewById(R.id.spinnerSearchDepth); // Initialize search depth spinner
+        textViewSearchDepthLabel = view.findViewById(R.id.textViewSearchDepthLabel);
         spinnerRerankCount = view.findViewById(R.id.spinnerRerankCount); // Initialize rerank count spinner
+        textViewRerankCountLabel = view.findViewById(R.id.textViewRerankCountLabel);
         checkBoxThinkingMode = view.findViewById(R.id.checkBoxThinkingModeKey); // Initialize thinking mode checkbox
         checkBoxGraphRagMode = view.findViewById(R.id.checkBoxGraphRagMode);
+        textViewGraphRagLabel = view.findViewById(R.id.textViewGraphRagLabel);
+        textViewAgentModeLabel = view.findViewById(R.id.textViewAgentModeLabel);
         checkBoxAgentMode = view.findViewById(R.id.checkBoxAgentMode); // Initialize Agent mode checkbox
         recyclerViewImageThumbnails = view.findViewById(R.id.recyclerViewImageThumbnails); // Initialize image thumbnail container
         textViewResponse = view.findViewById(R.id.textViewResponse); // Initialize response text view
@@ -489,19 +509,39 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 
                 // Dynamically switch between API Key and Backend Preference
                 updateApiKeyOrBackendDisplay(selectedApiUrl);
-                
-                loadApiKeyForUrl(selectedApiUrl);
+
+                String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), selectedApiUrl);
+                loadApiKeyForUrl(apiUrl);
+
+                // Skip saving and model fetch during programmatic config load or mode switch
+                if (isUpdatingUiFromConfig || isSwitchingMode) {
+                    return;
+                }
+
                 fetchModelsForApi(); // Automatically fetch model list
-                
-                // Save API URL setting
-                ConfigManager.setString(requireContext(), ConfigManager.KEY_API_URL, selectedApiUrl);
-                LogManager.logD(TAG, "Saved API URL: " + selectedApiUrl);
+
+                // Save API URL setting by current mode
+                if (isAgentMode()) {
+                    ConfigManager.setAgentApiUrl(requireContext(), apiUrl);
+                    LogManager.logD(TAG, "Saved Agent API URL: " + apiUrl);
+                } else {
+                    ConfigManager.setString(requireContext(), ConfigManager.KEY_API_URL, apiUrl);
+                    LogManager.logD(TAG, "Saved API URL: " + apiUrl);
+                }
             }
 
             @Override
             public void onNothingSelected(AdapterView<?> parent) {
                 // Do nothing
             }
+        });
+
+        // Sync API URL spinner from current mode config right before popup opens
+        spinnerApiUrl.setOnTouchListener((v, event) -> {
+            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                syncApiUrlSpinnerFromModeConfig();
+            }
+            return false;
         });
         
         // Add focus change listener for API Key to save API Key when focus is lost
@@ -539,8 +579,12 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 }
                 
                 if (!StateDisplayManager.isModelStatusDisplayText(requireContext(), selectedModel)) {
-                    // Save to global model name (for compatibility)
-                    ConfigManager.setString(requireContext(), ConfigManager.KEY_MODEL_NAME, selectedModel);
+                    if (isAgentMode()) {
+                        ConfigManager.setAgentModelName(requireContext(), selectedModel);
+                    } else {
+                        // Save to global model name (for compatibility)
+                        ConfigManager.setString(requireContext(), ConfigManager.KEY_MODEL_NAME, selectedModel);
+                    }
                     
                     // Save to current API's last used model
                     String currentApiUrl = spinnerApiUrl.getSelectedItem().toString();
@@ -569,6 +613,9 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         spinnerKnowledgeBase.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (isAgentMode()) {
+                    return;
+                }
                 String selectedKnowledgeBase = parent.getItemAtPosition(position).toString();
                 LogManager.logD(TAG, "[KB_SPINNER] onItemSelected: " + selectedKnowledgeBase);
 
@@ -597,6 +644,9 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         // Add focus change listener for system prompt to save system prompt when focus is lost
         editTextSystemPrompt.setOnFocusChangeListener((v, hasFocus) -> {
             if (!hasFocus) {
+                if (isAgentMode()) {
+                    return;
+                }
                 String systemPrompt = editTextSystemPrompt.getText().toString();
                 // Save regardless of empty or not, ensuring user can correctly save when clearing system prompt
                 ConfigManager.setSystemPrompt(requireContext(), systemPrompt);
@@ -611,6 +661,9 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         spinnerSearchDepth.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (isAgentMode()) {
+                    return;
+                }
                 String selectedDepth = parent.getItemAtPosition(position).toString();
                 int searchDepth = Integer.parseInt(selectedDepth);
                 ConfigManager.setInt(requireContext(), ConfigManager.KEY_SEARCH_DEPTH, searchDepth);
@@ -627,6 +680,9 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         spinnerRerankCount.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (isAgentMode()) {
+                    return;
+                }
                 String selectedCount = parent.getItemAtPosition(position).toString();
                 int rerankCount = Integer.parseInt(selectedCount);
                 ConfigManager.setRerankCount(requireContext(), rerankCount);
@@ -648,11 +704,14 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             }
             // Note: no_thinking=TRUE unchecks, false checks
             // So logic needs to be inverted here
-            ConfigManager.setBoolean(requireContext(), ConfigManager.KEY_NO_THINKING, !isChecked);
+            ConfigManager.setNoThinking(requireContext(), !isChecked, isAgentMode());
             LogManager.logD(TAG, "Thinking mode changed: " + (isChecked ? "enabled" : "disabled"));
         });
 
         checkBoxGraphRagMode.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (isAgentMode()) {
+                return;
+            }
             if (isUpdatingUiFromConfig) {
                 LogManager.logD(TAG, "Ignore graph RAG checkbox change during config-driven UI update");
                 return;
@@ -672,6 +731,9 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         
         // Load knowledge base list
         loadKnowledgeBases();
+
+        // Default mode visibility before config is loaded
+        applyModeUiVisibility();
         
         return view;
     }
@@ -777,6 +839,13 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 
         LogManager.logD(TAG, "Markwon renderer initialized");
         
+        // Initialize mode from ConfigManager - this is the single source of truth
+        // Mode persistence is handled entirely by ConfigManager
+        boolean savedAgentMode = ConfigManager.getBoolean(requireContext(), ConfigManager.KEY_AGENT_MODE_ENABLED, false);
+        currentMode = savedAgentMode ? PageMode.AGENT : PageMode.RAG;
+        isAgentEnabled.set(isAgentMode());
+        LogManager.logI(TAG, "[MODE_INIT] Initialized mode from config: " + currentMode);
+
         // Initialize text scaling helper class
         textViewResponse = view.findViewById(R.id.textViewResponse);
         
@@ -791,6 +860,9 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
 
         // 加载配置以初始化界面控件状态（包含思考模式复选框）
         loadConfig();
+
+        // Ensure chat folder mapping follows current mode before loading history
+        switchChatFolderByMode();
         
         // Load chat history if available
         loadChatHistory();
@@ -1272,19 +1344,13 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     }
     
     /**
-     * Setup listener for API URL spinner to dynamically switch between API Key and Backend Preference
+     * Setup listener for API URL spinner — kept for compatibility but no longer overrides the
+     * mode-aware listener set in onCreateView. Use isUpdatingUiFromConfig to suppress saves
+     * during programmatic selection in loadConfig().
      */
     private void setupApiUrlSwitchListener() {
-        spinnerApiUrl.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                String selectedApiUrl = parent.getItemAtPosition(position).toString();
-                updateApiKeyOrBackendDisplay(selectedApiUrl);
-            }
-            
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
-        });
+        // No-op: the full mode-aware listener is already set in onCreateView (spinnerApiUrl.setOnItemSelectedListener).
+        // Do NOT set another listener here — it would override the mode-aware one.
     }
     
     /**
@@ -1306,41 +1372,141 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             LogManager.logD(TAG, "Switched to API key mode");
         }
     }
+
+    private boolean isAgentMode() {
+        return currentMode == PageMode.AGENT;
+    }
+
+    public void switchMode(@NonNull PageMode mode) {
+        if (currentMode == mode) {
+            return;
+        }
+        if (isSwitchingMode) {
+            LogManager.logW(TAG, "[MODE] switchMode re-entry blocked, mode=" + mode);
+            return;
+        }
+        isSwitchingMode = true;
+        try {
+        saveConfig();
+        currentMode = mode;
+        isAgentEnabled.set(isAgentMode());
+        ConfigManager.setBoolean(requireContext(), ConfigManager.KEY_AGENT_MODE_ENABLED, isAgentMode());
+        if (isAgentMode()) {
+            ConfigManager.setInt(requireContext(), ConfigManager.KEY_AGENT_HISTORY_ROUNDS, 0);
+            ConfigManager.setHistoryRounds(requireContext(), 0);
+        } else {
+            int ragRounds = ConfigManager.getInt(requireContext(), ConfigManager.KEY_HISTORY_ROUNDS, ConfigManager.DEFAULT_HISTORY_ROUNDS);
+            ConfigManager.setHistoryRounds(requireContext(), ragRounds);
+        }
+        applyModeUiVisibility();
+        loadConfig();
+        // Force refresh model list to ensure spinner displays correct model for current mode
+        fetchModelsForApi();
+        switchChatFolderByMode();
+        loadChatHistory();
+        LogManager.logI(TAG, "[MODE] Switched page mode to " + currentMode);
+        } finally {
+            isSwitchingMode = false;
+        }
+    }
+
+    private void applyModeUiVisibility() {
+        int ragVisibility = isAgentMode() ? View.GONE : View.VISIBLE;
+        if (textViewKnowledgeBaseLabel != null) {
+            textViewKnowledgeBaseLabel.setVisibility(ragVisibility);
+        }
+        if (spinnerKnowledgeBase != null) {
+            spinnerKnowledgeBase.setVisibility(ragVisibility);
+        }
+        if (textViewSearchDepthLabel != null) {
+            textViewSearchDepthLabel.setVisibility(ragVisibility);
+        }
+        if (spinnerSearchDepth != null) {
+            spinnerSearchDepth.setVisibility(ragVisibility);
+        }
+        if (textViewRerankCountLabel != null) {
+            textViewRerankCountLabel.setVisibility(ragVisibility);
+        }
+        if (spinnerRerankCount != null) {
+            spinnerRerankCount.setVisibility(ragVisibility);
+        }
+        if (textViewSystemPromptLabel != null) {
+            textViewSystemPromptLabel.setVisibility(ragVisibility);
+        }
+        if (editTextSystemPrompt != null) {
+            editTextSystemPrompt.setVisibility(ragVisibility);
+        }
+        if (textViewGraphRagLabel != null) {
+            textViewGraphRagLabel.setVisibility(ragVisibility);
+        }
+        if (checkBoxGraphRagMode != null) {
+            checkBoxGraphRagMode.setVisibility(ragVisibility);
+        }
+        if (textViewAgentModeLabel != null) {
+            textViewAgentModeLabel.setVisibility(View.GONE);
+        }
+        if (checkBoxAgentMode != null) {
+            checkBoxAgentMode.setVisibility(View.GONE);
+        }
+    }
+
+    private void switchChatFolderByMode() {
+        if (isAgentMode()) {
+            String agentFolder = ConfigManager.getAgentChatFolder(requireContext());
+            if (agentFolder == null || agentFolder.trim().isEmpty()) {
+                agentFolder = ConfigManager.getAgentChatFolderPath(requireContext());
+                ConfigManager.setAgentChatFolder(requireContext(), agentFolder);
+            }
+            ConfigManager.setCurrentChatFolder(requireContext(), agentFolder);
+            currentChatFolderPath = agentFolder;
+        } else {
+            String ragFolder = ConfigManager.getString(requireContext(), ConfigManager.KEY_RAG_CHAT_FOLDER, "");
+            ConfigManager.setCurrentChatFolder(requireContext(), ragFolder);
+            currentChatFolderPath = ragFolder;
+        }
+    }
     
     /**
      * Load configuration file
      */
     private void loadConfig() {
         try {
-            // Use ConfigManager to load configuration
-            
-            // Load API URL
-            String apiUrl = ConfigManager.getString(requireContext(), ConfigManager.KEY_API_URL, "");
+            String apiUrl;
+            String modelName;
+            if (isAgentMode()) {
+                apiUrl = ConfigManager.getAgentApiUrl(requireContext());
+                modelName = ConfigManager.getAgentModelName(requireContext());
+                editTextSystemPrompt.setText("");
+            } else {
+                apiUrl = ConfigManager.getString(requireContext(), ConfigManager.KEY_API_URL, "");
+                modelName = ConfigManager.getString(requireContext(), ConfigManager.KEY_MODEL_NAME, "");
+            }
+
             if (!apiUrl.isEmpty()) {
                 // Convert original API URL to display text before setting selection
                 String apiUrlDisplayText = StateDisplayManager.getApiUrlDisplayText(requireContext(), apiUrl);
                 setSpinnerSelection(spinnerApiUrl, apiUrlDisplayText);
             }
-            
-            // Load model name
-            String modelName = ConfigManager.getString(requireContext(), ConfigManager.KEY_MODEL_NAME, "");
+
             if (!modelName.isEmpty() &&
                 !StateDisplayManager.isModelStatusDisplayText(requireContext(), modelName)) {
                 // Check if it's a state display text, if so use directly, otherwise may need conversion
                 // Since model names are usually saved directly, use it directly here
                 setSpinnerSelection(spinnerApiModel, modelName);
             }
-            
-            // Load knowledge base name
-            String knowledgeBase = ConfigManager.getString(requireContext(), ConfigManager.KEY_KNOWLEDGE_BASE, "");
-            if (!knowledgeBase.isEmpty()) {
-                setSpinnerSelection(spinnerKnowledgeBase, knowledgeBase);
-            }
-            
-            // Load system prompt
-            String systemPrompt = ConfigManager.getSystemPrompt(requireContext());
-            if (!systemPrompt.isEmpty()) {
-                editTextSystemPrompt.setText(systemPrompt);
+
+            if (!isAgentMode()) {
+                // Load knowledge base name
+                String knowledgeBase = ConfigManager.getString(requireContext(), ConfigManager.KEY_KNOWLEDGE_BASE, "");
+                if (!knowledgeBase.isEmpty()) {
+                    setSpinnerSelection(spinnerKnowledgeBase, knowledgeBase);
+                }
+
+                // Load system prompt
+                String systemPrompt = ConfigManager.getSystemPrompt(requireContext());
+                if (!systemPrompt.isEmpty()) {
+                    editTextSystemPrompt.setText(systemPrompt);
+                }
             }
             
             // Load all API Keys
@@ -1362,23 +1528,17 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         // Load thinking mode and Graph RAG settings
         // Note: no_thinking=TRUE unchecks, false checks
             isUpdatingUiFromConfig = true;
-            boolean noThinking = ConfigManager.getNoThinking(requireContext());
+            boolean noThinking = ConfigManager.getNoThinking(requireContext(), isAgentMode());
             checkBoxThinkingMode.setChecked(!noThinking);
             boolean graphRagEnabled = ConfigManager.isGraphRagEnabled(requireContext());
             if (checkBoxGraphRagMode != null) {
-                checkBoxGraphRagMode.setChecked(graphRagEnabled);
+                checkBoxGraphRagMode.setChecked(!isAgentMode() && graphRagEnabled);
             }
-            
-            // Load Agent mode setting
-            boolean agentModeEnabled = ConfigManager.getBoolean(requireContext(), ConfigManager.KEY_AGENT_MODE_ENABLED, false);
-            isAgentEnabled.set(agentModeEnabled);
-            if (checkBoxAgentMode != null) {
-                checkBoxAgentMode.setChecked(agentModeEnabled);
-            }
+            isAgentEnabled.set(isAgentMode());
             
             LogManager.logD(TAG, "Loaded thinking mode setting: " + (!noThinking ? "enabled" : "disabled"));
             LogManager.logD(TAG, "Loaded Graph RAG mode setting: " + (graphRagEnabled ? "enabled" : "disabled"));
-            LogManager.logD(TAG, "Loaded Agent mode setting: " + (agentModeEnabled ? "enabled" : "disabled"));
+            LogManager.logD(TAG, "Loaded Agent mode setting: " + (isAgentMode() ? "enabled" : "disabled"));
             isUpdatingUiFromConfig = false;
             
             // Update initial display based on API URL (show API Key or Backend Preference)
@@ -1403,31 +1563,41 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             String model = spinnerApiModel.getSelectedItem().toString();
             String knowledgeBase = spinnerKnowledgeBase.getSelectedItem().toString();
             String systemPrompt = editTextSystemPrompt.getText().toString();
-            
-            // Save directly to first-level configuration
-            ConfigManager.setString(requireContext(), ConfigManager.KEY_API_URL, apiUrl);
-            if (StateDisplayManager.isModelStatusDisplayText(requireContext(), model)) {
-                ConfigManager.setString(requireContext(), ConfigManager.KEY_MODEL_NAME, "");
+
+            if (isAgentMode()) {
+                ConfigManager.setAgentApiUrl(requireContext(), apiUrl);
+                if (StateDisplayManager.isModelStatusDisplayText(requireContext(), model)) {
+                    ConfigManager.setAgentModelName(requireContext(), "");
+                } else {
+                    ConfigManager.setAgentModelName(requireContext(), model);
+                }
+                ConfigManager.setInt(requireContext(), ConfigManager.KEY_AGENT_HISTORY_ROUNDS, 0);
             } else {
-                ConfigManager.setString(requireContext(), ConfigManager.KEY_MODEL_NAME, model);
+                // Save directly to first-level configuration
+                ConfigManager.setString(requireContext(), ConfigManager.KEY_API_URL, apiUrl);
+                if (StateDisplayManager.isModelStatusDisplayText(requireContext(), model)) {
+                    ConfigManager.setString(requireContext(), ConfigManager.KEY_MODEL_NAME, "");
+                } else {
+                    ConfigManager.setString(requireContext(), ConfigManager.KEY_MODEL_NAME, model);
+                }
+                ConfigManager.setString(requireContext(), ConfigManager.KEY_KNOWLEDGE_BASE, knowledgeBase);
+
+                // Save system prompt (using first-level item)
+                // Save regardless of empty or not, ensuring user can correctly save when clearing system prompt
+                ConfigManager.setSystemPrompt(requireContext(), systemPrompt);
+                LogManager.logD(TAG, "Saved system prompt: " + (systemPrompt.isEmpty() ? "[empty]" : systemPrompt));
+
+                if (checkBoxGraphRagMode != null) {
+                    boolean graphRagEnabled = checkBoxGraphRagMode.isChecked();
+                    ConfigManager.setGraphRagEnabled(requireContext(), graphRagEnabled);
+                    LogManager.logD(TAG, "Saved Graph RAG mode: " + (graphRagEnabled ? "enabled" : "disabled"));
+                }
             }
-            ConfigManager.setString(requireContext(), ConfigManager.KEY_KNOWLEDGE_BASE, knowledgeBase);
             
             // Save API Key to corresponding URL
             if (!apiKey.isEmpty()) {
                 ConfigManager.saveApiKey(requireContext(), apiUrl, apiKey);
                 LogManager.logD(TAG, "Saved API Key to URL: " + apiUrl);
-            }
-            
-            // Save system prompt (using first-level item)
-            // Save regardless of empty or not, ensuring user can correctly save when clearing system prompt
-            ConfigManager.setSystemPrompt(requireContext(), systemPrompt);
-            LogManager.logD(TAG, "Saved system prompt: " + (systemPrompt.isEmpty() ? "[empty]" : systemPrompt));
-
-            if (checkBoxGraphRagMode != null) {
-                boolean graphRagEnabled = checkBoxGraphRagMode.isChecked();
-                ConfigManager.setGraphRagEnabled(requireContext(), graphRagEnabled);
-                LogManager.logD(TAG, "Saved Graph RAG mode: " + (graphRagEnabled ? "enabled" : "disabled"));
             }
             
             // Search depth automatically saved through spinner selection listener
@@ -1472,9 +1642,30 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 Object item = adapter.getItem(i);
                 if (item != null && item.toString().equals(value)) {
                     spinner.setSelection(i);
+                    if (adapter instanceof ApiUrlAdapter) {
+                        ((ApiUrlAdapter) adapter).setSelectedPosition(i);
+                    }
                     break;
                 }
             }
+        }
+    }
+
+    private void syncApiUrlSpinnerFromModeConfig() {
+        try {
+            isUpdatingUiFromConfig = true;
+            loadApiUrlList();
+            String apiUrl = isAgentMode()
+                    ? ConfigManager.getAgentApiUrl(requireContext())
+                    : ConfigManager.getString(requireContext(), ConfigManager.KEY_API_URL, "");
+            if (apiUrl != null && !apiUrl.isEmpty()) {
+                String apiUrlDisplayText = StateDisplayManager.getApiUrlDisplayText(requireContext(), apiUrl);
+                setSpinnerSelection(spinnerApiUrl, apiUrlDisplayText);
+                updateApiKeyOrBackendDisplay(apiUrlDisplayText);
+                loadApiKeyForUrl(apiUrl);
+            }
+        } finally {
+            isUpdatingUiFromConfig = false;
         }
     }
 
@@ -1609,8 +1800,12 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                         
                         // Load corresponding API Key
                         loadApiKeyForUrl(apiUrl);
-                        // Save currently selected API URL (using internal constant value)
-                        ConfigManager.setString(requireContext(), ConfigManager.KEY_API_URL, internalApiUrl);
+                        // Save currently selected API URL by current mode
+                        if (isAgentMode()) {
+                            ConfigManager.setAgentApiUrl(requireContext(), internalApiUrl);
+                        } else {
+                            ConfigManager.setString(requireContext(), ConfigManager.KEY_API_URL, internalApiUrl);
+                        }
                     }
                 },
                 spinnerApiUrl
@@ -1618,8 +1813,10 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         
         spinnerApiUrl.setAdapter(adapter);
         
-        // Set currently selected API URL
-        String currentApiUrl = ConfigManager.getString(requireContext(), ConfigManager.KEY_API_URL, "");
+        // Set currently selected API URL by current mode
+        String currentApiUrl = isAgentMode()
+            ? ConfigManager.getAgentApiUrl(requireContext())
+            : ConfigManager.getString(requireContext(), ConfigManager.KEY_API_URL, "");
         LogManager.logD(TAG, "Current API URL from config: " + currentApiUrl);
         if (!currentApiUrl.isEmpty()) {
             // Convert current API URL to display text for matching
@@ -1878,8 +2075,8 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
             String apiKey = editTextApiKey.getText().toString();
             String model = spinnerApiModel.getSelectedItem().toString();
-            String knowledgeBase = spinnerKnowledgeBase.getSelectedItem().toString();
-            String systemPrompt = editTextSystemPrompt.getText().toString();
+            String knowledgeBase = isAgentMode() ? "" : spinnerKnowledgeBase.getSelectedItem().toString();
+            String systemPrompt = isAgentMode() ? "" : editTextSystemPrompt.getText().toString();
             String userPrompt = editTextUserPrompt.getText().toString();
             
             LogManager.logI(TAG, "[SEND] User clicked send - model=" + model + ", kb=" + knowledgeBase);
@@ -1987,8 +2184,11 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         }
 
         // Build QueryRequest snapshot for manager
-        int searchDepth = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
-        boolean graphRagEnabled = (checkBoxGraphRagMode != null && checkBoxGraphRagMode.isChecked());
+        int searchDepth = isAgentMode() ? 0 : Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
+        boolean graphRagEnabled = !isAgentMode() && (checkBoxGraphRagMode != null && checkBoxGraphRagMode.isChecked());
+        if (isAgentMode()) {
+            LogManager.logI(TAG, "[AGENT_RAG] Agent mode request snapshot: knowledgeBase=\"\", systemPrompt=\"\", searchDepth=0, graphRag=false");
+        }
         boolean needsAsr = false;
         String asrModel = null;
         if (userInput.hasAudio()) {
@@ -2024,7 +2224,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         );
         
         // CRITICAL: Agent mode vs Normal mode branching
-        if (isAgentEnabled.get()) {
+        if (isAgentMode()) {
             // Agent mode: Skip normal LLM query, directly start Agent loop
             LogManager.logI(TAG, "[AGENT] Agent mode enabled, skipping normal query and starting Agent loop");
             
@@ -2938,6 +3138,17 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         if (recyclerViewChat != null) {
             LogManager.logD(TAG, "[LIFECYCLE_DEBUG] recyclerViewChat.getAdapter(): " + recyclerViewChat.getAdapter());
         }
+
+        // CRITICAL: Sync current mode with config to ensure correct mode after app returns from background
+        // This is needed when Agent service puts app to background and user returns after task completion
+        boolean configAgentMode = ConfigManager.getBoolean(requireContext(), ConfigManager.KEY_AGENT_MODE_ENABLED, false);
+        if (currentMode == PageMode.RAG && configAgentMode) {
+            LogManager.logI(TAG, "[MODE_SYNC] Config shows Agent mode but UI is RAG, switching to Agent mode");
+            switchMode(PageMode.AGENT);
+        } else if (currentMode == PageMode.AGENT && !configAgentMode) {
+            LogManager.logI(TAG, "[MODE_SYNC] Config shows RAG mode but UI is Agent, switching to RAG mode");
+            switchMode(PageMode.RAG);
+        }
         
         // Re-apply font size when page resumes, so it takes effect immediately after modification in settings page
         applyGlobalTextSize();
@@ -3268,9 +3479,20 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
      * Handle new chat button click - clears UI and resets state
      */
     private void handleNewChatClick() {
-        // Clear current chat folder setting (new conversation will create new folder)
-        ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
-        LogManager.logD(TAG, "[CHAT_HISTORY] Cleared current chat folder setting for new conversation");
+        if (isAgentMode()) {
+            String agentFolder = ConfigManager.getAgentChatFolderPath(requireContext());
+            clearFolderContents(agentFolder);
+            ConfigManager.setAgentChatFolder(requireContext(), agentFolder);
+            ConfigManager.setCurrentChatFolder(requireContext(), agentFolder);
+            currentChatFolderPath = agentFolder;
+            LogManager.logD(TAG, "[CHAT_HISTORY] Cleared Agent fixed chat folder for new conversation");
+        } else {
+            // Clear current RAG conversation mapping (new send will create new folder)
+            ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            ConfigManager.setString(getContext(), ConfigManager.KEY_RAG_CHAT_FOLDER, "");
+            currentChatFolderPath = "";
+            LogManager.logD(TAG, "[CHAT_HISTORY] Cleared RAG current chat folder for new conversation");
+        }
         
         updateProgressOnUiThread("");
         editTextUserPrompt.setText("");
@@ -3306,6 +3528,80 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         }
         
         Toast.makeText(requireContext(), "New chat started", Toast.LENGTH_SHORT).show();
+    }
+
+    private void clearFolderContents(@NonNull String folderPath) {
+        try {
+            File folder = new File(folderPath);
+            if (!folder.exists() || !folder.isDirectory()) {
+                return;
+            }
+            File[] files = folder.listFiles();
+            if (files == null) {
+                return;
+            }
+            for (File file : files) {
+                if (file == null) {
+                    continue;
+                }
+                if (file.isDirectory()) {
+                    clearFolderContents(file.getAbsolutePath());
+                }
+                boolean deleted = file.delete();
+                if (!deleted) {
+                    LogManager.logW(TAG, "[CHAT_HISTORY] Failed to delete file: " + file.getAbsolutePath());
+                }
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[CHAT_HISTORY] Failed to clear folder contents: " + folderPath, e);
+        }
+    }
+
+    @Nullable
+    private String ensureCurrentChatFolderForMode() {
+        try {
+            if (isAgentMode()) {
+                String agentFolder = ConfigManager.getAgentChatFolder(requireContext());
+                if (agentFolder == null || agentFolder.trim().isEmpty()) {
+                    agentFolder = ConfigManager.getAgentChatFolderPath(requireContext());
+                }
+                File folder = new File(agentFolder);
+                if (!folder.exists() && !folder.mkdirs()) {
+                    LogManager.logE(TAG, "Failed to create Agent chat folder: " + agentFolder);
+                    return null;
+                }
+                ConfigManager.setAgentChatFolder(requireContext(), agentFolder);
+                ConfigManager.setCurrentChatFolder(requireContext(), agentFolder);
+                currentChatFolderPath = agentFolder;
+                return agentFolder;
+            }
+
+            String ragFolder = ConfigManager.getString(requireContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            if (ragFolder == null || ragFolder.trim().isEmpty()) {
+                ragFolder = ChatHistoryManager.createNewChatFolder(requireContext());
+                if (ragFolder == null || ragFolder.trim().isEmpty()) {
+                    LogManager.logE(TAG, "Failed to create RAG chat folder");
+                    return null;
+                }
+            } else {
+                File folder = new File(ragFolder);
+                if (!folder.exists()) {
+                    ragFolder = ChatHistoryManager.createNewChatFolder(requireContext());
+                    if (ragFolder == null || ragFolder.trim().isEmpty()) {
+                        LogManager.logE(TAG, "Failed to recreate RAG chat folder");
+                        return null;
+                    }
+                }
+            }
+
+            ConfigManager.setCurrentChatFolder(requireContext(), ragFolder);
+            ConfigManager.setString(requireContext(), ConfigManager.KEY_RAG_CHAT_FOLDER, ragFolder);
+            currentChatFolderPath = ragFolder;
+            return ragFolder;
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to ensure chat folder for mode " + currentMode, e);
+            return null;
+        }
     }
     
     /**
@@ -4576,7 +4872,14 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             if (!folder.exists()) {
                 LogManager.logW(TAG, "[CHAT_HISTORY] Chat folder does not exist, clearing setting and maintaining empty UI");
                 ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
-                // Silently maintain empty chat UI, no toast to avoid annoying user
+                // Clear chat messages to avoid showing previous mode's history
+                if (!chatMessages.isEmpty()) {
+                    chatMessages.clear();
+                    if (chatAdapter != null) {
+                        chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
+                    }
+                    LogManager.logI(TAG, "[CHAT_HISTORY] Folder not exist, cleared chat UI");
+                }
                 return;
             }
             
@@ -4616,7 +4919,14 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 // Successfully loaded, no toast needed (silent load for better UX)
             } else {
                 LogManager.logD(TAG, "[CHAT_HISTORY] No messages in history file, maintaining empty UI");
-                // Empty conversation file is valid, silently maintain empty UI
+                // Empty conversation file is valid, clear any previous messages to avoid mode history mixing
+                if (!chatMessages.isEmpty()) {
+                    chatMessages.clear();
+                    if (chatAdapter != null) {
+                        chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
+                    }
+                    LogManager.logI(TAG, "[CHAT_HISTORY] Empty history, cleared chat UI");
+                }
             }
         } catch (Exception e) {
             LogManager.logE(TAG, "[CHAT_HISTORY] Error loading conversation", e);
@@ -4978,22 +5288,12 @@ private void startVoiceRecording() {
     recordingDialog.show();
     
     // Ensure chat folder exists
-    String chatFolder = ConfigManager.getString(requireContext(), 
-        ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
-    if (chatFolder.isEmpty()) {
-        chatFolder = ChatHistoryManager.createNewChatFolder(requireContext());
-        if (chatFolder != null) {
-            ConfigManager.setString(requireContext(), 
-                ConfigManager.KEY_CURRENT_CHAT_FOLDER, chatFolder);
-            currentChatFolderPath = chatFolder;
-        } else {
-            LogManager.logE(TAG, "Failed to create chat folder for audio");
-            Toast.makeText(requireContext(), "无法创建对话文件夹", Toast.LENGTH_SHORT).show();
-            recordingDialog.dismiss();
-            return;
-        }
-    } else {
-        currentChatFolderPath = chatFolder;
+    String chatFolder = ensureCurrentChatFolderForMode();
+    if (chatFolder == null || chatFolder.trim().isEmpty()) {
+        LogManager.logE(TAG, "Failed to create chat folder for audio");
+        Toast.makeText(requireContext(), "无法创建对话文件夹", Toast.LENGTH_SHORT).show();
+        recordingDialog.dismiss();
+        return;
     }
     
     // Record to cache directory (will be compressed to M4A later)
@@ -5087,8 +5387,8 @@ private void sendVoiceMessage() {
     String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
     String apiKey = editTextApiKey.getText().toString();
     String model = spinnerApiModel.getSelectedItem().toString();
-    String knowledgeBase = spinnerKnowledgeBase.getSelectedItem().toString();
-    String systemPrompt = editTextSystemPrompt.getText().toString();
+    String knowledgeBase = isAgentMode() ? "" : spinnerKnowledgeBase.getSelectedItem().toString();
+    String systemPrompt = isAgentMode() ? "" : editTextSystemPrompt.getText().toString();
     String userPrompt = editTextUserPrompt.getText().toString().trim();
 
     LogManager.logI(TAG, "[VOICE][PARAM] apiUrl=" + apiUrl + ", model=" + model + ", kb=" + knowledgeBase);
@@ -5118,8 +5418,8 @@ private void sendVoiceMessage() {
     userScrolledAway = false; // Reset flag for new message
 
     // Build QueryRequest snapshot for manager (unified with text path)
-    int searchDepth = Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
-    boolean graphRagEnabled = (checkBoxGraphRagMode != null && checkBoxGraphRagMode.isChecked());
+    int searchDepth = isAgentMode() ? 0 : Integer.parseInt(spinnerSearchDepth.getSelectedItem().toString());
+    boolean graphRagEnabled = !isAgentMode() && (checkBoxGraphRagMode != null && checkBoxGraphRagMode.isChecked());
     boolean needsAsr = false;
     String asrModel = null;
     if (userInput.hasAudio()) {
@@ -5145,8 +5445,20 @@ private void sendVoiceMessage() {
                 needsAsr,
                 asrModel
         );
-        LogManager.logI(TAG, "[VOICE] Delegating audio query execution to RagQueryManager.startQuery");
-        ragQueryManager.startQuery(request);
+        if (isAgentMode()) {
+            if (agentManager == null) {
+                LogManager.logE(TAG, "[AGENT][VOICE] agentManager is null, fallback to normal query");
+                ragQueryManager.startQuery(request);
+            } else {
+                lastUserPrompt = userPrompt;
+                initializeSendingState();
+                agentManager.startAgentLoop(userPrompt, ragQueryManager);
+                LogManager.logI(TAG, "[AGENT][VOICE] Agent loop started, task: " + userPrompt);
+            }
+        } else {
+            LogManager.logI(TAG, "[VOICE] Delegating audio query execution to RagQueryManager.startQuery");
+            ragQueryManager.startQuery(request);
+        }
     } else {
         // CRITICAL: ragQueryManager must always exist. If null, it's a bug.
         LogManager.logE(TAG, "[VOICE] FATAL: ragQueryManager is null - this is a bug, manager-driven pipeline is required");
@@ -5180,33 +5492,11 @@ private void sendVoiceMessage() {
  */
 private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioFile) {
     // Step 1: Ensure chat folder exists
-    String chatFolderPath = ConfigManager.getString(getContext(), 
-        ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
-    
-    if (chatMessages.isEmpty() || chatFolderPath.isEmpty()) {
-        // Create new chat folder
-        String newFolder = ChatHistoryManager.createNewChatFolder(getContext());
-        if (newFolder == null) {
-            LogManager.logE(TAG, "Failed to create chat folder");
-            Toast.makeText(requireContext(), "无法创建对话文件夹，请检查存储权限", Toast.LENGTH_SHORT).show();
-            return null;
-        }
-        ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, newFolder);
-        currentChatFolderPath = newFolder;
-        chatFolderPath = newFolder;
-    } else {
-        // Verify existing folder
-        File existingFolder = new File(chatFolderPath);
-        if (!existingFolder.exists()) {
-            String newFolder = ChatHistoryManager.createNewChatFolder(getContext());
-            if (newFolder == null) {
-                LogManager.logE(TAG, "Failed to create chat folder");
-                return null;
-            }
-            ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, newFolder);
-            currentChatFolderPath = newFolder;
-            chatFolderPath = newFolder;
-        }
+    String chatFolderPath = ensureCurrentChatFolderForMode();
+    if (chatFolderPath == null || chatFolderPath.trim().isEmpty()) {
+        LogManager.logE(TAG, "Failed to create chat folder");
+        Toast.makeText(requireContext(), "无法创建对话文件夹，请检查存储权限", Toast.LENGTH_SHORT).show();
+        return null;
     }
     
     // Step 2: Save all media files synchronously
@@ -6010,50 +6300,9 @@ private static class UserInput {
                 }
             });
             
-            // Set Agent checkbox listener
             if (checkBoxAgentMode != null) {
-                checkBoxAgentMode.setOnCheckedChangeListener((buttonView, isChecked) -> {
-                    if (isUpdatingUiFromConfig) {
-                        LogManager.logD(TAG, "[AGENT] Ignore checkbox change during config-driven UI update");
-                        return;
-                    }
-                    
-                    isAgentEnabled.set(isChecked);
-                    
-                    // Auto-manage history rounds: 0 for Agent mode, restore default when disabled
-                    if (isChecked) {
-                        // Save current history rounds before setting to 0
-                        int currentHistoryRounds = ConfigManager.getInt(requireContext(), ConfigManager.KEY_HISTORY_ROUNDS, 5);
-                        if (currentHistoryRounds != 0) {
-                            ConfigManager.setInt(requireContext(), "agent_saved_history_rounds", currentHistoryRounds);
-                            LogManager.logI(TAG, "[AGENT] Saved current history rounds: " + currentHistoryRounds);
-                        }
-                        // Set history rounds to 0 for Agent mode
-                        ConfigManager.setInt(requireContext(), ConfigManager.KEY_HISTORY_ROUNDS, 0);
-                        LogManager.logI(TAG, "[AGENT] Auto-set history rounds to 0 (Agent mode)");
-                    } else {
-                        // Restore saved history rounds
-                        int savedHistoryRounds = ConfigManager.getInt(requireContext(), "agent_saved_history_rounds", 5);
-                        ConfigManager.setInt(requireContext(), ConfigManager.KEY_HISTORY_ROUNDS, savedHistoryRounds);
-                        LogManager.logI(TAG, "[AGENT] Restored history rounds to: " + savedHistoryRounds);
-                    }
-                    
-                    // Save to ConfigManager
-                    ConfigManager.setBoolean(requireContext(), ConfigManager.KEY_AGENT_MODE_ENABLED, isChecked);
-                    LogManager.logI(TAG, "[AGENT] Agent mode " + (isChecked ? "enabled" : "disabled") + ", saved to config");
-                    
-                    if (isChecked && !agentManager.isAccessibilityServiceEnabled()) {
-                        // Show permission dialog
-                        showAgentPermissionDialog();
-                        // Uncheck the box since permission not granted
-                        checkBoxAgentMode.setChecked(false);
-                        isAgentEnabled.set(false);
-                        // Restore history rounds since Agent mode failed to enable
-                        int savedHistoryRounds = ConfigManager.getInt(requireContext(), "agent_saved_history_rounds", 5);
-                        ConfigManager.setInt(requireContext(), ConfigManager.KEY_HISTORY_ROUNDS, savedHistoryRounds);
-                        LogManager.logI(TAG, "[AGENT] Permission denied, restored history rounds to: " + savedHistoryRounds);
-                    }
-                });
+                checkBoxAgentMode.setChecked(false);
+                checkBoxAgentMode.setVisibility(View.GONE);
             }
             
         } catch (Exception e) {

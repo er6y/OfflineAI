@@ -85,6 +85,7 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
     private boolean isMainUIInitialized = false;
     private UnifiedForegroundService unifiedForegroundService;
     private ServiceConnection serviceConnection;
+    private int currentRagPageNavId = R.id.navigation_rag_qa;
     // OTA download state flag
     private volatile boolean isOtaDownloading = false;
     // OTA APK URL loaded from release_info.json (app_url)
@@ -236,6 +237,12 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         // 初始化ViewPager2和BottomNavigationView
         viewPager = findViewById(R.id.viewPager);
         bottomNavigation = findViewById(R.id.bottomNavigation);
+
+        // Restore Rag/Agent tab from persisted mode config instead of hardcoded RAG default
+        boolean startupAgentMode = ConfigManager.getBoolean(this, ConfigManager.KEY_AGENT_MODE_ENABLED, false);
+        currentRagPageNavId = startupAgentMode ? R.id.navigation_agent : R.id.navigation_rag_qa;
+        LogManager.logI(TAG, "[MODE_INIT] MainActivity startup nav mode from config: "
+                + (startupAgentMode ? "AGENT" : "RAG"));
         
         // 设置ViewPager2适配器
         viewPager.setAdapter(new FragmentStateAdapter(this) {
@@ -268,13 +275,26 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         bottomNavigation.setOnItemSelectedListener(item -> {
             int itemId = item.getItemId();
             if (itemId == R.id.navigation_rag_qa) {
+                currentRagPageNavId = R.id.navigation_rag_qa;
                 viewPager.setCurrentItem(0, false);
+                RagQaFragment fragment = getRagQaFragment();
+                if (fragment != null) {
+                    fragment.switchMode(RagQaFragment.PageMode.RAG);
+                }
                 return true;
             } else if (itemId == R.id.navigation_build_kb) {
                 viewPager.setCurrentItem(1, false);
                 return true;
             } else if (itemId == R.id.navigation_kb_note) {
                 viewPager.setCurrentItem(2, false);
+                return true;
+            } else if (itemId == R.id.navigation_agent) {
+                currentRagPageNavId = R.id.navigation_agent;
+                viewPager.setCurrentItem(0, false);
+                RagQaFragment fragment = getRagQaFragment();
+                if (fragment != null) {
+                    fragment.switchMode(RagQaFragment.PageMode.AGENT);
+                }
                 return true;
             }
             return false;
@@ -286,7 +306,13 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
             public void onPageSelected(int position) {
                 switch (position) {
                     case 0:
-                        bottomNavigation.setSelectedItemId(R.id.navigation_rag_qa);
+                        bottomNavigation.setSelectedItemId(currentRagPageNavId);
+                        RagQaFragment fragment = getRagQaFragment();
+                        if (fragment != null) {
+                            fragment.switchMode(currentRagPageNavId == R.id.navigation_agent
+                                    ? RagQaFragment.PageMode.AGENT
+                                    : RagQaFragment.PageMode.RAG);
+                        }
                         break;
                     case 1:
                         bottomNavigation.setSelectedItemId(R.id.navigation_build_kb);
@@ -297,9 +323,24 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
                 }
             }
         });
+
+        // Apply startup tab selection after listeners are ready
+        bottomNavigation.setSelectedItemId(currentRagPageNavId);
         
         // 绑定到知识库构建服务
         bindToKnowledgeBaseBuilderService();
+    }
+
+    private RagQaFragment getRagQaFragment() {
+        try {
+            Fragment fragment = getSupportFragmentManager().findFragmentByTag("f0");
+            if (fragment instanceof RagQaFragment) {
+                return (RagQaFragment) fragment;
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "Failed to get RagQaFragment", e);
+        }
+        return null;
     }
     
     /**

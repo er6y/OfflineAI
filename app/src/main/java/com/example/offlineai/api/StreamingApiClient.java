@@ -231,23 +231,6 @@ public class StreamingApiClient {
                     }
                 }
                 
-                // 火山引擎(豆包): Uses thinking field in request body
-                if (apiType == LlmApiAdapter.ApiType.DOUBAO) {
-                    try {
-                        JSONObject thinking = new JSONObject();
-                        if (thinkingEnabled) {
-                            thinking.put("type", "enable");
-                            thinking.put("budget_tokens", 1024);
-                        } else {
-                            thinking.put("type", "disable");
-                        }
-                        requestBody.put("thinking", thinking);
-                        LogManager.logI(TAG, "[THINKING] Doubao thinking set: enabled=" + thinkingEnabled);
-                    } catch (JSONException e) {
-                        LogManager.logE(TAG, "Failed to set thinking parameter", e);
-                    }
-                }
-                
                 // DeepSeek: May support enable_thinking in extra_body
                 if (apiType == LlmApiAdapter.ApiType.DEEPSEEK) {
                     try {
@@ -284,6 +267,9 @@ public class StreamingApiClient {
                         LogManager.logE(TAG, "Failed to set enable_thinking for OpenAI-compatible API", e);
                     }
                 }
+                
+                // NOTE: DOUBAO (Volcengine) API uses standard OpenAI-compatible format
+                // It does not support special thinking parameters, so we don't add any
             }
             
             LogManager.logI(TAG, "[DEBUG_REQUEST] Request body size: " + requestBody.toString().length() + " bytes");

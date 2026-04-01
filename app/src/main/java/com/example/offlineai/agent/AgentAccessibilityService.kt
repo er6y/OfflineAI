@@ -312,8 +312,8 @@ class AgentAccessibilityService : AccessibilityService() {
                 
                 // Get API URL and model name for dynamic format selection
                 val appContext = applicationContext
-                val apiUrl = ConfigManager.getString(appContext, ConfigManager.KEY_API_URL, AppConstants.ApiUrl.LOCAL)
-                val model = ConfigManager.getString(appContext, ConfigManager.KEY_MODEL_NAME, "")
+                val apiUrl = ConfigManager.getAgentApiUrl(appContext)
+                val model = ConfigManager.getAgentModelName(appContext)
                 
                 // Call AgentEngine.executeTask with model inference callback
                 // RAG retrieval is handled by RagQueryManager's full pipeline via QueryRequest
@@ -468,7 +468,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 }
                 
                 // Agent module manages its own prompt (dynamic format based on API URL)
-                val noThinking = ConfigManager.getBoolean(context, ConfigManager.KEY_NO_THINKING, false)
+                val noThinking = ConfigManager.getNoThinking(context, true)
                 val userSelectedFormat = ConfigManager.getAgentActionFormat(context)
                 
                 if (currentContext.isNotEmpty() && currentStep == 1) {
