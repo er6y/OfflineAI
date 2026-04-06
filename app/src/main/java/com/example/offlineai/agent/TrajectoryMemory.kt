@@ -9,7 +9,6 @@ import android.graphics.Bitmap
 data class TrajectoryStep(
     val stepIndex: Int,
     val screenshot: Bitmap?,
-    val thinking: String,
     val action: AgentAction,
     val executionResult: ExecutionResult,
     val timestamp: Long = System.currentTimeMillis(),

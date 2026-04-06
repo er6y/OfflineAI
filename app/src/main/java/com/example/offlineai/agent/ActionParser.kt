@@ -1,7 +1,6 @@
 package com.example.offlineai.agent.parser
 
 import android.content.Context
-import com.example.offlineai.ConfigManager
 import com.example.offlineai.LogManager
 import com.example.offlineai.agent.model.AgentAction
 import com.example.offlineai.agent.model.AgentResponse
@@ -9,25 +8,25 @@ import com.example.offlineai.agent.ActionFormatRegistry
 
 /**
  * Action Parser - thin wrapper that delegates to ActionFormat implementations.
- * Format selection is based on user settings or API URL.
+ * Unified to OpenAI function-call format.
  */
 object ActionParser {
     
     private const val TAG = "ActionParser"
     
     /**
-     * Parse model output and return thinking + list of actions (supports context + actual action)
+     * Parse model output and return list of actions.
      */
-    fun parseActions(modelOutput: String, apiUrl: String, modelName: String = "", context: Context? = null): Pair<String, List<AgentAction>>? {
+    fun parseActions(modelOutput: String, apiUrl: String, modelName: String = "", context: Context? = null): List<AgentAction>? {
         try {
             LogManager.logI(TAG, "[PARSE_DEBUG] Input length: ${modelOutput.length}, apiUrl: $apiUrl, model: $modelName")
             LogManager.logD(TAG, "[PARSE_DEBUG] Input preview (first 200 chars): ${modelOutput.take(200)}")
             LogManager.logD(TAG, "[PARSE_DEBUG] Input preview (last 200 chars): ${modelOutput.takeLast(200)}")
             
-            val format = resolveFormat(apiUrl, modelName, context)
+            val format = resolveFormat(apiUrl, modelName)
             LogManager.logI(TAG, "[PARSE_DEBUG] Using format: ${format.getFormatName()}")
             
-            val (thinking, actions) = format.parseActionsWithCoT(modelOutput)
+            val actions = format.parseActions(modelOutput)
             if (actions.isEmpty()) {
                 LogManager.logE(TAG, "[PARSE_DEBUG] No actions parsed")
                 return null
@@ -37,7 +36,7 @@ object ActionParser {
             val validatedActions = actions.map { validateCoordinates(it) }
             
             LogManager.logI(TAG, "[PARSE_DEBUG] Successfully parsed ${validatedActions.size} actions: ${validatedActions.map { it.javaClass.simpleName }}")
-            return Pair(thinking ?: "", validatedActions)
+            return validatedActions
         } catch (e: Exception) {
             LogManager.logE(TAG, "[PARSE_DEBUG] Exception during parse", e)
             e.printStackTrace()
@@ -49,30 +48,17 @@ object ActionParser {
      * Legacy single-action parse (for backward compatibility)
      */
     fun parse(modelOutput: String, apiUrl: String, modelName: String = "", context: Context? = null): AgentResponse? {
-        val result = parseActions(modelOutput, apiUrl, modelName, context) ?: return null
-        val (thinking, actions) = result
+        val actions = parseActions(modelOutput, apiUrl, modelName, context) ?: return null
         // Return first non-context action (or first action if all are context)
         val mainAction = actions.firstOrNull { it !is AgentAction.Context } ?: actions.firstOrNull() ?: return null
-        return AgentResponse(thinking, mainAction)
+        return AgentResponse(mainAction)
     }
     
     /**
-     * Resolve the ActionFormat based on user settings or API URL.
+     * Resolve the unified ActionFormat.
      */
-    fun resolveFormat(apiUrl: String, modelName: String, context: Context?): com.example.offlineai.agent.ActionFormat {
-        if (context != null) {
-            val userFormat = ConfigManager.getAgentActionFormat(context)
-            LogManager.logI(TAG, "[PARSE_DEBUG] User selected format: $userFormat")
-            
-            if (userFormat != "Auto") {
-                val registryName = when (userFormat) {
-                    "AutoGLM-Phone" -> "AutoGLM"
-                    else -> userFormat
-                }
-                return ActionFormatRegistry.getFormatByName(registryName) 
-                    ?: ActionFormatRegistry.getFormatForApi(apiUrl, modelName)
-            }
-        }
+    fun resolveFormat(apiUrl: String, modelName: String): com.example.offlineai.agent.ActionFormat {
+        LogManager.logI(TAG, "[PARSE_DEBUG] Unified format: OpenAI FuncCall")
         return ActionFormatRegistry.getFormatForApi(apiUrl, modelName)
     }
     
@@ -113,9 +99,11 @@ object ActionParser {
     }
     
     /**
-     * Check if model output contains agent action tags
+     * Check if model output contains OpenAI-style function calls.
      */
     fun containsAgentAction(output: String): Boolean {
-        return output.contains("<tool_call>") && output.contains("</tool_call>")
+        val text = output.trim()
+        return text.contains("\"tool_calls\"") ||
+                (text.contains("\"name\"") && text.contains("\"parameters\""))
     }
 }

@@ -1397,27 +1397,6 @@
             android:layout_marginTop="16dp"
             android:layout_marginBottom="8dp" />
 
-        <!-- Agent动作格式选择 -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:layout_marginBottom="8dp">
-
-            <TextView
-                android:layout_width="100dp"
-                android:layout_height="wrap_content"
-                android:text="@string/label_agent_action_format"
-                android:textSize="16sp" />
-
-            <Spinner
-                android:id="@+id/spinnerAgentActionFormat"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1" />
-        </LinearLayout>
-
         <!-- Agent经验总结开关 -->
         <LinearLayout
             android:layout_width="match_parent"

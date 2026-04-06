@@ -318,6 +318,11 @@
     <string name="text_editor_save_success_toast">File saved</string>
     <string name="text_editor_save_failed">Failed to save file: %1$s</string>
     <string name="text_editor_save_failed_toast">Save failed</string>
+    <string name="text_editor_quick_stopwords">Stopwords: %1$s</string>
+    <string name="text_editor_quick_dictionary">Dictionary: %1$s</string>
+    <string name="text_editor_quick_model_list">Model List: %1$s</string>
+    <string name="text_editor_quick_agent_user">Agent User: %1$s</string>
+    <string name="text_editor_quick_browse">Browse Files</string>
     <string name="dialog_add_new_api_address">Add New API Address</string>
 
 
@@ -1284,11 +1289,6 @@
     
     <!-- Agent Settings -->
     <string name="settings_category_agent">Agent Setting</string>
-    <string name="label_agent_action_format">Action</string>
-    <string name="agent_action_format_auto">Auto</string>
-    <string name="agent_action_format_mai_ui">MAI-UI</string>
-    <string name="agent_action_format_autoglm">AutoGLM-Phone</string>
-    <string name="agent_action_format_doubao">Doubao-1.5-UI-TARS</string>
     <string name="label_agent_experience_summary">Experience Summary</string>
     <string name="agent_experience_summary_hint">Summarize experience after task completion and save to knowledge base</string>
     <string name="label_agent_tts">Agent TTS</string>

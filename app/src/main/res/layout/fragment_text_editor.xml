@@ -33,14 +33,15 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:gravity="end"
+        android:gravity="center_vertical"
         android:layout_marginBottom="4dp">
 
-        <Button
-            android:id="@+id/buttonBrowseFile"
-            android:layout_width="wrap_content"
+        <Spinner
+            android:id="@+id/spinnerQuickFile"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:text="@string/button_browse_files" />
+            android:layout_weight="1"
+            android:spinnerMode="dropdown" />
 
         <Button
             android:id="@+id/buttonSaveFile"

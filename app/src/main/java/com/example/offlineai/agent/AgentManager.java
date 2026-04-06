@@ -45,7 +45,7 @@ public class AgentManager {
      * Callback interface for agent events
      */
     public interface AgentCallback {
-        void onAgentActionDetected(String thinking, String actionType);
+        void onAgentActionDetected(String actionType);
         void onAgentActionCompleted(boolean success, String message);
         void onAgentError(String error);
         void onAgentAnswer(String text);
@@ -61,12 +61,12 @@ public class AgentManager {
         // Set engine callback
         engine.setCallback(new AgentEngine.AgentCallback() {
             @Override
-            public void onStepStarted(int stepIndex, @NotNull String thinking) {
+            public void onStepStarted(int stepIndex) {
                 // Step start logged in AgentEngine
             }
             
             @Override
-            public void onStepCompleted(int stepIndex, @NotNull String thinking, @NotNull AgentAction action, @NotNull ExecutionResult result) {
+            public void onStepCompleted(int stepIndex, @NotNull AgentAction action, @NotNull ExecutionResult result) {
                 if (callback != null) {
                     callback.onAgentActionCompleted(result.getSuccess(), result.getMessage());
                 }

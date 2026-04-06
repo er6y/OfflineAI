@@ -57,8 +57,8 @@ class AgentEngine(private val context: Context) {
      * Callback interface for agent execution events
      */
     interface AgentCallback {
-        fun onStepStarted(stepIndex: Int, thinking: String)
-        fun onStepCompleted(stepIndex: Int, thinking: String, action: AgentAction, result: ExecutionResult)
+        fun onStepStarted(stepIndex: Int)
+        fun onStepCompleted(stepIndex: Int, action: AgentAction, result: ExecutionResult)
         fun onTaskCompleted(success: Boolean, message: String)
         fun onError(error: String)
         // Suspend execution and show AskUser UI; resume with user input text (may be empty)
@@ -151,15 +151,13 @@ class AgentEngine(private val context: Context) {
                 val coordError = ActionParser.getLastCoordinateError()
                 ActionParser.clearCoordinateError()
                 
-                // Save complete model output for history (including <thinking> and <tool_call>)
-                // This allows extracting first 100 chars as thinking summary in buildUserPromptWithHistory
+                // Save complete model output for history
                 val rawOutput = modelOutput.trim()
                 
                 // Store in memory
                 val step = TrajectoryStep(
                     stepIndex = memory.getStepCount(),
                     screenshot = screenshot,
-                    thinking = response.thinking,
                     action = response.action,
                     executionResult = result,
                     coordinateError = coordError,
@@ -167,7 +165,7 @@ class AgentEngine(private val context: Context) {
                 )
                 memory.addStep(step)
                 
-                callback?.onStepCompleted(step.stepIndex, response.thinking, response.action, result)
+                callback?.onStepCompleted(step.stepIndex, response.action, result)
                 
                 return@withContext result
             }
@@ -284,25 +282,13 @@ class AgentEngine(private val context: Context) {
                             break
                         }
                         
-                        // Get format-specific error hint using user-selected format
-                        val userFormat = ConfigManager.getAgentActionFormat(context)
-                        val format = if (userFormat == "Auto") {
-                            com.example.offlineai.agent.ActionFormatRegistry.getFormatForApi(apiUrl, modelName)
-                        } else {
-                            val registryName = when (userFormat) {
-                                "AutoGLM-Phone" -> "AutoGLM"
-                                else -> userFormat
-                            }
-                            com.example.offlineai.agent.ActionFormatRegistry.getFormatByName(registryName)
-                                ?: com.example.offlineai.agent.ActionFormatRegistry.getFormatForApi(apiUrl, modelName)
-                        }
+                        val format = com.example.offlineai.agent.ActionFormatRegistry.getFormatForApi(apiUrl, modelName)
                         val errorHint = format.getErrorHint()
                         
                         // Add error feedback to memory for next retry
                         val step = TrajectoryStep(
                             stepIndex = memory.getStepCount(),
                             screenshot = screenshot,
-                            thinking = "",
                             action = AgentAction.Wait,
                             executionResult = ExecutionResult(
                                 success = false,
@@ -316,7 +302,7 @@ class AgentEngine(private val context: Context) {
                     }
 
                     parseRetryCount = 0
-                    val (thinking, actions) = parseResult
+                    val actions = parseResult
                     
                     // Extract context action and update currentContext
                     val contextAction = actions.filterIsInstance<AgentAction.Context>().firstOrNull()
@@ -360,13 +346,12 @@ class AgentEngine(private val context: Context) {
                         val pureStep = TrajectoryStep(
                             stepIndex = memory.getStepCount(),
                             screenshot = screenshot,
-                            thinking = thinking,
                             action = AgentAction.Wait,
                             executionResult = ExecutionResult(true, "context+data_memory step: $dmSummary"),
                             rawModelOutput = modelOutput.trim()
                         )
                         memory.addStep(pureStep)
-                        callback?.onStepCompleted(stepIndex, thinking, AgentAction.Wait, pureStep.executionResult)
+                        callback?.onStepCompleted(stepIndex, AgentAction.Wait, pureStep.executionResult)
                         // Inject dm result into lastStepResult so model knows set succeeded
                         val dmKeys = dataMemoryActions.filter { it.operation == "set" }.mapNotNull { it.key }
                         val realKeys = dataMemory.keys.joinToString(", ").ifEmpty { "（空）" }
@@ -391,8 +376,8 @@ class AgentEngine(private val context: Context) {
                     // Reset pure step counter when a real UI action is executed
                     consecutivePureSteps = 0
                     
-                    val response = AgentResponse(thinking, actualAction)
-                    callback?.onStepStarted(stepIndex, thinking)
+                    val response = AgentResponse(actualAction)
+                    callback?.onStepStarted(stepIndex)
                     
                     // Handle special actions
                     when (response.action) {
@@ -407,7 +392,6 @@ class AgentEngine(private val context: Context) {
                             val terminateStep = TrajectoryStep(
                                 stepIndex = memory.getStepCount(),
                                 screenshot = screenshot,
-                                thinking = response.thinking,
                                 action = expandedAction,
                                 executionResult = ExecutionResult(success = success, message = "Task terminated: ${expandedAction.status.value}"),  
                                 coordinateError = null,
@@ -416,7 +400,7 @@ class AgentEngine(private val context: Context) {
                             memory.addStep(terminateStep)
                             
                             // Step 1: Show terminate text in floating window FIRST (before TTS)
-                            callback?.onStepCompleted(stepIndex, response.thinking, expandedAction, terminateStep.executionResult)
+                            callback?.onStepCompleted(stepIndex, expandedAction, terminateStep.executionResult)
                             
                             // Step 2: Launch TTS asynchronously so experience summary can run concurrently.
                             // Both TTS and experience summary run in parallel; we wait for TTS at the end.
@@ -461,9 +445,8 @@ class AgentEngine(private val context: Context) {
                                 val taskHistory = "任务目标: $taskGoal\n\n最新上下文记忆:\n$currentContext"
                                 if (taskHistory.isNotEmpty()) {
                                     val agentKbRecalled = cachedAgentKbContext  // Full RAG recall for KB dedup
-                                    val userSelectedFormat = com.example.offlineai.ConfigManager.getAgentActionFormat(context)
                                     val summaryPrompt = AgentAccessibilityService.getInstance()?.buildExperienceSummaryPromptFromHistory(
-                                        taskHistory, agentKbRecalled, userSelectedFormat)
+                                        taskHistory, agentKbRecalled)
                                     if (!summaryPrompt.isNullOrEmpty()) {
                                         AgentAccessibilityService.getInstance()?.isExperienceSummaryStep = true
                                         val summaryResponse = try {
@@ -518,14 +501,13 @@ class AgentEngine(private val context: Context) {
                             val askUserResult = TrajectoryStep(
                                 stepIndex = memory.getStepCount(),
                                 screenshot = null,
-                                thinking = response.thinking,
                                 action = response.action,
                                 executionResult = ExecutionResult(true, askResultMsg),
                                 rawModelOutput = ""
                             )
                             memory.addStep(askUserResult)
                             // onStepCompleted now fires AFTER user replied → lastStepResult contains the reply
-                            callback?.onStepCompleted(stepIndex, response.thinking, response.action, askUserResult.executionResult)
+                            callback?.onStepCompleted(stepIndex, response.action, askUserResult.executionResult)
                             
                             // No delay needed - user already spent time on input
                             stepIndex++
@@ -542,14 +524,12 @@ class AgentEngine(private val context: Context) {
                             val coordError = ActionParser.getLastCoordinateError()
                             ActionParser.clearCoordinateError()
                             
-                            // Save complete model output for history (including <thinking> and <tool_call>)
-                            // This allows extracting first 100 chars as thinking summary in buildUserPromptWithHistory
+                            // Save complete model output for history
                             val rawOutput = modelOutput.trim()
                             
                             val step = TrajectoryStep(
                                 stepIndex = memory.getStepCount(),
                                 screenshot = screenshot,
-                                thinking = response.thinking,
                                 action = response.action,
                                 executionResult = result,
                                 coordinateError = coordError,
@@ -557,7 +537,7 @@ class AgentEngine(private val context: Context) {
                             )
                             memory.addStep(step)
                             
-                            callback?.onStepCompleted(stepIndex, response.thinking, response.action, result)
+                            callback?.onStepCompleted(stepIndex, response.action, result)
                             
                             if (!result.success) {
                                 LogManager.logE(TAG, "Action failed: ${result.message}")

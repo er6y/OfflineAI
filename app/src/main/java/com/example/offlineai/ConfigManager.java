@@ -125,7 +125,6 @@ public class ConfigManager {
     public static final String KEY_NO_THINKING = "no_thinking"; // 是否禁用思考模式
     public static final String KEY_AGENT_NO_THINKING = "agent_no_thinking"; // Agent模式是否禁用思考模式
     public static final String KEY_AGENT_MODE_ENABLED = "agent_mode_enabled"; // Agent模式是否启用
-    public static final String KEY_AGENT_ACTION_FORMAT = "agent_action_format"; // Agent动作格式选择 (Auto/MAI-UI/AutoGLM-Phone/Doubao-1.5-UI-TARS)
     public static final String KEY_AGENT_EXPERIENCE_SUMMARY = "agent_experience_summary"; // Agent经验总结开关
     public static final String KEY_AGENT_TTS_ENABLED = "agent_tts_enabled"; // Agent语音播报开关
     public static final String KEY_THREADS = "threads"; // ONNX推理线程数
@@ -1308,6 +1307,24 @@ public class ConfigManager {
     }
 
     /**
+     * Get graph custom dictionary file path.
+     * @param context Context
+     * @return Absolute path to selected dictionary JSON file, or empty string if none
+     */
+    public static String getGraphCustomDictionaryPath(Context context) {
+        return getString(context, KEY_GRAPH_CUSTOM_DICT_PATH, "");
+    }
+
+    /**
+     * Set graph custom dictionary file path.
+     * @param context Context
+     * @param path Absolute path to dictionary JSON file, or empty/NULL for none
+     */
+    public static void setGraphCustomDictionaryPath(Context context, String path) {
+        setString(context, KEY_GRAPH_CUSTOM_DICT_PATH, path == null ? "" : path);
+    }
+
+    /**
      * Whether BM25+RRF hybrid retrieval is enabled.
      * Mirrors Python config retrieval.bm25_enabled.
      * @param context Context
@@ -1324,6 +1341,16 @@ public class ConfigManager {
      */
     public static String getDataRootPath(Context context) {
         return getString(context, KEY_DATA_ROOT_PATH, DEFAULT_DATA_ROOT_PATH);
+    }
+
+    /**
+     * Get a file under current data root by file name.
+     * @param context Context
+     * @param fileName File name under data root
+     * @return File object under data root
+     */
+    public static File getDataRootFile(Context context, String fileName) {
+        return new File(getDataRootPath(context), fileName);
     }
 
     /**
@@ -1468,6 +1495,48 @@ public class ConfigManager {
             LogManager.logD(TAG, "[STOPWORDS] Copied default example_stop.json to: " + exampleFile.getAbsolutePath());
         } catch (Exception e) {
             LogManager.logE(TAG, "[STOPWORDS] Failed to ensure default stopwords example", e);
+        }
+    }
+
+    /**
+     * Ensure an asset file exists under data root. If target file exists, keep it untouched.
+     * @param context Context
+     * @param assetName Asset file name
+     * @param targetFileName Target file name under data root
+     * @return true if file exists or copied successfully, false otherwise
+     */
+    public static boolean ensureAssetFileInDataRoot(Context context, String assetName, String targetFileName) {
+        try {
+            File baseDir = new File(getDataRootPath(context));
+            if (!baseDir.exists()) {
+                boolean created = baseDir.mkdirs();
+                if (!created) {
+                    LogManager.logW(TAG, "[DATA_ROOT_ASSET] Failed to create data root: " + baseDir.getAbsolutePath());
+                    return false;
+                }
+            }
+
+            File targetFile = new File(baseDir, targetFileName);
+            if (targetFile.exists() && targetFile.isFile()) {
+                return true;
+            }
+
+            AssetManager assetManager = context.getAssets();
+            try (InputStream in = assetManager.open(assetName);
+                 FileOutputStream out = new FileOutputStream(targetFile)) {
+                byte[] buffer = new byte[4096];
+                int len;
+                while ((len = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, len);
+                }
+                out.flush();
+            }
+
+            LogManager.logI(TAG, "[DATA_ROOT_ASSET] Copied asset to data root: " + targetFile.getAbsolutePath());
+            return true;
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[DATA_ROOT_ASSET] Failed to ensure asset in data root: " + assetName, e);
+            return false;
         }
     }
 
@@ -3090,25 +3159,6 @@ public class ConfigManager {
         String key = KEY_LAST_MODEL_PREFIX + apiUrl.hashCode();
         setString(context, key, modelName);
         LogManager.logD(TAG, "Saved last model for API " + apiUrl + ": " + modelName);
-    }
-    
-    /**
-     * 获取Agent动作格式设置
-     * @param context Context
-     * @return Agent动作格式 (Auto/MAI-UI/AutoGLM-Phone/Doubao-1.5-UI-TARS)，默认为Auto
-     */
-    public static String getAgentActionFormat(Context context) {
-        return getString(context, KEY_AGENT_ACTION_FORMAT, "Auto");
-    }
-    
-    /**
-     * 设置Agent动作格式
-     * @param context Context
-     * @param format Agent动作格式 (Auto/MAI-UI/AutoGLM-Phone/Doubao-1.5-UI-TARS)
-     */
-    public static void setAgentActionFormat(Context context, String format) {
-        setString(context, KEY_AGENT_ACTION_FORMAT, format);
-        LogManager.logD(TAG, "Set agent action format: " + format);
     }
     
     /**

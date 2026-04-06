@@ -300,10 +300,9 @@ sealed class AgentAction {
 }
 
 /**
- * Parsed model response containing thinking and action
+ * Parsed model response containing action
  */
 data class AgentResponse(
-    val thinking: String,
     val action: AgentAction
 )
 

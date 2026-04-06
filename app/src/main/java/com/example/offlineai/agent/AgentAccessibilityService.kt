@@ -174,13 +174,13 @@ class AgentAccessibilityService : AccessibilityService() {
         // Set AgentEngine callback to save step history
         if (engine != null) {
             engine.setCallback(object : AgentEngine.AgentCallback {
-                override fun onStepStarted(stepIndex: Int, thinking: String) {
+                override fun onStepStarted(stepIndex: Int) {
                     // Silent
                 }
                 
-                override fun onStepCompleted(stepIndex: Int, thinking: String, action: AgentAction, result: ExecutionResult) {
+                override fun onStepCompleted(stepIndex: Int, action: AgentAction, result: ExecutionResult) {
                     LogManager.logI(TAG, "[AGENT] Step $stepIndex: ${action.javaClass.simpleName} - ${if (result.success) "OK" else "FAIL"}")
-                    saveStepToConversationMd(stepIndex, thinking, action, result)
+                    saveStepToConversationMd(stepIndex, action, result)
                     // On terminate: show full expanded text in output area and lock it
                     if (action is AgentAction.Terminate) {
                         floatingWindow?.showTerminateResult(action.text)
@@ -438,7 +438,7 @@ class AgentAccessibilityService : AccessibilityService() {
         currentStep++
         try {
             floatingWindow?.updateStep(currentStep)
-            floatingWindow?.updateStatus("Step $currentStep: Thinking...")
+            floatingWindow?.updateStatus("Step $currentStep: Processing...")
         } catch (e: Exception) {
             LogManager.logW(TAG, "Failed to update floating window: ${e.message}")
         }
@@ -452,9 +452,9 @@ class AgentAccessibilityService : AccessibilityService() {
                 
                 // Agent module builds its own QueryRequest with Agent-specific configuration
                 val context = applicationContext
-                val apiUrl = ConfigManager.getString(context, ConfigManager.KEY_API_URL, AppConstants.ApiUrl.LOCAL)
+                val apiUrl = ConfigManager.getAgentApiUrl(context).ifEmpty { AppConstants.ApiUrl.LOCAL }
                 val apiKey = ConfigManager.getApiKey(context, apiUrl)  // Get API Key for specific URL
-                val model = ConfigManager.getString(context, ConfigManager.KEY_MODEL_NAME, "")
+                val model = ConfigManager.getAgentModelName(context)
                 
                 // Get installed launchable apps (use cache if available)
                 val appNames = if (cachedAppList != null) {
@@ -468,20 +468,17 @@ class AgentAccessibilityService : AccessibilityService() {
                 }
                 
                 // Agent module manages its own prompt (dynamic format based on API URL)
-                val noThinking = ConfigManager.getNoThinking(context, true)
-                val userSelectedFormat = ConfigManager.getAgentActionFormat(context)
                 
                 if (currentContext.isNotEmpty() && currentStep == 1) {
                     LogManager.logI(TAG, "[AGENT_CONTEXT] Initial context (RAG recall): ${currentContext.length} chars")
                 }
                 
-                // Use empty system prompt for experience summary step
+                // Use unified system prompt
                 val systemPrompt = if (isExperienceSummaryStep) {
                     LogManager.logI(TAG, "[AGENT_EXP] Using empty system prompt for experience summary")
                     ""
                 } else {
-                    // RAG context is NOT injected into system prompt; it's in currentContext (user prompt)
-                    AgentPrompts.getSystemPromptForApi(apiUrl, model, appNames, !noThinking, userSelectedFormat)
+                    AgentPrompts.getSystemPromptForApi(context, apiUrl, model, appNames)
                 }
                 
                 // Log system prompt on first step (full content for debugging)
@@ -1108,12 +1105,11 @@ class AgentAccessibilityService : AccessibilityService() {
      */
     private fun saveStepToConversationMd(
         stepIndex: Int,
-        thinking: String,
         action: AgentAction,
         result: ExecutionResult
     ) {
         LogManager.logI(TAG, "[AGENT_STEP_HISTORY_DEBUG] === saveStepToConversationMd CALLED ===")
-        LogManager.logI(TAG, "[AGENT_STEP_HISTORY_DEBUG] stepIndex=$stepIndex, thinking.length=${thinking.length}, action=${action.javaClass.simpleName}, result.success=${result.success}")
+        LogManager.logI(TAG, "[AGENT_STEP_HISTORY_DEBUG] stepIndex=$stepIndex, action=${action.javaClass.simpleName}, result.success=${result.success}")
         try {
             val context = applicationContext
             val chatFolderPath = ConfigManager.getString(
@@ -1133,16 +1129,9 @@ class AgentAccessibilityService : AccessibilityService() {
             val markdown = StringBuilder()
             
             // Format: Step N:
-            // OBSERVATION: thinking
             // ACTION: action description
             // RESULT: result message
             markdown.append("\nStep $stepIndex:\n")
-            
-            // OBSERVATION (thinking)
-            if (thinking.isNotEmpty()) {
-                markdown.append("OBSERVATION: $thinking\n")
-                LogManager.logI(TAG, "[AGENT_STEP_HISTORY_DEBUG] Added OBSERVATION, length=${thinking.length}")
-            }
             
             // ACTION description
             markdown.append("ACTION: ")
@@ -1264,25 +1253,13 @@ class AgentAccessibilityService : AccessibilityService() {
      */
     fun buildExperienceSummaryPromptFromHistory(
         taskHistory: String,
-        agentKbRecalled: String = "",
-        userSelectedFormat: String = ""
+        agentKbRecalled: String = ""
     ): String {
-        // Get the action format to determine thinking tag
         val context = applicationContext
-        val apiUrl = ConfigManager.getString(context, ConfigManager.KEY_API_URL, AppConstants.ApiUrl.LOCAL)
-        val model = ConfigManager.getString(context, ConfigManager.KEY_MODEL_NAME, "")
+        val apiUrl = ConfigManager.getAgentApiUrl(context).ifEmpty { AppConstants.ApiUrl.LOCAL }
+        val model = ConfigManager.getAgentModelName(context)
+        val format = ActionFormatRegistry.getFormatForApi(apiUrl, model)
         
-        val format = if (userSelectedFormat.isEmpty() || userSelectedFormat == "Auto" || userSelectedFormat == "自动") {
-            ActionFormatRegistry.getFormatForApi(apiUrl, model)
-        } else {
-            val registryName = when (userSelectedFormat) {
-                "AutoGLM-Phone" -> "AutoGLM"
-                else -> userSelectedFormat
-            }
-            ActionFormatRegistry.getFormatByName(registryName) ?: ActionFormatRegistry.getFormatForApi(apiUrl, model)
-        }
-        
-        val thinkingTag = format.getThinkingTag()
         val kbActionDesc = format.getKbActionDescription()
         
         // Build recalled experience section
@@ -1311,10 +1288,10 @@ $taskHistory
 $recalledSection
 
 ## 输出要求
-你需要先在<$thinkingTag>**思考内容**</$thinkingTag>标签中思考，然后输出 KB Action。
+输出 KB Action 前请思考：任务分析、经验提炼、已有经验评估、KB Action 决策。
 
 ### 思考内容
-<$thinkingTag>**思考内容**</$thinkingTag>中必须包含：
+思考内容应包含：
 1. 任务分析：这次任务的核心目标是什么，成功/失败的关键因素
 2. 经验提炼：哪些步骤是通用的，哪些是特定场景的
 3. 已有经验评估：逐一判断每个召回文档——是否与本次任务相关？若不相关，跳过（不删除）
@@ -1339,9 +1316,7 @@ $kbActionDesc
 
 **重要**：
 - 控制输出精要不赘述，说重点，全部输出不超过800字
-- 先在<$thinkingTag>**思考内容**</$thinkingTag>思考，再输出 KB Action
-- 可以输出多个 KB Action（如：先 kb_delete 旧的，再 kb_insert 新的）
-- 思考过程中的草稿 KB Action 不会被执行，只有<$thinkingTag>外的 KB Action 才会执行
+- 先思考再输出 KB Action
         """.trimIndent()
     }
     
@@ -1376,7 +1351,7 @@ $kbActionDesc
             trajectory.forEachIndexed { index, step ->
                 val stepNum = index + 1
                 
-                // Extract first 100 chars from rawModelOutput as thinking summary
+                // Extract first 100 chars from rawModelOutput as summary
                 // Remove all tags to save tokens
                 val cleanText = step.rawModelOutput
                     .replace(Regex("<thinking>|</thinking>|<tool_call>|</tool_call>"), "")
@@ -1388,7 +1363,7 @@ $kbActionDesc
                     } else {
                         cleanText
                     }
-                    result.append("Step $stepNum 思考: $summary\n")
+                    result.append("Step $stepNum 模型输出: $summary\n")
                 }
                 
                 // Extract action with detailed info
@@ -1580,14 +1555,14 @@ $kbActionDesc
         val actions = mutableListOf<KbActionItem>()
         
         try {
-            val apiUrl = ConfigManager.getApiUrl(applicationContext)
-            val modelName = ConfigManager.getModelName(applicationContext)
-            val format = com.example.offlineai.agent.parser.ActionParser.resolveFormat(apiUrl, modelName, applicationContext)
+            val apiUrl = ConfigManager.getAgentApiUrl(applicationContext).ifEmpty { AppConstants.ApiUrl.LOCAL }
+            val modelName = ConfigManager.getAgentModelName(applicationContext)
+            val format = com.example.offlineai.agent.parser.ActionParser.resolveFormat(apiUrl, modelName)
             
             LogManager.logI(TAG, "[AGENT_EXP] Using ${format.getFormatName()} with universal CoT strategy")
             
             // Use universal CoT: group by type, take last of each type
-            val (_, finalActions) = format.parseActionsWithCoT(modelOutput)
+            val finalActions = format.parseActions(modelOutput)
             
             LogManager.logI(TAG, "[AGENT_EXP] Universal CoT returned ${finalActions.size} final action(s)")
             

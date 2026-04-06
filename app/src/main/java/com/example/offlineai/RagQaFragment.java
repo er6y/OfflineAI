@@ -1111,7 +1111,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 }
                 
                 @Override
-                public void onAgentActionDetected(String fullResponse) {
+                public void onAgentActionDetected(String actionType) {
                     // Agent loop is now started directly when user sends message in Agent mode
                     // No need to trigger from streaming output (callback ignored)
                 }
@@ -1377,6 +1377,16 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         return currentMode == PageMode.AGENT;
     }
 
+    private boolean isUiReadyForModeOps() {
+        return isAdded()
+                && spinnerApiUrl != null
+                && editTextApiKey != null
+                && spinnerApiModel != null
+                && spinnerKnowledgeBase != null
+                && editTextSystemPrompt != null
+                && checkBoxThinkingMode != null;
+    }
+
     public void switchMode(@NonNull PageMode mode) {
         if (currentMode == mode) {
             return;
@@ -1387,7 +1397,12 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         }
         isSwitchingMode = true;
         try {
-        saveConfig();
+        boolean uiReady = isUiReadyForModeOps();
+        if (uiReady) {
+            saveConfig();
+        } else {
+            LogManager.logW(TAG, "[MODE] UI not ready during switchMode, skip saveConfig and defer UI-bound refresh");
+        }
         currentMode = mode;
         isAgentEnabled.set(isAgentMode());
         ConfigManager.setBoolean(requireContext(), ConfigManager.KEY_AGENT_MODE_ENABLED, isAgentMode());
@@ -1399,11 +1414,15 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             ConfigManager.setHistoryRounds(requireContext(), ragRounds);
         }
         applyModeUiVisibility();
-        loadConfig();
-        // Force refresh model list to ensure spinner displays correct model for current mode
-        fetchModelsForApi();
-        switchChatFolderByMode();
-        loadChatHistory();
+        if (uiReady) {
+            loadConfig();
+            // Force refresh model list to ensure spinner displays correct model for current mode
+            fetchModelsForApi();
+            switchChatFolderByMode();
+            loadChatHistory();
+        } else {
+            LogManager.logW(TAG, "[MODE] Deferred loadConfig/fetchModelsForApi/loadChatHistory until view is ready");
+        }
         LogManager.logI(TAG, "[MODE] Switched page mode to " + currentMode);
         } finally {
             isSwitchingMode = false;
@@ -1470,6 +1489,10 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
      * Load configuration file
      */
     private void loadConfig() {
+        if (!isUiReadyForModeOps()) {
+            LogManager.logW(TAG, "[LIFECYCLE] loadConfig skipped because UI is not ready");
+            return;
+        }
         try {
             String apiUrl;
             String modelName;
@@ -1555,6 +1578,10 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     
     // Save configuration to file
     private void saveConfig() {
+        if (!isUiReadyForModeOps()) {
+            LogManager.logW(TAG, "[LIFECYCLE] saveConfig skipped because UI is not ready");
+            return;
+        }
         try {
             // Get currently selected values
             String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
@@ -3819,6 +3846,10 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
      * Fetch available models for current API selection
      */
     private void fetchModelsForApi() {
+        if (!isUiReadyForModeOps()) {
+            LogManager.logW(TAG, "[LIFECYCLE] fetchModelsForApi skipped because UI is not ready");
+            return;
+        }
         String apiUrlDisplay = spinnerApiUrl.getSelectedItem().toString();
         String apiUrl = StateDisplayManager.getApiUrlFromDisplayText(requireContext(), apiUrlDisplay);
         String apiKey = editTextApiKey.getText().toString();
@@ -6255,10 +6286,10 @@ private static class UserInput {
             // Set Agent callback
             agentManager.setCallback(new AgentManager.AgentCallback() {
                 @Override
-                public void onAgentActionDetected(String thinking, String actionType) {
+                public void onAgentActionDetected(String actionType) {
                     LogManager.logI(TAG, "[AGENT] Action detected: " + actionType);
                     mainHandler.post(() -> {
-                        addSystemMessage("🤖 Agent: " + thinking);
+                        addSystemMessage("🤖 Agent: " + actionType);
                         updateAgentExecutionState(true, "Executing: " + actionType);
                     });
                 }

@@ -1111,6 +1111,11 @@
     <string name="text_editor_save_success_toast">保存成功</string>
     <string name="text_editor_save_failed">保存文件失败: %1$s</string>
     <string name="text_editor_save_failed_toast">保存失败</string>
+    <string name="text_editor_quick_stopwords">停用词: %1$s</string>
+    <string name="text_editor_quick_dictionary">词典: %1$s</string>
+    <string name="text_editor_quick_model_list">模型列表: %1$s</string>
+    <string name="text_editor_quick_agent_user">Agent用户词: %1$s</string>
+    <string name="text_editor_quick_browse">浏览文件</string>
 
     <!-- RagQueryManager Messages -->
     <string name="building_prompt">构建提示词...</string>
@@ -1292,16 +1297,10 @@
     <string name="agent_service_not_enabled">Agent功能需要开启无障碍服务</string>
     
     <!-- Agent Settings -->
-    <string name="settings_category_agent">代理设置</string>
-    <string name="label_agent_action_format">动作格式</string>
-    <string name="agent_action_format_auto">自动</string>
-    <string name="agent_action_format_mai_ui">MAI-UI</string>
-    <string name="agent_action_format_autoglm">AutoGLM-Phone</string>
-    <string name="agent_action_format_doubao">Doubao-1.5-UI-TARS</string>
-    <string name="agent_action_format_openai_funccall">OpenAI FuncCall</string>
+    <string name="settings_category_agent">智能体设置</string>
     <string name="label_agent_experience_summary">总结经验</string>
     <string name="agent_experience_summary_hint">任务完成后总结经验并可保存到知识库</string>
-    <string name="label_agent_tts">代理语音 (Agent TTS)</string>
+    <string name="label_agent_tts">智能体语音 (Agent TTS)</string>
     <string name="agent_tts_hint">任务完成或需要用户操作时语音播报</string>
     <string name="agent_tts_task_done">任务完成</string>
     <string name="agent_tts_task_failed">任务失败</string>

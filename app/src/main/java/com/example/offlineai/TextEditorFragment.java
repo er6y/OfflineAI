@@ -15,8 +15,11 @@ import android.view.MenuInflater;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -32,11 +35,16 @@ import androidx.fragment.app.Fragment;
 import androidx.lifecycle.Lifecycle;
 
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 
 public class TextEditorFragment extends Fragment {
     private static final String TAG = "TextEditorFragment";
@@ -44,17 +52,31 @@ public class TextEditorFragment extends Fragment {
     private TextView textViewFilePath;
     private TextView textViewStatus;
     private EditText editTextContent;
-    private Button buttonBrowseFile;
+    private Spinner spinnerQuickFile;
     private Button buttonSaveFile;
 
     private ActivityResultLauncher<Intent> openDocumentLauncher;
 
     private Uri currentDocumentUri;
+    private String currentFilePath = "";
     private String currentFileDisplayName = "";
     private boolean hasUnsavedChanges = false;
     private boolean ignoreTextChanges = false;
     private String lastSavedContent = "";
-    private String stopwordsDirPath = "";
+    private final List<QuickFileItem> quickFileItems = new ArrayList<>();
+    private boolean suppressQuickSelection = false;
+
+    private static class QuickFileItem {
+        final String displayName;
+        final String filePath;
+        final boolean browseItem;
+
+        QuickFileItem(String displayName, String filePath, boolean browseItem) {
+            this.displayName = displayName;
+            this.filePath = filePath;
+            this.browseItem = browseItem;
+        }
+    }
 
     @Override
     public void onCreate(@Nullable Bundle savedInstanceState) {
@@ -95,10 +117,9 @@ public class TextEditorFragment extends Fragment {
         textViewFilePath = view.findViewById(R.id.textViewFilePath);
         textViewStatus = view.findViewById(R.id.textViewStatus);
         editTextContent = view.findViewById(R.id.editTextContent);
-        buttonBrowseFile = view.findViewById(R.id.buttonBrowseFile);
+        spinnerQuickFile = view.findViewById(R.id.spinnerQuickFile);
         buttonSaveFile = view.findViewById(R.id.buttonSaveFile);
 
-        buttonBrowseFile.setOnClickListener(v -> openDocumentPicker());
         buttonSaveFile.setOnClickListener(v -> saveCurrentDocument());
 
         if (editTextContent != null) {
@@ -126,11 +147,13 @@ public class TextEditorFragment extends Fragment {
 
         try {
             ConfigManager.ensureDefaultStopwordsExample(requireContext());
-            stopwordsDirPath = ConfigManager.getStopwordsDirectoryPath(requireContext());
+            ConfigManager.ensureAssetFileInDataRoot(requireContext(), "ModelDownloadList.txt", "ModelDownloadList.txt");
+            ConfigManager.ensureAssetFileInDataRoot(requireContext(), "agent_user.txt", "agent_user.txt");
         } catch (Exception e) {
-            LogManager.logE(TAG, "[TEXT_EDITOR] Failed to initialize stopwords directory: " + e.getMessage(), e);
-            stopwordsDirPath = "";
+            LogManager.logE(TAG, "[TEXT_EDITOR] Failed to initialize quick files: " + e.getMessage(), e);
         }
+
+        initializeQuickFileSpinner();
 
         // Initialize label without preset path; actual full path is only shown after user selects a file
         textViewFilePath.setText(getString(R.string.label_text_editor_files));
@@ -172,7 +195,99 @@ public class TextEditorFragment extends Fragment {
                 activity.getSupportActionBar().setTitle(R.string.title_text_editor);
             }
         }
+        rebuildQuickFileOptions();
         applyGlobalTextSize();
+    }
+
+    private void initializeQuickFileSpinner() {
+        if (spinnerQuickFile == null) {
+            return;
+        }
+        spinnerQuickFile.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (suppressQuickSelection || position < 0 || position >= quickFileItems.size()) {
+                    return;
+                }
+                QuickFileItem item = quickFileItems.get(position);
+                if (item.browseItem) {
+                    openDocumentPicker();
+                    return;
+                }
+                openLocalFileWithUnsavedCheck(item.filePath);
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+        rebuildQuickFileOptions();
+    }
+
+    private void rebuildQuickFileOptions() {
+        if (!isAdded() || spinnerQuickFile == null) {
+            return;
+        }
+
+        quickFileItems.clear();
+
+        String stopwordsPath = ConfigManager.getGraphStopwordsPath(requireContext());
+        if (stopwordsPath != null && !stopwordsPath.isEmpty()) {
+            File file = new File(stopwordsPath);
+            if (file.exists() && file.isFile()) {
+                quickFileItems.add(new QuickFileItem(
+                        getString(R.string.text_editor_quick_stopwords, file.getName()),
+                        file.getAbsolutePath(),
+                        false
+                ));
+            }
+        }
+
+        String customDictPath = ConfigManager.getGraphCustomDictionaryPath(requireContext());
+        if (customDictPath != null && !customDictPath.isEmpty()) {
+            File file = new File(customDictPath);
+            if (file.exists() && file.isFile()) {
+                quickFileItems.add(new QuickFileItem(
+                        getString(R.string.text_editor_quick_dictionary, file.getName()),
+                        file.getAbsolutePath(),
+                        false
+                ));
+            }
+        }
+
+        File modelListFile = ConfigManager.getDataRootFile(requireContext(), "ModelDownloadList.txt");
+        if (modelListFile.exists() && modelListFile.isFile()) {
+            quickFileItems.add(new QuickFileItem(
+                    getString(R.string.text_editor_quick_model_list, modelListFile.getName()),
+                    modelListFile.getAbsolutePath(),
+                    false
+            ));
+        }
+
+        File agentUserFile = ConfigManager.getDataRootFile(requireContext(), "agent_user.txt");
+        if (agentUserFile.exists() && agentUserFile.isFile()) {
+            quickFileItems.add(new QuickFileItem(
+                    getString(R.string.text_editor_quick_agent_user, agentUserFile.getName()),
+                    agentUserFile.getAbsolutePath(),
+                    false
+            ));
+        }
+
+        quickFileItems.add(new QuickFileItem(getString(R.string.text_editor_quick_browse), "", true));
+
+        List<String> displayList = new ArrayList<>();
+        for (QuickFileItem item : quickFileItems) {
+            displayList.add(item.displayName);
+        }
+
+        suppressQuickSelection = true;
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, displayList);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerQuickFile.setAdapter(adapter);
+        if (!displayList.isEmpty()) {
+            spinnerQuickFile.setSelection(0, false);
+        }
+        spinnerQuickFile.post(() -> suppressQuickSelection = false);
     }
 
     private void openDocumentPicker() {
@@ -181,7 +296,7 @@ public class TextEditorFragment extends Fragment {
             return;
         }
 
-        if (hasUnsavedChanges && currentDocumentUri != null) {
+        if (hasUnsavedChanges && hasCurrentFileSelection()) {
             new AlertDialog.Builder(requireContext())
                     .setTitle(R.string.dialog_title_warning)
                     .setMessage(R.string.dialog_message_unsaved_changes)
@@ -206,16 +321,49 @@ public class TextEditorFragment extends Fragment {
         openDocumentLauncher.launch(intent);
     }
 
+    private void openLocalFileWithUnsavedCheck(String filePath) {
+        if (filePath == null || filePath.isEmpty()) {
+            Toast.makeText(requireContext(), R.string.text_editor_invalid_selection, Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        Runnable openAction = () -> openLocalFile(filePath);
+        if (hasUnsavedChanges && hasCurrentFileSelection()) {
+            new AlertDialog.Builder(requireContext())
+                    .setTitle(R.string.dialog_title_warning)
+                    .setMessage(R.string.dialog_message_unsaved_changes)
+                    .setPositiveButton(R.string.common_save, (dialog, which) -> {
+                        if (saveCurrentDocument()) {
+                            openAction.run();
+                        }
+                    })
+                    .setNegativeButton(R.string.common_cancel, null)
+                    .show();
+        } else {
+            openAction.run();
+        }
+    }
+
+    private void openLocalFile(String filePath) {
+        File file = new File(filePath);
+        if (!file.exists() || !file.isFile()) {
+            Toast.makeText(requireContext(), R.string.text_editor_invalid_selection, Toast.LENGTH_SHORT).show();
+            return;
+        }
+        currentDocumentUri = null;
+        currentFilePath = file.getAbsolutePath();
+        currentFileDisplayName = file.getName();
+        textViewFilePath.setText(getString(R.string.label_text_editor_files) + " " + currentFilePath);
+        loadDocumentContentFromFile(file);
+    }
+
     private void handleDocumentPicked(Uri uri) {
         currentDocumentUri = uri;
+        currentFilePath = "";
         currentFileDisplayName = getDisplayNameFromUri(uri);
-        String displayPath;
-        if (stopwordsDirPath != null && !stopwordsDirPath.isEmpty()) {
-            // Display logical full path under stopwords directory
-            displayPath = stopwordsDirPath + "/" + currentFileDisplayName;
-        } else {
-            // Fallback: show filename only when directory path is unavailable
-            displayPath = currentFileDisplayName;
+        String displayPath = currentFileDisplayName;
+        if (uri.getScheme() != null && "file".equalsIgnoreCase(uri.getScheme()) && uri.getPath() != null) {
+            displayPath = uri.getPath();
         }
         textViewFilePath.setText(getString(R.string.label_text_editor_files) + " " + displayPath);
         loadDocumentContent(uri);
@@ -267,16 +415,59 @@ public class TextEditorFragment extends Fragment {
         }
     }
 
+    private void loadDocumentContentFromFile(File file) {
+        try (FileInputStream inputStream = new FileInputStream(file);
+             InputStreamReader isr = new InputStreamReader(inputStream, StandardCharsets.UTF_8);
+             BufferedReader reader = new BufferedReader(isr)) {
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+            String content = sb.toString();
+            ignoreTextChanges = true;
+            editTextContent.setText(content);
+            ignoreTextChanges = false;
+            lastSavedContent = content;
+            hasUnsavedChanges = false;
+            textViewStatus.setText(getString(R.string.text_editor_load_success, currentFileDisplayName));
+            LogManager.logD(TAG, "[TEXT_EDITOR] Loaded local file: " + file.getAbsolutePath());
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[TEXT_EDITOR] Failed to read local file: " + e.getMessage(), e);
+            Toast.makeText(requireContext(), R.string.error_file_read, Toast.LENGTH_SHORT).show();
+        }
+    }
+
     private boolean saveCurrentDocument() {
         if (getContext() == null) {
             return false;
         }
-        if (currentDocumentUri == null) {
+        if (!hasCurrentFileSelection()) {
             Toast.makeText(requireContext(), R.string.text_editor_invalid_selection, Toast.LENGTH_SHORT).show();
             return false;
         }
         String content = editTextContent != null ? editTextContent.getText().toString() : "";
-        try (OutputStream outputStream = requireContext().getContentResolver().openOutputStream(currentDocumentUri);
+
+        if (currentDocumentUri != null) {
+            try (OutputStream outputStream = requireContext().getContentResolver().openOutputStream(currentDocumentUri);
+                 OutputStreamWriter writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8)) {
+                writer.write(content != null ? content : "");
+                writer.flush();
+                lastSavedContent = content != null ? content : "";
+                hasUnsavedChanges = false;
+                textViewStatus.setText(getString(R.string.text_editor_save_success, currentFileDisplayName));
+                Toast.makeText(requireContext(), R.string.text_editor_save_success_toast, Toast.LENGTH_SHORT).show();
+                LogManager.logD(TAG, "[TEXT_EDITOR] Saved document by URI: " + currentDocumentUri);
+                return true;
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[TEXT_EDITOR] Failed to save document by URI: " + e.getMessage(), e);
+                textViewStatus.setText(getString(R.string.text_editor_save_failed, currentFileDisplayName));
+                Toast.makeText(requireContext(), R.string.text_editor_save_failed_toast, Toast.LENGTH_SHORT).show();
+                return false;
+            }
+        }
+
+        try (FileOutputStream outputStream = new FileOutputStream(currentFilePath);
              OutputStreamWriter writer = new OutputStreamWriter(outputStream, StandardCharsets.UTF_8)) {
             writer.write(content != null ? content : "");
             writer.flush();
@@ -284,18 +475,22 @@ public class TextEditorFragment extends Fragment {
             hasUnsavedChanges = false;
             textViewStatus.setText(getString(R.string.text_editor_save_success, currentFileDisplayName));
             Toast.makeText(requireContext(), R.string.text_editor_save_success_toast, Toast.LENGTH_SHORT).show();
-            LogManager.logD(TAG, "[TEXT_EDITOR] Saved document: " + currentDocumentUri);
+            LogManager.logD(TAG, "[TEXT_EDITOR] Saved local file: " + currentFilePath);
             return true;
         } catch (Exception e) {
-            LogManager.logE(TAG, "[TEXT_EDITOR] Failed to save document: " + e.getMessage(), e);
+            LogManager.logE(TAG, "[TEXT_EDITOR] Failed to save local file: " + e.getMessage(), e);
             textViewStatus.setText(getString(R.string.text_editor_save_failed, currentFileDisplayName));
             Toast.makeText(requireContext(), R.string.text_editor_save_failed_toast, Toast.LENGTH_SHORT).show();
             return false;
         }
     }
 
+    private boolean hasCurrentFileSelection() {
+        return currentDocumentUri != null || (currentFilePath != null && !currentFilePath.isEmpty());
+    }
+
     private void handleBackNavigation() {
-        if (!hasUnsavedChanges || currentDocumentUri == null) {
+        if (!hasUnsavedChanges || !hasCurrentFileSelection()) {
             navigateBackToMain();
             return;
         }

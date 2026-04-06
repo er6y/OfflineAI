@@ -62,6 +62,11 @@ public class GlobalApplication extends Application {
         initializeExampleDictionary();
         Log.i(TAG, "[STARTUP_TRACE] initializeExampleDictionary finished, costMs=" + (System.currentTimeMillis() - stepStart));
 
+        // Ensure text-editor seed files in data root
+        stepStart = System.currentTimeMillis();
+        initializeTextEditorSeedFiles();
+        Log.i(TAG, "[STARTUP_TRACE] initializeTextEditorSeedFiles finished, costMs=" + (System.currentTimeMillis() - stepStart));
+
         long totalCost = System.currentTimeMillis() - startMs;
         Log.i(TAG, "[STARTUP_TRACE] GlobalApplication.onCreate end, process=" + processName + ", totalCostMs=" + totalCost);
     }
@@ -108,6 +113,22 @@ public class GlobalApplication extends Application {
             
         } catch (Exception e) {
             Log.e(TAG, "Failed to initialize example dictionary: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Ensure text editor seed files exist in data root.
+     * Keep user files untouched if they already exist.
+     */
+    private void initializeTextEditorSeedFiles() {
+        try {
+            boolean modelListReady = ConfigManager.ensureAssetFileInDataRoot(this,
+                    "ModelDownloadList.txt", "ModelDownloadList.txt");
+            boolean agentUserReady = ConfigManager.ensureAssetFileInDataRoot(this,
+                    "agent_user.txt", "agent_user.txt");
+            Log.i(TAG, "[TEXT_EDITOR_SEED] modelListReady=" + modelListReady + ", agentUserReady=" + agentUserReady);
+        } catch (Exception e) {
+            Log.e(TAG, "[TEXT_EDITOR_SEED] Failed to initialize text editor seed files: " + e.getMessage(), e);
         }
     }
     

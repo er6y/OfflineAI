@@ -98,7 +98,6 @@ public class SettingsFragment extends Fragment {
     private SeekBar seekBarGraphRagVectorExpand;
     private TextView textViewGraphRagVectorExpandValue;
     private Spinner spinnerGraphStopwords;
-    private Spinner spinnerAgentActionFormat;
     private Switch switchAgentExperienceSummary;
     private Switch switchAgentTts;
     
@@ -249,7 +248,6 @@ public class SettingsFragment extends Fragment {
         seekBarGraphRagVectorExpand = view.findViewById(R.id.seekBarGraphRagVectorExpand);
         textViewGraphRagVectorExpandValue = view.findViewById(R.id.textViewGraphRagVectorExpandValue);
         spinnerGraphStopwords = view.findViewById(R.id.spinnerGraphStopwords);
-        spinnerAgentActionFormat = view.findViewById(R.id.spinnerAgentActionFormat);
         switchAgentExperienceSummary = view.findViewById(R.id.switchAgentExperienceSummary);
         switchAgentTts = view.findViewById(R.id.switchAgentTts);
         
@@ -356,7 +354,6 @@ public class SettingsFragment extends Fragment {
         initializeGraphCustomDictionarySpinner();
         
         // 初始化Agent设置
-        initializeAgentActionFormatSpinner();
         initializeAgentExperienceSummarySwitch();
         initializeAgentTtsSwitch();
         
@@ -1996,7 +1993,7 @@ public class SettingsFragment extends Fragment {
         spinnerGraphCustomDictionary.setAdapter(adapter);
         
         // Load saved selection
-        String savedDict = ConfigManager.getString(requireContext(), ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, "");
+        String savedDict = ConfigManager.getGraphCustomDictionaryPath(requireContext());
         if (!savedDict.isEmpty()) {
             for (int i = 0; i < dictPathOptions.size(); i++) {
                 String path = dictPathOptions.get(i);
@@ -2015,10 +2012,10 @@ public class SettingsFragment extends Fragment {
                 String selectedLabel = parent.getItemAtPosition(position).toString();
                 String selectedPath = dictPathOptions.get(position);
                 if (position == 0 || selectedPath == null || selectedPath.isEmpty()) {
-                    ConfigManager.setString(requireContext(), ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, "");
+                    ConfigManager.setGraphCustomDictionaryPath(requireContext(), "");
                     LogManager.logD(TAG, "No dictionary selected");
                 } else {
-                    ConfigManager.setString(requireContext(), ConfigManager.KEY_GRAPH_CUSTOM_DICT_PATH, selectedPath);
+                    ConfigManager.setGraphCustomDictionaryPath(requireContext(), selectedPath);
                     LogManager.logD(TAG, "Selected dictionary: " + selectedPath + " (label=" + selectedLabel + ")");
                 }
             }
@@ -2091,84 +2088,6 @@ public class SettingsFragment extends Fragment {
                     ConfigManager.setGraphStopwordsPath(requireContext(), selectedPath);
                     LogManager.logD(TAG, "[STOPWORDS_SPINNER] Selected stopwords file: " + selectedPath);
                 }
-            }
-
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {
-            }
-        });
-    }
-    
-    /**
-     * Initialize Agent action format spinner
-     */
-    private void initializeAgentActionFormatSpinner() {
-        LogManager.logD(TAG, "[AGENT_FORMAT_SPINNER] Initializing agent action format spinner");
-        
-        // Create options array
-        String[] formatOptions = new String[] {
-            getString(R.string.agent_action_format_auto),
-            getString(R.string.agent_action_format_mai_ui),
-            getString(R.string.agent_action_format_autoglm),
-            getString(R.string.agent_action_format_doubao),
-            getString(R.string.agent_action_format_openai_funccall)
-        };
-        
-        // Create adapter
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(requireContext(),
-            android.R.layout.simple_spinner_item, formatOptions);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinnerAgentActionFormat.setAdapter(adapter);
-        
-        // Load saved selection
-        String savedFormat = ConfigManager.getAgentActionFormat(requireContext());
-        int selectedIndex = 0; // Default to Auto
-        switch (savedFormat) {
-            case "Auto":
-                selectedIndex = 0;
-                break;
-            case "MAI-UI":
-                selectedIndex = 1;
-                break;
-            case "AutoGLM-Phone":
-                selectedIndex = 2;
-                break;
-            case "Doubao-1.5-UI-TARS":
-                selectedIndex = 3;
-                break;
-            case "OpenAI FuncCall":
-                selectedIndex = 4;
-                break;
-        }
-        spinnerAgentActionFormat.setSelection(selectedIndex);
-        LogManager.logD(TAG, "[AGENT_FORMAT_SPINNER] Loaded saved format: " + savedFormat);
-        
-        // Set selection listener
-        spinnerAgentActionFormat.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                String selectedFormat;
-                switch (position) {
-                    case 0:
-                        selectedFormat = "Auto";
-                        break;
-                    case 1:
-                        selectedFormat = "MAI-UI";
-                        break;
-                    case 2:
-                        selectedFormat = "AutoGLM-Phone";
-                        break;
-                    case 3:
-                        selectedFormat = "Doubao-1.5-UI-TARS";
-                        break;
-                    case 4:
-                        selectedFormat = "OpenAI FuncCall";
-                        break;
-                    default:
-                        selectedFormat = "Auto";
-                }
-                ConfigManager.setAgentActionFormat(requireContext(), selectedFormat);
-                LogManager.logD(TAG, "[AGENT_FORMAT_SPINNER] Selected format: " + selectedFormat);
             }
 
             @Override
