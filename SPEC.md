@@ -200,7 +200,7 @@ flowchart TB
     - **在邮件/列表中查看更多内容用 `swipe up`**
     - 历史 Bug：曾将 UP/DOWN 坐标反转（UP = 手指从上往下），已修复
   - **三层记忆架构**：
-    - **Context Action**（执行状态记忆）：承上启下，记录任务进展/策略/坐标/错误，每步覆盖，1000-2500字，不存原始业务数据
+    - **Context Action**（执行状态记忆）：采用 `fact + text` 双层结构；`fact` 为历史事实（追加累积，不覆盖），`text` 为当前轮次总结（每轮覆盖），不存原始业务数据
     - **Data Memory**（数据 KV 存储）：任务级 KV Map，专门存储多步骤提取的业务数据（邮件内容、搜索结果等），每任务清空
     - **RAG 经验库**（长期记忆）：任务完成后总结写入，下次相似任务第一步注入
   - **Data Memory 机制**（`AgentAction.DataMemory`，`AgentEngine.dataMemory`）：
@@ -209,8 +209,9 @@ flowchart TB
     - **生命周期**：每次 `executeTask()` 调用时清空，不跨任务持久化
     - **轻量注入**：每步提示词只注入 `Data Memory: key1, key2, ...`（~30字符），value 不注入 prompt，按需通过 get 读取
     - **占位符展开**：`terminate` 的 `text` 字段中可用 `{{key}}` 引用已存入数据，`AgentEngine.expandPlaceholders()` 在执行前自动替换为实际内容
-    - **context 严格分离要求**：context 只写状态与策略，**严禁把邮件正文/项目数据等业务内容写入 context**；`CONTEXT_ACTION_REQUIREMENTS` ⚠️条明确禁止
-    - **context 已处理项目清单**：context ①条要求记录"已处理项目清单（含名称+状态）"，防止重复操作同一项目（如重复下载同一课程）；模型应在 context 中明确写出已完成的具体项目名称，返回列表后据此跳过已处理项目
+    - **context 严格分离要求**：context 只写状态与策略；`fact` 仅记录长期稳定且关键的信息（最终路径/用户确认/硬约束/data_memory key），**禁止写入步骤号、失败过程、猜测、下一步计划**；**禁止重复输出已存在的fact，如无新fact请输出空字符串""**；`text` 仅记录最近状态、当前错误和下一步；**严禁把邮件正文/项目数据等业务内容写入 context**；`CONTEXT_ACTION_REQUIREMENTS` ⚠️条明确禁止
+    - **context 已处理项目清单**：应作为可复用事实写入 `fact`（例如“已处理项目A=完成”），防止重复操作同一项目；`text` 只保留本轮变化与下一步计划
+    - **context 解析策略**（`AgentEngine.kt`）：引擎端对 `context.fact` 执行“去重后追加”，对 `context.text` 执行“刷新覆盖”，再组合注入 `上下文记忆`，降低链式断片风险
     - **Data Memory 为唯一可信状态**：每步提示词注入的 `Data Memory: [key列表]` 是唯一真相，context 中自称"已存入"不算数；提示词明确要求"以 Data Memory 索引为准"
     - **set 成功反馈机制**：Pure step（仅 context+data_memory 无 UI 操作）执行后，系统将 `data_memory set success: key. Data Memory now: key1, key2` 注入 `lastStepResult`，让模型下步能核实实际存储状态
     - **Pure step 死循环防护**（`consecutivePureSteps` 计数器，`AgentEngine.kt`）：
@@ -218,10 +219,36 @@ flowchart TB
       - 连续 Pure step ≥ 2 次时，在 `lastStepResult` 追加系统强制警告，明确列出真实 Data Memory key 列表，要求模型补存缺失 key 或立即 terminate
       - 根本问题：模型 context 幻觉（说"已存4个"）与 Data Memory 真实状态（只有2个key）矛盾时，模型不知道信哪个，陷入反复 set 同一 key 的死循环；硬注入警告强制纠正
     - **提示词引导**（`AgentPrompts.kt` 规则区）：set/get/list 用法、Data Memory 为唯一可信状态、set 后系统返回确认、所有目标 key 齐全后立即 terminate、禁止重复 set 同一 key
+    - **规则文案精简（token 优化）**：在不改变约束语义前提下，压缩 `AgentPrompts.kt` 规则区表述，减少冗余句式与重复解释，降低每步提示词开销
+    - **文件工具规则收敛**：文件/目录决策在提示词中保留“优先 `file_*`、不先走文件管理器 UI”的策略约束；文本文件操作对模型暴露 `file_new/file_read/file_search/file_edit` 四个动作，`file_open/file_save` 不再作为模型步骤
+    - **文件会话自动化语义**（`UnifiedActionExecutor.kt`）：
+      - `file_read/file_search/file_edit`：执行层自动 open + execute（edit 额外 save）+ close
+      - `file_read/file_search/file_edit` **禁止隐式创建文件**；路径不存在时直接失败并返回明确错误
+      - `file_new`：唯一允许创建文件的动作；文件已存在时直接失败，避免覆盖
+      - `file_edit` 必须显式提供 `start_line/end_line`；`new_content` 仅接受字符串（可用 `\n` 表示多行）
+      - `file_read` 返回格式：`Lines start-end/total:\n1: content\n2: content...`（纯文本带行号，非JSON数组）
+    - **统一参数校验兜底**（`UnifiedActionExecutor.validateActionParameters` + `ActionParser.validateCoordinates`）：
+      - 每个里程碑只允许一次校验，通过后立即进入下一里程碑
+      - 同一文件同一目的禁止重复 `file_read`/重复确认，仅允许“上一步失败后重试一次”
+      - 禁止连续输出无执行动作的 `context/data_memory` 组合；可判定完成时立即 `terminate`
+      - 总步数接近上限时必须 `terminate fail` 并说明卡点（fail-fast）
     - **四种格式均支持**：MAI-UI JSON、AutoGLM do()、AutoGLM action()、OpenAI FuncCall 格式均已添加解析分支
+    - **多 action 去重执行策略（稳定化）**（`BaseActionFormat.parseActions` + `AgentEngine.kt`）：
+      - 保留“**每种 action 类型仅取最后一次 function call**”的策略，前面的同类型调用视为思考/草稿
+      - 对每种类型最后一次出现的位置做排序，保证去重后动作序列仍按时间先后输出，避免跨类型去重后顺序漂移
+      - `AgentEngine` 会按去重后顺序执行每一个非 `context/data_memory` 动作（每种类型最多执行一次）
     - **ActionParser terminate 丢失根本原因修复**（`OpenAiFuncCallFormat.extractAllActions`，`ActionFormat.kt`）：
-      - **问题**：原正则 `\{(?:[^{}]|(?:\{[^{}]*\}))*\}` 只支持 2 层 JSON 嵌套；`tool_calls` 结构为 3 层（外层→name/parameters→status/text），正则无法匹配完整外层 JSON 对象，`json.has("tool_calls")` 分支永远走不到；terminate text 含 `\n` 等特殊字符也导致子对象匹配失败
-      - **修复**：用括号平衡扫描器 `extractTopLevelJsonObjects()` 替代正则，逐字符跟踪 `depth`/`inString`/`escape` 状态，支持任意嵌套深度和 text 字段内任意字符，不再静默丢弃 terminate
+      - **问题**：原正则 `\{(?:[^{}]|(?:\{[^{}]*\}))*\}` 只支持 2 层 JSON 嵌套，遇到更深层结构或 text 字段含 `\n` 等字符时，容易漏解析并静默丢弃动作
+      - **修复**：用括号平衡扫描器 `extractTopLevelJsonObjects()` 替代正则，逐字符跟踪 `depth`/`inString`/`escape` 状态，支持任意嵌套深度和 text 字段内任意字符；当前仅解析多个顶层 function-call JSON 对象（`{"name":"...","parameters":{...}}`）
+    - **Parse 错误可解释反馈**（`ActionFormat.kt` + `ActionParser.kt` + `AgentEngine.kt`）：
+      - `parseFuncCall` 记录具体失败原因（缺失 `name/parameters`、未知 action、枚举值非法、参数字段类型不匹配等）
+      - `ActionParser` 透传最近一次 parse 明细；`AgentEngine` 在 parse retry 反馈中注入 `Parse detail: ...`
+      - 目标：让模型“知其然且知其所以然”，按具体错误快速纠正 function call 输出
+    - **重复失败实时纠偏机制**（`AgentEngine.kt`）：
+      - 为每次失败生成签名：`actionType + actionJson + errorText`，连续命中同一签名时计数递增
+      - 连续失败达到 2 次后，实时向 `lastStepResult` 注入纠偏提示（`[AGENT][REALTIME_CORRECTION]`），下一轮推理立即可见
+      - 文件类常见错误给出定向建议：直接使用 `file_read/file_search/file_edit`，路径不确定时优先 `file_search_regex`
+      - 一旦动作执行成功即清空失败签名计数，避免过期纠偏污染后续步骤
     - **TTS 被过早 shutdown 导致只朗读开头几个字**（`AgentTtsHelper.kt`，`AgentEngine.kt`）：
       - **问题**：`agentTts.speak()` 是异步 fire-and-forget，调用后立即 `break` 出循环，协程 job 结束触发 `finally`→`stopAgentLoop()`→`agentTts.shutdown()`→`tts.stop()`，TTS 播放被强制终止
       - **修复**：`AgentTtsHelper` 新增 `awaitSpeechDone()` 挂起函数，通过 `UtteranceProgressListener.onDone` 回调 resume；AgentEngine terminate 处理中 `speak()` 后调用 `agentTts?.awaitSpeechDone()`，确保完整朗读后再 break
@@ -357,22 +384,22 @@ flowchart TB
          → onExperienceSummaryGenerated() 显示保存按钮
          → 等待用户保存或取消
        ```
-     - **历史提取**：`readTaskHistoryFromConversationMd()` 从 conversation.md 中只摘抄关键信息：
-       - 查找最后一个 `agent_step_1_*.jpg` 或 `agent_step_1_*.png` 定位任务起点（截图格式已从 PNG 改为 JPEG，兼容旧数据）
-       - 逐行解析，**只提取**每步的 `<thinking>` 内容、`Action:` 行和 `RESULT:` 行（执行成功/失败及原因）
-       - **过滤掉**：`<debug>`、`<!-- MESSAGE_SEPARATOR -->`、`![](agent_step_*)`、`## 用户/AI助手` 标题、`Previous Steps` 等噪声
-       - 输出格式：`Task: {目标}\nStep N thinking: ...\nStep N action: ...\nStep N result: RESULT: Success/Failed - ...\n`
+     - **历史提取**：`AgentEngine` 在经验总结步骤调用 `buildTaskHistoryForSummary(memory.getAllSteps())` 构建精简操作历史，包含：
+       - 每步仅保留 `ACTION` 与 `RESULT`，不再注入 `rawModelOutput`（避免思考与工具原文导致 prompt 膨胀）
+       - `RESULT` 去换行并截断（160 chars），控制 token；结合 `taskBrief + context` 仍可完成经验归纳
+       - 支持的 Action 描述：Click/Type/Swipe/Open/SystemButton/Wait/Terminate/AskUser/WebOpen/WebGetContent/WebExecuteJs/FileNew/FileEdit/FileRead/FileListDir/FileCopy/FileDelete 等
      - **系统提示词**：经验总结时 `isExperienceSummaryStep=true`，`callRagQueryManagerSync` 检测到后系统提示词置空（Agent 的 UI-TARS 系统提示词不适用于经验总结）
      - **用户提示词**：`buildUserPromptWithHistory` 检测到 `isExperienceSummaryStep=true` 时直接返回 `instruction` 原文，跳过 `"任务: "` 前缀包裹和后缀追加
-     - **提示词模板**：`buildExperienceSummaryPromptFromHistory(taskHistory, agentKbRecalled, userSelectedFormat)` 包含三部分：
-       1. 任务执行历史（从 conversation.md 提取的精简记录）
-       2. AgentKB 已有经验（带 `[ID:xxx]` 标签，便于模型判断是否需要删除）
-       3. KB Action 格式说明（根据用户选择的 action 格式动态生成 `kb_delete`/`kb_insert` 的语法示例）
+     - **提示词模板**：`buildExperienceSummaryPromptFromHistory(taskHistory, agentKbRecalled, userSelectedFormat)` 精简设计：
+       - 任务执行历史 + AgentKB 召回（带 `[ID:xxx]`）+ KB Action 格式说明
+       - **删除规则**：严禁删除无关经验；只有**同类型+过时+确定相关**才 delete
+       - **新经验要求**：使用正确Action名称（file_list_dir/file_new等），**不是**Linux命令；关键步骤示例区分UI类（点击图标→搜索框）和文件操作类（file_list_dir→file_new→file_edit→file_read）；5要素（任务目标、步骤序列、应用名称、坐标/路径、避坑提示）
+       - 限制输出 ≤800字，简要思考后直接输出 action
      - **模型输出格式**：模型不再输出纯文本总结，而是输出 `kb_delete` 和 `kb_insert` action 命令：
        - 先输出 `kb_delete`（删除过时/冗余/不准确的旧经验，按 `[ID:xxx]` 标识）
-       - 再输出 `kb_insert`（插入新的经验总结，500字以内）
-       - 支持4种格式：MAI-UI（`<tool_call>JSON</tool_call>`）、AutoGLM（`do(action=...)`）、Doubao（`Action: kb_xxx(...)`）、OpenAI FuncCall（`{"name":"kb_xxx","parameters":{...}}`）
-     - **悬浮窗交互**：
+      - 再输出 `kb_insert`（插入新的经验总结，500字以内）
+      - 支持4种格式：MAI-UI / AutoGLM / Doubao / OpenAI FuncCall
+    - **悬浮窗交互**：
        - 经验生成后：`isWaitingForExperienceSave=true`，悬浮窗保持可见，显示保存/停止按钮
        - 保存按钮：解析 action → 执行 kb_delete/kb_insert → 倒计时关闭
        - 停止按钮（作为取消）：清除 `isWaitingForExperienceSave` → 隐藏悬浮窗

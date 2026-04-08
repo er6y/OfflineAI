@@ -230,6 +230,9 @@ dependencies {
     // HanLP - NER (Named Entity Recognition)
     implementation 'com.hankcs:hanlp:portable-1.8.4'
     
+    // juniversalchardet - 编码自动检测库
+    implementation 'com.googlecode.juniversalchardet:juniversalchardet:1.0.3'
+    
     // GraphView - Lightweight graph visualization
     implementation 'com.jjoe64:graphview:4.2.2'
     

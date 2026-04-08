@@ -103,9 +103,17 @@ class AgentAccessibilityService : AccessibilityService() {
     // Data Memory keys: lightweight index injected into prompt each step (values stay in AgentEngine)
     @Volatile
     private var dataMemoryKeys: List<String> = emptyList()
+
+    // Task brief: structured plan generated once at task start and injected into follow-up prompts
+    @Volatile
+    private var taskBrief: String = ""
     
     fun updateDataMemoryKeys(keys: List<String>) {
         dataMemoryKeys = keys
+    }
+
+    fun updateTaskBrief(brief: String) {
+        taskBrief = brief
     }
     
     fun setAgentActive(active: Boolean) {
@@ -207,6 +215,17 @@ class AgentAccessibilityService : AccessibilityService() {
                         is AgentAction.KbDelete -> "kb_delete(ids=${action.ids})"
                         is AgentAction.Context -> "context"  // Should not appear here
                         is AgentAction.DataMemory -> "data_memory(op=${action.operation}, key=${action.key})"
+                        is AgentAction.FileOpen -> "file_open(path=${action.path})"
+                        is AgentAction.FileRead -> "file_read(path=${action.path}, start=${action.startLine})"
+                        is AgentAction.FileNew -> "file_new(path=${action.path}, content_length=${action.newContent.length})"
+                        is AgentAction.FileEdit -> "file_edit(path=${action.path}, lines=${action.startLine}-${action.endLine})"
+                        is AgentAction.FileSearch -> "file_search(path=${action.path}, keyword=${action.keyword})"
+                        is AgentAction.FileSave -> "file_save(path=${action.path})"
+                        is AgentAction.FileListDir -> "file_list_dir(path=${action.path})"
+                        is AgentAction.FileCopy -> "file_copy(src=${action.src}, dst=${action.dst})"
+                        is AgentAction.FileDelete -> "file_delete(path=${action.path})"
+                        is AgentAction.FileSearchRegex -> "file_search_regex(path=${action.path}, pattern=${action.pattern})"
+                        is AgentAction.FileCreateDir -> "file_create_dir(path=${action.path})"
                     }
                     
                     // Build result string with returnData (critical for web_get_content, get_app_list, etc.)
@@ -271,6 +290,7 @@ class AgentAccessibilityService : AccessibilityService() {
         setAgentActive(true)
         currentStep = 0
         lastStepResult = ""  // Clear last step result for new task
+        taskBrief = ""
         
         // Initialize Agent TTS if enabled
         val ttsEnabled = ConfigManager.isAgentTtsEnabled(applicationContext)
@@ -412,6 +432,7 @@ class AgentAccessibilityService : AccessibilityService() {
         
         // Normal stop: clear everything and hide window
         experienceSummaryContent = ""
+        taskBrief = ""
         
         // Restore original temperature
         savedTemperature?.let { temp ->
@@ -1076,6 +1097,14 @@ class AgentAccessibilityService : AccessibilityService() {
         
         // Task goal (Chinese for better token efficiency)
         prompt.append("任务: $instruction\n\n")
+
+        if (stepIndex == 0) {
+            prompt.append("""
+##首轮规划要求（只执行一次）
+ -这是任务开始。先输出任务简报 JSON，并使用 data_memory 保存为 key=taskBrief；同一轮继续输出首个可执行 action。
+ -任务简报 JSON 必须包含字段：任务、目标、里程碑(3-5个)、执行约束（强制）。
+ -固定模板（原样复制）：{"name":"data_memory","parameters":{"operation":"set","key":"taskBrief","value":"任务:<任务>\n目标:<目标>\n里程碑:\nM1 <内容>\nM2 <内容>\nM3 <内容>\n...\n执行约束:\n<约束1>\n<约束2>\n...\n"}}""");
+        }
         
         // Inject last step hardcoded fact BEFORE context (highest priority, cannot be forgotten)
         // This is the "ground truth" the model must acknowledge regardless of its context memory
@@ -1086,6 +1115,10 @@ class AgentAccessibilityService : AccessibilityService() {
         // Inject data memory keys index (lightweight, no values)
         if (dataMemoryKeys.isNotEmpty()) {
             prompt.append("Data Memory: ${dataMemoryKeys.joinToString(", ")}\n\n")
+        }
+
+        if (taskBrief.isNotEmpty()) {
+            prompt.append("任务简报（执行基线）:\n$taskBrief\n\n")
         }
         
         // Add current context (Agent's memory)
@@ -1158,6 +1191,8 @@ class AgentAccessibilityService : AccessibilityService() {
                     "WebGetContent: extracted page content from background WebView"
                 is AgentAction.WebExecuteJs ->
                     "WebExecuteJs: ${action.script.take(60)}"
+                is AgentAction.FileNew ->
+                    "FileNew: ${action.path} (${action.newContent.length} chars)"
                 else -> action.javaClass.simpleName
             }
             markdown.append(actionDesc)
@@ -1196,50 +1231,41 @@ class AgentAccessibilityService : AccessibilityService() {
      */
     fun buildTaskHistoryForSummary(steps: List<TrajectoryStep>): String {
         val history = StringBuilder()
+        val maxResultLen = 160
         
         steps.forEach { step ->
             history.append("Step ${step.stepIndex}:\n")
-            
-            // Add <tool_call> (rawModelOutput already contains only <tool_call>)
-            if (step.rawModelOutput.isNotEmpty()) {
-                history.append("${step.rawModelOutput}\n")
-            }
-            
-            // ACTION
+
             val actionDesc = when (val action = step.action) {
-                is AgentAction.Click -> 
-                    "Clicked at [${action.x}, ${action.y}]"
-                is AgentAction.Type -> 
-                    "Typed: ${action.text}"
-                is AgentAction.Swipe -> 
-                    "Swiped ${action.direction}"
-                is AgentAction.Open -> 
-                    "Opened app: ${action.appName}"
-                is AgentAction.SystemButton -> 
-                    "Pressed ${action.button} button"
-                is AgentAction.Wait -> 
-                    "Waited"
-                is AgentAction.Terminate ->
-                    "Terminated (${action.status.value})"
-                is AgentAction.AskUser ->
-                    "AskUser: ${action.text}"
-                is AgentAction.WebOpen ->
-                    "WebOpen: ${action.url} (page loaded in background WebView)"
-                is AgentAction.WebGetContent ->
-                    "WebGetContent: extracted page content from background WebView"
-                is AgentAction.WebExecuteJs ->
-                    "WebExecuteJs: ${action.script.take(60)}"
+                is AgentAction.Click -> "click([${action.x},${action.y}])"
+                is AgentAction.LongPress -> "long_press([${action.x},${action.y}])"
+                is AgentAction.DoubleClick -> "double_click([${action.x},${action.y}])"
+                is AgentAction.Type -> "type(len=${action.text.length})"
+                is AgentAction.Swipe -> "swipe(${action.direction})"
+                is AgentAction.Drag -> "drag([${action.startX},${action.startY}]→[${action.endX},${action.endY}])"
+                is AgentAction.Open -> "open(${action.appName})"
+                is AgentAction.SystemButton -> "system_button(${action.button})"
+                is AgentAction.Wait -> "wait"
+                is AgentAction.Terminate -> "terminate(${action.status.value})"
+                is AgentAction.AskUser -> "ask_user"
+                is AgentAction.GetAppList -> "get_app_list"
+                is AgentAction.WebOpen -> "web_open"
+                is AgentAction.WebGetContent -> "web_get_content"
+                is AgentAction.WebExecuteJs -> "web_execute_js"
+                is AgentAction.DataMemory -> "data_memory(${action.operation},${action.key})"
+                is AgentAction.FileRead -> "file_read(${action.path})"
+                is AgentAction.FileNew -> "file_new(${action.path})"
+                is AgentAction.FileEdit -> "file_edit(${action.path})"
+                is AgentAction.FileSearch -> "file_search(${action.path})"
+                is AgentAction.FileListDir -> "file_list_dir(${action.path})"
+                is AgentAction.FileCopy -> "file_copy(${action.src}→${action.dst})"
+                is AgentAction.FileDelete -> "file_delete(${action.path})"
                 else -> action.javaClass.simpleName
             }
             history.append("ACTION: $actionDesc\n")
-            
-            // RESULT
-            history.append("RESULT: ${if (step.executionResult.success) "Success" else "Failed"} - ${step.executionResult.message}\n")
-            
-            // Coordinate error if any
-            if (step.coordinateError != null) {
-                history.append("NOTE: ${step.coordinateError}\n")
-            }
+
+            val resultMsg = step.executionResult.message.replace("\n", " ").trim().take(maxResultLen)
+            history.append("RESULT: ${if (step.executionResult.success) "Success" else "Failed"} - $resultMsg\n")
             
             history.append("\n")
         }
@@ -1274,49 +1300,27 @@ $agentKbRecalled"""
         }
         
         return """
-你是 Agent 经验总结专家。基于任务执行历史，生成可复用的经验总结。
-
-## ⚠️ 删除规则（最高优先级）
-**严禁删除与本次任务无关的经验**。召回文档可能包含其他任务的历史经验（误召回），这些经验对其他任务仍有价值，绝对不能删除。
-- **只有**同时满足以下所有条件才可以 kb_delete：
-  1. 该经验与本次任务明确相关（同类型任务、同应用）
-  2. 该经验内容已过时、不准确或与新总结完全冗余
-  3. 不确定是否相关时 → 保留，不删除
+基于任务历史，输出经验总结的 KB Action。
 
 ## 任务执行历史
 $taskHistory
 $recalledSection
 
-## 输出要求
-输出 KB Action 前请思考：任务分析、经验提炼、已有经验评估、KB Action 决策。
+## 删除规则
+- **严禁删除与本次任务无关的经验**
+- 只有**同类型+过时+确定相关**才 delete，否则保留
 
-### 思考内容
-思考内容应包含：
-1. 任务分析：这次任务的核心目标是什么，成功/失败的关键因素
-2. 经验提炼：哪些步骤是通用的，哪些是特定场景的
-3. 已有经验评估：逐一判断每个召回文档——是否与本次任务相关？若不相关，跳过（不删除）
-4. KB Action 决策：需要 delete 哪些ID（只删本任务相关且过时的），insert 什么内容
-
-### KB Action 格式
+## KB Action 格式
 $kbActionDesc
 
-### KB Action 内容要求
-**1. 处理已有经验**
-- **不相关的经验（其他任务）：绝对不删除，直接跳过**
-- 本任务相关且**已过时/不准确/与新总结完全冗余**：kb_delete(对应ID)
-- 本任务相关且有用的内容：合并到新 kb_insert 中
-- 不确定是否相关或是否过时：保留（不删除）
+## 新经验（kb_insert ≤500字，去修饰词）
+- 使用正确之前contex提到的Action名称（file_list_dir/file_new等）
+- 关键步骤示例：
+  - UI类：点击edge图标→搜索框→输入→搜索
+  - 文件操作：file_list_dir(确认目录)→file_new(创建文件)→file_edit(追加内容)→file_read(验证)
+- 5要素：任务目标、步骤序列、应用名称、坐标/路径、避坑提示
 
-**2. 新经验内容（kb_insert 的内容不大于500字。最少字表达，去掉修饰词）**
-1. 任务类型+目标（如：打开edge搜索）
-2. 关键步骤序列（如：点击edge图标→搜索框→输入→搜索）
-3. 能直接启动的应用名称
-4. UI元素坐标（关键按钮位置）
-5. 避坑提示（广告、弹窗处理）
-
-**重要**：
-- 控制输出精要不赘述，说重点，全部输出不超过800字
-- 先思考再输出 KB Action
+输出 ≤800字，简要思考后直接输出 action。
         """.trimIndent()
     }
     
@@ -1431,6 +1435,39 @@ $kbActionDesc
                     }
                     is AgentAction.DataMemory -> {
                         result.append(" (op=${action.operation}, key=${action.key})")
+                    }
+                    is AgentAction.FileOpen -> {
+                        result.append(" (file: ${action.path})")
+                    }
+                    is AgentAction.FileRead -> {
+                        result.append(" (read ${action.path} from line ${action.startLine})")
+                    }
+                    is AgentAction.FileNew -> {
+                        result.append(" (create file ${action.path}, content_length=${action.newContent.length})")
+                    }
+                    is AgentAction.FileEdit -> {
+                        result.append(" (edit ${action.path} lines ${action.startLine}-${action.endLine})")
+                    }
+                    is AgentAction.FileSearch -> {
+                        result.append(" (search ${action.path} for '${action.keyword}')")
+                    }
+                    is AgentAction.FileSave -> {
+                        result.append(" (save ${action.path})")
+                    }
+                    is AgentAction.FileListDir -> {
+                        result.append(" (list dir ${action.path})")
+                    }
+                    is AgentAction.FileCopy -> {
+                        result.append(" (copy ${action.src} to ${action.dst})")
+                    }
+                    is AgentAction.FileDelete -> {
+                        result.append(" (delete ${action.path})")
+                    }
+                    is AgentAction.FileSearchRegex -> {
+                        result.append(" (search regex ${action.pattern} in ${action.path})")
+                    }
+                    is AgentAction.FileCreateDir -> {
+                        result.append(" (create dir ${action.path})")
                     }
                 }
                 result.append("\n")

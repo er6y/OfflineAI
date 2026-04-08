@@ -46,6 +46,8 @@ class AgentEngine(private val context: Context) {
     
     // Current context: Agent's memory for next step (initialized with RAG recall, updated by context action)
     private var currentContext: String = ""
+    private val contextFactHistory = mutableListOf<String>()
+    private var currentContextText: String = ""
     
     // Data Memory: task-scoped KV store for accumulated business data (e.g., extracted email content)
     // Cleared at task start; only keys injected into prompt each step; values retrieved on demand
@@ -202,6 +204,7 @@ class AgentEngine(private val context: Context) {
         memory.setTaskGoal(taskGoal)
         dataMemory.clear()  // Clear task-scoped data memory for every new task
         AgentAccessibilityService.getInstance()?.updateDataMemoryKeys(emptyList())
+        AgentAccessibilityService.getInstance()?.updateTaskBrief("")
         
         // Query AgentKB once at task start, cache for all steps and experience summary
         cachedAgentKbContext = try {
@@ -221,6 +224,8 @@ class AgentEngine(private val context: Context) {
         } else {
             ""
         }
+        contextFactHistory.clear()
+        currentContextText = ""
         
         // Pass current context to AgentAccessibilityService for step prompt assembly
         AgentAccessibilityService.getInstance()?.currentContext = currentContext
@@ -233,6 +238,8 @@ class AgentEngine(private val context: Context) {
                 var parseRetryCount = 0
                 var lastAction: AgentAction? = null
                 var consecutivePureSteps = 0  // Track stuck pure context/data_memory loops
+                var lastFailureSignature: String? = null
+                var sameFailureCount = 0
                 
                 // Auto-press Home before first screenshot so model starts from Home screen
                 val homeResult = AgentAccessibilityService.getInstance()?.pressHome() ?: false
@@ -284,6 +291,12 @@ class AgentEngine(private val context: Context) {
                         
                         val format = com.example.offlineai.agent.ActionFormatRegistry.getFormatForApi(apiUrl, modelName)
                         val errorHint = format.getErrorHint()
+                        val parseDetail = com.example.offlineai.agent.parser.ActionParser.getLastParseError()
+                        val parseFeedback = if (parseDetail.isNullOrBlank()) {
+                            errorHint
+                        } else {
+                            "$errorHint Parse detail: $parseDetail"
+                        }
                         
                         // Add error feedback to memory for next retry
                         val step = TrajectoryStep(
@@ -292,7 +305,7 @@ class AgentEngine(private val context: Context) {
                             action = AgentAction.Wait,
                             executionResult = ExecutionResult(
                                 success = false,
-                                message = errorHint,
+                                message = parseFeedback,
                                 error = null
                             ),
                             rawModelOutput = ""  // No valid tool_call for failed parse
@@ -307,15 +320,13 @@ class AgentEngine(private val context: Context) {
                     // Extract context action and update currentContext
                     val contextAction = actions.filterIsInstance<AgentAction.Context>().firstOrNull()
                     if (contextAction != null) {
-                        // Enforce 2500 char soft limit (increased from 1500 for info collection tasks)
-                        // Prompt requires 1000 chars minimum, 2500 allows accumulating multiple email contents
-                        currentContext = if (contextAction.text.length > 2500) {
-                            LogManager.logW(TAG, "[CONTEXT] Context too long (${contextAction.text.length} chars), truncating to 2500")
-                            contextAction.text.take(2500)
-                        } else {
-                            contextAction.text
-                        }
-                        LogManager.logI(TAG, "[CONTEXT] Updated: ${currentContext.take(100)}...")
+                        appendFact(contextAction.fact)
+                        currentContextText = normalizeContextText(contextAction.text)
+                        currentContext = composeContextPayload()
+                        LogManager.logI(
+                            TAG,
+                            "[CONTEXT] Updated: facts=${contextFactHistory.size}, text=${currentContextText.length} chars"
+                        )
                         // Update AgentAccessibilityService's context for next step
                         AgentAccessibilityService.getInstance()?.currentContext = currentContext
                     } else {
@@ -328,15 +339,18 @@ class AgentEngine(private val context: Context) {
                     val dataMemoryActions = actions.filterIsInstance<AgentAction.DataMemory>()
                     for (dmAction in dataMemoryActions) {
                         val dmResult = executeDataMemory(dmAction)
-                        if (dmAction.operation == "get" || dmAction.operation == "list") {
+                        val shouldInjectDmResult = dmAction.operation == "get" ||
+                            dmAction.operation == "list" ||
+                            (dmAction.operation == "set" && dmAction.key == "taskBrief" && dmResult.message.contains("invalid"))
+                        if (shouldInjectDmResult) {
                             val resultMsg = if (dmResult.success) dmResult.message else "data_memory ${dmAction.operation} failed: ${dmResult.message}"
                             AgentAccessibilityService.getInstance()?.lastStepResult = resultMsg
                         }
                     }
                     
-                    // Get actual action (first non-context, non-data_memory action)
-                    val actualAction = actions.firstOrNull { it !is AgentAction.Context && it !is AgentAction.DataMemory }
-                    if (actualAction == null) {
+                    // Execute every distinct non-context/non-data_memory action once
+                    val executableActions = actions.filter { it !is AgentAction.Context && it !is AgentAction.DataMemory }
+                    if (executableActions.isEmpty()) {
                         // Pure context+data_memory step (no UI action) - record in memory and advance
                         // IMPORTANT: do NOT set lastAction=Context here - must take screenshot next step
                         // so model can see the screen and decide next action (avoid blind loop)
@@ -375,177 +389,188 @@ class AgentEngine(private val context: Context) {
                     }
                     // Reset pure step counter when a real UI action is executed
                     consecutivePureSteps = 0
-                    
-                    val response = AgentResponse(actualAction)
                     callback?.onStepStarted(stepIndex)
-                    
-                    // Handle special actions
-                    when (response.action) {
-                        is AgentAction.Terminate -> {
-                            val success = response.action.status == AgentAction.Terminate.Status.SUCCESS
-                            
-                            // Expand {{key}} placeholders in terminate text using dataMemory values
-                            val expandedText = expandPlaceholders(response.action.text)
-                            val expandedAction = response.action.copy(text = expandedText)
-                            
-                            // Store Terminate step in memory (with expanded text)
-                            val terminateStep = TrajectoryStep(
-                                stepIndex = memory.getStepCount(),
-                                screenshot = screenshot,
-                                action = expandedAction,
-                                executionResult = ExecutionResult(success = success, message = "Task terminated: ${expandedAction.status.value}"),  
-                                coordinateError = null,
-                                rawModelOutput = modelOutput.trim()  // Save complete output for history
-                            )
-                            memory.addStep(terminateStep)
-                            
-                            // Step 1: Show terminate text in floating window FIRST (before TTS)
-                            callback?.onStepCompleted(stepIndex, expandedAction, terminateStep.executionResult)
-                            
-                            // Step 2: Launch TTS asynchronously so experience summary can run concurrently.
-                            // Both TTS and experience summary run in parallel; we wait for TTS at the end.
-                            val ttsPrefix = if (success)
-                                context.getString(com.example.offlineai.R.string.agent_tts_task_done)
-                            else
-                                context.getString(com.example.offlineai.R.string.agent_tts_task_failed)
-                            val ttsText = expandedText.trim()
-                            val ttsFullText = if (ttsText.isNotEmpty()) "$ttsPrefix $ttsText" else ttsPrefix
-                            val tts = agentTts
-                            val ttsJob = if (tts != null) {
-                                CoroutineScope(Dispatchers.Default).launch {
-                                    tts.speak(ttsFullText)
-                                    tts.awaitSpeechDone()
-                                    LogManager.logD(TAG, "[AGENT_TTS] Terminate TTS finished")
-                                }
-                            } else null
-                            
-                            // Check if experience summary is enabled
-                            val experienceSummaryEnabled = com.example.offlineai.ConfigManager.getBoolean(
-                                context,
-                                com.example.offlineai.ConfigManager.KEY_AGENT_EXPERIENCE_SUMMARY,
-                                false
-                            )
-                            
-                            if (experienceSummaryEnabled && success) {
-                                LogManager.logI(TAG, "[AGENT_EXP] Experience summary enabled, executing summary step")
-                                delay(STEP_DELAY_MS)
-                                
-                                // Bring OfflineAI to foreground before summary
-                                try {
-                                    val intent = android.content.Intent(context, com.example.offlineai.MainActivity::class.java)
-                                    intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                                    context.startActivity(intent)
-                                    LogManager.logI(TAG, "[AGENT_EXP] Brought OfflineAI to foreground")
-                                    delay(500)
-                                } catch (e: Exception) {
-                                    LogManager.logE(TAG, "[AGENT_EXP] Failed to bring OfflineAI to foreground", e)
-                                }
-                                
-                                // Experience summary uses currentContext (model-maintained memory) + original RAG recall
-                                val taskHistory = "任务目标: $taskGoal\n\n最新上下文记忆:\n$currentContext"
-                                if (taskHistory.isNotEmpty()) {
-                                    val agentKbRecalled = cachedAgentKbContext  // Full RAG recall for KB dedup
-                                    val summaryPrompt = AgentAccessibilityService.getInstance()?.buildExperienceSummaryPromptFromHistory(
-                                        taskHistory, agentKbRecalled)
-                                    if (!summaryPrompt.isNullOrEmpty()) {
-                                        AgentAccessibilityService.getInstance()?.isExperienceSummaryStep = true
-                                        val summaryResponse = try {
-                                            modelInferenceCallback(
-                                                summaryPrompt,
-                                                null,  // No screenshot needed for experience summary
-                                                emptyList()
-                                            )
-                                        } finally {
-                                            AgentAccessibilityService.getInstance()?.isExperienceSummaryStep = false
+                    var terminateTriggered = false
+                    var askUserTriggered = false
+                    for ((actionIndex, action) in executableActions.withIndex()) {
+                        val response = AgentResponse(action)
+
+                        when (response.action) {
+                            is AgentAction.Terminate -> {
+                                val success = response.action.status == AgentAction.Terminate.Status.SUCCESS
+                                val expandedText = expandPlaceholders(response.action.text)
+                                val expandedAction = response.action.copy(text = expandedText)
+
+                                lastAction = expandedAction
+
+                                val terminateStep = TrajectoryStep(
+                                    stepIndex = memory.getStepCount(),
+                                    screenshot = screenshot,
+                                    action = expandedAction,
+                                    executionResult = ExecutionResult(success = success, message = "Task terminated: ${expandedAction.status.value}"),
+                                    coordinateError = null,
+                                    rawModelOutput = modelOutput.trim()
+                                )
+                                memory.addStep(terminateStep)
+                                callback?.onStepCompleted(stepIndex, expandedAction, terminateStep.executionResult)
+
+                                val ttsPrefix = if (success)
+                                    context.getString(com.example.offlineai.R.string.agent_tts_task_done)
+                                else
+                                    context.getString(com.example.offlineai.R.string.agent_tts_task_failed)
+                                val ttsText = expandedText.trim()
+                                val ttsFullText = if (ttsText.isNotEmpty()) "$ttsPrefix $ttsText" else ttsPrefix
+                                val tts = agentTts
+                                val ttsJob = if (tts != null) {
+                                    CoroutineScope(Dispatchers.Default).launch {
+                                        tts.speak(ttsFullText)
+                                        tts.awaitSpeechDone()
+                                        LogManager.logD(TAG, "[AGENT_TTS] Terminate TTS finished")
+                                    }
+                                } else null
+
+                                val experienceSummaryEnabled = com.example.offlineai.ConfigManager.getBoolean(
+                                    context,
+                                    com.example.offlineai.ConfigManager.KEY_AGENT_EXPERIENCE_SUMMARY,
+                                    false
+                                )
+
+                                if (experienceSummaryEnabled && success) {
+                                    LogManager.logI(TAG, "[AGENT_EXP] Experience summary enabled, executing summary step")
+                                    delay(STEP_DELAY_MS)
+
+                                    try {
+                                        val intent = android.content.Intent(context, com.example.offlineai.MainActivity::class.java)
+                                        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                                        context.startActivity(intent)
+                                        LogManager.logI(TAG, "[AGENT_EXP] Brought OfflineAI to foreground")
+                                        delay(500)
+                                    } catch (e: Exception) {
+                                        LogManager.logE(TAG, "[AGENT_EXP] Failed to bring OfflineAI to foreground", e)
+                                    }
+
+                                    // Build detailed step history from trajectory
+                                    val stepHistory = AgentAccessibilityService.getInstance()?.buildTaskHistoryForSummary(memory.getAllSteps()) ?: ""
+                                    val taskHistory = "任务目标: $taskGoal\n\n操作历史:\n$stepHistory\n\n最新上下文记忆:\n$currentContext"
+                                    if (taskHistory.isNotEmpty()) {
+                                        val agentKbRecalled = cachedAgentKbContext
+                                        val summaryPrompt = AgentAccessibilityService.getInstance()?.buildExperienceSummaryPromptFromHistory(
+                                            taskHistory, agentKbRecalled)
+                                        if (!summaryPrompt.isNullOrEmpty()) {
+                                            AgentAccessibilityService.getInstance()?.isExperienceSummaryStep = true
+                                            val summaryResponse = try {
+                                                modelInferenceCallback(
+                                                    summaryPrompt,
+                                                    null,
+                                                    emptyList()
+                                                )
+                                            } finally {
+                                                AgentAccessibilityService.getInstance()?.isExperienceSummaryStep = false
+                                            }
+                                            LogManager.logI(TAG, "[AGENT_EXP] Summary generated, length: ${summaryResponse.length}")
+                                            AgentAccessibilityService.getInstance()?.onExperienceSummaryGenerated(summaryResponse)
+                                            LogManager.logI(TAG, "[AGENT_EXP] Waiting for user to save or cancel experience summary")
+                                            ttsJob?.join()
+                                            LogManager.logD(TAG, "[AGENT_TTS] TTS join completed (with experience summary)")
+                                            terminateTriggered = true
+                                            break
                                         }
-                                        LogManager.logI(TAG, "[AGENT_EXP] Summary generated, length: ${summaryResponse.length}")
-                                        AgentAccessibilityService.getInstance()?.onExperienceSummaryGenerated(summaryResponse)
-                                        LogManager.logI(TAG, "[AGENT_EXP] Waiting for user to save or cancel experience summary")
-                                        // Wait for TTS to finish (it was running concurrently with experience summary)
-                                        ttsJob?.join()
-                                        LogManager.logD(TAG, "[AGENT_TTS] TTS join completed (with experience summary)")
-                                        break
                                     }
                                 }
+
+                                ttsJob?.join()
+                                LogManager.logD(TAG, "[AGENT_TTS] TTS join completed (no experience summary)")
+                                callback?.onTaskCompleted(success, "Task terminated: ${response.action.status.value}")
+                                terminateTriggered = true
+                                break
                             }
-                            
-                            // Only call onTaskCompleted if experience summary was not generated
-                            // Wait for TTS to finish before declaring task complete
-                            ttsJob?.join()
-                            LogManager.logD(TAG, "[AGENT_TTS] TTS join completed (no experience summary)")
-                            callback?.onTaskCompleted(success, "Task terminated: ${response.action.status.value}")
-                            break
-                        }
-                        is AgentAction.AskUser -> {
-                            LogManager.logI(TAG, "[AGENT][ASK_USER] Showing AskUser UI: ${response.action.text}")
-                            
-                            // TTS: announce the question/instruction (fire-and-forget, synced with UI display)
-                            val askPrefix = context.getString(com.example.offlineai.R.string.agent_tts_ask_user_prefix)
-                            agentTts?.speak("$askPrefix ${response.action.text}")
-                            
-                            // Update lastAction so next loop iteration also skips screenshot
-                            lastAction = response.action
-                            
-                            // Suspend and wait for user input via floating window FIRST,
-                            // then record result with actual user reply so lastStepResult is correct
-                            val userResponse = callback?.onAskUser(response.action.text) ?: ""
-                            LogManager.logI(TAG, "[AGENT][ASK_USER] User responded (${userResponse.length} chars)")
-                            
-                            // Build result message that includes the user's actual input
-                            val askResultMsg = if (userResponse.isNotEmpty())
-                                "AskUser completed. User replied: $userResponse"
-                            else
-                                "AskUser completed. User confirmed (no text input)"
-                            
-                            // Save AskUser step in memory with the actual user reply as result
-                            val askUserResult = TrajectoryStep(
-                                stepIndex = memory.getStepCount(),
-                                screenshot = null,
-                                action = response.action,
-                                executionResult = ExecutionResult(true, askResultMsg),
-                                rawModelOutput = ""
-                            )
-                            memory.addStep(askUserResult)
-                            // onStepCompleted now fires AFTER user replied → lastStepResult contains the reply
-                            callback?.onStepCompleted(stepIndex, response.action, askUserResult.executionResult)
-                            
-                            // No delay needed - user already spent time on input
-                            stepIndex++
-                            continue
-                        }
-                        else -> {
-                            // Update lastAction BEFORE execution for next step's screenshot decision
-                            lastAction = response.action
-                            
-                            // Execute the action
-                            val result = executor.execute(response.action)
-                            
-                            // Get coordinate error if any
-                            val coordError = ActionParser.getLastCoordinateError()
-                            ActionParser.clearCoordinateError()
-                            
-                            // Save complete model output for history
-                            val rawOutput = modelOutput.trim()
-                            
-                            val step = TrajectoryStep(
-                                stepIndex = memory.getStepCount(),
-                                screenshot = screenshot,
-                                action = response.action,
-                                executionResult = result,
-                                coordinateError = coordError,
-                                rawModelOutput = rawOutput
-                            )
-                            memory.addStep(step)
-                            
-                            callback?.onStepCompleted(stepIndex, response.action, result)
-                            
-                            if (!result.success) {
-                                LogManager.logE(TAG, "Action failed: ${result.message}")
-                                // Continue anyway, let model decide what to do
+                            is AgentAction.AskUser -> {
+                                LogManager.logI(TAG, "[AGENT][ASK_USER] Showing AskUser UI: ${response.action.text}")
+                                val askPrefix = context.getString(com.example.offlineai.R.string.agent_tts_ask_user_prefix)
+                                agentTts?.speak("$askPrefix ${response.action.text}")
+
+                                lastAction = response.action
+
+                                val userResponse = callback?.onAskUser(response.action.text) ?: ""
+                                LogManager.logI(TAG, "[AGENT][ASK_USER] User responded (${userResponse.length} chars)")
+
+                                val askResultMsg = if (userResponse.isNotEmpty())
+                                    "AskUser completed. User replied: $userResponse"
+                                else
+                                    "AskUser completed. User confirmed (no text input)"
+
+                                val askUserResult = TrajectoryStep(
+                                    stepIndex = memory.getStepCount(),
+                                    screenshot = null,
+                                    action = response.action,
+                                    executionResult = ExecutionResult(true, askResultMsg),
+                                    rawModelOutput = ""
+                                )
+                                memory.addStep(askUserResult)
+                                callback?.onStepCompleted(stepIndex, response.action, askUserResult.executionResult)
+
+                                stepIndex++
+                                askUserTriggered = true
+                                break
+                            }
+                            else -> {
+                                lastAction = response.action
+
+                                val result = executor.execute(response.action)
+                                val coordError = ActionParser.getLastCoordinateError()
+                                ActionParser.clearCoordinateError()
+                                val rawOutput = modelOutput.trim()
+
+                                val step = TrajectoryStep(
+                                    stepIndex = memory.getStepCount(),
+                                    screenshot = screenshot,
+                                    action = response.action,
+                                    executionResult = result,
+                                    coordinateError = coordError,
+                                    rawModelOutput = rawOutput
+                                )
+                                memory.addStep(step)
+
+                                callback?.onStepCompleted(stepIndex, response.action, result)
+
+                                if (!result.success) {
+                                    LogManager.logE(TAG, "Action failed: ${result.message}")
+                                    val failureSignature = buildFailureSignature(response.action, result)
+                                    if (failureSignature == lastFailureSignature) {
+                                        sameFailureCount++
+                                    } else {
+                                        lastFailureSignature = failureSignature
+                                        sameFailureCount = 1
+                                    }
+
+                                    if (sameFailureCount >= 2) {
+                                        val correctionHint = buildRealtimeCorrectionHint(response.action, result, sameFailureCount)
+                                        AgentAccessibilityService.getInstance()?.lastStepResult =
+                                            "${result.message}\n$correctionHint"
+                                        LogManager.logW(
+                                            TAG,
+                                            "[AGENT][REALTIME_CORRECTION] Injected correction hint for repeated failure: $correctionHint"
+                                        )
+                                    }
+                                } else {
+                                    lastFailureSignature = null
+                                    sameFailureCount = 0
+                                }
+
+                                if (actionIndex < executableActions.lastIndex) {
+                                    delay(STEP_DELAY_MS)
+                                }
                             }
                         }
                     }
-                    
+
+                    if (terminateTriggered) {
+                        break
+                    }
+                    if (askUserTriggered) {
+                        continue
+                    }
+
                     // Wait for UI to stabilize
                     delay(STEP_DELAY_MS)
                     stepIndex++
@@ -564,6 +589,8 @@ class AgentEngine(private val context: Context) {
                 isRunning = false
                 cachedAgentKbContext = ""
                 currentContext = ""
+                contextFactHistory.clear()
+                currentContextText = ""
                 AgentAccessibilityService.getInstance()?.currentContext = ""
                 // Deactivate accessibility service
                 AgentAccessibilityService.getInstance()?.setAgentActive(false)
@@ -582,6 +609,8 @@ class AgentEngine(private val context: Context) {
         isRunning = false
         cachedAgentKbContext = ""
         currentContext = ""
+        contextFactHistory.clear()
+        currentContextText = ""
         AgentAccessibilityService.getInstance()?.currentContext = ""
         // Deactivate accessibility service
         AgentAccessibilityService.getInstance()?.setAgentActive(false)
@@ -629,6 +658,15 @@ class AgentEngine(private val context: Context) {
                 dataMemory[key] = value
                 LogManager.logI(TAG, "[DATA_MEMORY] set key='$key' (${value.length} chars)")
                 AgentAccessibilityService.getInstance()?.updateDataMemoryKeys(dataMemory.keys.toList())
+                if (key == "taskBrief") {
+                    val normalizedBrief = normalizeTaskBrief(value)
+                    if (normalizedBrief != null) {
+                        AgentAccessibilityService.getInstance()?.updateTaskBrief(normalizedBrief)
+                        LogManager.logI(TAG, "[TASK_BRIEF] Stored and injected taskBrief text (${normalizedBrief.length} chars)")
+                        return ExecutionResult(true, "data_memory: stored 'taskBrief' text and injected into baseline prompt")
+                    }
+                    return ExecutionResult(false, "data_memory: taskBrief text is empty")
+                }
                 ExecutionResult(true, "data_memory: stored '$key' (${value.length} chars)")
             }
             "get" -> {
@@ -661,6 +699,75 @@ class AgentEngine(private val context: Context) {
                 ExecutionResult(true, "data_memory: cleared all entries")
             }
             else -> ExecutionResult(false, "[DATA_MEMORY] unknown operation: ${action.operation}")
+        }
+    }
+
+    private fun normalizeTaskBrief(value: String): String? {
+        val trimmed = value.trim()
+        if (trimmed.isEmpty()) return null
+        return trimmed
+    }
+
+    private fun appendFact(fact: String) {
+        val normalized = fact.trim()
+        if (normalized.isEmpty()) return
+        if (contextFactHistory.contains(normalized)) return
+        contextFactHistory.add(normalized)
+    }
+
+    private fun normalizeContextText(text: String): String {
+        val normalized = text.trim()
+        if (normalized.length > 1200) {
+            LogManager.logW(TAG, "[CONTEXT] text too long (${normalized.length} chars), truncating to 1200")
+            return normalized.take(1200)
+        }
+        return normalized
+    }
+
+    private fun composeContextPayload(): String {
+        val sections = mutableListOf<String>()
+
+        if (contextFactHistory.isNotEmpty()) {
+            sections.add("fact:\n${contextFactHistory.joinToString("\n")}")
+        }
+
+        if (currentContextText.isNotEmpty()) {
+            sections.add("text:\n$currentContextText")
+        }
+
+        if (sections.isEmpty()) {
+            return ""
+        }
+        return sections.joinToString("\n\n")
+    }
+
+    private fun buildFailureSignature(action: AgentAction, result: ExecutionResult): String {
+        val actionJson = try {
+            action.toJson().toString()
+        } catch (_: Exception) {
+            action.javaClass.simpleName ?: "UnknownAction"
+        }
+        val errorText = result.error?.message ?: result.message
+        return "${action.javaClass.simpleName}|$actionJson|$errorText"
+    }
+
+    private fun buildRealtimeCorrectionHint(action: AgentAction, result: ExecutionResult, repeatCount: Int): String {
+        val errorText = (result.error?.message ?: result.message).lowercase()
+        val genericHint = "Realtime correction: same action failed $repeatCount times. Do not repeat with identical parameters. Change strategy, ask_user, or terminate with reason."
+
+        return when (action) {
+            is AgentAction.FileSearch,
+            is AgentAction.FileRead,
+            is AgentAction.FileEdit,
+            is AgentAction.FileSave,
+            is AgentAction.FileNew -> {
+                if (errorText.contains("file not opened") || errorText.contains("file not found")) {
+                    "Realtime correction: text file operation failed $repeatCount times. Create files only with file_new. file_read/file_search/file_edit must use an existing file path. For path uncertainty, run file_search_regex first."
+                } else {
+                    genericHint
+                }
+            }
+            else -> genericHint
         }
     }
     

@@ -13,6 +13,7 @@ interface ActionFormat {
     fun getFormatDescription(): String
     fun getCorrectExample(): String
     fun getErrorHint(): String
+    fun getLastParseError(): String?
     
     /**
      * Parse actions from model response.
@@ -53,12 +54,16 @@ abstract class BaseActionFormat : ActionFormat {
      */
     override fun parseActions(response: String): List<AgentAction> {
         val allActions = extractAllActions(response)
-        
-        // Group by action type (using class name as key)
-        val groupedByType = allActions.groupBy { it::class.simpleName ?: "Unknown" }
-        
-        // Take last action from each group
-        return groupedByType.values.mapNotNull { it.lastOrNull() }
+
+        val lastByType = linkedMapOf<String, Pair<Int, AgentAction>>()
+        allActions.forEachIndexed { index, action ->
+            val key = action::class.simpleName ?: "Unknown"
+            lastByType[key] = index to action
+        }
+
+        return lastByType.values
+            .sortedBy { it.first }
+            .map { it.second }
     }
 }
 
@@ -82,9 +87,11 @@ internal fun parseSystemButton(btn: String): AgentAction.SystemButton.Button? = 
 /**
  * OpenAI Function Call Format Implementation
  * Uses OpenAI function call format: {"name":"tool_name", "parameters":{...}}
- * Supports both single call and batch calls via tool_calls array
+ * Supports multiple top-level function-call JSON objects in one response
  */
 class OpenAiFuncCallFormat : BaseActionFormat() {
+
+    private var lastParseError: String? = null
     
     override fun getFormatName(): String = "OpenAI FuncCall"
     
@@ -95,14 +102,16 @@ class OpenAiFuncCallFormat : BaseActionFormat() {
     override fun getErrorHint(): String {
         return "ERROR: 解析动作Action失败. 严格按照系统提示词中 ## 动作列表 格式输出！"
     }
+
+    override fun getLastParseError(): String? = lastParseError
     
     override fun getFormatDescription(): String {
         return """**输出格式**：OpenAI Function Call 格式
 单个调用：{"name":"[function_name]","parameters":{...}}
-批量调用：{"tool_calls":[{"name":"context","parameters":{"text":"..."}},{"name":"[function_name]","parameters":{...}}]}
+批量调用：{"name":"context","parameters":{"text":"..."}...{"name":"[function_name]","parameters":{...}}
 
 ## 可用OpenAI Function Call函数列表
-{"name":"context","parameters":{"text":"当前状态、关键信息、错误、坐标、策略"}}
+{"name":"context","parameters":{"fact":"事实记忆，关键信息"，"text":"状态、错误、下一步、策略"}}
 {"name":"click","parameters":{"coordinate":[x,y]}}
 {"name":"long_press","parameters":{"coordinate":[x,y]}}
 {"name":"double_click","parameters":{"coordinate":[x,y]}}
@@ -122,7 +131,18 @@ class OpenAiFuncCallFormat : BaseActionFormat() {
 {"name":"data_memory","parameters":{"operation":"get","key":"name"}}
 {"name":"data_memory","parameters":{"operation":"list"}}
 
-注意：支持批量调用，使用 tool_calls 数组"""
+文件操作：
+{"name":"file_new","parameters":{"path":"/sdcard/new.txt","new_content":"line 1\nline 2\n..."}}
+{"name":"file_read","parameters":{"path":"/sdcard/file.txt","start_line":1,"read_count":50}}
+{"name":"file_edit","parameters":{"path":"/sdcard/file.txt","start_line":1,"end_line":2,"new_content":"new line 1\nnew line 2\n..."}}
+{"name":"file_search","parameters":{"path":"/sdcard/file.txt","keyword":"text","ignore_case":true}}
+
+{"name":"file_list_dir","parameters":{"path":"/sdcard/","recursive":false}}
+{"name":"file_copy","parameters":{"src":"/sdcard/src.txt","dst":"/sdcard/dst.txt"}}
+{"name":"file_delete","parameters":{"path":"/sdcard/file.txt","recursive":false}}
+{"name":"file_search_regex","parameters":{"path":"/sdcard/","pattern":".*\\.txt$","recursive":true}}
+{"name":"file_create_dir","parameters":{"path":"/sdcard/new_folder"}}
+"""
     }
     
     override fun getKbActionDescription(): String = 
@@ -132,26 +152,23 @@ class OpenAiFuncCallFormat : BaseActionFormat() {
 Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags above)."""
     
     override fun extractAllActions(response: String): List<AgentAction> {
+        lastParseError = null
         val actions = mutableListOf<AgentAction>()
 
         // Use bracket-balance scanning to extract top-level JSON objects of any nesting depth.
         // The old depth-limited regex "\{(?:[^{}]|(?:\{[^{}]*\}))*\}" only handled 2 levels,
-        // causing tool_calls JSON (3+ levels deep) or text fields with newlines to be silently dropped.
+        // causing deeply nested JSON or text fields with newlines to be silently dropped.
         for (jsonStr in extractTopLevelJsonObjects(response)) {
             try {
                 val json = JSONObject(jsonStr)
+                parseFuncCall(json)?.let { actions.add(it) }
+            } catch (e: Exception) {
+                lastParseError = "Invalid JSON object in model output: ${e.message ?: "unknown parse error"}"
+            }
+        }
 
-                // Handle tool_calls array format
-                if (json.has("tool_calls")) {
-                    val toolCalls = json.getJSONArray("tool_calls")
-                    for (i in 0 until toolCalls.length()) {
-                        parseFuncCall(toolCalls.getJSONObject(i))?.let { actions.add(it) }
-                    }
-                } else {
-                    // Handle single function call format
-                    parseFuncCall(json)?.let { actions.add(it) }
-                }
-            } catch (_: Exception) {}
+        if (actions.isEmpty() && lastParseError == null) {
+            lastParseError = "No valid function call found. Ensure each call uses {\"name\":\"...\",\"parameters\":{...}} format."
         }
 
         return actions
@@ -194,8 +211,30 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
         return results
     }
     
+    private fun parseNewContentText(params: JSONObject, actionName: String): String? {
+        if (!params.has("new_content")) {
+            lastParseError = "$actionName missing required field: new_content (string)"
+            return null
+        }
+        val raw = params.opt("new_content")
+        if (raw !is String) {
+            lastParseError = "$actionName.new_content must be string"
+            return null
+        }
+        return raw
+    }
+
     private fun parseFuncCall(json: JSONObject): AgentAction? {
         try {
+            if (!json.has("name")) {
+                lastParseError = "Missing required field: name"
+                return null
+            }
+            if (!json.has("parameters")) {
+                lastParseError = "Action '${json.optString("name", "unknown")}' missing required field: parameters"
+                return null
+            }
+
             val name = json.getString("name")
             val params = json.getJSONObject("parameters")
             
@@ -225,7 +264,12 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                 }
                 "open" -> AgentAction.Open(params.getString("text"))
                 "system_button" -> {
-                    val btn = parseSystemButton(params.getString("button")) ?: return null
+                    val btnValue = params.getString("button")
+                    val btn = parseSystemButton(btnValue)
+                    if (btn == null) {
+                        lastParseError = "system_button.button must be one of back/home/menu/enter, got '$btnValue'"
+                        return null
+                    }
                     AgentAction.SystemButton(btn)
                 }
                 "wait" -> AgentAction.Wait
@@ -236,7 +280,15 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                     }
                     AgentAction.Terminate(st, params.optString("text", ""))
                 }
-                "context" -> AgentAction.Context(params.getString("text"))
+                "context" -> {
+                    val fact = params.optString("fact", "")
+                    val text = params.optString("text", "")
+                    if (fact.isEmpty() && text.isEmpty()) {
+                        null
+                    } else {
+                        AgentAction.Context(text = text, fact = fact)
+                    }
+                }
                 "ask_user" -> AgentAction.AskUser(params.getString("text"))
                 "get_app_list" -> AgentAction.GetAppList
                 "kb_insert" -> AgentAction.KbInsert(params.optString("text", ""))
@@ -247,11 +299,67 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                 "data_memory" -> AgentAction.DataMemory(
                     operation = params.optString("operation", "list"),
                     key = params.optString("key").takeIf { it.isNotEmpty() },
-                    value = params.optString("value").takeIf { it.isNotEmpty() }
+                    value = params.opt("value")?.takeIf { it != JSONObject.NULL }?.toString()?.takeIf { it.isNotEmpty() }
                 )
-                else -> null
+                "file_read" -> AgentAction.FileRead(
+                    path = params.getString("path"),
+                    startLine = params.optInt("start_line", 1),
+                    readCount = params.optInt("read_count", 50)
+                )
+                "file_new" -> {
+                    val newContent = parseNewContentText(params, "file_new") ?: return null
+                    AgentAction.FileNew(
+                        path = params.getString("path"),
+                        newContent = newContent
+                    )
+                }
+                "file_edit" -> {
+                    if (!params.has("start_line")) {
+                        lastParseError = "file_edit missing required field: start_line"
+                        return null
+                    }
+                    if (!params.has("end_line")) {
+                        lastParseError = "file_edit missing required field: end_line"
+                        return null
+                    }
+                    val newContent = parseNewContentText(params, "file_edit") ?: return null
+                    AgentAction.FileEdit(
+                        path = params.getString("path"),
+                        startLine = params.getInt("start_line"),
+                        endLine = params.getInt("end_line"),
+                        newContent = newContent
+                    )
+                }
+                "file_search" -> AgentAction.FileSearch(
+                    path = params.getString("path"),
+                    keyword = params.getString("keyword"),
+                    ignoreCase = params.optBoolean("ignore_case", true)
+                )
+                "file_list_dir" -> AgentAction.FileListDir(
+                    path = params.getString("path"),
+                    recursive = params.optBoolean("recursive", false)
+                )
+                "file_copy" -> AgentAction.FileCopy(
+                    src = params.getString("src"),
+                    dst = params.getString("dst")
+                )
+                "file_delete" -> AgentAction.FileDelete(
+                    path = params.getString("path"),
+                    recursive = params.optBoolean("recursive", false)
+                )
+                "file_search_regex" -> AgentAction.FileSearchRegex(
+                    path = params.getString("path"),
+                    pattern = params.getString("pattern"),
+                    recursive = params.optBoolean("recursive", true)
+                )
+                "file_create_dir" -> AgentAction.FileCreateDir(params.getString("path"))
+                else -> {
+                    lastParseError = "Unknown action name: '$name'"
+                    null
+                }
             }
         } catch (e: Exception) {
+            lastParseError = "Failed to parse action '${json.optString("name", "unknown")}': ${e.message ?: "invalid parameters"}"
             return null
         }
     }

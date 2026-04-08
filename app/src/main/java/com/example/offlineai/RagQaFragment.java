@@ -424,7 +424,6 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 if (newState == RecyclerView.SCROLL_STATE_DRAGGING) {
                     if (!isAtBottom(layoutManager)) {
                         userScrolledAway = true;
-                        LogManager.logD(TAG, "[SCROLL] User scrolled away from bottom");
                     }
                 }
             }
@@ -437,7 +436,6 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 if (isAtBottom(layoutManager)) {
                     if (userScrolledAway) {
                         userScrolledAway = false;
-                        LogManager.logD(TAG, "[SCROLL] User returned to bottom");
                     }
                 }
             }
@@ -4738,11 +4736,6 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             if ((hasDoubleNewlineInChunk || hasCrossChunkDoubleNewline || hasClosedLatex) && !markdownStreamingActivated) {
                 markdownStreamingActivated = true;
                 lastMsg.setMarkdownLocked(true);
-                if (hasClosedLatex) {
-                    LogManager.logD(TAG, "[STREAM_RENDER] Markdown streaming mode activated by closed LaTeX formula");
-                } else {
-                    LogManager.logD(TAG, "[STREAM_RENDER] Markdown streaming mode activated");
-                }
             }
 
             boolean shouldFullMarkdownRender = (markdownStreamingActivated
@@ -4756,9 +4749,6 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 int lastPos = chatMessages.size() - 1;
                 if (lastPos >= 0 && chatAdapter != null) {
                     chatAdapter.notifyItemChanged(lastPos);
-                }
-                if (hasDoubleNewlineInChunk || hasCrossChunkDoubleNewline || hasClosedLatex) {
-                    LogManager.logD(TAG, "[STREAM_RENDER] Full markdown render triggered at paragraph boundary");
                 }
             } else {
                 // Incremental update path; when hasUnclosedLatex=true,
@@ -4797,7 +4787,6 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     private void smartScrollToBottom() {
         // Don't scroll if user has manually scrolled away
         if (userScrolledAway) {
-            LogManager.logD(TAG, "[SCROLL] Skip auto-scroll: userScrolledAway=true");
             return;
         }
         
