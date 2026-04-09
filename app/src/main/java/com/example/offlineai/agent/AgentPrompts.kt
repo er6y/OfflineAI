@@ -60,6 +60,12 @@ ${format.getFormatDescription()}
   - 同一操作重复3次失败
   - 需用户介入的必要场景
 
+- **python操作决策**
+  - `python_run`：异步启动Python，返回`status`，单实例，若已有RUNNING实例，再次`python_run` 会报错。
+  - `python_status`：查询单实例状态，返回`status`（RUNNING/SUCCESS/FAILED）、`return`、`recent_output`（最近500字符）
+  - `python_kill`：无参数，终止当前运行中的唯一Python实例
+  - 查输出方式：直接用`python_status` 返回的`recent_output`（最近500字符），如果还不完善可用固定使用Action `data_memory` `get` `key`="python_key" 查询完整输出（先调`python_status`触发同步）
+
 - **文件操作工具决策**：文件/目录任务必须优先使用 `file_*` 工具，不要先走文件管理器UI
 - **web 工具使用决策**：未指定搜索引擎时优先 bing.com
 - **应用启动**：名称不明确时先调用 `get_app_list action`，严格匹配应用名，禁止幻觉

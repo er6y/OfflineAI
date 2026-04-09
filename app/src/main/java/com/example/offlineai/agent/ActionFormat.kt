@@ -142,9 +142,15 @@ class OpenAiFuncCallFormat : BaseActionFormat() {
 {"name":"file_delete","parameters":{"path":"/sdcard/file.txt","recursive":false}}
 {"name":"file_search_regex","parameters":{"path":"/sdcard/","pattern":".*\\.txt$","recursive":true}}
 {"name":"file_create_dir","parameters":{"path":"/sdcard/new_folder"}}
+
+Python execution
+{"name":"python_run","parameters":{"code":"print(1+1)"}}
+{"name":"python_run","parameters":{"file":"/sdcard/script.py","args":["--port","8000"]}}
+{"name":"python_status","parameters":{}}
+{"name":"python_kill","parameters":{}}
 """
     }
-    
+
     override fun getKbActionDescription(): String = 
     """OpenAI Function Call列表：
 {"name":"kb_delete","parameters":{"ids":"ID1,ID2,..."}}
@@ -353,6 +359,22 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                     recursive = params.optBoolean("recursive", true)
                 )
                 "file_create_dir" -> AgentAction.FileCreateDir(params.getString("path"))
+                "python_run" -> {
+                    val argsList = mutableListOf<String>()
+                    if (params.has("args")) {
+                        val argsArray = params.getJSONArray("args")
+                        for (i in 0 until argsArray.length()) {
+                            argsList.add(argsArray.getString(i))
+                        }
+                    }
+                    AgentAction.PythonRun(
+                        code = params.optString("code").takeIf { it.isNotEmpty() },
+                        file = params.optString("file").takeIf { it.isNotEmpty() },
+                        args = argsList
+                    )
+                }
+                "python_status" -> AgentAction.PythonStatus()
+                "python_kill" -> AgentAction.PythonKill()
                 else -> {
                     lastParseError = "Unknown action name: '$name'"
                     null

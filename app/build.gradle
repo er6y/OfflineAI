@@ -1,6 +1,40 @@
 plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
+    id 'com.chaquo.python'
+}
+
+chaquopy {
+    defaultConfig {
+        version "3.10"
+        pip {
+            // ========== Core Office Suite ==========
+            install "python-docx"       // Word
+            install "python-pptx"       // PPT
+            install "openpyxl"         // Excel
+
+            // ========== PDF Processing ==========
+            install "PyPDF2"           // Read, merge, split PDF
+            install "fpdf2"            // Generate PDF
+
+            // ========== Network & Web ==========
+            install "requests"
+            install "beautifulsoup4"
+
+            // ========== File & Image ==========
+            install "chardet"
+            install "pillow"
+
+            // ========== Scientific Computing ==========
+            install "numpy"
+
+            // ========== Compression (ultra-lightweight) ==========
+            install "zipfile36"        // ZIP extract/compress (pure Python, tiny)
+
+            // ========== Utilities ==========
+            install "python-dotenv"
+        }
+    }
 }
 
 // Note: sherpa-mnn ASR is now compiled from source in mnn-jni module

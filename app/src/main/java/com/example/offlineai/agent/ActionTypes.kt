@@ -1,5 +1,6 @@
 package com.example.offlineai.agent.model
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -472,6 +473,51 @@ sealed class AgentAction {
         override fun toJson() = JSONObject().apply {
             put("action", "file_create_dir")
             put("path", path)
+        }
+        override fun needsScreenshot() = false
+    }
+
+    /**
+     * Run Python code asynchronously via Chaquopy
+     * {"action": "python_run", "code": "print('hello')"}
+     * {"action": "python_run", "file": "/sdcard/script.py", "args": ["--port", "8000"]}
+     */
+    data class PythonRun(
+        val code: String? = null,
+        val file: String? = null,
+        val args: List<String> = emptyList()
+    ) : AgentAction() {
+        override fun toJson() = JSONObject().apply {
+            put("action", "python_run")
+            code?.let { put("code", it) }
+            file?.let { put("file", it) }
+            if (args.isNotEmpty()) put("args", JSONArray(args))
+        }
+        override fun needsScreenshot() = false
+    }
+
+    /**
+     * Query all Python sessions status
+     * {"action": "python_status"}
+     */
+    data class PythonStatus(
+        val dummy: String = ""  // No parameters needed
+    ) : AgentAction() {
+        override fun toJson() = JSONObject().apply {
+            put("action", "python_status")
+        }
+        override fun needsScreenshot() = false
+    }
+
+    /**
+     * Kill Python session
+     * {"action": "python_kill"}
+     */
+    data class PythonKill(
+        val dummy: String = ""
+    ) : AgentAction() {
+        override fun toJson() = JSONObject().apply {
+            put("action", "python_kill")
         }
         override fun needsScreenshot() = false
     }

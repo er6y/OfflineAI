@@ -517,6 +517,16 @@ class AgentEngine(private val context: Context) {
                                 lastAction = response.action
 
                                 val result = executor.execute(response.action)
+                                if (response.action is AgentAction.PythonStatus && result.success) {
+                                    val pythonOutputs = executor.getPythonOutputSnapshot()
+                                    if (pythonOutputs.isNotEmpty()) {
+                                        for ((key, value) in pythonOutputs) {
+                                            dataMemory[key] = value
+                                        }
+                                        AgentAccessibilityService.getInstance()?.updateDataMemoryKeys(dataMemory.keys.toList())
+                                        LogManager.logI(TAG, "[PYTHON_STATUS] Synced ${pythonOutputs.size} stdout entries to data_memory")
+                                    }
+                                }
                                 val coordError = ActionParser.getLastCoordinateError()
                                 ActionParser.clearCoordinateError()
                                 val rawOutput = modelOutput.trim()

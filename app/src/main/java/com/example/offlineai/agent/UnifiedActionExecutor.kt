@@ -5,13 +5,16 @@ import android.content.Intent
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.example.offlineai.LogManager
+import com.example.offlineai.ConfigManager
 import com.example.offlineai.agent.model.AgentAction
 import com.example.offlineai.agent.model.ExecutionResult
 import com.example.offlineai.agent.service.AgentAccessibilityService
 import com.example.offlineai.agent.utils.AppNameMapper
 import kotlinx.coroutines.*
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.roundToInt
+import com.chaquo.python.Python
 
 /**
  * Unified Action Executor - executes AgentAction using Accessibility Service.
@@ -167,6 +170,9 @@ class UnifiedActionExecutor(private val context: Context) {
                 is AgentAction.FileDelete -> executeFileDelete(action.path, action.recursive)
                 is AgentAction.FileSearchRegex -> executeFileSearchRegex(action.path, action.pattern, action.recursive)
                 is AgentAction.FileCreateDir -> executeFileCreateDir(action.path)
+                is AgentAction.PythonRun -> executePythonRun(action)
+                is AgentAction.PythonStatus -> executePythonStatus(action)
+                is AgentAction.PythonKill -> executePythonKill(action)
             }
         } finally {
             if (needsHide) {
@@ -258,10 +264,21 @@ class UnifiedActionExecutor(private val context: Context) {
                     ?: requireNonBlank(action.pattern, "file_search_regex.pattern")
             }
             is AgentAction.FileCreateDir -> requireNonBlank(action.path, "file_create_dir.path")
+            is AgentAction.PythonRun -> {
+                if (action.code == null && action.file == null) {
+                    "python_run requires either 'code' or 'file' parameter"
+                } else if (action.code != null && action.file != null) {
+                    "python_run cannot have both 'code' and 'file' parameters"
+                } else {
+                    null
+                }
+            }
+            is AgentAction.PythonStatus -> null  // No parameters needed
+            is AgentAction.PythonKill -> null  // No parameters needed
             else -> null
         }
     }
-    
+
     private fun executeClick(xNorm: Int, yNorm: Int): ExecutionResult {
         val (sx, sy) = normalizedToPixel(xNorm, yNorm)
         LogManager.logI(TAG, "[CLICK] Normalized: [$xNorm, $yNorm] -> Pixel: ($sx, $sy)")
@@ -723,6 +740,319 @@ class UnifiedActionExecutor(private val context: Context) {
         } catch (e: Exception) {
             LogManager.logE(TAG, "[FILE_CREATE_DIR] Failed: $path", e)
             ExecutionResult(false, "Create directory failed: ${e.message}")
+        }
+    }
+
+    // ============================================================================
+    // Python Operations (via Chaquopy)
+    // ============================================================================
+
+    private val pythonOutputMemory = mutableMapOf<String, StringBuilder>()
+    private val pythonStateLock = Any()
+    private val PYTHON_STDOUT_KEY = "python_key"
+    private val sessionCounter = AtomicInteger(0)
+    @Volatile private var activePythonSession: PythonSession? = null
+    @Volatile private var lastPythonSession: PythonSession? = null
+    
+    // CRITICAL: Chaquopy requires single-threaded Python execution to avoid "frame does not exist" error
+    private val pythonExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "Python-Chaquopy-SingleThread").apply { isDaemon = true }
+    }
+
+    private fun executePythonRun(action: AgentAction.PythonRun): ExecutionResult {
+        LogManager.logI(TAG, "[PYTHON_RUN] Starting Python session")
+
+        synchronized(pythonStateLock) {
+            val running = activePythonSession
+            if (running != null && running.state == PythonSession.State.RUNNING) {
+                return ExecutionResult(
+                    false,
+                    "Python single-instance mode: another run is active. Wait via python_status or stop via python_kill."
+                )
+            }
+        }
+
+        // Validate input
+        if (action.code == null && action.file == null) {
+            return ExecutionResult(false, "python_run requires either 'code' or 'file' parameter")
+        }
+        if (action.code != null && action.file != null) {
+            return ExecutionResult(false, "python_run cannot have both 'code' and 'file' parameters")
+        }
+
+        val sessionId = "py_${System.currentTimeMillis()}_${sessionCounter.incrementAndGet()}"
+
+        // Prepare Python code
+        val pythonCode = when {
+            action.code != null -> action.code
+            action.file != null -> {
+                val file = File(action.file)
+                if (!file.exists()) {
+                    return ExecutionResult(false, "Python file not found: ${action.file}")
+                }
+                file.readText()
+            }
+            else -> return ExecutionResult(false, "No Python code to execute")
+        }
+
+        // Create log file in chat history folder
+        val logFile = File(getChatHistoryFolder(), "${sessionId}.log")
+        val logWriter = java.io.FileWriter(logFile, true)
+
+        // Create internal single session (ID only for framework debug, not exposed to model)
+        val session = PythonSession(
+            sessionId = sessionId,
+            startTime = System.currentTimeMillis(),
+            logFile = logFile,
+            logWriter = logWriter
+        )
+        synchronized(pythonStateLock) {
+            activePythonSession = session
+            lastPythonSession = session
+        }
+
+        // Prepare wrapped code with stdout/stderr redirection to file
+        val wrappedCode = wrapPythonWithOutputCapture(pythonCode, logFile.absolutePath)
+
+        // CRITICAL: Use single-threaded executor to prevent Chaquopy "frame does not exist" error
+        // Python is not thread-safe, must execute sequentially
+        val future = pythonExecutor.submit<java.lang.Void> {
+            try {
+                LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId started execution on thread: ${Thread.currentThread().name}")
+                val python = Python.getInstance()
+                LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId got Python instance")
+
+                // Execute Python code (stdout/stderr captured by wrapper)
+                val module = python.getModule("builtins")
+                LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId got builtins module, executing code...")
+
+                // Log wrapped code preview for debugging (first 200 chars)
+                val codePreview = wrappedCode.take(200).replace("\n", "\\n")
+                LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId code preview: $codePreview...")
+
+                module.callAttr("exec", wrappedCode)
+
+                // Update session status on completion
+                if (session.state != PythonSession.State.KILLED) {
+                    session.state = PythonSession.State.COMPLETED
+                    session.exitCode = 0
+                    logWriter.append("[PYTHON] Session completed\n")
+                    logWriter.close()
+                    LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId completed successfully")
+                }
+            } catch (e: Exception) {
+                if (session.state != PythonSession.State.KILLED) {
+                    session.state = PythonSession.State.FAILED
+                    session.errorMessage = e.message
+                    val stackTrace = e.stackTraceToString()
+                    logWriter.append("[PYTHON ERROR] ${e.message}\n")
+                    logWriter.append("[PYTHON STACKTRACE] $stackTrace\n")
+                    logWriter.close()
+                    LogManager.logE(TAG, "[PYTHON_RUN] Session $sessionId failed: ${e.message}")
+                    LogManager.logE(TAG, "[PYTHON_RUN] Session $sessionId stacktrace: $stackTrace")
+                }
+            } finally {
+                // Sync file content to data_memory for model access
+                try {
+                    if (logFile.exists()) {
+                        val finalContent = logFile.readText()
+                        pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(finalContent)
+                    }
+                } catch (e: Exception) {
+                    LogManager.logE(TAG, "[PYTHON_RUN] Final sync error: ${e.message}")
+                } finally {
+                    synchronized(pythonStateLock) {
+                        if (activePythonSession?.sessionId == sessionId && session.state != PythonSession.State.RUNNING) {
+                            activePythonSession = null
+                        }
+                        lastPythonSession = session
+                    }
+                }
+            }
+            null
+        }
+
+        // Convert Future to Job-like structure for session management
+        val job = CoroutineScope(Dispatchers.IO).launch {
+            try {
+                future.get()
+            } catch (e: Exception) {
+                LogManager.logE(TAG, "[PYTHON_RUN] Session $sessionId future error: ${e.message}")
+            }
+        }
+
+        session.job = job
+
+        return ExecutionResult(
+            true,
+            "Python run started (single-instance mode). Query output with {\"name\":\"data_memory\",\"parameters\":{\"operation\":\"get\",\"key\":\"python_key\"}} after python_status.",
+            returnData = "{\"status\":\"RUNNING\",\"hint\":\"Use data_memory get key=python_key after python_status\"}"
+        )
+    }
+
+    private fun getChatHistoryFolder(): File {
+        val chatFolderPath = ConfigManager.getString(context, ConfigManager.KEY_CURRENT_CHAT_FOLDER, "")
+        return if (chatFolderPath.isNotEmpty()) {
+            File(chatFolderPath)
+        } else {
+            File(context.getExternalFilesDir(null), "chat_history").apply { mkdirs() }
+        }
+    }
+
+    private fun executePythonStatus(action: AgentAction.PythonStatus): ExecutionResult {
+        val session = synchronized(pythonStateLock) {
+            activePythonSession ?: lastPythonSession
+        }
+
+        if (session == null) {
+            return ExecutionResult(
+                true,
+                "Python status: FAILED (no active instance). Use data_memory get key=python_key for latest synced output.",
+                returnData = "{\"status\":\"FAILED\",\"return\":\"no_active_python_instance\",\"recent_output\":\"\",\"hint\":\"Use data_memory get key=python_key\"}"
+            )
+        }
+
+        val fullOutput = try {
+            if (session.logFile.exists()) {
+                val content = session.logFile.readText()
+                pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(content)
+                content
+            } else {
+                pythonOutputMemory[PYTHON_STDOUT_KEY]?.toString() ?: ""
+            }
+        } catch (e: Exception) {
+            "[Error reading log: ${e.message}]"
+        }
+        val recentOutput = fullOutput.takeLast(500)
+        val returnValue = when (session.state) {
+            PythonSession.State.RUNNING -> "running"
+            PythonSession.State.COMPLETED -> (session.exitCode?.toString() ?: "0")
+            PythonSession.State.FAILED -> (session.errorMessage ?: "failed")
+            PythonSession.State.KILLED -> (session.errorMessage ?: "killed")
+        }
+        val externalStatus = when (session.state) {
+            PythonSession.State.RUNNING -> "RUNNING"
+            PythonSession.State.COMPLETED -> "SUCCESS"
+            PythonSession.State.FAILED, PythonSession.State.KILLED -> "FAILED"
+        }
+
+        val result = buildString {
+            append("{")
+            append("\"status\":\"$externalStatus\",")
+            append("\"return\":\"${returnValue.escapeJson()}\",")
+            append("\"recent_output\":\"${recentOutput.escapeJson()}\",")
+            append("\"hint\":\"Use data_memory get key=python_key\"")
+            append("}")
+        }
+
+        return ExecutionResult(true, "Python status: $externalStatus. Use data_memory get key=python_key for full output.", returnData = result)
+    }
+
+    fun getPythonOutputSnapshot(): Map<String, String> {
+        return pythonOutputMemory.mapValues { it.value.toString() }
+    }
+
+    private fun executePythonKill(action: AgentAction.PythonKill): ExecutionResult {
+        val session = synchronized(pythonStateLock) { activePythonSession }
+            ?: return ExecutionResult(
+                true,
+                "No running Python instance. Kill is idempotent and treated as success.",
+                returnData = "{\"status\":\"FAILED\",\"return\":\"no_running_instance\",\"hint\":\"Use data_memory get key=python_key\"}"
+            )
+
+        return try {
+            // Cancel the coroutine
+            session.job.cancel()
+
+            // Update state
+            session.state = PythonSession.State.KILLED
+            session.errorMessage = "Killed by python_kill"
+            synchronized(pythonStateLock) {
+                activePythonSession = null
+                lastPythonSession = session
+            }
+
+            LogManager.logI(TAG, "[PYTHON_KILL] Active Python session killed")
+
+            ExecutionResult(
+                true,
+                "Python instance killed. Status treated as FAILED. Use data_memory get key=python_key for output.",
+                returnData = "{\"status\":\"FAILED\",\"return\":\"killed\",\"hint\":\"Use data_memory get key=python_key\"}"
+            )
+        } catch (e: Exception) {
+            LogManager.logE(TAG, "[PYTHON_KILL] Kill exception but keeping app safe: ${e.message}")
+            synchronized(pythonStateLock) {
+                activePythonSession = null
+                lastPythonSession = session
+            }
+            session.state = PythonSession.State.KILLED
+            session.errorMessage = "Kill attempted with exception: ${e.message}"
+            ExecutionResult(
+                true,
+                "Python kill encountered internal exception but was handled safely. Status treated as FAILED.",
+                returnData = "{\"status\":\"FAILED\",\"return\":\"kill_failed_but_safe\",\"hint\":\"Use data_memory get key=python_key\"}"
+            )
+        }
+    }
+
+    private fun String.escapeJson(): String {
+        return this
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+    }
+
+    private fun wrapPythonWithOutputCapture(code: String, logFilePath: String): String {
+        val escapedPath = logFilePath.replace("\\", "\\\\").replace("'", "\\'")
+        val escapedCode = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+        val pythonWrapper = StringBuilder()
+        pythonWrapper.append("import sys\n")
+        pythonWrapper.append("import traceback\n\n")
+        pythonWrapper.append("_log_file_path = '$escapedPath'\n\n")
+        pythonWrapper.append("class _FileOutputCapture:\n")
+        pythonWrapper.append("    def __init__(self, original, filepath, prefix=''):\n")
+        pythonWrapper.append("        self.original = original\n")
+        pythonWrapper.append("        self.filepath = filepath\n")
+        pythonWrapper.append("        self.prefix = prefix\n\n")
+        pythonWrapper.append("    def write(self, s):\n")
+        pythonWrapper.append("        if s and s.strip():\n")
+        pythonWrapper.append("            line = self.prefix + s.rstrip('\\n')\n")
+        pythonWrapper.append("            with open(self.filepath, 'a', encoding='utf-8') as f:\n")
+        pythonWrapper.append("                f.write(line + '\\n')\n")
+        pythonWrapper.append("        self.original.write(s)\n\n")
+        pythonWrapper.append("    def flush(self):\n")
+        pythonWrapper.append("        self.original.flush()\n\n")
+        pythonWrapper.append("sys.stdout = _FileOutputCapture(sys.stdout, _log_file_path)\n")
+        pythonWrapper.append("sys.stderr = _FileOutputCapture(sys.stderr, _log_file_path, '[ERROR] ')\n\n")
+        pythonWrapper.append("print('[PYTHON DEBUG] Python wrapper started, thread: ' + str(__import__('threading').current_thread().name))\n")
+        pythonWrapper.append("print('[PYTHON DEBUG] Python version: ' + sys.version)\n")
+        pythonWrapper.append("print('[PYTHON DEBUG] Starting user code execution...')\n\n")
+        pythonWrapper.append("_user_code = '''${escapedCode}'''\n\n")
+        pythonWrapper.append("try:\n")
+        pythonWrapper.append("    exec(_user_code)\n")
+        pythonWrapper.append("    print('[PYTHON DEBUG] User code completed successfully')\n")
+        pythonWrapper.append("except Exception as e:\n")
+        pythonWrapper.append("    print('[PYTHON EXCEPTION] ' + str(type(e).__name__) + ': ' + str(e))\n")
+        pythonWrapper.append("    print('[PYTHON TRACEBACK] ' + traceback.format_exc())\n")
+        pythonWrapper.append("    raise\n")
+        return pythonWrapper.toString()
+    }
+
+    // Python session data class
+    data class PythonSession(
+        val sessionId: String,
+        val startTime: Long,
+        val logFile: File,
+        val logWriter: java.io.FileWriter,
+        @Volatile var state: State = State.RUNNING,
+        @Volatile var job: Job = Job(),
+        @Volatile var exitCode: Int? = null,
+        @Volatile var errorMessage: String? = null
+    ) {
+        enum class State {
+            RUNNING, COMPLETED, FAILED, KILLED
         }
     }
 }

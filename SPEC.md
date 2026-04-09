@@ -339,6 +339,34 @@ flowchart TB
      - **保留动作**：Click/LongPress/DoubleClick/Type/Swipe/Drag/Open/SystemButton/Wait/Terminate/AskUser/GetAppList/KbInsert/KbDelete/WebOpen/WebGetContent/WebExecuteJs
      - **已删除**：`Answer`（用 Terminate 替代）、旧版 `AskUser`（用新版 AskUser 替代）、`Confirm`（用 AskUser 替代）、`Interact`/`Note`/`CallApi`（占位符，无实际用途）
      - **4种格式已对齐**：MAI-UI/AutoGLM/Doubao/OpenAI FuncCall 均支持相同的核心动作集，ask_user 在各格式中均已解析实现
+   - **Python执行（异步三操作）**：
+     - **设计原则**：非阻塞执行，stdout实时捕获到文件+data_memory，模型优先通过data_memory key访问
+     - **⚠️ 线程安全关键约束**：
+       - **Chaquopy限制**：Python解释器不是线程安全的，并发执行会导致 `SystemError: frame does not exist`
+       - **解决方案**：使用 `newSingleThreadExecutor` 确保所有Python代码在单一线程顺序执行
+       - **实现位置**：`UnifiedActionExecutor.pythonExecutor`，线程名 `Python-Chaquopy-SingleThread`
+       - **影响**：Python代码并发请求会被排队顺序执行，而非真正并行（符合CPython GIL行为）
+     - **python_run**：启动Python代码或脚本（严格单实例）
+    - 参数：`code`或`file`（二选一），`args`（命令行参数列表，可选）
+    - 返回：`status`（不返回`stdout_key`字段）
+    - 固定约定：输出查询 key 固定为 `python_key`
+     - 并发约束：若已有RUNNING实例，再次`python_run`必须失败，提示先`python_status`等待结束或执行`python_kill`
+     - 日志文件命名：内部仍为`${internal_session_id}.log`（仅框架调试使用，不对模型暴露）
+     - stdout/stderr实时写入：文件 + data_memory（key=`python_key`）
+     - 示例：`{"name":"python_run","parameters":{"code":"print(1+1)"}}`
+    - **python_status**：查询当前单实例状态（不传参数）
+     - 返回：`status`（RUNNING/SUCCESS/FAILED）、`return`、`recent_output`（最近500字符）
+     - 注意：调用时会自动把文件内容同步到data_memory（key=`python_key`）
+     - 示例：`{"name":"python_status","parameters":{}}`
+    - **python_kill**：终止当前运行实例（不传参数）
+     - 兜底语义：幂等且安全，目标不存在/已结束也返回成功，不因 kill 失败导致 Agent 流程中断
+      - 示例：`{"name":"python_kill","parameters":{}}`
+     - **典型流程**：
+       1. `python_run`启动（返回`status`，并提示固定查询 key=`python_key`）
+      2. 查输出：先调`python_status`触发同步，再`data_memory get key=python_key`获取完整输出
+      3. `python_status`轮询状态（查看`status/return/recent_output`）
+      4. 卡住/完成：`python_kill`终止
+     - **已安装Python库**：python-docx、python-pptx、openpyxl、PyPDF2、fpdf2、requests、beautifulsoup4、chardet、pillow、numpy、zipfile36、python-dotenv
    - **AskUser 交互设计**：
      - **触发**：模型输出 `ask_user` action，携带 `text` 字段（给用户的问题或操作说明）
      - **截图控制设计**（单一 flag，三处联动）：

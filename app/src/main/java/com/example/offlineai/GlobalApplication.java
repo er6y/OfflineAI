@@ -7,6 +7,8 @@ import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.util.Log;
 import java.util.Locale;
+import com.chaquo.python.Python;
+import com.chaquo.python.android.AndroidPlatform;
 
 /**
  * 全局应用类，用于提供应用上下文
@@ -24,7 +26,15 @@ public class GlobalApplication extends Application {
         String processName = getCurrentProcessName();
         Log.i(TAG, "[STARTUP_TRACE] GlobalApplication.onCreate start, process=" + processName + ", timeMs=" + startMs);
 
+        // Initialize Chaquopy Python (required for python_run action)
         long stepStart = System.currentTimeMillis();
+        if (!Python.isStarted()) {
+            Python.start(new AndroidPlatform(this));
+            Log.i(TAG, "✅ Chaquopy Python initialized");
+        }
+        Log.i(TAG, "[STARTUP_TRACE] Python.start finished, costMs=" + (System.currentTimeMillis() - stepStart));
+
+        stepStart = System.currentTimeMillis();
         initLanguageSettings();
         Log.i(TAG, "[STARTUP_TRACE] initLanguageSettings finished, costMs=" + (System.currentTimeMillis() - stepStart));
 

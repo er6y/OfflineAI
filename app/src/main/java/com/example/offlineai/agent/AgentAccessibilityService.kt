@@ -226,6 +226,9 @@ class AgentAccessibilityService : AccessibilityService() {
                         is AgentAction.FileDelete -> "file_delete(path=${action.path})"
                         is AgentAction.FileSearchRegex -> "file_search_regex(path=${action.path}, pattern=${action.pattern})"
                         is AgentAction.FileCreateDir -> "file_create_dir(path=${action.path})"
+                        is AgentAction.PythonRun -> "python_run(${action.code?.take(30) ?: action.file})"
+                        is AgentAction.PythonStatus -> "python_status"
+                        is AgentAction.PythonKill -> "python_kill"
                     }
                     
                     // Build result string with returnData (critical for web_get_content, get_app_list, etc.)
@@ -1260,6 +1263,9 @@ class AgentAccessibilityService : AccessibilityService() {
                 is AgentAction.FileListDir -> "file_list_dir(${action.path})"
                 is AgentAction.FileCopy -> "file_copy(${action.src}→${action.dst})"
                 is AgentAction.FileDelete -> "file_delete(${action.path})"
+                is AgentAction.PythonRun -> "python_run(${if (action.code != null) "code" else "file"})"
+                is AgentAction.PythonStatus -> "python_status"
+                is AgentAction.PythonKill -> "python_kill"
                 else -> action.javaClass.simpleName
             }
             history.append("ACTION: $actionDesc\n")
@@ -1468,6 +1474,15 @@ $kbActionDesc
                     }
                     is AgentAction.FileCreateDir -> {
                         result.append(" (create dir ${action.path})")
+                    }
+                    is AgentAction.PythonRun -> {
+                        result.append(" (${if (action.code != null) "code" else "file"}: ${action.code?.take(30) ?: action.file})")
+                    }
+                    is AgentAction.PythonStatus -> {
+                        result.append(" (list all sessions)")
+                    }
+                    is AgentAction.PythonKill -> {
+                        result.append(" (kill active python instance)")
                     }
                 }
                 result.append("\n")
