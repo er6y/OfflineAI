@@ -1293,6 +1293,8 @@
     <string name="agent_experience_summary_hint">Summarize experience after task completion and save to knowledge base</string>
     <string name="label_agent_tts">Agent TTS</string>
     <string name="agent_tts_hint">Voice announcement when task completes or user action is needed</string>
+    <string name="label_agent_max_steps">Max Steps</string>
+    <string name="agent_max_steps_unlimited">∞</string>
     <string name="agent_tts_task_done">Task Done</string>
     <string name="agent_tts_task_failed">Task Failed</string>
     <string name="agent_tts_ask_user_prefix">Please Confirm</string>

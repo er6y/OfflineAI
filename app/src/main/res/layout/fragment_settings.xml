@@ -1466,6 +1466,40 @@
                 android:layout_marginTop="4dp" />
         </LinearLayout>
 
+        <!-- Agent Max Steps Slider -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_agent_max_steps"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarAgentMaxSteps"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="0dp"
+                android:layout_marginEnd="0dp"
+                android:max="39"
+                android:progress="8" />
+
+            <TextView
+                android:id="@+id/textViewAgentMaxStepsValue"
+                android:layout_width="50dp"
+                android:layout_height="wrap_content"
+                android:text="50"
+                android:textSize="14sp"
+                android:gravity="center"
+                android:layout_marginStart="0dp" />
+        </LinearLayout>
+
         <!-- 全局设置 -->
         <TextView
             android:layout_width="match_parent"

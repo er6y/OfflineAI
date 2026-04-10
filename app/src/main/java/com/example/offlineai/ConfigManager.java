@@ -127,6 +127,7 @@ public class ConfigManager {
     public static final String KEY_AGENT_MODE_ENABLED = "agent_mode_enabled"; // Agent模式是否启用
     public static final String KEY_AGENT_EXPERIENCE_SUMMARY = "agent_experience_summary"; // Agent经验总结开关
     public static final String KEY_AGENT_TTS_ENABLED = "agent_tts_enabled"; // Agent语音播报开关
+    public static final String KEY_AGENT_MAX_STEPS = "agent_max_steps"; // Agent最大执行轮数（默认50，0表示无限制）
     public static final String KEY_THREADS = "threads"; // ONNX推理线程数
     public static final String KEY_EMBEDDING_CONCURRENCY = "embedding_concurrency"; // Embedding session concurrency for knowledge base building
     public static final String KEY_EMBEDDING_THREADS = "embedding_threads"; // MNN threads per embedding session for knowledge base building

@@ -24,7 +24,7 @@ class AgentEngine(private val context: Context) {
     
     companion object {
         private const val TAG = "AgentEngine"
-        private const val MAX_STEPS = 50 // Maximum steps to prevent infinite loops
+        private const val DEFAULT_MAX_STEPS = 50 // Default maximum steps
         private const val STEP_DELAY_MS = 1500L // Delay between steps for UI stabilization
         private const val MAX_PARSE_RETRIES = 3 // Maximum retries for parse failures
     }
@@ -248,7 +248,12 @@ class AgentEngine(private val context: Context) {
                     delay(1000) // Wait for Home screen to fully render
                 }
                 
-                while (stepIndex < MAX_STEPS && !shouldStop) {
+                // Read configurable max steps (0 = unlimited)
+                val configuredMaxSteps = ConfigManager.getInt(context, ConfigManager.KEY_AGENT_MAX_STEPS, DEFAULT_MAX_STEPS)
+                val maxSteps = if (configuredMaxSteps <= 0) Int.MAX_VALUE else configuredMaxSteps
+                LogManager.logI(TAG, "[AGENT] Max steps configured: $configuredMaxSteps (effective: ${if (maxSteps == Int.MAX_VALUE) "unlimited" else maxSteps.toString()})")
+                
+                while (stepIndex < maxSteps && !shouldStop) {
                     // Decide whether to capture screenshot based on last action
                     // For first step (lastAction == null), always capture screenshot
                     val needsScreenshot = lastAction?.needsScreenshot() ?: true
@@ -334,72 +339,42 @@ class AgentEngine(private val context: Context) {
                         LogManager.logW(TAG, "[CONTEXT] Missing context action at step $stepIndex, reusing previous context: ${currentContext.take(50)}")
                     }
                     
-                    // Handle data_memory actions before selecting actual action
-                    // For "get" operations, inject returned value into lastStepResult so model sees it next step
-                    val dataMemoryActions = actions.filterIsInstance<AgentAction.DataMemory>()
-                    for (dmAction in dataMemoryActions) {
-                        val dmResult = executeDataMemory(dmAction)
-                        val shouldInjectDmResult = dmAction.operation == "get" ||
-                            dmAction.operation == "list" ||
-                            (dmAction.operation == "set" && dmAction.key == "taskBrief" && dmResult.message.contains("invalid"))
-                        if (shouldInjectDmResult) {
-                            val resultMsg = if (dmResult.success) dmResult.message else "data_memory ${dmAction.operation} failed: ${dmResult.message}"
-                            AgentAccessibilityService.getInstance()?.lastStepResult = resultMsg
-                        }
-                    }
-                    
-                    // Execute every distinct non-context/non-data_memory action once
-                    val executableActions = actions.filter { it !is AgentAction.Context && it !is AgentAction.DataMemory }
-                    if (executableActions.isEmpty()) {
-                        // Pure context+data_memory step (no UI action) - record in memory and advance
-                        // IMPORTANT: do NOT set lastAction=Context here - must take screenshot next step
-                        // so model can see the screen and decide next action (avoid blind loop)
+                    // ========== UNIFIED ACTION PIPELINE ==========
+                    // Dedup: remove context, keep last occurrence of each action type, sort by last position
+                    val allNonContext = actions.filter { it !is AgentAction.Context }
+                    val seen = mutableSetOf<String>()
+                    val dedupedActions = allNonContext.reversed().filter { action ->
+                        val typeKey = action::class.simpleName ?: action.javaClass.name
+                        seen.add(typeKey)
+                    }.reversed()
+                    LogManager.logI(TAG, "[AGENT][STEP_${stepIndex + 1}] Deduped actions: ${dedupedActions.map { it::class.simpleName }}")
+
+                    val hasUiAction = dedupedActions.any { it !is AgentAction.DataMemory }
+                    if (!hasUiAction) {
                         consecutivePureSteps++
-                        LogManager.logI(TAG, "[AGENT][STEP_${stepIndex + 1}] Pure context/data_memory step, advancing (consecutive=$consecutivePureSteps)")
-                        val dmSummary = dataMemoryActions.joinToString("; ") { "${it.operation}('${it.key}')" }
-                        val pureStep = TrajectoryStep(
-                            stepIndex = memory.getStepCount(),
-                            screenshot = screenshot,
-                            action = AgentAction.Wait,
-                            executionResult = ExecutionResult(true, "context+data_memory step: $dmSummary"),
-                            rawModelOutput = modelOutput.trim()
-                        )
-                        memory.addStep(pureStep)
-                        callback?.onStepCompleted(stepIndex, AgentAction.Wait, pureStep.executionResult)
-                        // Inject dm result into lastStepResult so model knows set succeeded
-                        val dmKeys = dataMemoryActions.filter { it.operation == "set" }.mapNotNull { it.key }
-                        val realKeys = dataMemory.keys.joinToString(", ").ifEmpty { "（空）" }
-                        val setMsg = if (dmKeys.isNotEmpty()) {
-                            "data_memory set success: ${dmKeys.joinToString(", ")}. Data Memory now: $realKeys"
-                        } else {
-                            "Data Memory now: $realKeys"
-                        }
-                        // When stuck in pure loop: inject strong system warning to break the deadlock
-                        val warningMsg = if (consecutivePureSteps >= 2) {
-                            LogManager.logW(TAG, "[AGENT][PURE_LOOP] Consecutive pure steps=$consecutivePureSteps, injecting loop-break warning")
-                            "\n⚠️ 系统警告：已连续${consecutivePureSteps}步只输出data_memory/context，未执行任何UI操作。" +
-                            "当前 Data Memory 实际存储的key为：[$realKeys]。" +
-                            "你的context中声称已存入的key与实际不符时，必须重新执行 set 操作补存，或者立即输出terminate完成任务。" +
-                            "禁止继续重复set同一个key。"
-                        } else ""
-                        AgentAccessibilityService.getInstance()?.lastStepResult = setMsg + warningMsg
-                        // lastAction stays as-is: next step WILL take screenshot (model needs screen context)
-                        stepIndex++
-                        continue
+                        LogManager.logI(TAG, "[AGENT][STEP_${stepIndex + 1}] Pure context/data_memory step (consecutive=$consecutivePureSteps)")
+                    } else {
+                        consecutivePureSteps = 0
                     }
-                    // Reset pure step counter when a real UI action is executed
-                    consecutivePureSteps = 0
+
                     callback?.onStepStarted(stepIndex)
                     var terminateTriggered = false
                     var askUserTriggered = false
-                    for ((actionIndex, action) in executableActions.withIndex()) {
-                        val response = AgentResponse(action)
+                    val stepResultLines = mutableListOf<String>()
 
-                        when (response.action) {
+                    for ((actionIndex, action) in dedupedActions.withIndex()) {
+                        when (action) {
+                            is AgentAction.DataMemory -> {
+                                val dmResult = executeDataMemory(action)
+                                val desc = formatActionDesc(action)
+                                val resultStr = formatResultStr(dmResult)
+                                stepResultLines.add("$desc -> $resultStr")
+                                LogManager.logI(TAG, "[EXEC] $desc -> ${if (dmResult.success) "OK" else "FAIL"}")
+                            }
                             is AgentAction.Terminate -> {
-                                val success = response.action.status == AgentAction.Terminate.Status.SUCCESS
-                                val expandedText = expandPlaceholders(response.action.text)
-                                val expandedAction = response.action.copy(text = expandedText)
+                                val success = action.status == AgentAction.Terminate.Status.SUCCESS
+                                val expandedText = expandPlaceholders(action.text)
+                                val expandedAction = action.copy(text = expandedText)
 
                                 lastAction = expandedAction
 
@@ -449,7 +424,6 @@ class AgentEngine(private val context: Context) {
                                         LogManager.logE(TAG, "[AGENT_EXP] Failed to bring OfflineAI to foreground", e)
                                     }
 
-                                    // Build detailed step history from trajectory
                                     val stepHistory = AgentAccessibilityService.getInstance()?.buildTaskHistoryForSummary(memory.getAllSteps()) ?: ""
                                     val taskHistory = "任务目标: $taskGoal\n\n操作历史:\n$stepHistory\n\n最新上下文记忆:\n$currentContext"
                                     if (taskHistory.isNotEmpty()) {
@@ -480,18 +454,18 @@ class AgentEngine(private val context: Context) {
 
                                 ttsJob?.join()
                                 LogManager.logD(TAG, "[AGENT_TTS] TTS join completed (no experience summary)")
-                                callback?.onTaskCompleted(success, "Task terminated: ${response.action.status.value}")
+                                callback?.onTaskCompleted(success, "Task terminated: ${action.status.value}")
                                 terminateTriggered = true
                                 break
                             }
                             is AgentAction.AskUser -> {
-                                LogManager.logI(TAG, "[AGENT][ASK_USER] Showing AskUser UI: ${response.action.text}")
+                                LogManager.logI(TAG, "[AGENT][ASK_USER] Showing AskUser UI: ${action.text}")
                                 val askPrefix = context.getString(com.example.offlineai.R.string.agent_tts_ask_user_prefix)
-                                agentTts?.speak("$askPrefix ${response.action.text}")
+                                agentTts?.speak("$askPrefix ${action.text}")
 
-                                lastAction = response.action
+                                lastAction = action
 
-                                val userResponse = callback?.onAskUser(response.action.text) ?: ""
+                                val userResponse = callback?.onAskUser(action.text) ?: ""
                                 LogManager.logI(TAG, "[AGENT][ASK_USER] User responded (${userResponse.length} chars)")
 
                                 val askResultMsg = if (userResponse.isNotEmpty())
@@ -502,22 +476,23 @@ class AgentEngine(private val context: Context) {
                                 val askUserResult = TrajectoryStep(
                                     stepIndex = memory.getStepCount(),
                                     screenshot = null,
-                                    action = response.action,
+                                    action = action,
                                     executionResult = ExecutionResult(true, askResultMsg),
                                     rawModelOutput = ""
                                 )
                                 memory.addStep(askUserResult)
-                                callback?.onStepCompleted(stepIndex, response.action, askUserResult.executionResult)
+                                callback?.onStepCompleted(stepIndex, action, askUserResult.executionResult)
 
                                 stepIndex++
                                 askUserTriggered = true
                                 break
                             }
                             else -> {
-                                lastAction = response.action
+                                lastAction = action
 
-                                val result = executor.execute(response.action)
-                                if (response.action is AgentAction.PythonStatus && result.success) {
+                                val result = executor.execute(action)
+                                // After python_status succeeds, sync stdout to data_memory so subsequent dm get can find it
+                                if (action is AgentAction.PythonStatus && result.success) {
                                     val pythonOutputs = executor.getPythonOutputSnapshot()
                                     if (pythonOutputs.isNotEmpty()) {
                                         for ((key, value) in pythonOutputs) {
@@ -529,49 +504,75 @@ class AgentEngine(private val context: Context) {
                                 }
                                 val coordError = ActionParser.getLastCoordinateError()
                                 ActionParser.clearCoordinateError()
-                                val rawOutput = modelOutput.trim()
 
                                 val step = TrajectoryStep(
                                     stepIndex = memory.getStepCount(),
                                     screenshot = screenshot,
-                                    action = response.action,
+                                    action = action,
                                     executionResult = result,
                                     coordinateError = coordError,
-                                    rawModelOutput = rawOutput
+                                    rawModelOutput = modelOutput.trim()
                                 )
                                 memory.addStep(step)
+                                callback?.onStepCompleted(stepIndex, action, result)
 
-                                callback?.onStepCompleted(stepIndex, response.action, result)
+                                // Collect formatted result line
+                                val desc = formatActionDesc(action)
+                                val resultStr = formatResultStr(result)
+                                stepResultLines.add("$desc -> $resultStr")
+                                LogManager.logI(TAG, "[EXEC] $desc -> ${if (result.success) "OK" else "FAIL"}")
 
                                 if (!result.success) {
-                                    LogManager.logE(TAG, "Action failed: ${result.message}")
-                                    val failureSignature = buildFailureSignature(response.action, result)
+                                    val failureSignature = buildFailureSignature(action, result)
                                     if (failureSignature == lastFailureSignature) {
                                         sameFailureCount++
                                     } else {
                                         lastFailureSignature = failureSignature
                                         sameFailureCount = 1
                                     }
-
                                     if (sameFailureCount >= 2) {
-                                        val correctionHint = buildRealtimeCorrectionHint(response.action, result, sameFailureCount)
-                                        AgentAccessibilityService.getInstance()?.lastStepResult =
-                                            "${result.message}\n$correctionHint"
-                                        LogManager.logW(
-                                            TAG,
-                                            "[AGENT][REALTIME_CORRECTION] Injected correction hint for repeated failure: $correctionHint"
-                                        )
+                                        val correctionHint = buildRealtimeCorrectionHint(action, result, sameFailureCount)
+                                        stepResultLines.add("⚠️ $correctionHint")
+                                        LogManager.logW(TAG, "[AGENT][REALTIME_CORRECTION] $correctionHint")
                                     }
                                 } else {
                                     lastFailureSignature = null
                                     sameFailureCount = 0
                                 }
 
-                                if (actionIndex < executableActions.lastIndex) {
+                                if (actionIndex < dedupedActions.lastIndex) {
                                     delay(STEP_DELAY_MS)
                                 }
                             }
                         }
+                    }
+
+                    // Assemble lastStepResult from all collected results
+                    if (!terminateTriggered && !askUserTriggered && stepResultLines.isNotEmpty()) {
+                        val header = "Previous step executed:"
+                        val body = stepResultLines.joinToString("\n")
+                        val warningMsg = if (consecutivePureSteps >= 2) {
+                            val realKeys = dataMemory.keys.joinToString(", ").ifEmpty { "(empty)" }
+                            LogManager.logW(TAG, "[AGENT][PURE_LOOP] Consecutive pure steps=$consecutivePureSteps")
+                            "\n⚠️ WARNING: ${consecutivePureSteps} consecutive steps with only data_memory/context, no UI action. " +
+                            "Data Memory keys: [$realKeys]. Execute a real action or terminate now."
+                        } else ""
+                        AgentAccessibilityService.getInstance()?.lastStepResult = "$header\n$body$warningMsg"
+                        LogManager.logI(TAG, "[LAST_STEP] ${stepResultLines.size} action result(s) injected")
+                    }
+
+                    // Record pure step in trajectory if no UI action
+                    if (!hasUiAction && !terminateTriggered && !askUserTriggered) {
+                        val dmSummary = dedupedActions.joinToString("; ") { formatActionDesc(it) }
+                        val pureStep = TrajectoryStep(
+                            stepIndex = memory.getStepCount(),
+                            screenshot = screenshot,
+                            action = AgentAction.Wait,
+                            executionResult = ExecutionResult(true, "context+data_memory step: $dmSummary"),
+                            rawModelOutput = modelOutput.trim()
+                        )
+                        memory.addStep(pureStep)
+                        callback?.onStepCompleted(stepIndex, AgentAction.Wait, pureStep.executionResult)
                     }
 
                     if (terminateTriggered) {
@@ -586,9 +587,9 @@ class AgentEngine(private val context: Context) {
                     stepIndex++
                 }
                 
-                if (stepIndex >= MAX_STEPS) {
-                    LogManager.logW(TAG, "Reached maximum steps limit")
-                    callback?.onTaskCompleted(false, "Reached maximum steps limit")
+                if (stepIndex >= maxSteps) {
+                    LogManager.logW(TAG, "Reached maximum steps limit ($maxSteps)")
+                    callback?.onTaskCompleted(false, "Reached maximum steps limit ($maxSteps)")
                 }
                 
             } catch (e: Exception) {
@@ -663,8 +664,10 @@ class AgentEngine(private val context: Context) {
     private fun executeDataMemory(action: AgentAction.DataMemory): ExecutionResult {
         return when (action.operation) {
             "set" -> {
-                val key = action.key ?: return ExecutionResult(false, "[DATA_MEMORY] set: missing key")
-                val value = action.value ?: return ExecutionResult(false, "[DATA_MEMORY] set: missing value")
+                val key = action.key ?: return ExecutionResult(false, "[DATA_MEMORY] set: missing key",
+                    returnData = "{\"status\":\"FAIL\",\"message\":\"missing key\"}")
+                val value = action.value ?: return ExecutionResult(false, "[DATA_MEMORY] set: missing value",
+                    returnData = "{\"status\":\"FAIL\",\"message\":\"missing value\"}")
                 dataMemory[key] = value
                 LogManager.logI(TAG, "[DATA_MEMORY] set key='$key' (${value.length} chars)")
                 AgentAccessibilityService.getInstance()?.updateDataMemoryKeys(dataMemory.keys.toList())
@@ -673,42 +676,54 @@ class AgentEngine(private val context: Context) {
                     if (normalizedBrief != null) {
                         AgentAccessibilityService.getInstance()?.updateTaskBrief(normalizedBrief)
                         LogManager.logI(TAG, "[TASK_BRIEF] Stored and injected taskBrief text (${normalizedBrief.length} chars)")
-                        return ExecutionResult(true, "data_memory: stored 'taskBrief' text and injected into baseline prompt")
+                        return ExecutionResult(true, "data_memory set taskBrief",
+                            returnData = "{\"status\":\"OK\",\"key\":\"taskBrief\",\"chars\":${normalizedBrief.length}}")
                     }
-                    return ExecutionResult(false, "data_memory: taskBrief text is empty")
+                    return ExecutionResult(false, "data_memory: taskBrief text is empty",
+                        returnData = "{\"status\":\"FAIL\",\"key\":\"taskBrief\",\"message\":\"empty value\"}")
                 }
-                ExecutionResult(true, "data_memory: stored '$key' (${value.length} chars)")
+                ExecutionResult(true, "data_memory set '$key'",
+                    returnData = "{\"status\":\"OK\",\"key\":\"${key.replace("\"", "\\\"")}\",\"chars\":${value.length}}")
             }
             "get" -> {
-                val key = action.key ?: return ExecutionResult(false, "[DATA_MEMORY] get: missing key")
+                val key = action.key ?: return ExecutionResult(false, "[DATA_MEMORY] get: missing key",
+                    returnData = "{\"status\":\"FAIL\",\"message\":\"missing key\"}")
                 val value = dataMemory[key]
                 if (value != null) {
                     LogManager.logI(TAG, "[DATA_MEMORY] get key='$key' -> ${value.length} chars")
-                    ExecutionResult(true, value, returnData = value)
+                    val escapedValue = value.take(2000).replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+                    ExecutionResult(true, "data_memory get '$key'",
+                        returnData = "{\"status\":\"OK\",\"key\":\"${key.replace("\"", "\\\"")}\",\"chars\":${value.length},\"value\":\"$escapedValue\"}")
                 } else {
                     LogManager.logW(TAG, "[DATA_MEMORY] get key='$key' not found")
-                    ExecutionResult(false, "data_memory: key '$key' not found")
+                    ExecutionResult(false, "data_memory: key '$key' not found",
+                        returnData = "{\"status\":\"FAIL\",\"key\":\"${key.replace("\"", "\\\"")}\",\"message\":\"key not found\"}")
                 }
             }
             "delete" -> {
-                val key = action.key ?: return ExecutionResult(false, "[DATA_MEMORY] delete: missing key")
+                val key = action.key ?: return ExecutionResult(false, "[DATA_MEMORY] delete: missing key",
+                    returnData = "{\"status\":\"FAIL\",\"message\":\"missing key\"}")
                 dataMemory.remove(key)
                 AgentAccessibilityService.getInstance()?.updateDataMemoryKeys(dataMemory.keys.toList())
                 LogManager.logI(TAG, "[DATA_MEMORY] delete key='$key'")
-                ExecutionResult(true, "data_memory: deleted '$key'")
+                ExecutionResult(true, "data_memory delete '$key'",
+                    returnData = "{\"status\":\"OK\",\"key\":\"${key.replace("\"", "\\\"")}\"}")
             }
             "list" -> {
                 val keys = dataMemory.keys.joinToString(", ").ifEmpty { "(empty)" }
                 LogManager.logI(TAG, "[DATA_MEMORY] list -> $keys")
-                ExecutionResult(true, "data_memory keys: $keys", returnData = keys)
+                ExecutionResult(true, "data_memory list",
+                    returnData = "{\"status\":\"OK\",\"keys\":\"${keys.replace("\"", "\\\"")}\"}")
             }
             "clear" -> {
                 dataMemory.clear()
                 AgentAccessibilityService.getInstance()?.updateDataMemoryKeys(emptyList())
                 LogManager.logI(TAG, "[DATA_MEMORY] cleared all")
-                ExecutionResult(true, "data_memory: cleared all entries")
+                ExecutionResult(true, "data_memory clear",
+                    returnData = "{\"status\":\"OK\",\"message\":\"all entries cleared\"}")
             }
-            else -> ExecutionResult(false, "[DATA_MEMORY] unknown operation: ${action.operation}")
+            else -> ExecutionResult(false, "[DATA_MEMORY] unknown operation: ${action.operation}",
+                returnData = "{\"status\":\"FAIL\",\"message\":\"unknown operation: ${action.operation}\"}")
         }
     }
 
@@ -721,8 +736,14 @@ class AgentEngine(private val context: Context) {
     private fun appendFact(fact: String) {
         val normalized = fact.trim()
         if (normalized.isEmpty()) return
-        if (contextFactHistory.contains(normalized)) return
-        contextFactHistory.add(normalized)
+        // Split by lines and deduplicate each line individually
+        // This prevents duplicates when LLM returns overlapping multi-line facts across steps
+        val lines = normalized.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        for (line in lines) {
+            if (!contextFactHistory.contains(line)) {
+                contextFactHistory.add(line)
+            }
+        }
     }
 
     private fun normalizeContextText(text: String): String {
@@ -797,6 +818,66 @@ class AgentEngine(private val context: Context) {
         }
         return expanded
     }
+
+    /**
+     * Format action description for result injection (compact, with key params).
+     * Long params (>50 chars) are truncated with "...".
+     */
+    private fun formatActionDesc(action: AgentAction): String = when (action) {
+        is AgentAction.Click -> "click([${action.x},${action.y}])"
+        is AgentAction.LongPress -> "long_press([${action.x},${action.y}])"
+        is AgentAction.DoubleClick -> "double_click([${action.x},${action.y}])"
+        is AgentAction.Type -> "type(\"${action.text.ellipsis(50)}\")"
+        is AgentAction.Swipe -> "swipe(${action.direction}" +
+            if (action.x != null) ",[${action.x},${action.y}])" else ")"
+        is AgentAction.Drag -> "drag([${action.startX},${action.startY}]->[${action.endX},${action.endY}])"
+        is AgentAction.Open -> "open(\"${action.appName}\")"
+        is AgentAction.SystemButton -> "system_button(${action.button})"
+        is AgentAction.Wait -> "wait"
+        is AgentAction.GetAppList -> "get_app_list"
+        is AgentAction.WebOpen -> "web_open(\"${action.url.ellipsis(80)}\")"
+        is AgentAction.WebGetContent -> "web_get_content"
+        is AgentAction.WebExecuteJs -> "web_execute_js(\"${action.script.ellipsis(60)}\")"
+        is AgentAction.Terminate -> "terminate(${action.status.value})"
+        is AgentAction.AskUser -> "ask_user(\"${action.text.ellipsis(40)}\")"
+        is AgentAction.KbInsert -> "kb_insert"
+        is AgentAction.KbDelete -> "kb_delete(${action.ids})"
+        is AgentAction.Context -> "context"
+        is AgentAction.DataMemory -> "data_memory(${action.operation}, key=${action.key})"
+        is AgentAction.FileOpen -> "file_open(${action.path})"
+        is AgentAction.FileRead -> "file_read(${action.path})"
+        is AgentAction.FileNew -> "file_new(${action.path})"
+        is AgentAction.FileEdit -> "file_edit(${action.path}, L${action.startLine}-${action.endLine})"
+        is AgentAction.FileSearch -> "file_search(${action.path}, \"${action.keyword.ellipsis(30)}\")"
+        is AgentAction.FileSave -> "file_save(${action.path})"
+        is AgentAction.FileListDir -> "file_list_dir(${action.path})"
+        is AgentAction.FileCopy -> "file_copy(${action.src}, ${action.dst})"
+        is AgentAction.FileDelete -> "file_delete(${action.path})"
+        is AgentAction.FileSearchRegex -> "file_search_regex(${action.path}, \"${action.pattern.ellipsis(30)}\")"
+        is AgentAction.FileCreateDir -> "file_create_dir(${action.path})"
+        is AgentAction.PythonRun -> "python_run(\"${(action.code ?: action.file ?: "").ellipsis(50)}\")"
+        is AgentAction.PythonStatus -> "python_status"
+        is AgentAction.PythonKill -> "python_kill"
+    }
+
+    /**
+     * Format ExecutionResult into a unified JSON string for injection.
+     * If returnData exists (already JSON from executor), use it directly.
+     * Otherwise construct a simple JSON: {"status":"OK/FAIL","message":"..."}.
+     * This ensures the model always sees consistent JSON after "->".
+     */
+    private fun formatResultStr(result: ExecutionResult): String {
+        return if (!result.returnData.isNullOrEmpty()) {
+            result.returnData.take(2000)
+        } else {
+            val status = if (result.success) "OK" else "FAIL"
+            val msg = result.message.take(200).replace("\"", "\\\"").replace("\n", "\\n")
+            "{\"status\":\"$status\",\"message\":\"$msg\"}"
+        }
+    }
+
+    private fun String.ellipsis(maxLen: Int): String =
+        if (length <= maxLen) this else take(maxLen) + "..."
 
     /**
      * Release resources

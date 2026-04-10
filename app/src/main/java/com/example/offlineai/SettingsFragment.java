@@ -100,6 +100,8 @@ public class SettingsFragment extends Fragment {
     private Spinner spinnerGraphStopwords;
     private Switch switchAgentExperienceSummary;
     private Switch switchAgentTts;
+    private SeekBar seekBarAgentMaxSteps;
+    private TextView textViewAgentMaxStepsValue;
     
     private EditText editTextDataRootPath;
     private Button buttonSelectDataRootPath;
@@ -250,6 +252,8 @@ public class SettingsFragment extends Fragment {
         spinnerGraphStopwords = view.findViewById(R.id.spinnerGraphStopwords);
         switchAgentExperienceSummary = view.findViewById(R.id.switchAgentExperienceSummary);
         switchAgentTts = view.findViewById(R.id.switchAgentTts);
+        seekBarAgentMaxSteps = view.findViewById(R.id.seekBarAgentMaxSteps);
+        textViewAgentMaxStepsValue = view.findViewById(R.id.textViewAgentMaxStepsValue);
         
         editTextDataRootPath = view.findViewById(R.id.editTextDataRootPath);
         buttonSelectDataRootPath = view.findViewById(R.id.buttonSelectDataRootPath);
@@ -356,6 +360,7 @@ public class SettingsFragment extends Fragment {
         // 初始化Agent设置
         initializeAgentExperienceSummarySwitch();
         initializeAgentTtsSwitch();
+        initializeAgentMaxStepsSeekBar();
         
         // 加载当前设置
         loadSettings();
@@ -2106,6 +2111,48 @@ public class SettingsFragment extends Fragment {
             ConfigManager.setAgentTtsEnabled(requireContext(), isChecked);
             LogManager.logD(TAG, "[AGENT_TTS] Agent TTS enabled: " + isChecked);
         });
+    }
+
+    /**
+     * Initialize Agent Max Steps SeekBar
+     * Range: 10-200 (step 5), rightmost position = unlimited (stored as 0)
+     * SeekBar max=39: progress 0-38 maps to 10-200, progress 39 = unlimited
+     */
+    private void initializeAgentMaxStepsSeekBar() {
+        int savedValue = ConfigManager.getInt(requireContext(), ConfigManager.KEY_AGENT_MAX_STEPS, 50);
+        int progress;
+        if (savedValue <= 0) {
+            progress = 39; // unlimited
+        } else {
+            progress = Math.max(0, Math.min(38, (savedValue - 10) / 5));
+        }
+        seekBarAgentMaxSteps.setProgress(progress);
+        updateAgentMaxStepsDisplay(progress);
+        
+        seekBarAgentMaxSteps.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int p, boolean fromUser) {
+                updateAgentMaxStepsDisplay(p);
+                if (fromUser) {
+                    int value = (p >= 39) ? 0 : (p * 5 + 10);
+                    ConfigManager.setInt(requireContext(), ConfigManager.KEY_AGENT_MAX_STEPS, value);
+                    LogManager.logD(TAG, "[AGENT_MAX_STEPS] Set to: " + (value == 0 ? "unlimited" : value));
+                }
+            }
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+    }
+    
+    private void updateAgentMaxStepsDisplay(int progress) {
+        if (progress >= 39) {
+            textViewAgentMaxStepsValue.setText(getString(R.string.agent_max_steps_unlimited));
+        } else {
+            int value = progress * 5 + 10;
+            textViewAgentMaxStepsValue.setText(String.valueOf(value));
+        }
     }
 
     /**

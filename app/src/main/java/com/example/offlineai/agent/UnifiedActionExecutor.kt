@@ -750,6 +750,7 @@ class UnifiedActionExecutor(private val context: Context) {
     private val pythonOutputMemory = mutableMapOf<String, StringBuilder>()
     private val pythonStateLock = Any()
     private val PYTHON_STDOUT_KEY = "python_key"
+    private val PYTHON_OUTPUT_MAX_CHARS = 10000
     private val sessionCounter = AtomicInteger(0)
     @Volatile private var activePythonSession: PythonSession? = null
     @Volatile private var lastPythonSession: PythonSession? = null
@@ -818,25 +819,37 @@ class UnifiedActionExecutor(private val context: Context) {
         // Python is not thread-safe, must execute sequentially
         val future = pythonExecutor.submit<java.lang.Void> {
             try {
+                session.executionThread = Thread.currentThread()
                 LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId started execution on thread: ${Thread.currentThread().name}")
                 val python = Python.getInstance()
                 LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId got Python instance")
 
-                // Execute Python code (stdout/stderr captured by wrapper)
-                val module = python.getModule("builtins")
-                LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId got builtins module, executing code...")
+                // Get CPython thread ident for PyThreadState_SetAsyncExc (used by python_kill)
+                val mainModule = python.getModule("__main__")
+                try {
+                    val threading = python.getModule("threading")
+                    val currentThread = threading.callAttr("current_thread")
+                    val ident = currentThread.get("ident")
+                    session.pythonThreadIdent = ident?.toLong() ?: -1L
+                    LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId CPython thread ident: ${session.pythonThreadIdent}")
+                } catch (e: Exception) {
+                    LogManager.logW(TAG, "[PYTHON_RUN] Failed to get CPython thread ident: ${e.message}")
+                }
+
+                val mainDict = mainModule.get("__dict__")
+                val builtins = python.builtins
+                LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId executing...")
 
                 // Log wrapped code preview for debugging (first 200 chars)
                 val codePreview = wrappedCode.take(200).replace("\n", "\\n")
                 LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId code preview: $codePreview...")
 
-                module.callAttr("exec", wrappedCode)
+                builtins.callAttr("exec", wrappedCode, mainDict, mainDict)
 
                 // Update session status on completion
                 if (session.state != PythonSession.State.KILLED) {
                     session.state = PythonSession.State.COMPLETED
                     session.exitCode = 0
-                    logWriter.append("[PYTHON] Session completed\n")
                     logWriter.close()
                     LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId completed successfully")
                 }
@@ -856,7 +869,9 @@ class UnifiedActionExecutor(private val context: Context) {
                 try {
                     if (logFile.exists()) {
                         val finalContent = logFile.readText()
-                        pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(finalContent)
+                        pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(
+                            truncatePythonOutput(finalContent, logFile.absolutePath)
+                        )
                     }
                 } catch (e: Exception) {
                     LogManager.logE(TAG, "[PYTHON_RUN] Final sync error: ${e.message}")
@@ -882,11 +897,12 @@ class UnifiedActionExecutor(private val context: Context) {
         }
 
         session.job = job
+        session.future = future
 
         return ExecutionResult(
             true,
-            "Python run started (single-instance mode). Query output with {\"name\":\"data_memory\",\"parameters\":{\"operation\":\"get\",\"key\":\"python_key\"}} after python_status.",
-            returnData = "{\"status\":\"RUNNING\",\"hint\":\"Use data_memory get key=python_key after python_status\"}"
+            "Python run started (single-instance mode).",
+            returnData = "{\"status\":\"RUNNING\"}"
         )
     }
 
@@ -915,8 +931,9 @@ class UnifiedActionExecutor(private val context: Context) {
         val fullOutput = try {
             if (session.logFile.exists()) {
                 val content = session.logFile.readText()
-                pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(content)
-                content
+                val truncated = truncatePythonOutput(content, session.logFile.absolutePath)
+                pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(truncated)
+                truncated
             } else {
                 pythonOutputMemory[PYTHON_STDOUT_KEY]?.toString() ?: ""
             }
@@ -933,7 +950,8 @@ class UnifiedActionExecutor(private val context: Context) {
         val externalStatus = when (session.state) {
             PythonSession.State.RUNNING -> "RUNNING"
             PythonSession.State.COMPLETED -> "SUCCESS"
-            PythonSession.State.FAILED, PythonSession.State.KILLED -> "FAILED"
+            PythonSession.State.FAILED -> "FAILED"
+            PythonSession.State.KILLED -> "KILLED"
         }
 
         val result = buildString {
@@ -956,43 +974,124 @@ class UnifiedActionExecutor(private val context: Context) {
         val session = synchronized(pythonStateLock) { activePythonSession }
             ?: return ExecutionResult(
                 true,
-                "No running Python instance. Kill is idempotent and treated as success.",
-                returnData = "{\"status\":\"FAILED\",\"return\":\"no_running_instance\",\"hint\":\"Use data_memory get key=python_key\"}"
+                "Python already stopped. Kill is idempotent.",
+                returnData = "{\"status\":\"SUCCESS\",\"return\":\"already_stopped\",\"hint\":\"Use data_memory get key=python_key\"}"
             )
 
         return try {
-            // Cancel the coroutine
-            session.job.cancel()
+            // Sync log before kill
+            try {
+                if (session.logFile.exists()) {
+                    val content = session.logFile.readText()
+                    pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(
+                        truncatePythonOutput(content, session.logFile.absolutePath)
+                    )
+                    LogManager.logI(TAG, "[PYTHON_KILL] Synced ${content.length} chars from log before kill")
+                }
+            } catch (e: Exception) {
+                LogManager.logW(TAG, "[PYTHON_KILL] Log sync failed: ${e.message}")
+            }
 
-            // Update state
             session.state = PythonSession.State.KILLED
             session.errorMessage = "Killed by python_kill"
+
+            val execThread = session.executionThread
+            var threadDead = execThread == null || !execThread.isAlive
+
+            // PyThreadState_SetAsyncExc: inject SystemExit into CPython thread.
+            // CPython checks pending async exceptions every ~5ms (sys.getswitchinterval).
+            // Works on ANY pure Python code including "while True: pass".
+            var asyncExcInjected = false
+            if (!threadDead && session.pythonThreadIdent > 0) {
+                LogManager.logI(TAG, "[PYTHON_KILL] Calling PyThreadState_SetAsyncExc (ident=${session.pythonThreadIdent})")
+                try {
+                    val python = Python.getInstance()
+                    val ctypes = python.getModule("ctypes")
+                    val pythonapi = ctypes.get("pythonapi")
+                    val cLong = ctypes.get("c_long")
+                    val pyObj = ctypes.get("py_object")
+                    val systemExit = python.builtins.get("SystemExit")
+                    val res = pythonapi?.get("PyThreadState_SetAsyncExc")
+                        ?.call(cLong?.call(session.pythonThreadIdent), pyObj?.call(systemExit))
+                    LogManager.logI(TAG, "[PYTHON_KILL] PyThreadState_SetAsyncExc returned: $res")
+                    asyncExcInjected = res?.toInt() == 1
+                } catch (e: Exception) {
+                    LogManager.logW(TAG, "[PYTHON_KILL] PyThreadState_SetAsyncExc failed: ${e.message}")
+                }
+
+                // Wait up to 5 seconds for thread to die
+                for (i in 1..50) {
+                    Thread.sleep(100)
+                    if (!execThread!!.isAlive) {
+                        threadDead = true
+                        LogManager.logI(TAG, "[PYTHON_KILL] Thread exited after ${i * 100}ms")
+                        break
+                    }
+                }
+
+                // If PyThreadState_SetAsyncExc returned 1, injection succeeded.
+                // Chaquopy JVM thread may lag behind CPython; treat as dead.
+                if (!threadDead && asyncExcInjected) {
+                    threadDead = true
+                    LogManager.logI(TAG, "[PYTHON_KILL] AsyncExc injected (ret=1), treating as dead despite Thread.isAlive")
+                }
+            }
+
+            session.job.cancel()
+            session.future?.cancel(true)
+
+            // Final log sync after kill
+            try {
+                if (session.logFile.exists()) {
+                    val content = session.logFile.readText()
+                    pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(
+                        truncatePythonOutput(content, session.logFile.absolutePath)
+                    )
+                }
+            } catch (_: Exception) {}
+
             synchronized(pythonStateLock) {
                 activePythonSession = null
                 lastPythonSession = session
             }
 
-            LogManager.logI(TAG, "[PYTHON_KILL] Active Python session killed")
+            if (threadDead) {
+                LogManager.logI(TAG, "[PYTHON_KILL] Python thread confirmed dead")
+            } else {
+                LogManager.logW(TAG, "[PYTHON_KILL] Thread may still be alive after 5s")
+            }
 
             ExecutionResult(
                 true,
-                "Python instance killed. Status treated as FAILED. Use data_memory get key=python_key for output.",
-                returnData = "{\"status\":\"FAILED\",\"return\":\"killed\",\"hint\":\"Use data_memory get key=python_key\"}"
+                if (threadDead) "Python killed." else "Python kill sent, thread may still be winding down.",
+                returnData = "{\"status\":\"SUCCESS\",\"return\":\"killed\",\"thread_dead\":$threadDead,\"hint\":\"Use data_memory get key=python_key\"}"
             )
         } catch (e: Exception) {
-            LogManager.logE(TAG, "[PYTHON_KILL] Kill exception but keeping app safe: ${e.message}")
+            LogManager.logE(TAG, "[PYTHON_KILL] Exception: ${e.message}")
             synchronized(pythonStateLock) {
                 activePythonSession = null
                 lastPythonSession = session
             }
             session.state = PythonSession.State.KILLED
-            session.errorMessage = "Kill attempted with exception: ${e.message}"
             ExecutionResult(
                 true,
-                "Python kill encountered internal exception but was handled safely. Status treated as FAILED.",
-                returnData = "{\"status\":\"FAILED\",\"return\":\"kill_failed_but_safe\",\"hint\":\"Use data_memory get key=python_key\"}"
+                "Python kill completed (exception: ${e.message}).",
+                returnData = "{\"status\":\"SUCCESS\",\"return\":\"killed\",\"hint\":\"Use data_memory get key=python_key\"}"
             )
         }
+    }
+
+    /**
+     * Truncate Python output to PYTHON_OUTPUT_MAX_CHARS.
+     * If content exceeds the limit, keep only the last PYTHON_OUTPUT_MAX_CHARS chars
+     * and prepend a warning with the full file path.
+     */
+    private fun truncatePythonOutput(content: String, filePath: String): String {
+        if (content.length <= PYTHON_OUTPUT_MAX_CHARS) return content
+        val tail = content.takeLast(PYTHON_OUTPUT_MAX_CHARS)
+        val warning = "[WARNING] Output too large (${content.length} chars), only last $PYTHON_OUTPUT_MAX_CHARS chars shown. Full log: $filePath\n"
+        LogManager.logW(TAG, "[PYTHON_OUTPUT] Truncated from ${content.length} to $PYTHON_OUTPUT_MAX_CHARS chars, file=$filePath")
+        return warning + tail
     }
 
     private fun String.escapeJson(): String {
@@ -1007,37 +1106,42 @@ class UnifiedActionExecutor(private val context: Context) {
     private fun wrapPythonWithOutputCapture(code: String, logFilePath: String): String {
         val escapedPath = logFilePath.replace("\\", "\\\\").replace("'", "\\'")
         val escapedCode = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
-        val pythonWrapper = StringBuilder()
-        pythonWrapper.append("import sys\n")
-        pythonWrapper.append("import traceback\n\n")
-        pythonWrapper.append("_log_file_path = '$escapedPath'\n\n")
-        pythonWrapper.append("class _FileOutputCapture:\n")
-        pythonWrapper.append("    def __init__(self, original, filepath, prefix=''):\n")
-        pythonWrapper.append("        self.original = original\n")
-        pythonWrapper.append("        self.filepath = filepath\n")
-        pythonWrapper.append("        self.prefix = prefix\n\n")
-        pythonWrapper.append("    def write(self, s):\n")
-        pythonWrapper.append("        if s and s.strip():\n")
-        pythonWrapper.append("            line = self.prefix + s.rstrip('\\n')\n")
-        pythonWrapper.append("            with open(self.filepath, 'a', encoding='utf-8') as f:\n")
-        pythonWrapper.append("                f.write(line + '\\n')\n")
-        pythonWrapper.append("        self.original.write(s)\n\n")
-        pythonWrapper.append("    def flush(self):\n")
-        pythonWrapper.append("        self.original.flush()\n\n")
-        pythonWrapper.append("sys.stdout = _FileOutputCapture(sys.stdout, _log_file_path)\n")
-        pythonWrapper.append("sys.stderr = _FileOutputCapture(sys.stderr, _log_file_path, '[ERROR] ')\n\n")
-        pythonWrapper.append("print('[PYTHON DEBUG] Python wrapper started, thread: ' + str(__import__('threading').current_thread().name))\n")
-        pythonWrapper.append("print('[PYTHON DEBUG] Python version: ' + sys.version)\n")
-        pythonWrapper.append("print('[PYTHON DEBUG] Starting user code execution...')\n\n")
-        pythonWrapper.append("_user_code = '''${escapedCode}'''\n\n")
-        pythonWrapper.append("try:\n")
-        pythonWrapper.append("    exec(_user_code)\n")
-        pythonWrapper.append("    print('[PYTHON DEBUG] User code completed successfully')\n")
-        pythonWrapper.append("except Exception as e:\n")
-        pythonWrapper.append("    print('[PYTHON EXCEPTION] ' + str(type(e).__name__) + ': ' + str(e))\n")
-        pythonWrapper.append("    print('[PYTHON TRACEBACK] ' + traceback.format_exc())\n")
-        pythonWrapper.append("    raise\n")
-        return pythonWrapper.toString()
+        // Kill mechanism: PyThreadState_SetAsyncExc only (from Java side via ctypes).
+        // Zero overhead during normal execution. CPython checks pending async exceptions
+        // every ~5ms, so even "while True: pass" gets killed.
+        return buildString {
+            append("import sys\n")
+            append("import traceback\n\n")
+
+            // -- stdout/stderr file capture (no kill logic, pure logging) --
+            append("_log_file_path = '$escapedPath'\n\n")
+            append("class _FileOutputCapture:\n")
+            append("    def __init__(self, original, filepath, prefix=''):\n")
+            append("        self.original = original\n")
+            append("        self.filepath = filepath\n")
+            append("        self.prefix = prefix\n\n")
+            append("    def write(self, s):\n")
+            append("        if s and s.strip():\n")
+            append("            line = self.prefix + s.rstrip('\\n')\n")
+            append("            with open(self.filepath, 'a', encoding='utf-8') as f:\n")
+            append("                f.write(line + '\\n')\n")
+            append("        self.original.write(s)\n\n")
+            append("    def flush(self):\n")
+            append("        self.original.flush()\n\n")
+            append("sys.stdout = _FileOutputCapture(sys.stdout, _log_file_path)\n")
+            append("sys.stderr = _FileOutputCapture(sys.stderr, _log_file_path, '[ERROR] ')\n\n")
+
+            // -- execute user code --
+            append("_user_code = '''${escapedCode}'''\n\n")
+            append("try:\n")
+            append("    exec(_user_code)\n")
+            append("except SystemExit as e:\n")
+            append("    print(str(e))\n")
+            append("except Exception as e:\n")
+            append("    print('[PYTHON EXCEPTION] ' + str(type(e).__name__) + ': ' + str(e))\n")
+            append("    print('[PYTHON TRACEBACK] ' + traceback.format_exc())\n")
+            append("    raise\n")
+        }
     }
 
     // Python session data class
@@ -1048,6 +1152,9 @@ class UnifiedActionExecutor(private val context: Context) {
         val logWriter: java.io.FileWriter,
         @Volatile var state: State = State.RUNNING,
         @Volatile var job: Job = Job(),
+        @Volatile var future: java.util.concurrent.Future<*>? = null,
+        @Volatile var executionThread: Thread? = null,
+        @Volatile var pythonThreadIdent: Long = -1L,
         @Volatile var exitCode: Int? = null,
         @Volatile var errorMessage: String? = null
     ) {

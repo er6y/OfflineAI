@@ -1302,6 +1302,8 @@
     <string name="agent_experience_summary_hint">任务完成后总结经验并可保存到知识库</string>
     <string name="label_agent_tts">智能体语音 (Agent TTS)</string>
     <string name="agent_tts_hint">任务完成或需要用户操作时语音播报</string>
+    <string name="label_agent_max_steps">最大轮数</string>
+    <string name="agent_max_steps_unlimited">无限</string>
     <string name="agent_tts_task_done">任务完成</string>
     <string name="agent_tts_task_failed">任务失败</string>
     <string name="agent_tts_ask_user_prefix">请确认</string>

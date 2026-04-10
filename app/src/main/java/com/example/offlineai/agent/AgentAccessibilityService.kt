@@ -193,58 +193,8 @@ class AgentAccessibilityService : AccessibilityService() {
                     if (action is AgentAction.Terminate) {
                         floatingWindow?.showTerminateResult(action.text)
                     }
-                    // Update lastStepResult so next buildUserPromptWithHistory can inject hardcoded fact
-                    val actionDesc = when (action) {
-                        is AgentAction.Click -> "click(coordinate=[${action.x},${action.y}])"
-                        is AgentAction.LongPress -> "long_press(coordinate=[${action.x},${action.y}])"
-                        is AgentAction.DoubleClick -> "double_click(coordinate=[${action.x},${action.y}])"
-                        is AgentAction.Type -> "type(text=\"${action.text.take(50)}\")"
-                        is AgentAction.Swipe -> "swipe(direction=${action.direction}" + 
-                            if (action.x != null && action.y != null) ", coordinate=[${action.x},${action.y}])" else ")"
-                        is AgentAction.Drag -> "drag(start=[${action.startX},${action.startY}], end=[${action.endX},${action.endY}])"
-                        is AgentAction.Open -> "open(app=\"${action.appName}\")"
-                        is AgentAction.SystemButton -> "system_button(button=${action.button})"
-                        is AgentAction.Wait -> "wait"
-                        is AgentAction.GetAppList -> "get_app_list"
-                        is AgentAction.WebOpen -> "web_open(url=\"${action.url.take(80)}\")"
-                        is AgentAction.WebGetContent -> "web_get_content"
-                        is AgentAction.WebExecuteJs -> "web_execute_js(script=\"${action.script.take(60)}...\")"
-                        is AgentAction.Terminate -> "terminate(status=${action.status.value})"
-                        is AgentAction.AskUser -> "ask_user(text=\"${action.text.take(40)}\")"
-                        is AgentAction.KbInsert -> "kb_insert"
-                        is AgentAction.KbDelete -> "kb_delete(ids=${action.ids})"
-                        is AgentAction.Context -> "context"  // Should not appear here
-                        is AgentAction.DataMemory -> "data_memory(op=${action.operation}, key=${action.key})"
-                        is AgentAction.FileOpen -> "file_open(path=${action.path})"
-                        is AgentAction.FileRead -> "file_read(path=${action.path}, start=${action.startLine})"
-                        is AgentAction.FileNew -> "file_new(path=${action.path}, content_length=${action.newContent.length})"
-                        is AgentAction.FileEdit -> "file_edit(path=${action.path}, lines=${action.startLine}-${action.endLine})"
-                        is AgentAction.FileSearch -> "file_search(path=${action.path}, keyword=${action.keyword})"
-                        is AgentAction.FileSave -> "file_save(path=${action.path})"
-                        is AgentAction.FileListDir -> "file_list_dir(path=${action.path})"
-                        is AgentAction.FileCopy -> "file_copy(src=${action.src}, dst=${action.dst})"
-                        is AgentAction.FileDelete -> "file_delete(path=${action.path})"
-                        is AgentAction.FileSearchRegex -> "file_search_regex(path=${action.path}, pattern=${action.pattern})"
-                        is AgentAction.FileCreateDir -> "file_create_dir(path=${action.path})"
-                        is AgentAction.PythonRun -> "python_run(${action.code?.take(30) ?: action.file})"
-                        is AgentAction.PythonStatus -> "python_status"
-                        is AgentAction.PythonKill -> "python_kill"
-                    }
-                    
-                    // Build result string with returnData (critical for web_get_content, get_app_list, etc.)
-                    val resultStr = if (result.success) {
-                        val baseMsg = "Success" + if (result.message.isNotEmpty()) ": ${result.message.take(100)}" else ""
-                        if (result.returnData != null && result.returnData.isNotEmpty()) {
-                            // For web_get_content/get_app_list, returnData is the key output
-                            "$baseMsg\nReturned data: ${result.returnData.take(800)}"
-                        } else {
-                            baseMsg
-                        }
-                    } else {
-                        "Failed" + if (result.message.isNotEmpty()) ": ${result.message.take(150)}" else ""
-                    }
-                    lastStepResult = "Previous step executed: $actionDesc\nResult: $resultStr"
-                    LogManager.logI(TAG, "[LAST_STEP] ${lastStepResult.replace("\n", " | ")}")
+                    // NOTE: lastStepResult is now assembled by AgentEngine after all actions are executed.
+                    // This callback no longer writes lastStepResult to avoid partial overwrite issues.
                 }
                 
                 override fun onTaskCompleted(success: Boolean, message: String) {
@@ -512,7 +462,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 }
                 
                 // Build user prompt with currentContext (currentStep already incremented, so use currentStep - 1 for 0-based index)
-                val userPromptWithHistory = buildUserPromptWithHistory(instruction, currentStep - 1)
+                val userPromptWithHistory = buildUserPromptWithHistory(instruction, currentStep - 1, screenshot != null)
                 
                 // Log user prompt for every step (replace image paths with placeholders)
                 val userPromptForLog = userPromptWithHistory.replace(Regex("file://[^\\s)]+"), "[IMAGE:...]")
@@ -1086,7 +1036,8 @@ class AgentAccessibilityService : AccessibilityService() {
      */
     private fun buildUserPromptWithHistory(
         instruction: String,
-        stepIndex: Int
+        stepIndex: Int,
+        hasScreenshot: Boolean = true
     ): String {
         // Experience summary step: use instruction as-is (already a complete prompt)
         if (isExperienceSummaryStep) {
@@ -1129,8 +1080,12 @@ class AgentAccessibilityService : AccessibilityService() {
             prompt.append("上下文记忆:\n$currentContext\n\n")
         }
         
-        // Current instruction (Chinese)
-        prompt.append("根据当前截图或结果返回，决定下一步操作以继续任务。\n")
+        // Current instruction (Chinese) - adapt based on screenshot availability
+        if (hasScreenshot) {
+            prompt.append("根据当前截图或结果返回，决定下一步操作以继续任务。\n")
+        } else {
+            prompt.append("根据当前结果返回，决定下一步操作以继续任务。\n")
+        }
         
         return prompt.toString()
     }
