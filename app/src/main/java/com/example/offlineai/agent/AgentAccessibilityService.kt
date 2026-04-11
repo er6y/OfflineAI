@@ -1149,8 +1149,8 @@ class AgentAccessibilityService : AccessibilityService() {
                     "WebGetContent: extracted page content from background WebView"
                 is AgentAction.WebExecuteJs ->
                     "WebExecuteJs: ${action.script.take(60)}"
-                is AgentAction.FileNew ->
-                    "FileNew: ${action.path} (${action.newContent.length} chars)"
+                is AgentAction.CreateFile ->
+                    "CreateFile: ${action.path} (${action.content.length} chars)"
                 else -> action.javaClass.simpleName
             }
             markdown.append(actionDesc)
@@ -1211,13 +1211,18 @@ class AgentAccessibilityService : AccessibilityService() {
                 is AgentAction.WebGetContent -> "web_get_content"
                 is AgentAction.WebExecuteJs -> "web_execute_js"
                 is AgentAction.DataMemory -> "data_memory(${action.operation},${action.key})"
-                is AgentAction.FileRead -> "file_read(${action.path})"
-                is AgentAction.FileNew -> "file_new(${action.path})"
-                is AgentAction.FileEdit -> "file_edit(${action.path})"
-                is AgentAction.FileSearch -> "file_search(${action.path})"
-                is AgentAction.FileListDir -> "file_list_dir(${action.path})"
-                is AgentAction.FileCopy -> "file_copy(${action.src}→${action.dst})"
-                is AgentAction.FileDelete -> "file_delete(${action.path})"
+                is AgentAction.CreateFile -> "create_file(${action.path})"
+                is AgentAction.ReadFile -> "read_file(${action.path})"
+                is AgentAction.WriteFile -> "write_file(${action.path})"
+                is AgentAction.ReadLines -> "read_lines(${action.path})"
+                is AgentAction.EditLines -> "edit_lines(${action.path})"
+                is AgentAction.Grep -> "grep(${action.path})"
+                is AgentAction.RenameFile -> "rename_file(${action.oldPath}→${action.newPath})"
+                is AgentAction.DeleteFile -> "delete_file(${action.path})"
+                is AgentAction.CopyFile -> "copy_file(${action.src}→${action.dst})"
+                is AgentAction.ListDir -> "list_dir(${action.path})"
+                is AgentAction.Mkdir -> "mkdir(${action.path})"
+                is AgentAction.SearchFiles -> "search_files(${action.path})"
                 is AgentAction.PythonRun -> "python_run(${if (action.code != null) "code" else "file"})"
                 is AgentAction.PythonStatus -> "python_status"
                 is AgentAction.PythonKill -> "python_kill"
@@ -1275,10 +1280,10 @@ $recalledSection
 $kbActionDesc
 
 ## 新经验（kb_insert ≤500字，去修饰词）
-- 使用正确之前contex提到的Action名称（file_list_dir/file_new等）
+- 使用正确之前context提到的Action名称（list_dir/create_file等）
 - 关键步骤示例：
   - UI类：点击edge图标→搜索框→输入→搜索
-  - 文件操作：file_list_dir(确认目录)→file_new(创建文件)→file_edit(追加内容)→file_read(验证)
+  - 文件操作：list_dir(确认目录)→create_file(创建文件)→edit_lines(追加内容)→read_file(验证)
 - 5要素：任务目标、步骤序列、应用名称、坐标/路径、避坑提示
 
 输出 ≤800字，简要思考后直接输出 action。
@@ -1397,38 +1402,41 @@ $kbActionDesc
                     is AgentAction.DataMemory -> {
                         result.append(" (op=${action.operation}, key=${action.key})")
                     }
-                    is AgentAction.FileOpen -> {
-                        result.append(" (file: ${action.path})")
+                    is AgentAction.CreateFile -> {
+                        result.append(" (create ${action.path}, ${action.content.length} chars)")
                     }
-                    is AgentAction.FileRead -> {
-                        result.append(" (read ${action.path} from line ${action.startLine})")
+                    is AgentAction.ReadFile -> {
+                        result.append(" (read ${action.path})")
                     }
-                    is AgentAction.FileNew -> {
-                        result.append(" (create file ${action.path}, content_length=${action.newContent.length})")
+                    is AgentAction.WriteFile -> {
+                        result.append(" (write ${action.path}, ${action.content.length} chars)")
                     }
-                    is AgentAction.FileEdit -> {
-                        result.append(" (edit ${action.path} lines ${action.startLine}-${action.endLine})")
+                    is AgentAction.ReadLines -> {
+                        result.append(" (read ${action.path} L${action.startLine}-${action.endLine})")
                     }
-                    is AgentAction.FileSearch -> {
-                        result.append(" (search ${action.path} for '${action.keyword}')")
+                    is AgentAction.EditLines -> {
+                        result.append(" (edit ${action.path} L${action.startLine}-${action.endLine})")
                     }
-                    is AgentAction.FileSave -> {
-                        result.append(" (save ${action.path})")
+                    is AgentAction.Grep -> {
+                        result.append(" (grep ${action.path} for '${action.keyword}')")
                     }
-                    is AgentAction.FileListDir -> {
-                        result.append(" (list dir ${action.path})")
+                    is AgentAction.RenameFile -> {
+                        result.append(" (rename ${action.oldPath} to ${action.newPath})")
                     }
-                    is AgentAction.FileCopy -> {
-                        result.append(" (copy ${action.src} to ${action.dst})")
-                    }
-                    is AgentAction.FileDelete -> {
+                    is AgentAction.DeleteFile -> {
                         result.append(" (delete ${action.path})")
                     }
-                    is AgentAction.FileSearchRegex -> {
-                        result.append(" (search regex ${action.pattern} in ${action.path})")
+                    is AgentAction.CopyFile -> {
+                        result.append(" (copy ${action.src} to ${action.dst})")
                     }
-                    is AgentAction.FileCreateDir -> {
-                        result.append(" (create dir ${action.path})")
+                    is AgentAction.ListDir -> {
+                        result.append(" (list dir ${action.path})")
+                    }
+                    is AgentAction.Mkdir -> {
+                        result.append(" (mkdir ${action.path})")
+                    }
+                    is AgentAction.SearchFiles -> {
+                        result.append(" (search '${action.keyword}' in ${action.path})")
                     }
                     is AgentAction.PythonRun -> {
                         result.append(" (${if (action.code != null) "code" else "file"}: ${action.code?.take(30) ?: action.file})")

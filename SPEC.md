@@ -215,21 +215,10 @@ flowchart TB
     - **Data Memory 为唯一可信状态**：每步提示词注入的 `Data Memory: [key列表]` 是唯一真相，context 中自称"已存入"不算数；提示词明确要求"以 Data Memory 索引为准"
     - **set 成功反馈机制**：Pure step（仅 context+data_memory 无 UI 操作）执行后，系统将 `data_memory set success: key. Data Memory now: key1, key2` 注入 `lastStepResult`，让模型下步能核实实际存储状态
     - **Pure step 死循环防护**（`consecutivePureSteps` 计数器，`AgentEngine.kt`）：
-      - 每次 Pure step（无 UI 操作）时计数器 +1；执行任何 UI 操作后重置为 0
-      - 连续 Pure step ≥ 2 次时，在 `lastStepResult` 追加系统强制警告，明确列出真实 Data Memory key 列表，要求模型补存缺失 key 或立即 terminate
-      - 根本问题：模型 context 幻觉（说"已存4个"）与 Data Memory 真实状态（只有2个key）矛盾时，模型不知道信哪个，陷入反复 set 同一 key 的死循环；硬注入警告强制纠正
-    - **提示词引导**（`AgentPrompts.kt` 规则区）：set/get/list 用法、Data Memory 为唯一可信状态、set 后系统返回确认、所有目标 key 齐全后立即 terminate、禁止重复 set 同一 key
-    - **规则文案精简（token 优化）**：在不改变约束语义前提下，压缩 `AgentPrompts.kt` 规则区表述，减少冗余句式与重复解释，降低每步提示词开销
-    - **文件工具规则收敛**：文件/目录决策在提示词中保留“优先 `file_*`、不先走文件管理器 UI”的策略约束；文本文件操作对模型暴露 `file_new/file_read/file_search/file_edit` 四个动作，`file_open/file_save` 不再作为模型步骤
-    - **文件会话自动化语义**（`UnifiedActionExecutor.kt`）：
-      - `file_read/file_search/file_edit`：执行层自动 open + execute（edit 额外 save）+ close
-      - `file_read/file_search/file_edit` **禁止隐式创建文件**；路径不存在时直接失败并返回明确错误
-      - `file_new`：唯一允许创建文件的动作；文件已存在时直接失败，避免覆盖
-      - `file_edit` 必须显式提供 `start_line/end_line`；`new_content` 仅接受字符串（可用 `\n` 表示多行）
-      - `file_read` 返回格式：`Lines start-end/total:\n1: content\n2: content...`（纯文本带行号，非JSON数组）
+      - `read_lines` 返回格式：`Lines start-end/total:\n1: content\n2: content...`（纯文本带行号，非JSON数组）
     - **统一参数校验兜底**（`UnifiedActionExecutor.validateActionParameters` + `ActionParser.validateCoordinates`）：
       - 每个里程碑只允许一次校验，通过后立即进入下一里程碑
-      - 同一文件同一目的禁止重复 `file_read`/重复确认，仅允许“上一步失败后重试一次”
+      - 同一文件同一目的禁止重复 `read_file`/`read_lines`/重复确认，仅允许“上一步失败后重试一次”
       - 禁止连续输出无执行动作的 `context/data_memory` 组合；可判定完成时立即 `terminate`
       - 总步数接近上限时必须 `terminate fail` 并说明卡点（fail-fast）
     - **四种格式均支持**：MAI-UI JSON、AutoGLM do()、AutoGLM action()、OpenAI FuncCall 格式均已添加解析分支
@@ -247,7 +236,7 @@ flowchart TB
     - **重复失败实时纠偏机制**（`AgentEngine.kt`）：
       - 为每次失败生成签名：`actionType + actionJson + errorText`，连续命中同一签名时计数递增
       - 连续失败达到 2 次后，实时向 `lastStepResult` 注入纠偏提示（`[AGENT][REALTIME_CORRECTION]`），下一轮推理立即可见
-      - 文件类常见错误给出定向建议：直接使用 `file_read/file_search/file_edit`，路径不确定时优先 `file_search_regex`
+      - 文件类常见错误给出定向建议：直接使用 `read_file/read_lines/edit_lines/grep`，路径不确定时优先 `search_files` 或 `list_dir`
       - 一旦动作执行成功即清空失败签名计数，避免过期纠偏污染后续步骤
     - **TTS 被过早 shutdown 导致只朗读开头几个字**（`AgentTtsHelper.kt`，`AgentEngine.kt`）：
       - **问题**：`agentTts.speak()` 是异步 fire-and-forget，调用后立即 `break` 出循环，协程 job 结束触发 `finally`→`stopAgentLoop()`→`agentTts.shutdown()`→`tts.stop()`，TTS 播放被强制终止
@@ -416,13 +405,13 @@ flowchart TB
      - **历史提取**：`AgentEngine` 在经验总结步骤调用 `buildTaskHistoryForSummary(memory.getAllSteps())` 构建精简操作历史，包含：
        - 每步仅保留 `ACTION` 与 `RESULT`，不再注入 `rawModelOutput`（避免思考与工具原文导致 prompt 膨胀）
        - `RESULT` 去换行并截断（160 chars），控制 token；结合 `taskBrief + context` 仍可完成经验归纳
-       - 支持的 Action 描述：Click/Type/Swipe/Open/SystemButton/Wait/Terminate/AskUser/WebOpen/WebGetContent/WebExecuteJs/FileNew/FileEdit/FileRead/FileListDir/FileCopy/FileDelete 等
+       - 支持的 Action 描述：Click/Type/Swipe/Open/SystemButton/Wait/Terminate/AskUser/WebOpen/WebGetContent/WebExecuteJs/CreateFile/ReadFile/WriteFile/ReadLines/EditLines/Grep/RenameFile/DeleteFile/CopyFile/ListDir/Mkdir/SearchFiles 等
      - **系统提示词**：经验总结时 `isExperienceSummaryStep=true`，`callRagQueryManagerSync` 检测到后系统提示词置空（Agent 的 UI-TARS 系统提示词不适用于经验总结）
      - **用户提示词**：`buildUserPromptWithHistory` 检测到 `isExperienceSummaryStep=true` 时直接返回 `instruction` 原文，跳过 `"任务: "` 前缀包裹和后缀追加
      - **提示词模板**：`buildExperienceSummaryPromptFromHistory(taskHistory, agentKbRecalled, userSelectedFormat)` 精简设计：
        - 任务执行历史 + AgentKB 召回（带 `[ID:xxx]`）+ KB Action 格式说明
        - **删除规则**：严禁删除无关经验；只有**同类型+过时+确定相关**才 delete
-       - **新经验要求**：使用正确Action名称（file_list_dir/file_new等），**不是**Linux命令；关键步骤示例区分UI类（点击图标→搜索框）和文件操作类（file_list_dir→file_new→file_edit→file_read）；5要素（任务目标、步骤序列、应用名称、坐标/路径、避坑提示）
+       - **新经验要求**：使用正确Action名称（list_dir/create_file等），**不是**Linux命令；关键步骤示例区分UI类（点击图标→搜索框）和文件操作类（list_dir→create_file→edit_lines→read_file）；5要素（任务目标、步骤序列、应用名称、坐标/路径、避坑提示）
        - 限制输出 ≤800字，简要思考后直接输出 action
      - **模型输出格式**：模型不再输出纯文本总结，而是输出 `kb_delete` 和 `kb_insert` action 命令：
        - 先输出 `kb_delete`（删除过时/冗余/不准确的旧经验，按 `[ID:xxx]` 标识）

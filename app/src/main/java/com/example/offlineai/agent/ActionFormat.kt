@@ -131,19 +131,21 @@ class OpenAiFuncCallFormat : BaseActionFormat() {
 {"name":"data_memory","parameters":{"operation":"get","key":"name"}}
 {"name":"data_memory","parameters":{"operation":"list"}}
 
-文件操作：
-{"name":"file_new","parameters":{"path":"/sdcard/new.txt","new_content":"line 1\nline 2\n..."}}
-{"name":"file_read","parameters":{"path":"/sdcard/file.txt","start_line":1,"read_count":50}}
-{"name":"file_edit","parameters":{"path":"/sdcard/file.txt","start_line":1,"end_line":2,"new_content":"new line 1\nnew line 2\n..."}}
-{"name":"file_search","parameters":{"path":"/sdcard/file.txt","keyword":"text","ignore_case":true}}
+File & text operations:
+{"name":"create_file","parameters":{"path":"/sdcard/new.txt","content":"line1\nline2"}}
+{"name":"read_file","parameters":{"path":"/sdcard/file.txt"}}
+{"name":"write_file","parameters":{"path":"/sdcard/file.txt","content":"overwrite content"}}
+{"name":"read_lines","parameters":{"path":"/sdcard/file.txt","start_line":1,"end_line":50}}
+{"name":"edit_lines","parameters":{"path":"/sdcard/file.txt","start_line":5,"end_line":10,"content":"new line 5\nnew line 6"}}
+{"name":"grep","parameters":{"path":"/sdcard/file.txt","keyword":"TODO"}}
+{"name":"rename_file","parameters":{"old_path":"/sdcard/a.txt","new_path":"/sdcard/b.txt"}}
+{"name":"delete_file","parameters":{"path":"/sdcard/file.txt","recursive":false}}
+{"name":"copy_file","parameters":{"src":"/sdcard/src.txt","dst":"/sdcard/dst.txt"}}
+{"name":"list_dir","parameters":{"path":"/sdcard/"}}
+{"name":"mkdir","parameters":{"path":"/sdcard/new_folder"}}
+{"name":"search_files","parameters":{"path":"/sdcard/","keyword":".txt"}}
 
-{"name":"file_list_dir","parameters":{"path":"/sdcard/","recursive":false}}
-{"name":"file_copy","parameters":{"src":"/sdcard/src.txt","dst":"/sdcard/dst.txt"}}
-{"name":"file_delete","parameters":{"path":"/sdcard/file.txt","recursive":false}}
-{"name":"file_search_regex","parameters":{"path":"/sdcard/","pattern":".*\\.txt$","recursive":true}}
-{"name":"file_create_dir","parameters":{"path":"/sdcard/new_folder"}}
-
-Python execution
+Python execution:
 {"name":"python_run","parameters":{"code":"print(1+1)"}}
 {"name":"python_run","parameters":{"file":"/sdcard/script.py","args":["--port","8000"]}}
 {"name":"python_status","parameters":{}}
@@ -217,14 +219,14 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
         return results
     }
     
-    private fun parseNewContentText(params: JSONObject, actionName: String): String? {
-        if (!params.has("new_content")) {
-            lastParseError = "$actionName missing required field: new_content (string)"
+    private fun parseContentText(params: JSONObject, actionName: String): String? {
+        if (!params.has("content")) {
+            lastParseError = "$actionName missing required field: content (string)"
             return null
         }
-        val raw = params.opt("new_content")
+        val raw = params.opt("content")
         if (raw !is String) {
-            lastParseError = "$actionName.new_content must be string"
+            lastParseError = "$actionName.content must be string"
             return null
         }
         return raw
@@ -307,58 +309,69 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                     key = params.optString("key").takeIf { it.isNotEmpty() },
                     value = params.opt("value")?.takeIf { it != JSONObject.NULL }?.toString()?.takeIf { it.isNotEmpty() }
                 )
-                "file_read" -> AgentAction.FileRead(
-                    path = params.getString("path"),
-                    startLine = params.optInt("start_line", 1),
-                    readCount = params.optInt("read_count", 50)
-                )
-                "file_new" -> {
-                    val newContent = parseNewContentText(params, "file_new") ?: return null
-                    AgentAction.FileNew(
+                "create_file" -> {
+                    val content = parseContentText(params, "create_file") ?: return null
+                    AgentAction.CreateFile(
                         path = params.getString("path"),
-                        newContent = newContent
+                        content = content
                     )
                 }
-                "file_edit" -> {
+                "read_file" -> AgentAction.ReadFile(
+                    path = params.getString("path")
+                )
+                "write_file" -> {
+                    val content = parseContentText(params, "write_file") ?: return null
+                    AgentAction.WriteFile(
+                        path = params.getString("path"),
+                        content = content
+                    )
+                }
+                "read_lines" -> AgentAction.ReadLines(
+                    path = params.getString("path"),
+                    startLine = params.optInt("start_line", 1),
+                    endLine = params.optInt("end_line", 50)
+                )
+                "edit_lines" -> {
                     if (!params.has("start_line")) {
-                        lastParseError = "file_edit missing required field: start_line"
+                        lastParseError = "edit_lines missing required field: start_line"
                         return null
                     }
                     if (!params.has("end_line")) {
-                        lastParseError = "file_edit missing required field: end_line"
+                        lastParseError = "edit_lines missing required field: end_line"
                         return null
                     }
-                    val newContent = parseNewContentText(params, "file_edit") ?: return null
-                    AgentAction.FileEdit(
+                    val content = parseContentText(params, "edit_lines") ?: return null
+                    AgentAction.EditLines(
                         path = params.getString("path"),
                         startLine = params.getInt("start_line"),
                         endLine = params.getInt("end_line"),
-                        newContent = newContent
+                        content = content
                     )
                 }
-                "file_search" -> AgentAction.FileSearch(
+                "grep" -> AgentAction.Grep(
                     path = params.getString("path"),
-                    keyword = params.getString("keyword"),
-                    ignoreCase = params.optBoolean("ignore_case", true)
+                    keyword = params.getString("keyword")
                 )
-                "file_list_dir" -> AgentAction.FileListDir(
+                "rename_file" -> AgentAction.RenameFile(
+                    oldPath = params.getString("old_path"),
+                    newPath = params.getString("new_path")
+                )
+                "delete_file" -> AgentAction.DeleteFile(
                     path = params.getString("path"),
                     recursive = params.optBoolean("recursive", false)
                 )
-                "file_copy" -> AgentAction.FileCopy(
+                "copy_file" -> AgentAction.CopyFile(
                     src = params.getString("src"),
                     dst = params.getString("dst")
                 )
-                "file_delete" -> AgentAction.FileDelete(
-                    path = params.getString("path"),
-                    recursive = params.optBoolean("recursive", false)
+                "list_dir" -> AgentAction.ListDir(
+                    path = params.getString("path")
                 )
-                "file_search_regex" -> AgentAction.FileSearchRegex(
-                    path = params.getString("path"),
-                    pattern = params.getString("pattern"),
-                    recursive = params.optBoolean("recursive", true)
+                "mkdir" -> AgentAction.Mkdir(params.getString("path"))
+                "search_files" -> AgentAction.SearchFiles(
+                    path = if (params.has("path")) params.getString("path") else params.getString("dir_path"),
+                    keyword = params.getString("keyword")
                 )
-                "file_create_dir" -> AgentAction.FileCreateDir(params.getString("path"))
                 "python_run" -> {
                     val argsList = mutableListOf<String>()
                     if (params.has("args")) {

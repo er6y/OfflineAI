@@ -49,7 +49,7 @@ ${format.getFormatDescription()}
 
 - **防膨胀约束**：
   - 每个里程碑最多校验一次，通过后立即推进
-  - 同一文件同一目的禁止重复 `file_read`/重复确认；仅允许失败后重试一次
+  - 同一文件同一目的禁止重复 `read_file`/`read_lines`/重复确认；仅允许失败后重试一次
   - 禁止连续输出无执行动作的 `context/data_memory`
   - 可判定完成即 `terminate`，不要重复总结
   - 接近步数上限必须 fail-fast：说明卡点并 `terminate fail`
@@ -66,7 +66,7 @@ ${format.getFormatDescription()}
   - `python_kill`：无参数，终止当前运行中的唯一Python实例
   - 查输出方式：直接用`python_status` 返回的`recent_output`（最近500字符），如果还不完善可用固定使用Action `data_memory` `get` `key`="python_key" 查询完整输出（先调`python_status`触发同步）
 
-- **文件操作工具决策**：文件/目录任务必须优先使用 `file_*` 工具，不要先走文件管理器UI
+- **文件操作工具决策**：文件/目录任务必须优先使用文件工具（create_file/read_file/write_file/read_lines/edit_lines/grep/list_dir等），不要先走文件管理器UI
 - **web 工具使用决策**：未指定搜索引擎时优先 bing.com
 - **应用启动**：名称不明确时先调用 `get_app_list action`，严格匹配应用名，禁止幻觉
 - **坐标点击失败（无效）处理**：等待 → 重试±20~40偏移 → 换策略

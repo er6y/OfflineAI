@@ -787,13 +787,14 @@ class AgentEngine(private val context: Context) {
         val genericHint = "Realtime correction: same action failed $repeatCount times. Do not repeat with identical parameters. Change strategy, ask_user, or terminate with reason."
 
         return when (action) {
-            is AgentAction.FileSearch,
-            is AgentAction.FileRead,
-            is AgentAction.FileEdit,
-            is AgentAction.FileSave,
-            is AgentAction.FileNew -> {
-                if (errorText.contains("file not opened") || errorText.contains("file not found")) {
-                    "Realtime correction: text file operation failed $repeatCount times. Create files only with file_new. file_read/file_search/file_edit must use an existing file path. For path uncertainty, run file_search_regex first."
+            is AgentAction.Grep,
+            is AgentAction.ReadFile,
+            is AgentAction.ReadLines,
+            is AgentAction.EditLines,
+            is AgentAction.WriteFile,
+            is AgentAction.CreateFile -> {
+                if (errorText.contains("file not found") || errorText.contains("not found")) {
+                    "Realtime correction: file operation failed $repeatCount times. create_file for new files. read_file/read_lines/edit_lines/grep require existing file. Use search_files or list_dir to find correct path first."
                 } else {
                     genericHint
                 }
@@ -844,17 +845,18 @@ class AgentEngine(private val context: Context) {
         is AgentAction.KbDelete -> "kb_delete(${action.ids})"
         is AgentAction.Context -> "context"
         is AgentAction.DataMemory -> "data_memory(${action.operation}, key=${action.key})"
-        is AgentAction.FileOpen -> "file_open(${action.path})"
-        is AgentAction.FileRead -> "file_read(${action.path})"
-        is AgentAction.FileNew -> "file_new(${action.path})"
-        is AgentAction.FileEdit -> "file_edit(${action.path}, L${action.startLine}-${action.endLine})"
-        is AgentAction.FileSearch -> "file_search(${action.path}, \"${action.keyword.ellipsis(30)}\")"
-        is AgentAction.FileSave -> "file_save(${action.path})"
-        is AgentAction.FileListDir -> "file_list_dir(${action.path})"
-        is AgentAction.FileCopy -> "file_copy(${action.src}, ${action.dst})"
-        is AgentAction.FileDelete -> "file_delete(${action.path})"
-        is AgentAction.FileSearchRegex -> "file_search_regex(${action.path}, \"${action.pattern.ellipsis(30)}\")"
-        is AgentAction.FileCreateDir -> "file_create_dir(${action.path})"
+        is AgentAction.CreateFile -> "create_file(${action.path})"
+        is AgentAction.ReadFile -> "read_file(${action.path})"
+        is AgentAction.WriteFile -> "write_file(${action.path})"
+        is AgentAction.ReadLines -> "read_lines(${action.path}, L${action.startLine}-${action.endLine})"
+        is AgentAction.EditLines -> "edit_lines(${action.path}, L${action.startLine}-${action.endLine})"
+        is AgentAction.Grep -> "grep(${action.path}, \"${action.keyword.ellipsis(30)}\")"
+        is AgentAction.RenameFile -> "rename_file(${action.oldPath}, ${action.newPath})"
+        is AgentAction.DeleteFile -> "delete_file(${action.path})"
+        is AgentAction.CopyFile -> "copy_file(${action.src}, ${action.dst})"
+        is AgentAction.ListDir -> "list_dir(${action.path})"
+        is AgentAction.Mkdir -> "mkdir(${action.path})"
+        is AgentAction.SearchFiles -> "search_files(${action.path}, \"${action.keyword.ellipsis(30)}\")"
         is AgentAction.PythonRun -> "python_run(\"${(action.code ?: action.file ?: "").ellipsis(50)}\")"
         is AgentAction.PythonStatus -> "python_status"
         is AgentAction.PythonKill -> "python_kill"

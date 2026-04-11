@@ -27,43 +27,78 @@ class UnifiedActionExecutor(private val context: Context) {
         private const val ACTION_DELAY_MS = 1000L
     }
 
-    private fun executeFileNew(path: String, newContent: String): ExecutionResult {
-        LogManager.logI(TAG, "[FILE_NEW] Creating file $path with content length=${newContent.length}")
+    private fun executeCreateFile(path: String, content: String): ExecutionResult {
+        LogManager.logI(TAG, "[CREATE_FILE] Creating $path with content length=${content.length}")
         val file = File(path)
         if (file.exists()) {
-            return ExecutionResult(false, "File already exists: $path")
+            return ExecutionResult(false, "File already exists: $path. Use write_file to overwrite.")
         }
 
-        val manager = com.example.offlineai.agent.utils.FileEditorManager
-        val (autoOpened, openError) = ensureFileSession(path, createIfMissing = true)
-        if (openError != null) {
-            return ExecutionResult(false, openError)
+        // Ensure parent directories exist
+        file.parentFile?.mkdirs()
+
+        return try {
+            file.writeText(content)
+            val lineCount = content.count { it == '\n' } + if (content.isNotEmpty()) 1 else 0
+            ExecutionResult(
+                true,
+                "Created $path ($lineCount lines)",
+                returnData = "{\"path\":\"$path\",\"line_count\":$lineCount}"
+            )
+        } catch (e: Exception) {
+            LogManager.logE(TAG, "[CREATE_FILE] Failed: $path", e)
+            ExecutionResult(false, "Create file failed: ${e.message}")
+        }
+    }
+
+    private fun executeReadFile(path: String): ExecutionResult {
+        LogManager.logI(TAG, "[READ_FILE] Reading entire file: $path")
+        val file = File(path)
+        if (!file.exists()) {
+            return ExecutionResult(false, "File not found: $path")
+        }
+        if (!file.isFile) {
+            return ExecutionResult(false, "Path is not a file: $path")
         }
 
-        val lines = splitContentToLines(newContent)
-        if (lines.isNotEmpty()) {
-            val result = manager.editReplace(path, 1, 1, lines)
-            val success = result["success"] as? Boolean ?: false
-            val error = result["error"] as? String
-            if (!success) {
-                closeFileSessionIfNeeded(path, autoOpened)
-                return ExecutionResult(false, error ?: "Failed to initialize new file")
-            }
+        return try {
+            val lines = file.readLines()
+            val totalLines = lines.size
+            val maxLines = 2000
+            val truncated = totalLines > maxLines
+            val outputLines = if (truncated) lines.take(maxLines) else lines
+            val contentStr = outputLines.mapIndexed { i, line -> "${i + 1}: $line" }.joinToString("\n")
+            val suffix = if (truncated) "\n[TRUNCATED: showing $maxLines of $totalLines lines. Use read_lines for specific ranges.]" else ""
+            ExecutionResult(
+                true,
+                "Read $path ($totalLines lines${if (truncated) ", truncated to $maxLines" else ""})",
+                returnData = "Total lines: $totalLines\n$contentStr$suffix"
+            )
+        } catch (e: Exception) {
+            LogManager.logE(TAG, "[READ_FILE] Failed: $path", e)
+            ExecutionResult(false, "Read file failed: ${e.message}")
         }
+    }
 
-        val saveResult = manager.saveFile(path)
-        val saveSuccess = saveResult["success"] as? Boolean ?: false
-        val saveError = saveResult["error"] as? String
-        if (!saveSuccess) {
-            closeFileSessionIfNeeded(path, true)
-            return ExecutionResult(false, saveError ?: "Failed to save new file")
+    private fun executeWriteFile(path: String, content: String): ExecutionResult {
+        LogManager.logI(TAG, "[WRITE_FILE] Writing $path with content length=${content.length}")
+        val file = File(path)
+
+        // Ensure parent directories exist
+        file.parentFile?.mkdirs()
+
+        return try {
+            file.writeText(content)
+            val lineCount = content.count { it == '\n' } + if (content.isNotEmpty()) 1 else 0
+            ExecutionResult(
+                true,
+                "Written $path ($lineCount lines)",
+                returnData = "{\"path\":\"$path\",\"line_count\":$lineCount}"
+            )
+        } catch (e: Exception) {
+            LogManager.logE(TAG, "[WRITE_FILE] Failed: $path", e)
+            ExecutionResult(false, "Write file failed: ${e.message}")
         }
-
-        return ExecutionResult(
-            true,
-            "Created file $path with ${lines.size} lines",
-            returnData = "{\"created\":true,\"path\":\"$path\",\"line_count\":${lines.size}}"
-        )
     }
     
     private var installedAppList: List<Pair<String, String>>? = null
@@ -159,17 +194,18 @@ class UnifiedActionExecutor(private val context: Context) {
                 is AgentAction.WebGetContent -> executeWebGetContent()
                 is AgentAction.WebExecuteJs -> executeWebExecuteJs(action.script)
                 is AgentAction.DataMemory -> ExecutionResult(true, "data_memory handled by AgentEngine")
-                is AgentAction.FileOpen -> ExecutionResult(false, "file_open is deprecated. Use file_new/file_read/file_search/file_edit directly.")
-                is AgentAction.FileRead -> executeFileRead(action.path, action.startLine, action.readCount)
-                is AgentAction.FileNew -> executeFileNew(action.path, action.newContent)
-                is AgentAction.FileEdit -> executeFileEdit(action.path, action.startLine, action.endLine, action.newContent)
-                is AgentAction.FileSearch -> executeFileSearch(action.path, action.keyword, action.ignoreCase)
-                is AgentAction.FileSave -> ExecutionResult(false, "file_save is deprecated. file_edit already saves automatically.")
-                is AgentAction.FileListDir -> executeFileListDir(action.path, action.recursive)
-                is AgentAction.FileCopy -> executeFileCopy(action.src, action.dst)
-                is AgentAction.FileDelete -> executeFileDelete(action.path, action.recursive)
-                is AgentAction.FileSearchRegex -> executeFileSearchRegex(action.path, action.pattern, action.recursive)
-                is AgentAction.FileCreateDir -> executeFileCreateDir(action.path)
+                is AgentAction.CreateFile -> executeCreateFile(action.path, action.content)
+                is AgentAction.ReadFile -> executeReadFile(action.path)
+                is AgentAction.WriteFile -> executeWriteFile(action.path, action.content)
+                is AgentAction.ReadLines -> executeReadLines(action.path, action.startLine, action.endLine)
+                is AgentAction.EditLines -> executeEditLines(action.path, action.startLine, action.endLine, action.content)
+                is AgentAction.Grep -> executeGrep(action.path, action.keyword)
+                is AgentAction.RenameFile -> executeRenameFile(action.oldPath, action.newPath)
+                is AgentAction.DeleteFile -> executeDeleteFile(action.path, action.recursive)
+                is AgentAction.CopyFile -> executeCopyFile(action.src, action.dst)
+                is AgentAction.ListDir -> executeListDir(action.path)
+                is AgentAction.Mkdir -> executeMkdir(action.path)
+                is AgentAction.SearchFiles -> executeSearchFiles(action.path, action.keyword)
                 is AgentAction.PythonRun -> executePythonRun(action)
                 is AgentAction.PythonStatus -> executePythonStatus(action)
                 is AgentAction.PythonKill -> executePythonKill(action)
@@ -234,36 +270,40 @@ class UnifiedActionExecutor(private val context: Context) {
                 }
             }
             is AgentAction.WebExecuteJs -> requireNonBlank(action.script, "web_execute_js.script")
-            is AgentAction.FileOpen -> requireNonBlank(action.path, "file_open.path")
-            is AgentAction.FileRead -> {
-                requireNonBlank(action.path, "file_read.path")
-                    ?: if (action.startLine < 1) "file_read.start_line must be >= 1" else null
-                    ?: if (action.readCount < 1) "file_read.read_count must be >= 1" else null
+            is AgentAction.CreateFile -> requireNonBlank(action.path, "create_file.path")
+            is AgentAction.ReadFile -> requireNonBlank(action.path, "read_file.path")
+            is AgentAction.WriteFile -> {
+                requireNonBlank(action.path, "write_file.path")
             }
-            is AgentAction.FileNew -> {
-                requireNonBlank(action.path, "file_new.path")
+            is AgentAction.ReadLines -> {
+                requireNonBlank(action.path, "read_lines.path")
+                    ?: if (action.startLine < 1) "read_lines.start_line must be >= 1" else null
+                    ?: if (action.endLine < action.startLine) "read_lines.end_line must be >= start_line" else null
             }
-            is AgentAction.FileEdit -> {
-                requireNonBlank(action.path, "file_edit.path")
-                    ?: if (action.startLine < 1) "file_edit.start_line must be >= 1" else null
-                    ?: if (action.endLine < action.startLine) "file_edit.end_line must be >= start_line" else null
+            is AgentAction.EditLines -> {
+                requireNonBlank(action.path, "edit_lines.path")
+                    ?: if (action.startLine < 1) "edit_lines.start_line must be >= 1" else null
+                    ?: if (action.endLine < action.startLine) "edit_lines.end_line must be >= start_line" else null
             }
-            is AgentAction.FileSearch -> {
-                requireNonBlank(action.path, "file_search.path")
-                    ?: requireNonBlank(action.keyword, "file_search.keyword")
+            is AgentAction.Grep -> {
+                requireNonBlank(action.path, "grep.path")
+                    ?: requireNonBlank(action.keyword, "grep.keyword")
             }
-            is AgentAction.FileSave -> requireNonBlank(action.path, "file_save.path")
-            is AgentAction.FileListDir -> requireNonBlank(action.path, "file_list_dir.path")
-            is AgentAction.FileCopy -> {
-                requireNonBlank(action.src, "file_copy.src")
-                    ?: requireNonBlank(action.dst, "file_copy.dst")
+            is AgentAction.RenameFile -> {
+                requireNonBlank(action.oldPath, "rename_file.old_path")
+                    ?: requireNonBlank(action.newPath, "rename_file.new_path")
             }
-            is AgentAction.FileDelete -> requireNonBlank(action.path, "file_delete.path")
-            is AgentAction.FileSearchRegex -> {
-                requireNonBlank(action.path, "file_search_regex.path")
-                    ?: requireNonBlank(action.pattern, "file_search_regex.pattern")
+            is AgentAction.DeleteFile -> requireNonBlank(action.path, "delete_file.path")
+            is AgentAction.CopyFile -> {
+                requireNonBlank(action.src, "copy_file.src")
+                    ?: requireNonBlank(action.dst, "copy_file.dst")
             }
-            is AgentAction.FileCreateDir -> requireNonBlank(action.path, "file_create_dir.path")
+            is AgentAction.ListDir -> requireNonBlank(action.path, "list_dir.path")
+            is AgentAction.Mkdir -> requireNonBlank(action.path, "mkdir.path")
+            is AgentAction.SearchFiles -> {
+                requireNonBlank(action.path, "search_files.path")
+                    ?: requireNonBlank(action.keyword, "search_files.keyword")
+            }
             is AgentAction.PythonRun -> {
                 if (action.code == null && action.file == null) {
                     "python_run requires either 'code' or 'file' parameter"
@@ -465,41 +505,50 @@ class UnifiedActionExecutor(private val context: Context) {
         }
     }
 
-    private fun executeFileRead(path: String, startLine: Int, readCount: Int): ExecutionResult {
-        LogManager.logI(TAG, "[FILE_READ] Reading $path from line $startLine, count $readCount")
-        val (autoOpened, openError) = ensureFileSession(path, createIfMissing = false)
-        if (openError != null) {
-            return ExecutionResult(false, openError)
+    private fun executeReadLines(path: String, startLine: Int, endLine: Int): ExecutionResult {
+        LogManager.logI(TAG, "[READ_LINES] Reading $path lines $startLine-$endLine")
+        val file = File(path)
+        if (!file.exists()) {
+            return ExecutionResult(false, "File not found: $path")
+        }
+        if (!file.isFile) {
+            return ExecutionResult(false, "Path is not a file: $path")
         }
 
-        val result = com.example.offlineai.agent.utils.FileEditorManager.readLines(path, startLine, readCount)
-        val success = result["success"] as? Boolean ?: false
-        val totalLines = result["total_lines"] as? Int ?: 0
-        val readLines = result["read_lines"] as? List<Map<String, Any>> ?: emptyList()
-        val error = result["error"] as? String
-
-        closeFileSessionIfNeeded(path, autoOpened)
-
-        return if (success) {
-            val contentStr = readLines.joinToString("\n") { "${it["line"]}: ${it["content"]}" }
+        return try {
+            val allLines = file.readLines()
+            val totalLines = allLines.size
+            // Clamp to valid range, out-of-range reads to EOF without error
+            val start = startLine.coerceAtLeast(1)
+            val end = endLine.coerceAtMost(totalLines)
+            if (start > totalLines) {
+                return ExecutionResult(
+                    true,
+                    "Read 0 lines from $path (start_line $start > total $totalLines)",
+                    returnData = "Total lines: $totalLines\n(empty: start_line exceeds total)"
+                )
+            }
+            val selectedLines = allLines.subList(start - 1, end)
+            val contentStr = selectedLines.mapIndexed { i, line -> "${start + i}: $line" }.joinToString("\n")
             ExecutionResult(
                 true,
-                "Read ${readLines.size} lines from $path (total: $totalLines)",
-                returnData = "Lines $startLine-${startLine + readLines.size - 1}/$totalLines:\n$contentStr"
+                "Read ${selectedLines.size} lines from $path (lines $start-$end of $totalLines)",
+                returnData = "Lines $start-$end/$totalLines:\n$contentStr"
             )
-        } else {
-            ExecutionResult(false, error ?: "Failed to read file")
+        } catch (e: Exception) {
+            LogManager.logE(TAG, "[READ_LINES] Failed: $path", e)
+            ExecutionResult(false, "Read lines failed: ${e.message}")
         }
     }
 
-    private fun executeFileEdit(
+    private fun executeEditLines(
         path: String,
         startLine: Int,
         endLine: Int,
-        newContent: String
+        content: String
     ): ExecutionResult {
-        val replacementLines = splitContentToLines(newContent)
-        LogManager.logI(TAG, "[FILE_EDIT] Replacing lines $startLine-$endLine in $path with ${replacementLines.size} lines")
+        val replacementLines = splitContentToLines(content)
+        LogManager.logI(TAG, "[EDIT_LINES] Replacing lines $startLine-$endLine in $path with ${replacementLines.size} lines")
         val manager = com.example.offlineai.agent.utils.FileEditorManager
         val (autoOpened, openError) = ensureFileSession(path, createIfMissing = false)
         if (openError != null) {
@@ -525,9 +574,10 @@ class UnifiedActionExecutor(private val context: Context) {
             return ExecutionResult(false, saveError ?: "Failed to save file")
         }
 
+        closeFileSessionIfNeeded(path, autoOpened)
         return ExecutionResult(
             true,
-            "Edited and saved $path: replaced $replacedRange, new total: $newTotalLines lines",
+            "Edited $path: replaced $replacedRange, new total: $newTotalLines lines",
             returnData = "{\"new_total_lines\":$newTotalLines, \"replaced_range\":\"$replacedRange\"}"
         )
     }
@@ -540,30 +590,72 @@ class UnifiedActionExecutor(private val context: Context) {
             .split("\n")
     }
 
-    private fun executeFileSearch(path: String, keyword: String, ignoreCase: Boolean): ExecutionResult {
-        LogManager.logI(TAG, "[FILE_SEARCH] Searching '$keyword' in $path (ignoreCase=$ignoreCase)")
-        val (autoOpened, openError) = ensureFileSession(path, createIfMissing = false)
-        if (openError != null) {
-            return ExecutionResult(false, openError)
+    private fun executeGrep(path: String, keyword: String): ExecutionResult {
+        LogManager.logI(TAG, "[GREP] Searching '$keyword' in $path")
+        val file = File(path)
+        if (!file.exists()) {
+            return ExecutionResult(false, "File not found: $path")
+        }
+        if (!file.isFile) {
+            return ExecutionResult(false, "Path is not a file: $path")
         }
 
-        val result = com.example.offlineai.agent.utils.FileEditorManager.searchKeyword(path, keyword, ignoreCase)
-        val success = result["success"] as? Boolean ?: false
-        val matchCount = result["match_count"] as? Int ?: 0
-        val matchLines = result["match_lines"] as? List<Int> ?: emptyList()
-        val error = result["error"] as? String
-
-        closeFileSessionIfNeeded(path, autoOpened)
-
-        return if (success) {
-            val linesStr = matchLines.joinToString(",")
+        return try {
+            val lines = file.readLines()
+            val matches = mutableListOf<String>()
+            val keywordLower = keyword.lowercase()
+            lines.forEachIndexed { index, line ->
+                if (line.lowercase().contains(keywordLower)) {
+                    matches.add("${index + 1}: $line")
+                }
+            }
+            val matchCount = matches.size
+            if (matchCount == 0) {
+                return ExecutionResult(
+                    true,
+                    "No matches found for '$keyword' in $path",
+                    returnData = "No matches found."
+                )
+            }
+            // Limit output to avoid excessive data
+            val maxMatches = 100
+            val truncated = matchCount > maxMatches
+            val outputMatches = if (truncated) matches.take(maxMatches) else matches
+            val contentStr = outputMatches.joinToString("\n")
+            val suffix = if (truncated) "\n[TRUNCATED: showing $maxMatches of $matchCount matches]" else ""
             ExecutionResult(
                 true,
                 "Found $matchCount matches for '$keyword' in $path",
-                returnData = "{\"match_count\":$matchCount, \"match_lines\":[$linesStr]}"
+                returnData = "Matches ($matchCount):\n$contentStr$suffix"
             )
-        } else {
-            ExecutionResult(false, error ?: "Failed to search file")
+        } catch (e: Exception) {
+            LogManager.logE(TAG, "[GREP] Failed: $path", e)
+            ExecutionResult(false, "Grep failed: ${e.message}")
+        }
+    }
+
+    private fun executeRenameFile(oldPath: String, newPath: String): ExecutionResult {
+        LogManager.logI(TAG, "[RENAME_FILE] Renaming $oldPath to $newPath")
+        return try {
+            val oldFile = File(oldPath)
+            if (!oldFile.exists()) {
+                return ExecutionResult(false, "Source not found: $oldPath")
+            }
+            val newFile = File(newPath)
+            if (newFile.exists()) {
+                return ExecutionResult(false, "Target already exists: $newPath")
+            }
+            // Ensure parent directory exists
+            newFile.parentFile?.mkdirs()
+            val success = oldFile.renameTo(newFile)
+            if (success) {
+                ExecutionResult(true, "Renamed $oldPath to $newPath")
+            } else {
+                ExecutionResult(false, "Failed to rename $oldPath to $newPath")
+            }
+        } catch (e: Exception) {
+            LogManager.logE(TAG, "[RENAME_FILE] Failed: $oldPath -> $newPath", e)
+            ExecutionResult(false, "Rename failed: ${e.message}")
         }
     }
 
@@ -571,8 +663,8 @@ class UnifiedActionExecutor(private val context: Context) {
     // Directory and File Management Operations
     // ============================================================================
 
-    private fun executeFileListDir(path: String, recursive: Boolean): ExecutionResult {
-        LogManager.logI(TAG, "[FILE_LIST_DIR] Listing: $path (recursive=$recursive)")
+    private fun executeListDir(path: String): ExecutionResult {
+        LogManager.logI(TAG, "[LIST_DIR] Listing: $path")
         return try {
             val dir = File(path)
             if (!dir.exists()) {
@@ -582,54 +674,25 @@ class UnifiedActionExecutor(private val context: Context) {
                 return ExecutionResult(false, "Path is not a directory: $path")
             }
 
-            val items = if (recursive) {
-                listFilesRecursive(dir, path)
-            } else {
-                dir.listFiles()?.map { fileToMap(it, path) } ?: emptyList()
-            }
-
-            val itemsJson = items.joinToString(",") { item ->
-                val type = item["type"] ?: "file"
-                val name = item["name"] ?: ""
-                val size = item["size"] ?: 0
-                val relPath = item["relative_path"] ?: ""
-                "{\"type\":\"$type\",\"name\":\"$name\",\"size\":$size,\"path\":\"$relPath\"}"
-            }
+            val items = dir.listFiles()?.map { file ->
+                val type = if (file.isDirectory) "dir" else "file"
+                val size = if (file.isFile) file.length() else 0
+                "{\"type\":\"$type\",\"name\":\"${file.name}\",\"size\":$size}"
+            } ?: emptyList()
 
             ExecutionResult(
                 true,
                 "Listed ${items.size} items in $path",
-                returnData = "{\"count\":${items.size},\"items\":[$itemsJson]}"
+                returnData = "[${items.joinToString(",")}]"
             )
         } catch (e: Exception) {
-            LogManager.logE(TAG, "[FILE_LIST_DIR] Failed: $path", e)
+            LogManager.logE(TAG, "[LIST_DIR] Failed: $path", e)
             ExecutionResult(false, "List directory failed: ${e.message}")
         }
     }
 
-    private fun listFilesRecursive(dir: File, basePath: String): List<Map<String, Any>> {
-        val result = mutableListOf<Map<String, Any>>()
-        dir.walkTopDown().forEach { file ->
-            if (file != dir) {
-                result.add(fileToMap(file, basePath))
-            }
-        }
-        return result
-    }
-
-    private fun fileToMap(file: File, basePath: String): Map<String, Any> {
-        val relativePath = file.absolutePath.removePrefix(basePath).removePrefix("/")
-        return mapOf(
-            "type" to if (file.isDirectory) "dir" else "file",
-            "name" to file.name,
-            "size" to if (file.isFile) file.length() else 0,
-            "relative_path" to relativePath,
-            "last_modified" to file.lastModified()
-        )
-    }
-
-    private fun executeFileCopy(src: String, dst: String): ExecutionResult {
-        LogManager.logI(TAG, "[FILE_COPY] Copying $src to $dst")
+    private fun executeCopyFile(src: String, dst: String): ExecutionResult {
+        LogManager.logI(TAG, "[COPY_FILE] Copying $src to $dst")
         return try {
             val srcFile = File(src)
             if (!srcFile.exists()) {
@@ -637,6 +700,7 @@ class UnifiedActionExecutor(private val context: Context) {
             }
 
             val dstFile = File(dst)
+            dstFile.parentFile?.mkdirs()
             if (srcFile.isDirectory) {
                 srcFile.copyRecursively(dstFile, overwrite = true)
             } else {
@@ -645,19 +709,22 @@ class UnifiedActionExecutor(private val context: Context) {
 
             ExecutionResult(true, "Copied $src to $dst")
         } catch (e: Exception) {
-            LogManager.logE(TAG, "[FILE_COPY] Failed: $src -> $dst", e)
+            LogManager.logE(TAG, "[COPY_FILE] Failed: $src -> $dst", e)
             ExecutionResult(false, "Copy failed: ${e.message}")
         }
     }
 
-    private fun executeFileDelete(path: String, recursive: Boolean): ExecutionResult {
-        LogManager.logI(TAG, "[FILE_DELETE] Deleting: $path (recursive=$recursive)")
+    private fun executeDeleteFile(path: String, recursive: Boolean): ExecutionResult {
+        LogManager.logI(TAG, "[DELETE_FILE] Deleting: $path (recursive=$recursive)")
         return try {
             val file = File(path)
             if (!file.exists()) {
                 return ExecutionResult(false, "File/directory not found: $path")
             }
 
+            if (file.isDirectory && !recursive && (file.listFiles()?.isNotEmpty() == true)) {
+                return ExecutionResult(false, "Directory is not empty: $path. Use recursive=true to delete non-empty directories.")
+            }
             val deleted = if (file.isDirectory && recursive) {
                 file.deleteRecursively()
             } else {
@@ -670,13 +737,13 @@ class UnifiedActionExecutor(private val context: Context) {
                 ExecutionResult(false, "Failed to delete: $path")
             }
         } catch (e: Exception) {
-            LogManager.logE(TAG, "[FILE_DELETE] Failed: $path", e)
+            LogManager.logE(TAG, "[DELETE_FILE] Failed: $path", e)
             ExecutionResult(false, "Delete failed: ${e.message}")
         }
     }
 
-    private fun executeFileSearchRegex(path: String, pattern: String, recursive: Boolean): ExecutionResult {
-        LogManager.logI(TAG, "[FILE_SEARCH_REGEX] Searching pattern '$pattern' in $path (recursive=$recursive)")
+    private fun executeSearchFiles(path: String, keyword: String): ExecutionResult {
+        LogManager.logI(TAG, "[SEARCH_FILES] Searching '$keyword' in $path")
         return try {
             val dir = File(path)
             if (!dir.exists()) {
@@ -686,41 +753,35 @@ class UnifiedActionExecutor(private val context: Context) {
                 return ExecutionResult(false, "Path is not a directory: $path")
             }
 
-            val regex = Regex(pattern)
-            val matches = mutableListOf<Map<String, String>>()
+            val keywordLower = keyword.lowercase()
+            val matches = mutableListOf<String>()
 
-            val files = if (recursive) dir.walkTopDown() else dir.listFiles()?.asSequence() ?: emptySequence()
-
-            files.filter { it.isFile }.forEach { file ->
-                if (regex.containsMatchIn(file.name)) {
-                    matches.add(mapOf(
-                        "name" to file.name,
-                        "path" to file.absolutePath,
-                        "size" to file.length().toString()
-                    ))
+            dir.walkTopDown().filter { it.isFile }.forEach { file ->
+                if (file.name.lowercase().contains(keywordLower)) {
+                    matches.add(file.absolutePath)
                 }
             }
 
-            val matchesJson = matches.joinToString(",") { m ->
-                val name = m["name"] ?: ""
-                val filePath = m["path"] ?: ""
-                val size = m["size"] ?: "0"
-                "{\"name\":\"$name\",\"path\":\"$filePath\",\"size\":$size}"
-            }
+            // Limit output
+            val maxMatches = 100
+            val truncated = matches.size > maxMatches
+            val outputMatches = if (truncated) matches.take(maxMatches) else matches
+            val contentStr = outputMatches.joinToString("\n")
+            val suffix = if (truncated) "\n[TRUNCATED: showing $maxMatches of ${matches.size} matches]" else ""
 
             ExecutionResult(
                 true,
-                "Found ${matches.size} files matching pattern in $path",
-                returnData = "{\"match_count\":${matches.size},\"matches\":[$matchesJson]}"
+                "Found ${matches.size} files matching '$keyword' in $path",
+                returnData = "Matches (${matches.size}):\n$contentStr$suffix"
             )
         } catch (e: Exception) {
-            LogManager.logE(TAG, "[FILE_SEARCH_REGEX] Failed: $path, pattern=$pattern", e)
-            ExecutionResult(false, "Regex search failed: ${e.message}")
+            LogManager.logE(TAG, "[SEARCH_FILES] Failed: $path, keyword=$keyword", e)
+            ExecutionResult(false, "Search files failed: ${e.message}")
         }
     }
 
-    private fun executeFileCreateDir(path: String): ExecutionResult {
-        LogManager.logI(TAG, "[FILE_CREATE_DIR] Creating directory: $path")
+    private fun executeMkdir(path: String): ExecutionResult {
+        LogManager.logI(TAG, "[MKDIR] Creating directory: $path")
         return try {
             val dir = File(path)
             if (dir.exists()) {
@@ -738,7 +799,7 @@ class UnifiedActionExecutor(private val context: Context) {
                 ExecutionResult(false, "Failed to create directory: $path")
             }
         } catch (e: Exception) {
-            LogManager.logE(TAG, "[FILE_CREATE_DIR] Failed: $path", e)
+            LogManager.logE(TAG, "[MKDIR] Failed: $path", e)
             ExecutionResult(false, "Create directory failed: ${e.message}")
         }
     }

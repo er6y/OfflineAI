@@ -237,17 +237,17 @@ sealed class AgentAction {
     }
 
     /**
-     * Create a new file with full content (single string, supports \n)
-     * {"action": "file_new", "path": "/sdcard/new.txt", "new_content": "line1\nline2"}
+     * Create a new file with content. Fails if file already exists.
+     * {"name": "create_file", "parameters": {"path": "/sdcard/new.txt", "content": "line1\nline2"}}
      */
-    data class FileNew(
+    data class CreateFile(
         val path: String,
-        val newContent: String
+        val content: String
     ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
-            put("action", "file_new")
+            put("action", "create_file")
             put("path", path)
-            put("new_content", newContent)
+            put("content", content)
         }
         override fun needsScreenshot() = false
     }
@@ -320,95 +320,115 @@ sealed class AgentAction {
     }
 
     /**
-     * Open file for editing
-     * {"action": "file_open", "path": "/sdcard/file.txt"}
+     * Read entire file content. Returns full text (truncated at 2000 lines).
+     * {"name": "read_file", "parameters": {"path": "/sdcard/file.txt"}}
      */
-    data class FileOpen(val path: String) : AgentAction() {
-        override fun toJson() = JSONObject().apply {
-            put("action", "file_open")
-            put("path", path)
-        }
-        override fun needsScreenshot() = false  // File operation, no screenshot needed
-    }
-
-    /**
-     * Read lines from opened file
-     * {"action": "file_read", "path": "/sdcard/file.txt", "start_line": 1, "read_count": 50}
-     */
-    data class FileRead(
-        val path: String,
-        val startLine: Int,
-        val readCount: Int
+    data class ReadFile(
+        val path: String
     ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
-            put("action", "file_read")
+            put("action", "read_file")
             put("path", path)
-            put("start_line", startLine)
-            put("read_count", readCount)
         }
         override fun needsScreenshot() = false
     }
 
     /**
-     * Replace lines in opened file
-     * {"action": "file_edit", "path": "/sdcard/file.txt", "start_line": 5, "end_line": 10, "new_content": "line1\nline2"}
+     * Overwrite file with content. Creates file if not exists, overwrites if exists.
+     * {"name": "write_file", "parameters": {"path": "/sdcard/file.txt", "content": "new content"}}
      */
-    data class FileEdit(
+    data class WriteFile(
         val path: String,
-        val startLine: Int,
-        val endLine: Int,
-        val newContent: String
+        val content: String
     ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
-            put("action", "file_edit")
+            put("action", "write_file")
+            put("path", path)
+            put("content", content)
+        }
+        override fun needsScreenshot() = false
+    }
+
+    /**
+     * Read lines [start_line, end_line] from file. Out-of-range reads to EOF without error.
+     * {"name": "read_lines", "parameters": {"path": "/sdcard/file.txt", "start_line": 1, "end_line": 50}}
+     */
+    data class ReadLines(
+        val path: String,
+        val startLine: Int,
+        val endLine: Int
+    ) : AgentAction() {
+        override fun toJson() = JSONObject().apply {
+            put("action", "read_lines")
             put("path", path)
             put("start_line", startLine)
             put("end_line", endLine)
-            put("new_content", newContent)
         }
         override fun needsScreenshot() = false
     }
 
     /**
-     * Search keyword in opened file
-     * {"action": "file_search", "path": "/sdcard/file.txt", "keyword": "text", "ignore_case": true}
+     * Replace lines [start_line, end_line] with new content. Auto-saves.
+     * {"name": "edit_lines", "parameters": {"path": "/sdcard/file.txt", "start_line": 5, "end_line": 10, "content": "new line 1\nnew line 2"}}
      */
-    data class FileSearch(
+    data class EditLines(
         val path: String,
-        val keyword: String,
-        val ignoreCase: Boolean = true
+        val startLine: Int,
+        val endLine: Int,
+        val content: String
     ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
-            put("action", "file_search")
+            put("action", "edit_lines")
+            put("path", path)
+            put("start_line", startLine)
+            put("end_line", endLine)
+            put("content", content)
+        }
+        override fun needsScreenshot() = false
+    }
+
+    /**
+     * Search text content in file, returns matching line numbers + content snippets.
+     * {"name": "grep", "parameters": {"path": "/sdcard/file.txt", "keyword": "TODO"}}
+     */
+    data class Grep(
+        val path: String,
+        val keyword: String
+    ) : AgentAction() {
+        override fun toJson() = JSONObject().apply {
+            put("action", "grep")
             put("path", path)
             put("keyword", keyword)
-            put("ignore_case", ignoreCase)
         }
         override fun needsScreenshot() = false
     }
 
     /**
-     * Save changes to file
-     * {"action": "file_save", "path": "/sdcard/file.txt"}
+     * Rename or move a file. Fails if new_path already exists.
+     * {"name": "rename_file", "parameters": {"old_path": "/sdcard/a.txt", "new_path": "/sdcard/b.txt"}}
      */
-    data class FileSave(val path: String) : AgentAction() {
+    data class RenameFile(
+        val oldPath: String,
+        val newPath: String
+    ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
-            put("action", "file_save")
-            put("path", path)
+            put("action", "rename_file")
+            put("old_path", oldPath)
+            put("new_path", newPath)
         }
         override fun needsScreenshot() = false
     }
 
     /**
-     * List directory contents
-     * {"action": "file_list_dir", "path": "/sdcard/", "recursive": false}
+     * Delete file or directory.
+     * {"name": "delete_file", "parameters": {"path": "/sdcard/file.txt", "recursive": false}}
      */
-    data class FileListDir(
+    data class DeleteFile(
         val path: String,
         val recursive: Boolean = false
     ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
-            put("action", "file_list_dir")
+            put("action", "delete_file")
             put("path", path)
             put("recursive", recursive)
         }
@@ -416,15 +436,15 @@ sealed class AgentAction {
     }
 
     /**
-     * Copy file or directory
-     * {"action": "file_copy", "src": "/sdcard/src.txt", "dst": "/sdcard/dst.txt"}
+     * Copy file or directory. Overwrites destination if exists.
+     * {"name": "copy_file", "parameters": {"src": "/sdcard/src.txt", "dst": "/sdcard/dst.txt"}}
      */
-    data class FileCopy(
+    data class CopyFile(
         val src: String,
         val dst: String
     ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
-            put("action", "file_copy")
+            put("action", "copy_file")
             put("src", src)
             put("dst", dst)
         }
@@ -432,47 +452,43 @@ sealed class AgentAction {
     }
 
     /**
-     * Delete file or directory
-     * {"action": "file_delete", "path": "/sdcard/file.txt", "recursive": false}
+     * List directory contents.
+     * {"name": "list_dir", "parameters": {"path": "/sdcard/"}}
      */
-    data class FileDelete(
-        val path: String,
-        val recursive: Boolean = false
+    data class ListDir(
+        val path: String
     ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
-            put("action", "file_delete")
+            put("action", "list_dir")
             put("path", path)
-            put("recursive", recursive)
         }
         override fun needsScreenshot() = false
     }
 
     /**
-     * Search files by regex pattern in directory
-     * {"action": "file_search_regex", "path": "/sdcard/", "pattern": ".*\\.txt$", "recursive": true}
+     * Create directory. Silent success if already exists.
+     * {"name": "mkdir", "parameters": {"path": "/sdcard/new_folder"}}
      */
-    data class FileSearchRegex(
-        val path: String,
-        val pattern: String,
-        val recursive: Boolean = true
-    ) : AgentAction() {
+    data class Mkdir(val path: String) : AgentAction() {
         override fun toJson() = JSONObject().apply {
-            put("action", "file_search_regex")
+            put("action", "mkdir")
             put("path", path)
-            put("pattern", pattern)
-            put("recursive", recursive)
         }
         override fun needsScreenshot() = false
     }
 
     /**
-     * Create directory
-     * {"action": "file_create_dir", "path": "/sdcard/new_folder"}
+     * Search files by name keyword in directory.
+     * {"name": "search_files", "parameters": {"path": "/sdcard/", "keyword": ".txt"}}
      */
-    data class FileCreateDir(val path: String) : AgentAction() {
+    data class SearchFiles(
+        val path: String,
+        val keyword: String
+    ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
-            put("action", "file_create_dir")
+            put("action", "search_files")
             put("path", path)
+            put("keyword", keyword)
         }
         override fun needsScreenshot() = false
     }
