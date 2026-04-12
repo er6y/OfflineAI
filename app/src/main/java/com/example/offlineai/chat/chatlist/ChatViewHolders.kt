@@ -20,7 +20,9 @@ import android.widget.Toast
 import androidx.recyclerview.widget.RecyclerView
 import com.example.offlineai.R
 import com.example.offlineai.chat.model.ChatDataItem
+import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.Markwon
+import io.noties.markwon.MarkwonPlugin
 import io.noties.markwon.ext.latex.JLatexMathPlugin
 import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
 
@@ -219,11 +221,13 @@ object ChatViewHolders {
         private val performanceMarker: View = view.findViewById(R.id.view_performance_marker)
         
         // Markwon with LaTeX support (inline $...$ and block $$...$$)
+        // Also includes file link handler for clickable file links in assistant messages
         private val markdown = Markwon.builder(itemView.context)
             .usePlugin(MarkwonInlineParserPlugin.create())  // Required for inline LaTeX
             .usePlugin(JLatexMathPlugin.create(32f) { builder ->
                 builder.inlinesEnabled(true)  // Enable $...$ inline formulas
             })
+            .usePlugin(createFileLinkPlugin(itemView.context))
             .build()
         
         init {
@@ -830,5 +834,109 @@ object ChatViewHolders {
 
         // Text selection is now handled by system via setTextIsSelectable(true)
         // Custom "Transfer to Note" menu is added via customSelectionActionModeCallback
+    }
+
+    /**
+     * Create a Markwon plugin that makes markdown links clickable.
+     * For local file paths, opens the system file chooser dialog.
+     * For http(s) URLs, opens the browser.
+     * Uses afterSetText to replace URLSpans with custom ClickableSpans
+     * so they work alongside setTextIsSelectable(true).
+     */
+    private fun createFileLinkPlugin(ctx: Context): MarkwonPlugin {
+        return object : AbstractMarkwonPlugin() {
+            override fun afterSetText(textView: TextView) {
+                val text = textView.text
+                if (text !is android.text.Spannable) return
+                
+                val urlSpans = text.getSpans(0, text.length, android.text.style.URLSpan::class.java)
+                if (urlSpans.isNullOrEmpty()) return
+                
+                for (span in urlSpans) {
+                    val url = span.url ?: continue
+                    val start = text.getSpanStart(span)
+                    val end = text.getSpanEnd(span)
+                    val flags = text.getSpanFlags(span)
+                    
+                    text.removeSpan(span)
+                    text.setSpan(object : android.text.style.ClickableSpan() {
+                        override fun onClick(widget: View) {
+                            openFileOrUrl(widget.context, url)
+                        }
+                        override fun updateDrawState(ds: android.text.TextPaint) {
+                            super.updateDrawState(ds)
+                            ds.isUnderlineText = true
+                        }
+                    }, start, end, flags)
+                }
+                
+                // Only set LinkMovementMethod when links are present (avoid overriding ArrowKeyMovementMethod on every frame)
+                if (textView.movementMethod !is android.text.method.LinkMovementMethod) {
+                    textView.movementMethod = android.text.method.LinkMovementMethod.getInstance()
+                }
+            }
+        }
+    }
+    
+    /**
+     * Open a file path or URL: local files via ACTION_VIEW with FileProvider, URLs via browser
+     */
+    private fun openFileOrUrl(context: Context, url: String) {
+        try {
+            if (url.startsWith("http://") || url.startsWith("https://")) {
+                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                context.startActivity(intent)
+                return
+            }
+            // Local file: try absolute path first, then resolve relative to known chat folders
+            val file = java.io.File(url)
+            if (file.isAbsolute && file.exists()) {
+                openLocalFile(context, file)
+                return
+            }
+            val chatFolders = listOf(
+                com.example.offlineai.ConfigManager.getString(context, com.example.offlineai.ConfigManager.KEY_AGENT_CHAT_FOLDER, ""),
+                com.example.offlineai.ConfigManager.getString(context, com.example.offlineai.ConfigManager.KEY_CURRENT_CHAT_FOLDER, "")
+            )
+            for (folder in chatFolders) {
+                if (folder.isNotEmpty()) {
+                    val resolved = java.io.File(folder, url)
+                    if (resolved.exists()) {
+                        openLocalFile(context, resolved)
+                        return
+                    }
+                }
+            }
+            Toast.makeText(context, "File not found: $url", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(context, "Cannot open: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+    
+    /**
+     * Open a local file using system file chooser via FileProvider
+     */
+    private fun openLocalFile(context: Context, file: java.io.File) {
+        try {
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            val mimeType = android.webkit.MimeTypeMap.getSingleton()
+                .getMimeTypeFromExtension(file.extension.lowercase())
+                ?: "application/octet-stream"
+            
+            val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mimeType)
+                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: android.content.ActivityNotFoundException) {
+            Toast.makeText(context, "No app to open this file type", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(context, "Cannot open file: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 }

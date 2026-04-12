@@ -235,6 +235,8 @@ public class ConfigManager {
     private static final String SUBDIR_KNOWLEDGE_BASES = "knowledge_bases";
     private static final String SUBDIR_STOPWORDS = "stopwords";
     private static final String SUBDIR_CHAT_HISTORY = "chathistory";
+    private static final String SUBDIR_SKILLS = "skills";
+    private static final String SUBDIR_AGENT_WORKSPACE = "agent_workspace";
 
     public static final float DEFAULT_TEXT_SIZE = 14f;
     
@@ -1537,6 +1539,142 @@ public class ConfigManager {
             return true;
         } catch (Exception e) {
             LogManager.logE(TAG, "[DATA_ROOT_ASSET] Failed to ensure asset in data root: " + assetName, e);
+            return false;
+        }
+    }
+
+    /**
+     * Get the skills directory path under data root.
+     */
+    public static String getSkillsPath(Context context) {
+        return new File(getDataRootPath(context), SUBDIR_SKILLS).getAbsolutePath();
+    }
+
+    /**
+     * Get the agent workspace directory path under data root.
+     */
+    public static String getAgentWorkspacePath(Context context) {
+        return new File(getDataRootPath(context), SUBDIR_AGENT_WORKSPACE).getAbsolutePath();
+    }
+
+    /**
+     * Ensure agent_workspace directory exists under data root.
+     * Creates it if missing. Returns the absolute path.
+     */
+    public static String ensureAgentWorkspace(Context context) {
+        File wsDir = new File(getDataRootPath(context), SUBDIR_AGENT_WORKSPACE);
+        if (!wsDir.exists()) {
+            boolean created = wsDir.mkdirs();
+            LogManager.logI(TAG, "[AGENT_WS] Created agent_workspace: " + created + " -> " + wsDir.getAbsolutePath());
+        }
+        return wsDir.getAbsolutePath();
+    }
+
+    /**
+     * Ensure all skill folders from assets/skills/ exist in dataRoot/skills/.
+     * Only copies missing skill folders (does not overwrite existing ones).
+     * Recursively copies all files within each skill folder.
+     *
+     * @return number of skill folders newly copied
+     */
+    public static int ensureAssetSkillsInDataRoot(Context context) {
+        int copiedCount = 0;
+        try {
+            String dataRootPath = getDataRootPath(context);
+            if (dataRootPath == null || dataRootPath.isEmpty()) {
+                LogManager.logW(TAG, "[SKILLS_SYNC] Data root path not set, skip skills sync");
+                return 0;
+            }
+
+            File skillsDir = new File(dataRootPath, SUBDIR_SKILLS);
+            if (!skillsDir.exists() && !skillsDir.mkdirs()) {
+                LogManager.logW(TAG, "[SKILLS_SYNC] Failed to create skills dir: " + skillsDir.getAbsolutePath());
+                return 0;
+            }
+
+            AssetManager assetManager = context.getAssets();
+            String[] skillFolders = assetManager.list(SUBDIR_SKILLS);
+            if (skillFolders == null || skillFolders.length == 0) {
+                LogManager.logI(TAG, "[SKILLS_SYNC] No skill folders found in assets");
+                return 0;
+            }
+
+            for (String skillName : skillFolders) {
+                File targetSkillDir = new File(skillsDir, skillName);
+                if (targetSkillDir.exists()) {
+                    // Skill already exists in data root, skip
+                    continue;
+                }
+                // Recursively copy this skill folder from assets
+                boolean ok = copyAssetFolder(assetManager, SUBDIR_SKILLS + "/" + skillName, targetSkillDir);
+                if (ok) {
+                    copiedCount++;
+                    LogManager.logI(TAG, "[SKILLS_SYNC] Copied skill: " + skillName);
+                } else {
+                    LogManager.logW(TAG, "[SKILLS_SYNC] Failed to copy skill: " + skillName);
+                }
+            }
+
+            if (copiedCount > 0) {
+                LogManager.logI(TAG, "[SKILLS_SYNC] Synced " + copiedCount + " new skill(s) to " + skillsDir.getAbsolutePath());
+            } else {
+                LogManager.logI(TAG, "[SKILLS_SYNC] All skills already present, nothing to copy");
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[SKILLS_SYNC] Error syncing skills: " + e.getMessage(), e);
+        }
+        return copiedCount;
+    }
+
+    /**
+     * Recursively copy an asset folder to a target directory on the filesystem.
+     */
+    private static boolean copyAssetFolder(AssetManager assetManager, String assetPath, File targetDir) {
+        try {
+            String[] children = assetManager.list(assetPath);
+            if (children == null || children.length == 0) {
+                // It's a file, copy it
+                return copyAssetFile(assetManager, assetPath, targetDir);
+            }
+
+            // It's a directory
+            if (!targetDir.exists() && !targetDir.mkdirs()) {
+                return false;
+            }
+
+            boolean allOk = true;
+            for (String child : children) {
+                boolean ok = copyAssetFolder(assetManager, assetPath + "/" + child, new File(targetDir, child));
+                if (!ok) allOk = false;
+            }
+            return allOk;
+        } catch (IOException e) {
+            LogManager.logE(TAG, "[SKILLS_SYNC] copyAssetFolder error: " + assetPath, e);
+            return false;
+        }
+    }
+
+    /**
+     * Copy a single asset file to a target file on the filesystem.
+     */
+    private static boolean copyAssetFile(AssetManager assetManager, String assetPath, File targetFile) {
+        try {
+            File parentDir = targetFile.getParentFile();
+            if (parentDir != null && !parentDir.exists() && !parentDir.mkdirs()) {
+                return false;
+            }
+            try (InputStream in = assetManager.open(assetPath);
+                 FileOutputStream out = new FileOutputStream(targetFile)) {
+                byte[] buffer = new byte[4096];
+                int len;
+                while ((len = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, len);
+                }
+                out.flush();
+            }
+            return true;
+        } catch (IOException e) {
+            LogManager.logE(TAG, "[SKILLS_SYNC] copyAssetFile error: " + assetPath, e);
             return false;
         }
     }

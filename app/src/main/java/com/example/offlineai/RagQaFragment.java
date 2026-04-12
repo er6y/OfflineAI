@@ -843,6 +843,10 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         currentMode = savedAgentMode ? PageMode.AGENT : PageMode.RAG;
         isAgentEnabled.set(isAgentMode());
         LogManager.logI(TAG, "[MODE_INIT] Initialized mode from config: " + currentMode);
+        
+        // Apply mode-specific UI visibility now that currentMode is set
+        // (the earlier call in onCreateView ran before mode was initialized)
+        applyModeUiVisibility();
 
         // Initialize text scaling helper class
         textViewResponse = view.findViewById(R.id.textViewResponse);
@@ -2264,10 +2268,13 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 // Initialize UI state for Agent execution
                 initializeSendingState();
                 
-                // Start Agent loop (will handle LLM calls with proper Agent system prompt)
-                agentManager.startAgentLoop(userPrompt, ragQueryManager);
+                // Build task goal: user prompt + attached file descriptions
+                String taskGoal = buildAgentTaskGoal(userPrompt, userInput);
                 
-                LogManager.logI(TAG, "[AGENT] Agent loop started, task: " + userPrompt);
+                // Start Agent loop (will handle LLM calls with proper Agent system prompt)
+                agentManager.startAgentLoop(taskGoal, ragQueryManager);
+                
+                LogManager.logI(TAG, "[AGENT] Agent loop started, task: " + taskGoal);
             }
         } else {
             // Normal mode: Start LLM query (creates llmTaskId, registers callbacks, enables polling)
@@ -4152,11 +4159,12 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     private void launchMediaPicker() {
         LogManager.logI(TAG, "Launch media picker from selection menu");
         
-        // Support images, audio (wav, mp3, m4a), and video (mp4)
+        // Support images, audio, video, and generic files (zip, txt, pdf, etc.)
         String[] mimeTypes = {
             "image/*",
             "audio/wav", "audio/x-wav", "audio/mpeg", "audio/mp4",
-            "video/mp4"
+            "video/mp4",
+            "application/*", "text/*"
         };
         
         pickMediaFile.launch(mimeTypes);
@@ -4186,12 +4194,23 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 Toast.makeText(requireContext(), "Video support coming soon", Toast.LENGTH_SHORT).show();
                 LogManager.logI(TAG, "Video file selected (not yet supported): " + fileUri);
             } else {
-                Toast.makeText(requireContext(), R.string.toast_unsupported_file_type, Toast.LENGTH_SHORT).show();
+                // Handle generic file (zip, txt, pdf, binary, etc.)
+                handleGenericFileSelected(fileUri, mimeType);
             }
         } catch (Exception e) {
             Toast.makeText(requireContext(), R.string.toast_unsupported_file_type, Toast.LENGTH_SHORT).show();
             LogManager.logE(TAG, "Error handling media file: " + e.getMessage());
         }
+    }
+    
+    /**
+     * Handle selected generic file: add to media adapter for display
+     */
+    private void handleGenericFileSelected(Uri fileUri, String mimeType) {
+        String fileName = UriUtils.getFileName(requireContext(), fileUri);
+        mediaThumbnailAdapter.addFile(fileUri, fileName, mimeType);
+        recyclerViewImageThumbnails.setVisibility(View.VISIBLE);
+        LogManager.logI(TAG, "Generic file selected: " + fileName + ", type: " + mimeType);
     }
     
     /**
@@ -5472,8 +5491,9 @@ private void sendVoiceMessage() {
             } else {
                 lastUserPrompt = userPrompt;
                 initializeSendingState();
-                agentManager.startAgentLoop(userPrompt, ragQueryManager);
-                LogManager.logI(TAG, "[AGENT][VOICE] Agent loop started, task: " + userPrompt);
+                String taskGoal = buildAgentTaskGoal(userPrompt, userInput);
+                agentManager.startAgentLoop(taskGoal, ragQueryManager);
+                LogManager.logI(TAG, "[AGENT][VOICE] Agent loop started, task: " + taskGoal);
             }
         } else {
             LogManager.logI(TAG, "[VOICE] Delegating audio query execution to RagQueryManager.startQuery");
@@ -5522,6 +5542,7 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
     // Step 2: Save all media files synchronously
     List<String> imagePaths = new ArrayList<>();
     List<String> audioPaths = new ArrayList<>();
+    List<String> filePaths = new ArrayList<>();
     float audioDuration = 0.0f;
     
     // Process recorded audio (from long-press)
@@ -5596,6 +5617,21 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
             } else if (item instanceof MediaThumbnailAdapter.AudioItem) {
                 // Audio already decoded and appended to user_voice.wav in handleAudioFileSelected()
                 hasAudioFiles = true;
+            } else if (item instanceof MediaThumbnailAdapter.FileItem) {
+                // Copy generic file to chat folder
+                MediaThumbnailAdapter.FileItem fileItem = (MediaThumbnailAdapter.FileItem) item;
+                try {
+                    String filePath = copyFileToChatFolder(fileItem.getOriginalUri(), fileItem.getFileName(), chatFolderPath);
+                    if (filePath != null) {
+                        filePaths.add(filePath);
+                    } else {
+                        failedMediaCount++;
+                        LogManager.logE(TAG, "Failed to copy file: " + fileItem.getFileName());
+                    }
+                } catch (Exception e) {
+                    failedMediaCount++;
+                    LogManager.logE(TAG, "Error copying file: " + fileItem.getFileName(), e);
+                }
             }
         }
     }
@@ -5660,8 +5696,9 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
     
     // Step 3: Create UserInput structure
     UserInput userInput = new UserInput(textPrompt, imagePaths, audioPaths, audioDuration);
-    LogManager.logI(TAG, String.format("User input prepared: text=%d, images=%d, audio=%d", 
-        textPrompt.length(), imagePaths.size(), audioPaths.size()));
+    userInput.filePaths = filePaths;
+    LogManager.logI(TAG, String.format("User input prepared: text=%d, images=%d, audio=%d, files=%d", 
+        textPrompt.length(), imagePaths.size(), audioPaths.size(), filePaths.size()));
     
     // Step 4: Create user message and add to chat
     ChatDataItem userMsg;
@@ -5696,9 +5733,23 @@ private UserInput prepareAndSaveUserInput(String textPrompt, File recordedAudioF
             textPrompt,
             Uri.parse(imagePaths.get(imageCount - 1))
         );
+    } else if (userInput.hasFiles()) {
+        // File attachment message (with text)
+        userMsg = ChatDataItem.Companion.createFileInputData(
+            getCurrentTime(),
+            textPrompt,
+            filePaths
+        );
     } else {
         // Text-only message
         userMsg = new ChatDataItem(getCurrentTime(), ChatViewHolders.USER, textPrompt);
+    }
+    // Attach file references to any message type (files can coexist with images/audio)
+    if (userInput.hasFiles() && userMsg.fileUris == null) {
+        userMsg.fileUris = new java.util.ArrayList<>();
+        for (String fp : filePaths) {
+            userMsg.fileUris.add(Uri.fromFile(new File(fp)));
+        }
     }
     
     chatMessages.add(userMsg);
@@ -5746,6 +5797,38 @@ private String convertAudioToChatFolder(Uri audioUri, String chatFolderPath) thr
 }
 
 /**
+ * Copy generic file to chat folder (synchronous)
+ * @return Absolute path of the copied file, or null on failure
+ */
+private String copyFileToChatFolder(Uri fileUri, String fileName, String chatFolderPath) throws IOException {
+    String timestamp = String.valueOf(System.currentTimeMillis());
+    // Preserve original extension
+    String ext = "";
+    int dotIdx = fileName.lastIndexOf('.');
+    if (dotIdx >= 0) {
+        ext = fileName.substring(dotIdx);
+    }
+    String destName = "file_" + timestamp + "_user" + ext;
+    File destFile = new File(chatFolderPath, destName);
+    
+    try (InputStream is = requireContext().getContentResolver().openInputStream(fileUri);
+         java.io.FileOutputStream fos = new java.io.FileOutputStream(destFile)) {
+        if (is == null) {
+            LogManager.logE(TAG, "Failed to open input stream for file: " + fileUri);
+            return null;
+        }
+        byte[] buffer = new byte[8192];
+        int bytesRead;
+        while ((bytesRead = is.read(buffer)) != -1) {
+            fos.write(buffer, 0, bytesRead);
+        }
+    }
+    
+    LogManager.logI(TAG, "File copied to chat folder: " + destFile.getAbsolutePath() + " (" + destFile.length() + " bytes)");
+    return destFile.getAbsolutePath();
+}
+
+/**
  * Cancel voice recording
  */
 private void cancelVoiceRecording() {
@@ -5765,6 +5848,44 @@ private void cancelVoiceRecording() {
 // See recordAudioPermissionLauncher and cameraPermissionLauncher initialization
 
 /**
+ * Build Agent task goal: merge user prompt with attached file descriptions.
+ * Output format: "user prompt\n\n[Attached files]\n- type: path (size)\n..."
+ */
+private String buildAgentTaskGoal(String userPrompt, UserInput userInput) {
+    List<String> allFiles = userInput.getAllFilePaths();
+    if (allFiles.isEmpty()) {
+        return userPrompt;
+    }
+    StringBuilder sb = new StringBuilder(userPrompt);
+    sb.append("\n\n[Attached files]\n");
+    for (String filePath : allFiles) {
+        java.io.File file = new java.io.File(filePath);
+        String ext = "";
+        int dotIdx = filePath.lastIndexOf('.');
+        if (dotIdx >= 0) {
+            ext = filePath.substring(dotIdx + 1).toLowerCase(java.util.Locale.ROOT);
+        }
+        String typeLabel;
+        switch (ext) {
+            case "jpg": case "jpeg": case "png": case "gif": case "webp": case "bmp": case "svg":
+                typeLabel = "image"; break;
+            case "wav": case "mp3": case "m4a": case "ogg": case "flac": case "aac":
+                typeLabel = "audio"; break;
+            default:
+                typeLabel = "file"; break;
+        }
+        String sizeStr = "unknown";
+        if (file.exists()) {
+            long sizeKb = file.length() / 1024;
+            sizeStr = sizeKb > 1024 ? (sizeKb / 1024) + "MB" : sizeKb + "KB";
+        }
+        sb.append("- ").append(typeLabel).append(": ").append(filePath)
+          .append(" (").append(sizeStr).append(")\n");
+    }
+    return sb.toString();
+}
+
+/**
  * User input data structure
  * Contains all user input: text, images, audio files
  */
@@ -5772,12 +5893,14 @@ private static class UserInput {
     String textPrompt;
     List<String> imagePaths;
     List<String> audioPaths;
+    List<String> filePaths;  // Generic files (zip, txt, pdf, etc.)
     float audioDuration;  // For single audio file
     
     UserInput(String textPrompt, List<String> imagePaths, List<String> audioPaths, float audioDuration) {
         this.textPrompt = textPrompt != null ? textPrompt : "";
         this.imagePaths = imagePaths != null ? imagePaths : new ArrayList<>();
         this.audioPaths = audioPaths != null ? audioPaths : new ArrayList<>();
+        this.filePaths = new ArrayList<>();
         this.audioDuration = audioDuration;
     }
     
@@ -5789,8 +5912,23 @@ private static class UserInput {
         return !audioPaths.isEmpty();
     }
     
+    boolean hasFiles() {
+        return !filePaths.isEmpty();
+    }
+    
     boolean hasText() {
         return !textPrompt.trim().isEmpty();
+    }
+    
+    /**
+     * Get all user input file paths (images + audio + generic files) for Agent fact injection
+     */
+    List<String> getAllFilePaths() {
+        List<String> all = new ArrayList<>();
+        all.addAll(imagePaths);
+        all.addAll(audioPaths);
+        all.addAll(filePaths);
+        return all;
     }
 }
 

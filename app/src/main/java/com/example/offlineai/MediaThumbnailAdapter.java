@@ -38,6 +38,7 @@ public class MediaThumbnailAdapter extends RecyclerView.Adapter<MediaThumbnailAd
 
     private static final int TYPE_IMAGE = 0;
     private static final int TYPE_AUDIO = 1;
+    private static final int TYPE_FILE = 2;
     private static final int MAX_AUDIO_COUNT = 3;
 
     private final List<MediaItem> mediaItems = new ArrayList<>();
@@ -133,6 +134,33 @@ public class MediaThumbnailAdapter extends RecyclerView.Adapter<MediaThumbnailAd
         }
     }
 
+    /**
+     * Generic file item (zip, txt, pdf, binary, etc.)
+     */
+    public static class FileItem extends MediaItem {
+        private final String fileName;
+        private final String mimeType;
+
+        public FileItem(Uri originalUri, String fileName, String mimeType) {
+            super(originalUri);
+            this.fileName = fileName != null ? fileName : "unknown_file";
+            this.mimeType = mimeType != null ? mimeType : "application/octet-stream";
+        }
+
+        @Override
+        public int getType() {
+            return TYPE_FILE;
+        }
+
+        public String getFileName() {
+            return fileName;
+        }
+
+        public String getMimeType() {
+            return mimeType;
+        }
+    }
+
     public interface OnMediaActionListener {
         void onMediaClick(MediaItem item, int position);
         void onMediaDelete(MediaItem item, int position);
@@ -157,6 +185,16 @@ public class MediaThumbnailAdapter extends RecyclerView.Adapter<MediaThumbnailAd
         ImageItem item = new ImageItem(imageUri);
         mediaItems.add(item);
         notifyItemInserted(mediaItems.size() - 1);
+    }
+
+    /**
+     * Add generic file by URI
+     */
+    public void addFile(Uri fileUri, String fileName, String mimeType) {
+        FileItem item = new FileItem(fileUri, fileName, mimeType);
+        mediaItems.add(item);
+        notifyItemInserted(mediaItems.size() - 1);
+        LogManager.logI("MediaThumbnailAdapter", "File added: " + fileName + ", type: " + mimeType);
     }
 
     /**
@@ -963,6 +1001,8 @@ public class MediaThumbnailAdapter extends RecyclerView.Adapter<MediaThumbnailAd
             bindImageItem(holder, (ImageItem) item, position);
         } else if (item instanceof AudioItem) {
             bindAudioItem(holder, (AudioItem) item, position);
+        } else if (item instanceof FileItem) {
+            bindFileItem(holder, (FileItem) item, position);
         }
     }
 
@@ -1021,6 +1061,35 @@ public class MediaThumbnailAdapter extends RecyclerView.Adapter<MediaThumbnailAd
                 listener.onMediaDelete(item, position);
             }
         });
+    }
+
+    private void bindFileItem(ViewHolder holder, FileItem item, int position) {
+        // Show generic file icon
+        holder.imageView.setImageResource(android.R.drawable.ic_menu_save);
+        holder.progressBar.setVisibility(View.GONE);
+        holder.imageView.setAlpha(1.0f);
+
+        holder.imageView.setOnClickListener(v -> {
+            if (listener != null) {
+                listener.onMediaClick(item, position);
+            }
+        });
+
+        holder.deleteButton.setOnClickListener(v -> {
+            if (listener != null) {
+                listener.onMediaDelete(item, position);
+            }
+        });
+    }
+
+    public int getFileCount() {
+        int count = 0;
+        for (MediaItem item : mediaItems) {
+            if (item instanceof FileItem) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private Bitmap loadThumbnailFromUri(Context context, Uri uri) {

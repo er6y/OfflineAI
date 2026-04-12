@@ -107,6 +107,14 @@ class AgentAccessibilityService : AccessibilityService() {
     // Task brief: structured plan generated once at task start and injected into follow-up prompts
     @Volatile
     private var taskBrief: String = ""
+
+    // Skill catalog: compact list injected only at Step 0
+    @Volatile
+    private var skillCatalog: String = ""
+
+    // Agent workspace path: default output directory for scripts and generated files
+    @Volatile
+    private var agentWorkspacePath: String = ""
     
     fun updateDataMemoryKeys(keys: List<String>) {
         dataMemoryKeys = keys
@@ -114,6 +122,14 @@ class AgentAccessibilityService : AccessibilityService() {
 
     fun updateTaskBrief(brief: String) {
         taskBrief = brief
+    }
+
+    fun updateSkillCatalog(catalog: String) {
+        skillCatalog = catalog
+    }
+
+    fun updateAgentWorkspacePath(path: String) {
+        agentWorkspacePath = path
     }
     
     fun setAgentActive(active: Boolean) {
@@ -1049,15 +1065,28 @@ class AgentAccessibilityService : AccessibilityService() {
         // Step number (1-based for user readability)
         prompt.append("Step ${stepIndex + 1}\n\n")
         
-        // Task goal (Chinese for better token efficiency)
-        prompt.append("任务: $instruction\n\n")
+        // Task goal: full instruction at Step 0, omit after taskBrief is generated (it already captures the goal)
+        if (stepIndex == 0 || taskBrief.isEmpty()) {
+            prompt.append("任务: $instruction\n\n")
+        }
 
         if (stepIndex == 0) {
+            // Inject skill catalog (only at Step 0)
+            if (skillCatalog.isNotEmpty()) {
+                prompt.append("\n## 可用技能\n以下是已安装的技能，如任务需要用到，必须先 read_file 对应 SKILL.md 学习用法后再编写脚本：\n")
+                prompt.append(skillCatalog)
+                prompt.append("\n⚠️ 如果任务涉及以上技能，首轮 context.fact 必须记录：所需 SKILL.md 全路径 + 默认工作目录，供后续 step 参考。不涉及则忽略。\n\n")
+            }
+            // Inject workspace path (only at Step 0)
+            if (agentWorkspacePath.isNotEmpty()) {
+                prompt.append("默认工作目录: $agentWorkspacePath （脚本和生成文件默认保存到此目录，除非用户指定其他路径）\n\n")
+            }
             prompt.append("""
 ##首轮规划要求（只执行一次）
  -这是任务开始。先输出任务简报 JSON，并使用 data_memory 保存为 key=taskBrief；同一轮继续输出首个可执行 action。
  -任务简报 JSON 必须包含字段：任务、目标、里程碑(3-5个)、执行约束（强制）。
- -固定模板（原样复制）：{"name":"data_memory","parameters":{"operation":"set","key":"taskBrief","value":"任务:<任务>\n目标:<目标>\n里程碑:\nM1 <内容>\nM2 <内容>\nM3 <内容>\n...\n执行约束:\n<约束1>\n<约束2>\n...\n"}}""");
+ -如果用户提供了附件（[Attached files]），必须在简报中原样记录所有附件路径，供后续步骤引用。
+ -固定模板（原样复制）：{"name":"data_memory","parameters":{"operation":"set","key":"taskBrief","value":"任务:<任务>\n目标:<目标>\n用户附件:\n<原样列出所有附件路径，无则写'无'>\n里程碑:\nM1 <内容>\nM2 <内容>\nM3 <内容>\n...\n执行约束:\n<约束1>\n<约束2>\n...\n"}}""");
         }
         
         // Inject last step hardcoded fact BEFORE context (highest priority, cannot be forgotten)
@@ -1446,6 +1475,9 @@ $kbActionDesc
                     }
                     is AgentAction.PythonKill -> {
                         result.append(" (kill active python instance)")
+                    }
+                    is AgentAction.ShowMedia -> {
+                        result.append(" (show ${action.path})")
                     }
                 }
                 result.append("\n")

@@ -28,6 +28,10 @@ class ChatDataItem {
     @JvmField
     var audioUris: MutableList<Uri>? = null
 
+    // Support generic file attachments (zip, pdf, ppt, etc.)
+    @JvmField
+    var fileUris: MutableList<Uri>? = null
+
     @JvmField
     var benchmarkInfo: String? = null
 
@@ -160,6 +164,16 @@ class ChatDataItem {
             val result = ChatDataItem(timeString, ChatViewHolders.USER, text)
             result.audioUri = Uri.fromFile(File(audioPath))
             result.audioDuration = duration
+            return result
+        }
+
+        fun createFileInputData(
+            timeString: String?,
+            text: String?,
+            filePaths: List<String>
+        ): ChatDataItem {
+            val result = ChatDataItem(timeString, ChatViewHolders.USER, text)
+            result.fileUris = filePaths.map { Uri.fromFile(File(it)) }.toMutableList()
             return result
         }
     }

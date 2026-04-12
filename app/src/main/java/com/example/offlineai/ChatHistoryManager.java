@@ -268,6 +268,19 @@ public class ChatHistoryManager {
                 }
             }
             
+            // Output generic file attachments (if any)
+            if (item.fileUris != null && !item.fileUris.isEmpty()) {
+                for (android.net.Uri fileUri : item.fileUris) {
+                    String filePath = fileUri.getPath();
+                    if (!TextUtils.isEmpty(filePath)) {
+                        java.io.File file = new java.io.File(filePath);
+                        markdown.append("📎 [").append(file.getName())
+                                .append("](").append(file.getName()).append(")\n\n");
+                        LogManager.logD(TAG, "File reference added: " + file.getName());
+                    }
+                }
+            }
+            
             // 输出用户文本（优先使用displayText，因为它可能经过处理）
             String userText = !TextUtils.isEmpty(item.getDisplayText()) ? item.getDisplayText() : item.text;
             if (!TextUtils.isEmpty(userText)) {

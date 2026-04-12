@@ -14,8 +14,9 @@ chaquopy {
             install "openpyxl"         // Excel
 
             // ========== PDF Processing ==========
-            install "PyPDF2"           // Read, merge, split PDF
-            install "fpdf2"            // Generate PDF
+            install "pypdf"            // Read, merge, split PDF (skills use 'from pypdf import')
+            install "pdfplumber"       // PDF text & table extraction
+            install "fpdf2"            // Generate PDF (pure Python)
 
             // ========== Network & Web ==========
             install "requests"
@@ -25,7 +26,8 @@ chaquopy {
             install "chardet"
             install "pillow"
 
-            // ========== Scientific Computing ==========
+            // ========== Data & Scientific Computing ==========
+            install "pandas"           // Data analysis (xlsx/pdf skills)
             install "numpy"
 
             // ========== Compression (ultra-lightweight) ==========

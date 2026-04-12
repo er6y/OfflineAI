@@ -77,6 +77,11 @@ public class GlobalApplication extends Application {
         initializeTextEditorSeedFiles();
         Log.i(TAG, "[STARTUP_TRACE] initializeTextEditorSeedFiles finished, costMs=" + (System.currentTimeMillis() - stepStart));
 
+        // Ensure skill folders from assets are present in data root
+        stepStart = System.currentTimeMillis();
+        int skillsCopied = ConfigManager.ensureAssetSkillsInDataRoot(this);
+        Log.i(TAG, "[STARTUP_TRACE] ensureAssetSkillsInDataRoot finished, copied=" + skillsCopied + ", costMs=" + (System.currentTimeMillis() - stepStart));
+
         long totalCost = System.currentTimeMillis() - startMs;
         Log.i(TAG, "[STARTUP_TRACE] GlobalApplication.onCreate end, process=" + processName + ", totalCostMs=" + totalCost);
     }

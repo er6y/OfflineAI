@@ -150,6 +150,9 @@ Python execution:
 {"name":"python_run","parameters":{"file":"/sdcard/script.py","args":["--port","8000"]}}
 {"name":"python_status","parameters":{}}
 {"name":"python_kill","parameters":{}}
+
+Media output (show image/audio/file in chat UI):
+{"name":"show_media","parameters":{"path":"/sdcard/output.png","description":"Generated chart"}}
 """
     }
 
@@ -388,6 +391,10 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                 }
                 "python_status" -> AgentAction.PythonStatus()
                 "python_kill" -> AgentAction.PythonKill()
+                "show_media" -> AgentAction.ShowMedia(
+                    path = params.getString("path"),
+                    description = params.optString("description", "")
+                )
                 else -> {
                     lastParseError = "Unknown action name: '$name'"
                     null

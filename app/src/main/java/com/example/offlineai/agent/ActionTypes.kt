@@ -537,6 +537,27 @@ sealed class AgentAction {
         }
         override fun needsScreenshot() = false
     }
+
+    /**
+     * Show media/file output in chat UI
+     * References the original file path (no copy) and writes markdown to conversation.md
+     *
+     * {"name": "show_media", "parameters": {"path": "/sdcard/output.png", "description": "Generated chart"}}
+     *
+     * Supports: image (jpg/png/gif/webp/bmp), audio (wav/mp3/m4a), generic files (zip/txt/pdf/etc.)
+     * Auto-detects type from file extension.
+     */
+    data class ShowMedia(
+        val path: String,
+        val description: String = ""
+    ) : AgentAction() {
+        override fun toJson() = JSONObject().apply {
+            put("action", "show_media")
+            put("path", path)
+            if (description.isNotEmpty()) put("description", description)
+        }
+        override fun needsScreenshot() = false
+    }
 }
 
 /**
@@ -555,3 +576,16 @@ data class ExecutionResult(
     val error: Throwable? = null,
     val returnData: String? = null
 )
+
+private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp", "svg")
+private val AUDIO_EXTENSIONS = setOf("wav", "mp3", "m4a", "ogg", "flac", "aac")
+
+/**
+ * Classify file type by extension.
+ * @return "image", "audio", or "file"
+ */
+fun classifyFileType(ext: String): String = when (ext.lowercase()) {
+    in IMAGE_EXTENSIONS -> "image"
+    in AUDIO_EXTENSIONS -> "audio"
+    else -> "file"
+}

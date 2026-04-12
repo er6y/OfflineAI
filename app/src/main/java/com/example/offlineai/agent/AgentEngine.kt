@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import com.example.offlineai.LogManager
 import com.example.offlineai.ConfigManager
 import com.example.offlineai.agent.AgentTtsHelper
+import com.example.offlineai.agent.SkillCatalog
 import com.example.offlineai.agent.UnifiedActionExecutor
 import com.example.offlineai.agent.model.AgentAction
 import com.example.offlineai.agent.model.AgentResponse
@@ -205,6 +206,15 @@ class AgentEngine(private val context: Context) {
         dataMemory.clear()  // Clear task-scoped data memory for every new task
         AgentAccessibilityService.getInstance()?.updateDataMemoryKeys(emptyList())
         AgentAccessibilityService.getInstance()?.updateTaskBrief("")
+
+        // Scan skills directory and cache catalog for Step 0 injection
+        SkillCatalog.scan(context)
+        AgentAccessibilityService.getInstance()?.updateSkillCatalog(SkillCatalog.getCatalogText())
+
+        // Ensure agent_workspace directory exists and pass path to service
+        val workspacePath = ConfigManager.ensureAgentWorkspace(context)
+        AgentAccessibilityService.getInstance()?.updateAgentWorkspacePath(workspacePath)
+        LogManager.logI(TAG, "[AGENT_INIT] Workspace: $workspacePath")
         
         // Query AgentKB once at task start, cache for all steps and experience summary
         cachedAgentKbContext = try {
@@ -367,7 +377,7 @@ class AgentEngine(private val context: Context) {
                             is AgentAction.DataMemory -> {
                                 val dmResult = executeDataMemory(action)
                                 val desc = formatActionDesc(action)
-                                val resultStr = formatResultStr(dmResult)
+                                val resultStr = formatResultStr(dmResult, action)
                                 stepResultLines.add("$desc -> $resultStr")
                                 LogManager.logI(TAG, "[EXEC] $desc -> ${if (dmResult.success) "OK" else "FAIL"}")
                             }
@@ -518,7 +528,7 @@ class AgentEngine(private val context: Context) {
 
                                 // Collect formatted result line
                                 val desc = formatActionDesc(action)
-                                val resultStr = formatResultStr(result)
+                                val resultStr = formatResultStr(result, action)
                                 stepResultLines.add("$desc -> $resultStr")
                                 LogManager.logI(TAG, "[EXEC] $desc -> ${if (result.success) "OK" else "FAIL"}")
 
@@ -860,6 +870,7 @@ class AgentEngine(private val context: Context) {
         is AgentAction.PythonRun -> "python_run(\"${(action.code ?: action.file ?: "").ellipsis(50)}\")"
         is AgentAction.PythonStatus -> "python_status"
         is AgentAction.PythonKill -> "python_kill"
+        is AgentAction.ShowMedia -> "show_media(${action.path})"
     }
 
     /**
@@ -868,9 +879,14 @@ class AgentEngine(private val context: Context) {
      * Otherwise construct a simple JSON: {"status":"OK/FAIL","message":"..."}.
      * This ensures the model always sees consistent JSON after "->".
      */
-    private fun formatResultStr(result: ExecutionResult): String {
+    private fun formatResultStr(result: ExecutionResult, action: AgentAction? = null): String {
+        // read_file / read_lines / web_get_content carry large payloads; allow up to 20000 chars
+        val maxReturnData = when (action) {
+            is AgentAction.ReadFile, is AgentAction.ReadLines, is AgentAction.WebGetContent -> 20000
+            else -> 2000
+        }
         return if (!result.returnData.isNullOrEmpty()) {
-            result.returnData.take(2000)
+            result.returnData.take(maxReturnData)
         } else {
             val status = if (result.success) "OK" else "FAIL"
             val msg = result.message.take(200).replace("\"", "\\\"").replace("\n", "\\n")
