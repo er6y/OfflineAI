@@ -26,23 +26,54 @@ with open(save_path, "wb") as f:
 print(f"Downloaded {len(r.content)} bytes to {save_path}")
 ```
 
-**(C) Web page URL** (not a direct zip link):
-1. Use `web_open` to load the page, then `web_get_content` to read it.
-2. Search the page content for a `.zip` download link (look for href containing `.zip`, "Download" buttons, GitHub release assets, etc.).
-3. If a zip link is found → download it with `python_run` + `requests` as in (B).
-4. If no zip link found → try navigating the page with browser actions (click download buttons, follow links).
-5. If still cannot obtain the zip → `ask_user`: "I couldn't find a downloadable skill package on this page. Please download the .zip file manually and tell me its local path."
+**(C) Web page URL** (skill registry page, GitHub repo, etc.):
+The goal is to find and download the `.zip` package. Follow this escalation chain — **do NOT loop; move to the next approach if the current one fails**:
+
+**Approach 1 — Scrape the page (1-2 steps max)**:
+1. `web_open` the URL, then `web_get_content`.
+2. The result is JSON with `links[]` and `buttons[]`. Check:
+   - Any `href` containing `.zip` or `download` or `archive`
+   - Any link/button text matching "Download zip", "下载ZIP", "下载", "Code" etc.
+3. If a direct `.zip` URL is found → download with `python_run` + `requests` as in (B). **Done.**
+
+**Approach 2 — Navigate to the files/download tab (1-2 steps max)**:
+Many registries (ModelScope, GitHub) show skill intro on the landing page but put the download link on a separate "Files" or "Code" tab.
+1. Look at `web_get_content` text for tab labels like "Skill 文件", "Files", "Code".
+2. Use `web_execute_js` to click that tab, e.g.: `document.querySelector('a[href*="file"]').click()` or similar.
+3. Then `web_get_content` again to find the zip link.
+4. If found → download with `python_run` + `requests`. **Done.**
+
+**Approach 3 — GUI operations with screenshot (2-3 steps max)**:
+If DOM scripting fails (SPA pages may render download buttons outside normal DOM), use **GUI mode**:
+1. The page should already be open. Use `take_screenshot` to see the actual rendered page.
+2. Look for a visible "Download zip" / "下载" button in the screenshot.
+3. If found, use `click` at the button coordinates to trigger the browser download.
+4. `wait` 5 seconds, then use `python_run` to check `/sdcard/Download/` for newly downloaded `.zip` files:
+   ```python
+   import os, glob
+   zips = sorted(glob.glob('/sdcard/Download/*.zip'), key=os.path.getmtime, reverse=True)
+   print(zips[:3] if zips else "No zip files found")
+   ```
+5. If a zip is found → proceed to Step 2. **Done.**
+
+**Approach 4 — Ask user**:
+If all above approaches fail → `ask_user`: "I couldn't find a downloadable skill package on this page. Please download the .zip file manually and tell me its local path."
+
+**IMPORTANT**: Do NOT repeat the same approach. Move forward through 1→2→3→4. Total attempts for Step 1(C) should not exceed ~8 agent steps.
 
 ### Step 2: Inspect zip, check conflict, then extract
 
-Derive the skills directory from this SKILL.md's own path (recorded in context.fact at Step 0).
+**CRITICAL — Target directory**: The skills directory is `{dataRoot}/skills/` where `dataRoot` is typically `/storage/emulated/0/Download/OfflineAIData`.
+You MUST derive it from the **skill-install SKILL.md path** shown in Step 0's skill catalog (e.g. `/storage/emulated/0/Download/OfflineAIData/skills/skill-install/SKILL.md` → go up 2 levels → `/storage/emulated/0/Download/OfflineAIData/skills/`).
+**Do NOT use `/sdcard/skills/` — that is the wrong location.** New skills must be siblings of `skill-install/` in the same directory.
 
 **Phase 1 — Inspect zip (do NOT extract yet)**:
 ```python
 import zipfile, os
 zip_path = "<save_path_or_local_path>"
-this_skill_md = "<path_to_this_SKILL.md>"  # from context.fact
-skills_dir = os.path.dirname(os.path.dirname(this_skill_md))
+# MUST use the skill-install SKILL.md path from Step 0 skill catalog to derive skills_dir
+this_skill_md = "<path_to_skill-install_SKILL.md>"  # e.g. /storage/emulated/0/Download/OfflineAIData/skills/skill-install/SKILL.md
+skills_dir = os.path.dirname(os.path.dirname(this_skill_md))  # -> {dataRoot}/skills/
 
 with zipfile.ZipFile(zip_path, "r") as z:
     names = z.namelist()

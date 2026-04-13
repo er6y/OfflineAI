@@ -228,6 +228,13 @@ public class ChatHistoryFragment extends Fragment {
             ConfigManager.setString(context, 
                 ConfigManager.KEY_CURRENT_CHAT_FOLDER, item.folderPath);
             
+            // Also persist to mode-specific key so switchChatFolderByMode can restore it
+            boolean isAgent = ConfigManager.getBoolean(context, ConfigManager.KEY_AGENT_MODE_ENABLED, false);
+            if (!isAgent) {
+                ConfigManager.setString(context, ConfigManager.KEY_RAG_CHAT_FOLDER, item.folderPath);
+                LogManager.logD(TAG, "[LOAD] Saved RAG chat folder: " + item.folderPath);
+            }
+            
             LogManager.logD(TAG, "Loading conversation from: " + item.folderPath);
             
             // Show toast BEFORE popBackStack

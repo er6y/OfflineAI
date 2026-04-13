@@ -1471,20 +1471,28 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         }
     }
 
-    private void switchChatFolderByMode() {
+    /**
+     * Get chat folder path based on current mode.
+     * AGENT -> KEY_AGENT_CHAT_FOLDER, RAG -> KEY_RAG_CHAT_FOLDER.
+     * This is the single source of truth for which folder to load/save.
+     */
+    private String getModeSpecificChatFolder() {
         if (isAgentMode()) {
-            String agentFolder = ConfigManager.getAgentChatFolder(requireContext());
-            if (agentFolder == null || agentFolder.trim().isEmpty()) {
-                agentFolder = ConfigManager.getAgentChatFolderPath(requireContext());
-                ConfigManager.setAgentChatFolder(requireContext(), agentFolder);
+            String folder = ConfigManager.getAgentChatFolder(requireContext());
+            if (folder == null || folder.trim().isEmpty()) {
+                folder = ConfigManager.getAgentChatFolderPath(requireContext());
             }
-            ConfigManager.setCurrentChatFolder(requireContext(), agentFolder);
-            currentChatFolderPath = agentFolder;
+            return folder;
         } else {
-            String ragFolder = ConfigManager.getString(requireContext(), ConfigManager.KEY_RAG_CHAT_FOLDER, "");
-            ConfigManager.setCurrentChatFolder(requireContext(), ragFolder);
-            currentChatFolderPath = ragFolder;
+            return ConfigManager.getString(requireContext(), ConfigManager.KEY_RAG_CHAT_FOLDER, "");
         }
+    }
+
+    private void switchChatFolderByMode() {
+        String folder = getModeSpecificChatFolder();
+        currentChatFolderPath = folder;
+        // Sync to KEY_CURRENT_CHAT_FOLDER for RagQueryManager and other external consumers
+        ConfigManager.setCurrentChatFolder(requireContext(), folder);
     }
     
     /**
@@ -2465,6 +2473,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 lastMsg.setShowDebug(false);
                 lastMsg.setShowThinking(false);
                 lastMsg.setShowPerformance(false);
+                lastMsg.setShowAgent(false);
                 lastMsg.setLoading(false);
                 
                 // Update UI
@@ -2521,7 +2530,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         try {
             String currentFolder = currentChatFolderPath;
             if (TextUtils.isEmpty(currentFolder)) {
-                currentFolder = ConfigManager.getString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                currentFolder = getModeSpecificChatFolder();
             }
             if (TextUtils.isEmpty(currentFolder)) {
                 return false;
@@ -3186,11 +3195,11 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         applyGlobalTextSize();
         
         // Check if chat folder changed (e.g., user switched conversation from history)
-        String configFolder = ConfigManager.getString(getContext(), 
-            ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+        String configFolder = getModeSpecificChatFolder();
         if (!configFolder.equals(currentChatFolderPath)) {
             LogManager.logD(TAG, "[CHAT_HISTORY] Detected conversation switch: " + configFolder);
             currentChatFolderPath = configFolder;
+            ConfigManager.setCurrentChatFolder(getContext(), configFolder);
             
             // Reload conversation
             loadChatHistory();
@@ -3520,8 +3529,8 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             LogManager.logD(TAG, "[CHAT_HISTORY] Cleared Agent fixed chat folder for new conversation");
         } else {
             // Clear current RAG conversation mapping (new send will create new folder)
-            ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
             ConfigManager.setString(getContext(), ConfigManager.KEY_RAG_CHAT_FOLDER, "");
+            ConfigManager.setCurrentChatFolder(getContext(), "");
             currentChatFolderPath = "";
             LogManager.logD(TAG, "[CHAT_HISTORY] Cleared RAG current chat folder for new conversation");
         }
@@ -3608,7 +3617,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 return agentFolder;
             }
 
-            String ragFolder = ConfigManager.getString(requireContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            String ragFolder = ConfigManager.getString(requireContext(), ConfigManager.KEY_RAG_CHAT_FOLDER, "");
             if (ragFolder == null || ragFolder.trim().isEmpty()) {
                 ragFolder = ChatHistoryManager.createNewChatFolder(requireContext());
                 if (ragFolder == null || ragFolder.trim().isEmpty()) {
@@ -4827,8 +4836,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
 // ... (unchanged code)
     private void saveChatHistory() {
         try {
-            String currentFolder = ConfigManager.getString(getContext(), 
-                ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            String currentFolder = getModeSpecificChatFolder();
             
             if (currentFolder.isEmpty()) {
                 LogManager.logD(TAG, "[CHAT_HISTORY] No current chat folder, skipping save");
@@ -4892,8 +4900,10 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
      */
     public void loadChatHistory() {
         try {
-            String currentFolder = ConfigManager.getString(getContext(), 
-                ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            String currentFolder = getModeSpecificChatFolder();
+            // Sync to KEY_CURRENT_CHAT_FOLDER for RagQueryManager
+            ConfigManager.setCurrentChatFolder(getContext(), currentFolder);
+            currentChatFolderPath = currentFolder;
             
             LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] === loadChatHistory() called ===");
             LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] currentFolder: " + currentFolder);
@@ -4903,6 +4913,14 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             
             if (currentFolder.isEmpty()) {
                 LogManager.logD(TAG, "[CHAT_HISTORY] No previous chat history to load");
+                // Clear chat messages to avoid showing previous mode's history
+                if (!chatMessages.isEmpty()) {
+                    chatMessages.clear();
+                    if (chatAdapter != null) {
+                        chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
+                    }
+                    LogManager.logI(TAG, "[CHAT_HISTORY] Empty folder, cleared chat UI");
+                }
                 return;
             }
             
@@ -4910,7 +4928,13 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             File folder = new File(currentFolder);
             if (!folder.exists()) {
                 LogManager.logW(TAG, "[CHAT_HISTORY] Chat folder does not exist, clearing setting and maintaining empty UI");
-                ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                // Clear mode-specific key
+                if (isAgentMode()) {
+                    ConfigManager.setAgentChatFolder(getContext(), "");
+                } else {
+                    ConfigManager.setString(getContext(), ConfigManager.KEY_RAG_CHAT_FOLDER, "");
+                }
+                ConfigManager.setCurrentChatFolder(getContext(), "");
                 // Clear chat messages to avoid showing previous mode's history
                 if (!chatMessages.isEmpty()) {
                     chatMessages.clear();
@@ -4970,7 +4994,13 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         } catch (Exception e) {
             LogManager.logE(TAG, "[CHAT_HISTORY] Error loading conversation", e);
             // Clear the problematic folder setting to prevent repeated failures
-            ConfigManager.setString(getContext(), ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+            // Clear mode-specific key on error
+            if (isAgentMode()) {
+                ConfigManager.setAgentChatFolder(getContext(), "");
+            } else {
+                ConfigManager.setString(getContext(), ConfigManager.KEY_RAG_CHAT_FOLDER, "");
+            }
+            ConfigManager.setCurrentChatFolder(getContext(), "");
             // Only show toast for real errors
             Toast.makeText(getContext(), R.string.toast_chat_history_load_failed, Toast.LENGTH_SHORT).show();
         }

@@ -71,7 +71,7 @@ ${format.getFormatDescription()}
 - **应用启动**：名称不明确时先调用 `get_app_list action`，严格匹配应用名，禁止幻觉
 - **坐标点击失败（无效）处理**：等待 → 重试±20~40偏移 → 换策略
 - **批量调用**：会顺序执行每一个action，如先 context 后 click
-- **任务完成**：必须用 `terminate`（status=success，text=结果摘要）
+- **任务完成**：必须用 `terminate`（status=success，text=结果摘要， files=可选生成的全路径的文件）
 - **swipe up**：从下往上滑 → 查看更多
 - **swipe down**：从上往下滑 → 返回顶部/刷新
 

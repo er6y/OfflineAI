@@ -132,12 +132,72 @@
             tools:visibility="visible" />
     </LinearLayout>
 
-    <!-- Main content text - THIRD -->
+    <!-- Agent execution section - THIRD -->
+    <LinearLayout
+        android:id="@+id/ll_agent_toggle"
+        android:layout_width="wrap_content"
+        android:layout_height="30dp"
+        android:layout_below="@id/ll_thinking_container"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/tv_agent_header"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            tools:text="Agent 执行过程"
+            android:textColor="#78909C"
+            android:textSize="14sp"
+            android:visibility="visible" />
+
+        <ImageView
+            android:id="@+id/iv_agent_header"
+            android:layout_width="15dp"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_vertical"
+            android:layout_marginStart="10dp"
+            app:srcCompat="@drawable/ic_arrow_down"
+            app:tint="#78909C" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/ll_agent_container"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_toEndOf="@id/ic_header"
+        android:layout_below="@id/ll_agent_toggle"
+        android:orientation="horizontal"
+        tools:visibility="visible"
+        android:visibility="gone"
+        android:padding="@dimen/space10">
+
+        <View
+            android:id="@+id/view_agent_marker"
+            android:layout_width="2dp"
+            android:layout_height="match_parent"
+            android:layout_marginTop="2dp"
+            android:layout_marginEnd="8dp"
+            android:background="#78909C" />
+
+        <TextView
+            android:id="@+id/tv_chat_agent"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textAppearance="@style/Light"
+            android:textColor="#78909C"
+            android:textSize="@dimen/h4"
+            tools:text="Agent execution steps..."
+            tools:visibility="visible" />
+    </LinearLayout>
+
+    <!-- Main content text - FOURTH -->
     <TextView
         android:id="@+id/tv_chat_text"
         tools:text="this is the generated text"
         android:layout_toEndOf="@id/ic_header"
-        android:layout_below="@id/ll_thinking_container"
+        android:layout_below="@id/ll_agent_container"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:paddingStart="2dp"

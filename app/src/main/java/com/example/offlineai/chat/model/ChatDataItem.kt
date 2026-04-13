@@ -70,6 +70,10 @@ class ChatDataItem {
     var performanceText: String? = null
     var showPerformance: Boolean = true
 
+    // Agent section (for collapsible agent execution steps)
+    var agentText: String? = null
+    var showAgent: Boolean = false  // Default collapsed
+
     var audioDuration = 0f
 
     private var _hasOmniAudio:Boolean = false
@@ -146,6 +150,10 @@ class ChatDataItem {
 
     fun togglePerformance() {
         showPerformance = !showPerformance
+    }
+
+    fun toggleAgent() {
+        showAgent = !showAgent
     }
 
     companion object {

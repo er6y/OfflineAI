@@ -216,6 +216,12 @@ class AgentAccessibilityService : AccessibilityService() {
                 override fun onTaskCompleted(success: Boolean, message: String) {
                     LogManager.logI(TAG, "[AGENT] Task completed: $success")
                     
+                    // NOTE: </agent> marker, terminate text and file attachments are now written
+                    // by AgentEngine in the Terminate action handler, BEFORE this callback is invoked.
+                    
+                    // Trigger UI reload so the merged agent block renders correctly
+                    ragQueryManager?.requestReloadChatHistory()
+                    
                     // Experience summary is now handled inside AgentEngine.executeTask()
                     // When terminate is detected and summary is enabled, AgentEngine will:
                     // 1. Execute one more step with summary prompt
@@ -390,6 +396,29 @@ class AgentAccessibilityService : AccessibilityService() {
         agentTts?.shutdown()
         agentTts = null
         
+        // Close unclosed <agent> tag in conversation.md to keep history parseable
+        try {
+            val chatFolderPath = ConfigManager.getString(
+                applicationContext, ConfigManager.KEY_CURRENT_CHAT_FOLDER, ""
+            )
+            if (chatFolderPath.isNotEmpty()) {
+                val conversationFile = java.io.File(chatFolderPath, "conversation.md")
+                if (conversationFile.exists()) {
+                    val content = conversationFile.readText()
+                    val lastOpen = content.lastIndexOf("<agent>")
+                    val lastClose = content.lastIndexOf("</agent>")
+                    if (lastOpen >= 0 && lastOpen > lastClose) {
+                        java.io.FileWriter(conversationFile, true).use { writer ->
+                            writer.write("\n</agent>\n")
+                        }
+                        LogManager.logI(TAG, "[AGENT_BLOCK] Appended </agent> on user stop (unclosed block)")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            LogManager.logE(TAG, "[AGENT_BLOCK] Failed to close agent tag on stop", e)
+        }
+        
         // If waiting for experience save, user clicked stop = cancel
         if (isWaitingForExperienceSave) {
             LogManager.logI(TAG, "[AGENT_EXP] User cancelled experience summary via stop button")
@@ -550,10 +579,18 @@ class AgentAccessibilityService : AccessibilityService() {
                             markdown.append("\n\n<!-- MESSAGE_SEPARATOR -->\n\n")
                         }
                         
-                        // Header: ## 用户 (timestamp)
+                        // Header: ## Agent (timestamp) for agent-generated prompts
+                        // Uses "Agent" instead of "用户" to distinguish from real user input
                         val sdf = java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault())
                         val timeStr = sdf.format(java.util.Date())
-                        markdown.append("## 用户 ($timeStr)\n\n")
+                        markdown.append("## Agent ($timeStr)\n\n")
+                        
+                        // Write <agent> marker INSIDE the first step's user message body
+                        // Must be after ## header so MESSAGE_SEPARATOR split (?=## ) still works
+                        if (currentStep == 1) {
+                            markdown.append("<agent>\n\n")
+                            LogManager.logI(TAG, "[AGENT_BLOCK] Writing <agent> marker at step 1")
+                        }
                         
                         // Add screenshot if available
                         if (screenshotPath != null) {
@@ -1475,9 +1512,6 @@ $kbActionDesc
                     }
                     is AgentAction.PythonKill -> {
                         result.append(" (kill active python instance)")
-                    }
-                    is AgentAction.ShowMedia -> {
-                        result.append(" (show ${action.path})")
                     }
                 }
                 result.append("\n")

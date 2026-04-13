@@ -8,7 +8,6 @@ import com.example.offlineai.LogManager
 import com.example.offlineai.ConfigManager
 import com.example.offlineai.agent.model.AgentAction
 import com.example.offlineai.agent.model.ExecutionResult
-import com.example.offlineai.agent.model.classifyFileType
 import com.example.offlineai.agent.service.AgentAccessibilityService
 import com.example.offlineai.agent.utils.AppNameMapper
 import kotlinx.coroutines.*
@@ -210,7 +209,6 @@ class UnifiedActionExecutor(private val context: Context) {
                 is AgentAction.PythonRun -> executePythonRun(action)
                 is AgentAction.PythonStatus -> executePythonStatus(action)
                 is AgentAction.PythonKill -> executePythonKill(action)
-                is AgentAction.ShowMedia -> executeShowMedia(action.path, action.description)
             }
         } finally {
             if (needsHide) {
@@ -317,7 +315,6 @@ class UnifiedActionExecutor(private val context: Context) {
             }
             is AgentAction.PythonStatus -> null  // No parameters needed
             is AgentAction.PythonKill -> null  // No parameters needed
-            is AgentAction.ShowMedia -> requireNonBlank(action.path, "show_media.path")
             else -> null
         }
     }
@@ -1143,69 +1140,6 @@ class UnifiedActionExecutor(private val context: Context) {
                 returnData = "{\"status\":\"SUCCESS\",\"return\":\"killed\",\"hint\":\"Use data_memory get key=python_key\"}"
             )
         }
-    }
-
-    /**
-     * Execute show_media action: reference original file path and write markdown to conversation.md
-     * No file copy — uses the original path directly.
-     * If file is already in chatFolder, markdown uses relative name; otherwise uses absolute path.
-     * Auto-detects media type from file extension:
-     * - image (jpg/png/gif/webp/bmp) -> ![](path)
-     * - audio (wav/mp3/m4a/ogg/flac) -> 🎙️ [音频: name](path)
-     * - generic file -> 📎 [name](path)
-     */
-    private fun executeShowMedia(path: String, description: String): ExecutionResult {
-        LogManager.logI(TAG, "[SHOW_MEDIA] path=$path, description=$description")
-        
-        val srcFile = File(path)
-        if (!srcFile.exists()) {
-            return ExecutionResult(false, "show_media: file not found: $path")
-        }
-        
-        // Get Agent chat folder
-        val chatFolderPath = ConfigManager.getString(context, ConfigManager.KEY_AGENT_CHAT_FOLDER, "")
-        if (chatFolderPath.isBlank()) {
-            return ExecutionResult(false, "show_media: Agent chat folder not configured")
-        }
-        val chatFolder = File(chatFolderPath)
-        if (!chatFolder.exists()) {
-            chatFolder.mkdirs()
-        }
-        
-        // Use original file path directly, no copy/rename
-        val ext = srcFile.extension
-        val typeLabel = classifyFileType(ext)
-        val fileName = srcFile.name
-        val absolutePath = srcFile.absolutePath
-        
-        // Determine markdown reference: use relative name if file is already in chatFolder, otherwise absolute path
-        val refPath = if (srcFile.parentFile?.absolutePath == chatFolder.absolutePath) {
-            fileName
-        } else {
-            absolutePath
-        }
-        
-        val markdown = when (typeLabel) {
-            "image" -> if (description.isNotEmpty()) "![$description]($refPath)" else "![]($refPath)"
-            "audio" -> "🎙️ [音频: $fileName${if (description.isNotEmpty()) " - $description" else ""}]($refPath)"
-            else -> "📎 [${description.ifEmpty { fileName }}]($refPath)"
-        }
-        
-        // Append to conversation.md
-        try {
-            com.example.offlineai.ChatHistoryManager.appendAssistantTextMessage(
-                context, chatFolderPath, markdown
-            )
-            LogManager.logI(TAG, "[SHOW_MEDIA] Appended $typeLabel to conversation.md: $refPath")
-        } catch (e: Exception) {
-            LogManager.logW(TAG, "[SHOW_MEDIA] Failed to append to conversation.md: ${e.message}")
-        }
-        
-        return ExecutionResult(
-            true,
-            "show_media: $typeLabel output displayed in chat ($fileName)",
-            returnData = absolutePath
-        )
     }
 
     /**

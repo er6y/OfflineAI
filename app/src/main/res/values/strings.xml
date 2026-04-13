@@ -1170,7 +1170,7 @@
     <string name="dialog_title_add_api_url_simple">添加API地址</string>
     
     <!-- Multimodal UI strings -->
-    <string name="menu_pick_media">多媒体</string>
+    <string name="menu_pick_media">文件</string>
     <string name="menu_take_photo">相机</string>
     <string name="desc_image_thumbnail">图片缩略图</string>
     <string name="desc_delete_image">删除图片</string>
@@ -1189,6 +1189,7 @@
     <string name="collapsible_debug">调试信息</string>
     <string name="collapsible_thinking">思考过程</string>
     <string name="collapsible_performance">性能指标</string>
+    <string name="collapsible_agent">Agent 执行过程</string>
 
     <!-- Chat History strings -->
     <string name="chat_history_title">对话历史</string>

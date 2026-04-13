@@ -173,9 +173,10 @@ sealed class AgentAction {
     
     /**
      * Terminate task with status
-     * {"action": "terminate", "status": "success/fail"}
+     * {"action": "terminate", "status": "success/fail", "text": "summary", "files": ["/path/to/file"]}
+     * files: optional list of file paths to attach (image/audio/generic file)
      */
-    data class Terminate(val status: Status, val text: String = "") : AgentAction() {
+    data class Terminate(val status: Status, val text: String = "", val files: List<String> = emptyList()) : AgentAction() {
         enum class Status(val value: String) {
             SUCCESS("success"),
             FAIL("fail")
@@ -185,6 +186,7 @@ sealed class AgentAction {
             put("action", "terminate")
             put("status", status.value)
             if (text.isNotEmpty()) put("text", text)
+            if (files.isNotEmpty()) put("files", JSONArray(files))
         }
         override fun needsScreenshot() = false  // Task ended, no screenshot needed
     }
@@ -538,26 +540,7 @@ sealed class AgentAction {
         override fun needsScreenshot() = false
     }
 
-    /**
-     * Show media/file output in chat UI
-     * References the original file path (no copy) and writes markdown to conversation.md
-     *
-     * {"name": "show_media", "parameters": {"path": "/sdcard/output.png", "description": "Generated chart"}}
-     *
-     * Supports: image (jpg/png/gif/webp/bmp), audio (wav/mp3/m4a), generic files (zip/txt/pdf/etc.)
-     * Auto-detects type from file extension.
-     */
-    data class ShowMedia(
-        val path: String,
-        val description: String = ""
-    ) : AgentAction() {
-        override fun toJson() = JSONObject().apply {
-            put("action", "show_media")
-            put("path", path)
-            if (description.isNotEmpty()) put("description", description)
-        }
-        override fun needsScreenshot() = false
-    }
+    // ShowMedia removed - replaced by Terminate.files parameter
 }
 
 /**

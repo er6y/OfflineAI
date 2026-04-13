@@ -305,6 +305,13 @@ public class ChatHistoryManager {
                 markdown.append("\n</debug>\n\n");
             }
             
+            // Persist agent execution block (if present from merged agent steps)
+            if (!TextUtils.isEmpty(item.getAgentText())) {
+                markdown.append("<agent>\n");
+                markdown.append(item.getAgentText().trim());
+                markdown.append("\n</agent>\n\n");
+            }
+            
             // 添加AI回复正文（只输出displayText，避免与text重复）
             if (!TextUtils.isEmpty(item.getDisplayText())) {
                 markdown.append(item.getDisplayText().trim()).append("\n\n");
@@ -387,12 +394,16 @@ public class ChatHistoryManager {
             // This prevents splitting on --- that appears in message content
             String separatorPattern = "\\n\\n<!\\-\\- MESSAGE_SEPARATOR \\-\\->\\n\\n(?=## )";
             String[] messageParts = content.toString().split(separatorPattern);
+            
+            // Pre-process: merge <agent>...</agent> raw markdown blocks before parsing
+            List<String> mergedParts = mergeAgentBlocksRaw(messageParts);
+            
             List<ChatDataItem> messages = new ArrayList<>();
             
             // Stats: [0]=chars, [1]=audio, [2]=image
             int[] stats = new int[3];
             
-            for (String part : messageParts) {
+            for (String part : mergedParts) {
                 if (TextUtils.isEmpty(part.trim())) {
                     continue;
                 }
@@ -412,6 +423,154 @@ public class ChatHistoryManager {
             LogManager.logE(TAG, "Error loading conversation", e);
             return null;
         }
+    }
+    
+    /**
+     * Pre-process raw markdown parts: merge <agent>...</agent> blocks into a single
+     * synthetic AI assistant message BEFORE markdownToChatItem parsing.
+     * 
+     * This operates on raw markdown strings so that nested <think>/<debug>/<performance>
+     * tags inside intermediate messages are preserved in the agentText.
+     * 
+     * conversation.md layout after agent run:
+     *   ## 用户 (HH:mm)                 ← original user question (outside agent block)
+     *   <!-- MESSAGE_SEPARATOR -->
+     *   ## 用户 (HH:mm)                 ← step 1 user message
+     *   <agent>                          ← agent block opens (inside step 1 body)
+     *   ...prompt...
+     *   <!-- MESSAGE_SEPARATOR -->
+     *   ## AI助手 (HH:mm)               ← step 1 AI reply
+     *   ...
+     *   <!-- MESSAGE_SEPARATOR -->
+     *   ## AI助手 (HH:mm)               ← last AI reply (terminate with optional file attachments)
+     *   ...content...
+     *   </agent>                         ← agent block closes (appended by onTaskCompleted)
+     * 
+     * After merge the intermediate parts become one synthetic part:
+     *   ## AI助手 (time)\n\n<agent>...all intermediate raw markdown...</agent>\n\nfinalText
+     */
+    private static List<String> mergeAgentBlocksRaw(String[] parts) {
+        if (parts == null || parts.length == 0) return new ArrayList<>();
+        
+        List<String> result = new ArrayList<>();
+        int i = 0;
+        while (i < parts.length) {
+            String part = parts[i];
+            
+            // Check if this part contains <agent> marker
+            if (part.contains("<agent>")) {
+                // If both <agent> and </agent> are in the same part, it's already a
+                // merged/serialized agent block (e.g. from chatItemToMarkdown). Pass through as-is.
+                if (part.contains("</agent>")) {
+                    LogManager.logI(TAG, "[AGENT_MERGE_RAW] Found self-contained <agent>...</agent> at part index " + i + ", pass through");
+                    result.add(part);
+                    i++;
+                    continue;
+                }
+                
+                LogManager.logI(TAG, "[AGENT_MERGE_RAW] Found <agent> at part index " + i);
+                int agentStartIndex = i;
+                
+                // Collect raw markdown of all intermediate parts
+                StringBuilder agentRawContent = new StringBuilder();
+                String finalPartContent = null;
+                String finalPartTime = null;
+                boolean foundEnd = false;
+                
+                // Extract content from the opening part (remove <agent> tag)
+                // The <agent> is inside the user message body, after ## 用户 header
+                String openingContent = part.replace("<agent>", "").trim();
+                if (!openingContent.isEmpty()) {
+                    agentRawContent.append(openingContent).append("\n\n---\n\n");
+                }
+                
+                i++;
+                while (i < parts.length) {
+                    String p = parts[i];
+                    
+                    if (p.contains("</agent>")) {
+                        // This part contains closing tag.
+                        // Content BEFORE </agent> is still part of the agent block
+                        // (e.g. the last AI step's raw model output including thinking).
+                        // Content AFTER </agent> (if any) is the final display text.
+                        int closingTagIdx = p.indexOf("</agent>");
+                        String beforeClose = p.substring(0, closingTagIdx).trim();
+                        String afterClose = p.substring(closingTagIdx + 8).trim(); // 8 = "</agent>".length()
+                        
+                        // The beforeClose content is an intermediate agent step - add to agent block
+                        if (!beforeClose.isEmpty()) {
+                            agentRawContent.append(beforeClose).append("\n\n---\n\n");
+                        }
+                        
+                        // Extract time from ## AI助手 header in beforeClose (for synthetic message timestamp)
+                        if (beforeClose.startsWith("## AI助手") || beforeClose.startsWith("## AI")) {
+                            String headerLine = beforeClose.split("\n", 2)[0];
+                            int ts = headerLine.indexOf("(");
+                            int te = headerLine.indexOf(")");
+                            if (ts >= 0 && te > ts) {
+                                finalPartTime = headerLine.substring(ts + 1, te).trim();
+                            }
+                        }
+                        
+                        // afterClose is the real display text outside the agent block (if any)
+                        finalPartContent = afterClose.isEmpty() ? null : afterClose;
+                        
+                        foundEnd = true;
+                        i++;
+                        break;
+                    } else {
+                        // Intermediate part: append raw markdown (preserves <think>, <debug> etc.)
+                        agentRawContent.append(p.trim()).append("\n\n---\n\n");
+                        i++;
+                    }
+                }
+                
+                if (!foundEnd) {
+                    // No closing </agent> found - agent crashed or still running.
+                    // CRITICAL: Do NOT merge - put all parts back as-is to avoid data loss.
+                    LogManager.logW(TAG, "[AGENT_MERGE_RAW] No </agent> found! Reverting " + (i - agentStartIndex) + " parts to avoid data loss");
+                    for (int j = agentStartIndex; j < i; j++) {
+                        // Strip orphan <agent> tag from first part so it doesn't confuse rendering
+                        String revert = parts[j];
+                        if (j == agentStartIndex) {
+                            revert = revert.replace("<agent>", "").trim();
+                        }
+                        result.add(revert);
+                    }
+                    continue;
+                }
+                
+                // Build synthetic AI assistant message with <agent> section
+                StringBuilder synthetic = new StringBuilder();
+                synthetic.append("## AI助手");
+                if (finalPartTime != null) {
+                    synthetic.append(" (").append(finalPartTime).append(")");
+                }
+                synthetic.append("\n\n");
+                
+                // Wrap intermediate content in <agent> tags for CollapsibleTextParser
+                String agentStr = agentRawContent.toString().trim();
+                if (!agentStr.isEmpty()) {
+                    synthetic.append("<agent>\n").append(agentStr).append("\n</agent>\n\n");
+                }
+                
+                // Append final display text (if any content exists after </agent> in the same part)
+                if (finalPartContent != null && !finalPartContent.isEmpty()) {
+                    synthetic.append(finalPartContent);
+                }
+                // NOTE: terminate text and file attachments are now written as separate
+                // MESSAGE_SEPARATOR-delimited parts AFTER </agent>, so they become
+                // independent ChatDataItems rather than being embedded here.
+                
+                LogManager.logI(TAG, "[AGENT_MERGE_RAW] Merged " + (i - agentStartIndex) + " parts into synthetic AI message (" + synthetic.length() + " chars)");
+                result.add(synthetic.toString());
+            } else {
+                result.add(part);
+                i++;
+            }
+        }
+        
+        return result;
     }
     
     /**
@@ -556,6 +715,21 @@ public class ChatHistoryManager {
             else if (type == ChatViewHolders.ASSISTANT) {
                 StringBuilder displayText = new StringBuilder();
                 
+                // Extract <agent> block FIRST, before other tags.
+                // This prevents <debug>/<think> extraction from reaching inside agent block.
+                if (bodyContent.contains("<agent>") && bodyContent.contains("</agent>")) {
+                    int agentStart = bodyContent.indexOf("<agent>");
+                    int agentEnd = bodyContent.indexOf("</agent>");
+                    if (agentEnd > agentStart) {
+                        String agentContent = bodyContent.substring(agentStart + 7, agentEnd).trim();
+                        item.setAgentText(agentContent);
+                        item.setShowAgent(false); // Default collapsed
+                        // Remove <agent>...</agent> block from bodyContent
+                        bodyContent = bodyContent.substring(0, agentStart) + bodyContent.substring(agentEnd + 8);
+                        LogManager.logD(TAG, "[AGENT_PARSE] Extracted agent block: " + agentContent.length() + " chars");
+                    }
+                }
+                
                 // 解析调试部分（通常在最前面）
                 if (bodyContent.contains("<debug>")) {
                     int debugStart = bodyContent.indexOf("<debug>");
@@ -608,57 +782,84 @@ public class ChatHistoryManager {
                 // CollapsibleTextParser will handle all tag parsing during rendering
                 // Just extract images and audio, keep all text tags intact
                 
-                // 剩余的是正文内容和图片
-                // 提取图片（如果有，Diffusion生成的图片）
-                if (bodyContent.contains("![](")) {
-                    int imgStart = bodyContent.indexOf("![](");
-                    int imgEnd = bodyContent.indexOf(")", imgStart);
-                    if (imgEnd > imgStart) {
-                        String imageFileName = bodyContent.substring(imgStart + 4, imgEnd);
-                        File imageFile = new File(folderPath, imageFileName);
-                        if (imageFile.exists()) {
-                            item.imageUri = Uri.fromFile(imageFile);
-                        }
-                        
-                        // 移除图片markdown语法，获取纯文本
-                        String beforeImg = bodyContent.substring(0, imgStart).trim();
-                        String afterImg = bodyContent.substring(imgEnd + 1).trim();
-                        bodyContent = (beforeImg + "\n" + afterImg).trim();
+                // Extract image attachments: ![](path) or ![alt](path)
+                // Support both relative (filename) and absolute (/sdcard/...) paths
+                while (bodyContent.contains("![")) {
+                    int imgStart = bodyContent.indexOf("![");
+                    int altEnd = bodyContent.indexOf("]", imgStart + 2);
+                    if (altEnd < 0) break;
+                    int parenStart = bodyContent.indexOf("(", altEnd);
+                    if (parenStart != altEnd + 1) break;
+                    int parenEnd = bodyContent.indexOf(")", parenStart);
+                    if (parenEnd < 0) break;
+                    
+                    String imagePath = bodyContent.substring(parenStart + 1, parenEnd);
+                    File imageFile;
+                    if (imagePath.startsWith("/")) {
+                        imageFile = new File(imagePath);
+                    } else {
+                        imageFile = new File(folderPath, imagePath);
                     }
+                    if (imageFile.exists() && item.imageUri == null) {
+                        item.imageUri = Uri.fromFile(imageFile);
+                        if (stats != null) stats[2]++;
+                    }
+                    
+                    String beforeImg = bodyContent.substring(0, imgStart).trim();
+                    String afterImg = bodyContent.substring(parenEnd + 1).trim();
+                    bodyContent = (beforeImg + "\n" + afterImg).trim();
                 }
                 
-                // 提取TTS音频（如果有）- 使用统一格式：🎙️ [音频: filename](filename)
-                if (bodyContent.contains("🎙️ [音频:")) {
-                    int audioStart = bodyContent.indexOf("🎙️ [音频:");
+                // Extract audio attachments: 🎙️ [label](path) or 🎤 [label](path)
+                // Covers both TTS format "🎙️ [音频: name]" and terminate format "🎤 [name]"
+                while (bodyContent.contains("\uD83C\uDFA4 [") || bodyContent.contains("🎙️ [")) {
+                    int audioStart = bodyContent.indexOf("\uD83C\uDFA4 [");
+                    if (audioStart < 0) audioStart = bodyContent.indexOf("🎙️ [");
+                    if (audioStart < 0) break;
                     int linkStart = bodyContent.indexOf("](", audioStart);
-                    int linkEnd = bodyContent.indexOf(")", linkStart);
-                    if (linkEnd > linkStart && linkStart > audioStart) {
-                        String audioFileName = bodyContent.substring(linkStart + 2, linkEnd);
-                        File audioFile = new File(folderPath, audioFileName);
-                        
-                        LogManager.logD(TAG, "[AI_AUDIO_LOAD] Parsing AI audio: fileName=" + audioFileName + 
-                                          ", folderPath=" + folderPath + ", exists=" + audioFile.exists());
-                        
-                        if (audioFile.exists()) {
-                            item.audioUri = Uri.fromFile(audioFile);
-                            item.setHasOmniAudio(true);  // CRITICAL: Must set flag to show AI audio player
-                            LogManager.logI(TAG, "[AI_AUDIO_LOAD] ✅ AI audio loaded: hasOmniAudio=true, uri=" + audioFile.getAbsolutePath());
-                        } else {
-                            LogManager.logW(TAG, "[AI_AUDIO_LOAD] ❌ AI audio file not found: " + audioFile.getAbsolutePath());
-                        }
-                        
-                        // 移除音频markdown语法，获取纯文本
-                        String beforeAudio = bodyContent.substring(0, audioStart).trim();
-                        String afterAudio = bodyContent.substring(linkEnd + 1).trim();
-                        bodyContent = (beforeAudio + "\n" + afterAudio).trim();
+                    int linkEnd = bodyContent.indexOf(")", linkStart + 2);
+                    if (linkEnd < 0 || linkStart < 0) break;
+                    
+                    String audioPath = bodyContent.substring(linkStart + 2, linkEnd);
+                    File audioFile;
+                    if (audioPath.startsWith("/")) {
+                        audioFile = new File(audioPath);
+                    } else {
+                        audioFile = new File(folderPath, audioPath);
                     }
+                    
+                    LogManager.logD(TAG, "[AI_AUDIO_LOAD] Parsing audio: path=" + audioPath + 
+                                      ", exists=" + audioFile.exists());
+                    
+                    if (audioFile.exists()) {
+                        if (item.audioUri == null) {
+                            item.audioUri = Uri.fromFile(audioFile);
+                            item.setHasOmniAudio(true);
+                            LogManager.logI(TAG, "[AI_AUDIO_LOAD] Audio loaded: " + audioFile.getAbsolutePath());
+                        } else {
+                            if (item.audioUris == null) item.audioUris = new java.util.ArrayList<>();
+                            item.audioUris.add(Uri.fromFile(audioFile));
+                        }
+                        if (stats != null) stats[1]++;
+                    }
+                    
+                    String beforeAudio = bodyContent.substring(0, audioStart).trim();
+                    String afterAudio = bodyContent.substring(linkEnd + 1).trim();
+                    bodyContent = (beforeAudio + "\n" + afterAudio).trim();
                 }
+                
+                // Generic file attachments (📎 [name](path)) are kept in displayText
+                // and rendered as clickable links by Markwon markdown renderer
                 
                 // Keep all remaining text as-is (including <tool_call>, Step X:, etc.)
                 // CollapsibleTextParser will handle tag parsing during rendering
                 String mainContent = bodyContent.trim();
                 item.text = mainContent;
                 item.setDisplayText(mainContent);
+                
+                LogManager.logI(TAG, "[PARSE_ITEM] ASSISTANT displayText.len=" + mainContent.length() 
+                    + ", agentText.len=" + (item.getAgentText() != null ? item.getAgentText().length() : 0)
+                    + ", preview=" + (mainContent.length() > 60 ? mainContent.substring(0, 60) : mainContent));
                 
                 // 加载时默认折叠 debug 和 performance (showDebug=false 表示折叠)
                 item.setShowDebug(false);

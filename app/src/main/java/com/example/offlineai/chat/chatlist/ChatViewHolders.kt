@@ -212,6 +212,14 @@ object ChatViewHolders {
         private val ivDebugHeader: ImageView = view.findViewById(R.id.iv_debug_header)
         private val debugMarker: View = view.findViewById(R.id.view_debug_marker)
         
+        // Agent section
+        private val agentToggle: LinearLayout = view.findViewById(R.id.ll_agent_toggle)
+        private val agentContainer: View = view.findViewById(R.id.ll_agent_container)
+        private val viewAgent: TextView = view.findViewById(R.id.tv_chat_agent)
+        private val textAgentHeader: TextView = view.findViewById(R.id.tv_agent_header)
+        private val ivAgentHeader: ImageView = view.findViewById(R.id.iv_agent_header)
+        private val agentMarker: View = view.findViewById(R.id.view_agent_marker)
+        
         // Performance section
         private val performanceToggle: LinearLayout = view.findViewById(R.id.ll_performance_toggle)
         private val performanceContainer: View = view.findViewById(R.id.ll_performance_container)
@@ -260,6 +268,13 @@ object ChatViewHolders {
             debugToggle.setOnClickListener {
                 val chatDataItem = it.tag as ChatDataItem
                 chatDataItem.toggleDebug()
+                updateCollapsibleSections(chatDataItem)
+            }
+            
+            // Agent toggle
+            agentToggle.setOnClickListener {
+                val chatDataItem = it.tag as ChatDataItem
+                chatDataItem.toggleAgent()
                 updateCollapsibleSections(chatDataItem)
             }
             
@@ -364,11 +379,16 @@ object ChatViewHolders {
             updateCollapsibleSections(data)
             
             // Main text
+            android.util.Log.i(TAG, "[BIND] type=${data.type}, displayText.len=${data.displayText?.length}, agentText.len=${data.agentText?.length}, pos=$adapterPosition")
             if (TextUtils.isEmpty(data.displayText)) {
                 viewText.visibility = View.GONE
             } else {
                 setMarkdownCached(viewText, data)
                 viewText.visibility = View.VISIBLE
+            }
+            // Post-layout diagnostic: check actual rendered state
+            viewText.post {
+                android.util.Log.i(TAG, "[BIND_POST] pos=$adapterPosition, viewText.visibility=${viewText.visibility}, w=${viewText.width}, h=${viewText.height}, text.len=${viewText.text?.length}, parent.w=${(viewText.parent as? View)?.width}, parent.h=${(viewText.parent as? View)?.height}")
             }
 
             // Loading indicator
@@ -388,9 +408,11 @@ object ChatViewHolders {
             viewText.tag = data
             viewThinking.tag = data
             viewDebug.tag = data
+            viewAgent.tag = data
             viewPerformance.tag = data
             thinkingToggle.tag = data
             debugToggle.tag = data
+            agentToggle.tag = data
             performanceToggle.tag = data
         }
         
@@ -517,13 +539,18 @@ object ChatViewHolders {
          */
         private fun setMarkdownCached(tv: TextView, data: ChatDataItem) {
             val text = normalizeLatex(data.displayText ?: "")
-            if (data.cachedSpannedKey == text) {
-                // Same text as last render: skip entirely to avoid redundant LaTeX parse.
+            if (data.cachedSpannedKey == text && tv.width > 0) {
+                // Same text as last render AND view has been laid out: skip to avoid redundant LaTeX parse.
                 return
             }
             // Full markdown path owns the whole text; clear any frozen-tail cache.
             data.streamingPlainTail = ""
-            data.cachedSpannedKey = text
+            // Only cache key if view has valid width; otherwise re-render on next bind after layout
+            if (tv.width > 0) {
+                data.cachedSpannedKey = text
+            } else {
+                data.cachedSpannedKey = null
+            }
             markdown.setMarkdown(tv, text)
         }
 
@@ -576,6 +603,7 @@ object ChatViewHolders {
                 viewText.textSize = fontSize
                 viewThinking.textSize = fontSize
                 viewDebug.textSize = fontSize
+                viewAgent.textSize = fontSize
                 viewPerformance.textSize = fontSize
             } catch (e: Exception) {
                 // Ignore if ConfigManager is not available
@@ -613,6 +641,21 @@ object ChatViewHolders {
                 markerView = debugMarker,
                 content = data.debugText,
                 headerText = itemView.context.getString(com.example.offlineai.R.string.collapsible_debug)
+            )
+            
+            // Update agent section (always show when content exists, default collapsed)
+            val agentHeaderBase = itemView.context.getString(com.example.offlineai.R.string.collapsible_agent)
+            updateSection(
+                hasContent = !TextUtils.isEmpty(data.agentText),
+                isExpanded = data.showAgent,
+                toggleView = agentToggle,
+                containerView = agentContainer,
+                contentView = viewAgent,
+                headerTextView = textAgentHeader,
+                headerIconView = ivAgentHeader,
+                markerView = agentMarker,
+                content = data.agentText,
+                headerText = agentHeaderBase
             )
             
             // Update performance section (controlled by static switch)

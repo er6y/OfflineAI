@@ -121,7 +121,7 @@ class OpenAiFuncCallFormat : BaseActionFormat() {
 {"name":"open","parameters":{"text":"应用名"}}
 {"name":"system_button","parameters":{"button":"back/home/menu/enter"}}
 {"name":"wait","parameters":{"duration":3}}
-{"name":"terminate","parameters":{"status":"success/fail","text":"总结"}}
+{"name":"terminate","parameters":{"status":"success/fail","text":"总结","files":["/sdcard/output.png"]}}
 {"name":"ask_user","parameters":{"text":"给用户的问题或操作说明"}}
 {"name":"get_app_list","parameters":{}}
 {"name":"web_open","parameters":{"url":"https://example.com"}}
@@ -151,8 +151,6 @@ Python execution:
 {"name":"python_status","parameters":{}}
 {"name":"python_kill","parameters":{}}
 
-Media output (show image/audio/file in chat UI):
-{"name":"show_media","parameters":{"path":"/sdcard/output.png","description":"Generated chart"}}
 """
     }
 
@@ -289,7 +287,11 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                         "success" -> AgentAction.Terminate.Status.SUCCESS
                         else -> AgentAction.Terminate.Status.FAIL
                     }
-                    AgentAction.Terminate(st, params.optString("text", ""))
+                    val filesArray = params.optJSONArray("files")
+                    val files = if (filesArray != null) {
+                        (0 until filesArray.length()).mapNotNull { filesArray.optString(it).takeIf { s -> s.isNotEmpty() } }
+                    } else emptyList()
+                    AgentAction.Terminate(st, params.optString("text", ""), files)
                 }
                 "context" -> {
                     val fact = params.optString("fact", "")
@@ -391,10 +393,6 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                 }
                 "python_status" -> AgentAction.PythonStatus()
                 "python_kill" -> AgentAction.PythonKill()
-                "show_media" -> AgentAction.ShowMedia(
-                    path = params.getString("path"),
-                    description = params.optString("description", "")
-                )
                 else -> {
                     lastParseError = "Unknown action name: '$name'"
                     null

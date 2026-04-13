@@ -372,6 +372,66 @@ class AgentEngine(private val context: Context) {
                     var askUserTriggered = false
                     val stepResultLines = mutableListOf<String>()
 
+                    // If this step contains a Terminate action, close the agent block BEFORE
+                    // executing any actions. File attachments from terminate.files are written
+                    // as markdown in the terminate message, outside the folded <agent> block.
+                    val hasTerminate = dedupedActions.any { it is AgentAction.Terminate }
+                    if (hasTerminate) {
+                        try {
+                            val chatFolderPath = com.example.offlineai.ConfigManager.getString(
+                                context,
+                                com.example.offlineai.ConfigManager.KEY_CURRENT_CHAT_FOLDER,
+                                ""
+                            )
+                            if (chatFolderPath.isNotEmpty()) {
+                                val conversationFile = java.io.File(chatFolderPath, "conversation.md")
+                                if (conversationFile.exists() && conversationFile.readText().contains("<agent>")) {
+                                    val terminateAction = dedupedActions.filterIsInstance<AgentAction.Terminate>().firstOrNull()
+                                    val terminateText = terminateAction?.let { expandPlaceholders(it.text).trim() } ?: ""
+                                    val terminateFiles = terminateAction?.files ?: emptyList()
+                                    
+                                    java.io.FileWriter(conversationFile, true).use { writer ->
+                                        writer.write("\n</agent>\n")
+                                        // Build terminate message content: text + file attachments
+                                        val hasContent = terminateText.isNotEmpty() || terminateFiles.isNotEmpty()
+                                        if (hasContent) {
+                                            val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+                                            val timeStr = sdf.format(java.util.Date())
+                                            val sb = StringBuilder()
+                                            sb.append("\n<!-- MESSAGE_SEPARATOR -->\n\n## AI助手 ($timeStr)\n\n")
+                                            if (terminateText.isNotEmpty()) {
+                                                sb.append(terminateText).append("\n")
+                                            }
+                                            // Append file attachments as markdown
+                                            for (filePath in terminateFiles) {
+                                                val file = java.io.File(filePath)
+                                                if (!file.exists()) {
+                                                    LogManager.logW(TAG, "[AGENT_BLOCK] Terminate file not found: $filePath")
+                                                    continue
+                                                }
+                                                val ext = file.extension
+                                                val typeLabel = com.example.offlineai.agent.model.classifyFileType(ext)
+                                                val fileName = file.name
+                                                val md = when (typeLabel) {
+                                                    "image" -> "\n![]($filePath)\n"
+                                                    "audio" -> "\n\uD83C\uDFA4 [$fileName]($filePath)\n"
+                                                    else -> "\n\uD83D\uDCCE [$fileName]($filePath)\n"
+                                                }
+                                                sb.append(md)
+                                                LogManager.logI(TAG, "[AGENT_BLOCK] Terminate file attachment: $typeLabel $filePath")
+                                            }
+                                            writer.write(sb.toString())
+                                            LogManager.logI(TAG, "[AGENT_BLOCK] Written terminate message (text=${terminateText.length}, files=${terminateFiles.size})")
+                                        }
+                                    }
+                                    LogManager.logI(TAG, "[AGENT_BLOCK] Written </agent> before executing terminate step actions")
+                                }
+                            }
+                        } catch (e: Exception) {
+                            LogManager.logE(TAG, "[AGENT_BLOCK] Failed to write </agent> marker", e)
+                        }
+                    }
+
                     for ((actionIndex, action) in dedupedActions.withIndex()) {
                         when (action) {
                             is AgentAction.DataMemory -> {
@@ -387,6 +447,9 @@ class AgentEngine(private val context: Context) {
                                 val expandedAction = action.copy(text = expandedText)
 
                                 lastAction = expandedAction
+
+                                // NOTE: </agent> marker already written before the action loop (see hasTerminate check above).
+                                // The terminate text is part of the streaming AI response already in conversation.md.
 
                                 val terminateStep = TrajectoryStep(
                                     stepIndex = memory.getStepCount(),
@@ -870,7 +933,6 @@ class AgentEngine(private val context: Context) {
         is AgentAction.PythonRun -> "python_run(\"${(action.code ?: action.file ?: "").ellipsis(50)}\")"
         is AgentAction.PythonStatus -> "python_status"
         is AgentAction.PythonKill -> "python_kill"
-        is AgentAction.ShowMedia -> "show_media(${action.path})"
     }
 
     /**

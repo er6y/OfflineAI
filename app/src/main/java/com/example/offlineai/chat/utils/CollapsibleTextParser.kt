@@ -25,6 +25,14 @@ object CollapsibleTextParser {
             remainingText = thinkingMatcher.replaceAll("")
         }
         
+        // Extract agent section
+        val agentPattern = Pattern.compile("<agent>(.*?)</agent>", Pattern.DOTALL or Pattern.CASE_INSENSITIVE)
+        val agentMatcher = agentPattern.matcher(remainingText)
+        if (agentMatcher.find()) {
+            chatDataItem.agentText = agentMatcher.group(1)?.trim()
+            remainingText = agentMatcher.replaceAll("")
+        }
+        
         // Extract debug section
         val debugPattern = Pattern.compile("<debug>(.*?)</debug>", Pattern.DOTALL or Pattern.CASE_INSENSITIVE)
         val debugMatcher = debugPattern.matcher(remainingText)
@@ -80,6 +88,7 @@ object CollapsibleTextParser {
      */
     fun hasCollapsibleSections(text: String): Boolean {
         return text.contains("<think", ignoreCase = true) ||
+               text.contains("<agent>", ignoreCase = true) ||
                text.contains("<debug>", ignoreCase = true) ||
                text.contains("<performance>", ignoreCase = true) ||
                text.contains("prefill:", ignoreCase = true) ||

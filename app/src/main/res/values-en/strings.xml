@@ -1169,7 +1169,7 @@
     <string name="dialog_title_add_api_url_simple">Add API URL</string>
 
     <!-- Multimodal UI strings -->
-    <string name="menu_pick_media">Media</string>
+    <string name="menu_pick_media">File</string>
     <string name="menu_take_photo">Camera</string>
     <string name="desc_image_thumbnail">Image thumbnail</string>
     <string name="desc_delete_image">Delete image</string>
@@ -1188,6 +1188,7 @@
     <string name="collapsible_debug">Debug</string>
     <string name="collapsible_thinking">Thinking</string>
     <string name="collapsible_performance">Performance</string>
+    <string name="collapsible_agent">Agent Execution</string>
 
     <!-- Chat History strings -->
     <string name="chat_history_title">Chat History</string>
