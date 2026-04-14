@@ -181,6 +181,7 @@ class UnifiedActionExecutor(private val context: Context) {
                 is AgentAction.Terminate -> ExecutionResult(true, "Task ${action.status.value}")
                 is AgentAction.Context -> ExecutionResult(true, "Context updated")
                 is AgentAction.AskUser -> ExecutionResult(true, "AskUser: ${action.text}")
+                is AgentAction.ShowOutput -> ExecutionResult(true, "ShowOutput: size=${action.size}")
                 is AgentAction.GetAppList -> executeGetAppList()
                 is AgentAction.KbInsert -> {
                     LogManager.logI(TAG, "[KB] kb_insert deferred to experience save flow")
@@ -446,9 +447,14 @@ class UnifiedActionExecutor(private val context: Context) {
             ?: return ExecutionResult(false, "AgentWebView not available (accessibility service not running)")
         val ok = webView.loadUrl(url)
         return if (ok) {
-            ExecutionResult(true, "Opened URL: $url (page loaded)")
+            ExecutionResult(true, "[WEB_OPEN_OK] Opened URL: $url (page loaded)")
         } else {
-            ExecutionResult(false, "Failed to load URL: $url (timeout or network error)")
+            // Timeout does NOT mean the page failed to load — the underlying WebView engine
+            // (Chromium) continues loading asynchronously. Slow servers (e.g. Jira cold-start)
+            // may exceed the wait threshold but eventually deliver onPageFinished.
+            // Return success=true so the model proceeds to web_get_content immediately.
+            LogManager.logW(TAG, "[WEB_OPEN] Load timeout for $url, but WebView may still be loading. Returning partial success.")
+            ExecutionResult(true, "[WEB_OPEN_PARTIAL_TIMEOUT_CONTINUE] URL opened: $url (load timed out waiting, page may still be loading — proceed with web_get_content)")
         }
     }
 

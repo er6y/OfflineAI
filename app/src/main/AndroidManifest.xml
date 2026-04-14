@@ -107,6 +107,15 @@
             android:excludeFromRecents="true"
             android:taskAffinity="" />
         
+        <!-- Transparent Activity for WebView login (IME works correctly in Activity) -->
+        <activity
+            android:name=".agent.AgentWebViewActivity"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:windowSoftInputMode="adjustResize"
+            android:taskAffinity="" />
+        
         <!-- 统一前台服务 - 保持app存活和支持长时间任务 -->
         <service
             android:name=".UnifiedForegroundService"

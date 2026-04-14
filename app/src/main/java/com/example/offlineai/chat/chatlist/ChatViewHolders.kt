@@ -379,7 +379,7 @@ object ChatViewHolders {
             updateCollapsibleSections(data)
             
             // Main text
-            android.util.Log.i(TAG, "[BIND] type=${data.type}, displayText.len=${data.displayText?.length}, agentText.len=${data.agentText?.length}, pos=$adapterPosition")
+            android.util.Log.d(TAG, "[BIND] type=${data.type}, displayText.len=${data.displayText?.length}, agentText.len=${data.agentText?.length}, pos=$adapterPosition")
             if (TextUtils.isEmpty(data.displayText)) {
                 viewText.visibility = View.GONE
             } else {
@@ -388,7 +388,7 @@ object ChatViewHolders {
             }
             // Post-layout diagnostic: check actual rendered state
             viewText.post {
-                android.util.Log.i(TAG, "[BIND_POST] pos=$adapterPosition, viewText.visibility=${viewText.visibility}, w=${viewText.width}, h=${viewText.height}, text.len=${viewText.text?.length}, parent.w=${(viewText.parent as? View)?.width}, parent.h=${(viewText.parent as? View)?.height}")
+                android.util.Log.d(TAG, "[BIND_POST] pos=$adapterPosition, viewText.visibility=${viewText.visibility}, w=${viewText.width}, h=${viewText.height}, text.len=${viewText.text?.length}, parent.w=${(viewText.parent as? View)?.width}, parent.h=${(viewText.parent as? View)?.height}")
             }
 
             // Loading indicator

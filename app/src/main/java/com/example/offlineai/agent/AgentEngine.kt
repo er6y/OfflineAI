@@ -56,6 +56,19 @@ class AgentEngine(private val context: Context) {
     
     private var currentJob: Job? = null
     
+    // Pending terminate output: recorded when Terminate action is received,
+    // written to conversation.md in finally block after all steps (including experience summary) complete
+    private var pendingTerminateText: String = ""
+    private var pendingTerminateFiles: List<String> = emptyList()
+    private var pendingTerminateSuccess: Boolean = false
+    @Volatile
+    private var hasPendingTerminate = false
+    // User clicked stop button - signals finally block to close <agent> tag even without Terminate action
+    @Volatile
+    private var userStopped = false
+    @Volatile
+    private var reachedMaxSteps = false
+    
     /**
      * Callback interface for agent execution events
      */
@@ -65,7 +78,8 @@ class AgentEngine(private val context: Context) {
         fun onTaskCompleted(success: Boolean, message: String)
         fun onError(error: String)
         // Suspend execution and show AskUser UI; resume with user input text (may be empty)
-        suspend fun onAskUser(question: String): String
+        // url: optional URL to show WebView for user login/interaction
+        suspend fun onAskUser(question: String, url: String? = null): String
     }
     
     private var callback: AgentCallback? = null
@@ -201,11 +215,15 @@ class AgentEngine(private val context: Context) {
         
         isRunning = true
         shouldStop = false
+        userStopped = false
         memory.clear()
         memory.setTaskGoal(taskGoal)
         dataMemory.clear()  // Clear task-scoped data memory for every new task
         AgentAccessibilityService.getInstance()?.updateDataMemoryKeys(emptyList())
         AgentAccessibilityService.getInstance()?.updateTaskBrief("")
+
+        // Reset floating window output size to small at task start
+        floatingWindow?.resetOutputSize()
 
         // Scan skills directory and cache catalog for Step 0 injection
         SkillCatalog.scan(context)
@@ -372,64 +390,18 @@ class AgentEngine(private val context: Context) {
                     var askUserTriggered = false
                     val stepResultLines = mutableListOf<String>()
 
-                    // If this step contains a Terminate action, close the agent block BEFORE
-                    // executing any actions. File attachments from terminate.files are written
-                    // as markdown in the terminate message, outside the folded <agent> block.
+                    // If this step contains a Terminate action, record terminate details
+                    // for deferred writing. The actual </agent> tag and terminate message
+                    // will be written in the finally block after ALL steps complete
+                    // (including experience summary if enabled).
                     val hasTerminate = dedupedActions.any { it is AgentAction.Terminate }
                     if (hasTerminate) {
-                        try {
-                            val chatFolderPath = com.example.offlineai.ConfigManager.getString(
-                                context,
-                                com.example.offlineai.ConfigManager.KEY_CURRENT_CHAT_FOLDER,
-                                ""
-                            )
-                            if (chatFolderPath.isNotEmpty()) {
-                                val conversationFile = java.io.File(chatFolderPath, "conversation.md")
-                                if (conversationFile.exists() && conversationFile.readText().contains("<agent>")) {
-                                    val terminateAction = dedupedActions.filterIsInstance<AgentAction.Terminate>().firstOrNull()
-                                    val terminateText = terminateAction?.let { expandPlaceholders(it.text).trim() } ?: ""
-                                    val terminateFiles = terminateAction?.files ?: emptyList()
-                                    
-                                    java.io.FileWriter(conversationFile, true).use { writer ->
-                                        writer.write("\n</agent>\n")
-                                        // Build terminate message content: text + file attachments
-                                        val hasContent = terminateText.isNotEmpty() || terminateFiles.isNotEmpty()
-                                        if (hasContent) {
-                                            val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
-                                            val timeStr = sdf.format(java.util.Date())
-                                            val sb = StringBuilder()
-                                            sb.append("\n<!-- MESSAGE_SEPARATOR -->\n\n## AI助手 ($timeStr)\n\n")
-                                            if (terminateText.isNotEmpty()) {
-                                                sb.append(terminateText).append("\n")
-                                            }
-                                            // Append file attachments as markdown
-                                            for (filePath in terminateFiles) {
-                                                val file = java.io.File(filePath)
-                                                if (!file.exists()) {
-                                                    LogManager.logW(TAG, "[AGENT_BLOCK] Terminate file not found: $filePath")
-                                                    continue
-                                                }
-                                                val ext = file.extension
-                                                val typeLabel = com.example.offlineai.agent.model.classifyFileType(ext)
-                                                val fileName = file.name
-                                                val md = when (typeLabel) {
-                                                    "image" -> "\n![]($filePath)\n"
-                                                    "audio" -> "\n\uD83C\uDFA4 [$fileName]($filePath)\n"
-                                                    else -> "\n\uD83D\uDCCE [$fileName]($filePath)\n"
-                                                }
-                                                sb.append(md)
-                                                LogManager.logI(TAG, "[AGENT_BLOCK] Terminate file attachment: $typeLabel $filePath")
-                                            }
-                                            writer.write(sb.toString())
-                                            LogManager.logI(TAG, "[AGENT_BLOCK] Written terminate message (text=${terminateText.length}, files=${terminateFiles.size})")
-                                        }
-                                    }
-                                    LogManager.logI(TAG, "[AGENT_BLOCK] Written </agent> before executing terminate step actions")
-                                }
-                            }
-                        } catch (e: Exception) {
-                            LogManager.logE(TAG, "[AGENT_BLOCK] Failed to write </agent> marker", e)
-                        }
+                        val terminateAction = dedupedActions.filterIsInstance<AgentAction.Terminate>().firstOrNull()
+                        pendingTerminateText = terminateAction?.let { expandPlaceholders(it.text).trim() } ?: ""
+                        pendingTerminateFiles = terminateAction?.files ?: emptyList()
+                        pendingTerminateSuccess = terminateAction?.status == AgentAction.Terminate.Status.SUCCESS
+                        hasPendingTerminate = true
+                        LogManager.logI(TAG, "[AGENT_BLOCK] Recorded pending terminate (text=${pendingTerminateText.length}, files=${pendingTerminateFiles.size})")
                     }
 
                     for ((actionIndex, action) in dedupedActions.withIndex()) {
@@ -448,8 +420,8 @@ class AgentEngine(private val context: Context) {
 
                                 lastAction = expandedAction
 
-                                // NOTE: </agent> marker already written before the action loop (see hasTerminate check above).
-                                // The terminate text is part of the streaming AI response already in conversation.md.
+                                // NOTE: </agent> and terminate message are deferred to the finally block,
+                                // written after all steps (including experience summary) complete.
 
                                 val terminateStep = TrajectoryStep(
                                     stepIndex = memory.getStepCount(),
@@ -527,18 +499,18 @@ class AgentEngine(private val context: Context) {
 
                                 ttsJob?.join()
                                 LogManager.logD(TAG, "[AGENT_TTS] TTS join completed (no experience summary)")
-                                callback?.onTaskCompleted(success, "Task terminated: ${action.status.value}")
+                                // onTaskCompleted is deferred to finally block after </agent> is written
                                 terminateTriggered = true
                                 break
                             }
                             is AgentAction.AskUser -> {
-                                LogManager.logI(TAG, "[AGENT][ASK_USER] Showing AskUser UI: ${action.text}")
+                                LogManager.logI(TAG, "[AGENT][ASK_USER] Showing AskUser UI: ${action.text}, url=${action.url ?: "none"}")
                                 val askPrefix = context.getString(com.example.offlineai.R.string.agent_tts_ask_user_prefix)
                                 agentTts?.speak("$askPrefix ${action.text}")
 
                                 lastAction = action
 
-                                val userResponse = callback?.onAskUser(action.text) ?: ""
+                                val userResponse = callback?.onAskUser(action.text, action.url) ?: ""
                                 LogManager.logI(TAG, "[AGENT][ASK_USER] User responded (${userResponse.length} chars)")
 
                                 val askResultMsg = if (userResponse.isNotEmpty())
@@ -556,9 +528,21 @@ class AgentEngine(private val context: Context) {
                                 memory.addStep(askUserResult)
                                 callback?.onStepCompleted(stepIndex, action, askUserResult.executionResult)
 
+                                // Inject user reply into lastStepResult so next step knows what user answered
+                                val askDesc = formatActionDesc(action)
+                                AgentAccessibilityService.getInstance()?.lastStepResult =
+                                    "Previous step executed:\n$askDesc -> [OK] $askResultMsg"
+                                LogManager.logI(TAG, "[ASK_USER] Injected user reply into lastStepResult: $askResultMsg")
+
                                 stepIndex++
                                 askUserTriggered = true
                                 break
+                            }
+                            is AgentAction.ShowOutput -> {
+                                floatingWindow?.showOutput(action.text, action.size)
+                                val desc = formatActionDesc(action)
+                                stepResultLines.add("$desc -> [OK] Displayed to user")
+                                LogManager.logI(TAG, "[SHOW_OUTPUT] size=${action.size}, text=${action.text.length} chars")
                             }
                             else -> {
                                 lastAction = action
@@ -620,6 +604,19 @@ class AgentEngine(private val context: Context) {
                         }
                     }
 
+                    // Update floating window output: show_output takes priority; fallback to context (fact+text)
+                    if (!terminateTriggered && !askUserTriggered) {
+                        val hasShowOutput = dedupedActions.any { it is AgentAction.ShowOutput }
+                        if (!hasShowOutput) {
+                            // Use currentContextText first; fall back to full currentContext (includes fact)
+                            val displayText = currentContextText.ifEmpty { currentContext }
+                            if (displayText.isNotEmpty()) {
+                                floatingWindow?.updateContextText(displayText)
+                                LogManager.logD(TAG, "[FLOATING_OUTPUT] Fallback context display (${displayText.length} chars)")
+                            }
+                        }
+                    }
+
                     // Assemble lastStepResult from all collected results
                     if (!terminateTriggered && !askUserTriggered && stepResultLines.isNotEmpty()) {
                         val header = "Previous step executed:"
@@ -662,14 +659,97 @@ class AgentEngine(private val context: Context) {
                 
                 if (stepIndex >= maxSteps) {
                     LogManager.logW(TAG, "Reached maximum steps limit ($maxSteps)")
-                    callback?.onTaskCompleted(false, "Reached maximum steps limit ($maxSteps)")
+                    reachedMaxSteps = true
+                    // Note: onTaskCompleted is called unconditionally in finally block below
                 }
                 
+            } catch (e: CancellationException) {
+                // Coroutine cancelled (user stop) - let finally block handle </agent> writing
+                LogManager.logI(TAG, "Agent execution cancelled (user stop)")
             } catch (e: Exception) {
                 LogManager.logE(TAG, "Agent execution error", e)
                 e.printStackTrace()
                 callback?.onError("Execution error: ${e.message}")
             } finally {
+                // Always close any unclosed <agent> tag, regardless of termination reason.
+                // Reason classification: normal-terminate (Terminate action), user-stop, error-abort (parse fail / exception).
+                val reason = when {
+                    hasPendingTerminate -> "normal-terminate"
+                    userStopped -> "user-stop"
+                    reachedMaxSteps -> "max-steps"
+                    else -> "error-abort"
+                }
+                try {
+                    val chatFolderPath = com.example.offlineai.ConfigManager.getString(
+                        context,
+                        com.example.offlineai.ConfigManager.KEY_CURRENT_CHAT_FOLDER,
+                        ""
+                    )
+                    if (chatFolderPath.isNotEmpty()) {
+                        val conversationFile = java.io.File(chatFolderPath, "conversation.md")
+                        if (conversationFile.exists()) {
+                            val content = conversationFile.readText()
+                            val lastOpen = content.lastIndexOf("<agent>")
+                            val lastClose = content.lastIndexOf("</agent>")
+                            val hasUnclosedAgent = lastOpen >= 0 && lastOpen > lastClose
+                            if (hasUnclosedAgent) {
+                                java.io.FileWriter(conversationFile, true).use { writer ->
+                                    writer.write("\n</agent>\n")
+                                    // Write terminate text/files only for normal termination
+                                    val hasContent = pendingTerminateText.isNotEmpty() || pendingTerminateFiles.isNotEmpty()
+                                    if (hasContent) {
+                                        val sb = StringBuilder()
+                                        sb.append("\n")
+                                        if (pendingTerminateText.isNotEmpty()) {
+                                            sb.append(pendingTerminateText).append("\n")
+                                        }
+                                        for (filePath in pendingTerminateFiles) {
+                                            val file = java.io.File(filePath)
+                                            if (!file.exists()) {
+                                                LogManager.logW(TAG, "[AGENT_BLOCK] Terminate file not found: $filePath")
+                                                continue
+                                            }
+                                            val ext = file.extension
+                                            val typeLabel = com.example.offlineai.agent.model.classifyFileType(ext)
+                                            val fileName = file.name
+                                            val md = when (typeLabel) {
+                                                "image" -> "\n![]($filePath)\n"
+                                                "audio" -> "\n\uD83C\uDFA4 [$fileName]($filePath)\n"
+                                                else -> "\n\uD83D\uDCCE [$fileName]($filePath)\n"
+                                            }
+                                            sb.append(md)
+                                            LogManager.logI(TAG, "[AGENT_BLOCK] Terminate file attachment: $typeLabel $filePath")
+                                        }
+                                        writer.write(sb.toString())
+                                        LogManager.logI(TAG, "[AGENT_BLOCK] Written terminate message (text=${pendingTerminateText.length}, files=${pendingTerminateFiles.size})")
+                                    }
+                                }
+                                LogManager.logI(TAG, "[AGENT_BLOCK] Written </agent> in finally block ($reason)")
+                            } else {
+                                LogManager.logI(TAG, "[AGENT_BLOCK] No unclosed <agent> tag found, skipping ($reason)")
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    LogManager.logE(TAG, "[AGENT_BLOCK] Failed to write </agent> in finally block", e)
+                }
+                // Always notify callback so UI reloads history after agent stops
+                val terminateSuccess = if (hasPendingTerminate) pendingTerminateSuccess else false
+                val terminateMsg = when {
+                    hasPendingTerminate -> "Task terminated: ${if (pendingTerminateSuccess) "success" else "failure"}"
+                    userStopped -> "User stopped"
+                    reachedMaxSteps -> "Reached maximum steps limit"
+                    else -> "Agent stopped (error)"
+                }
+                callback?.onTaskCompleted(terminateSuccess, terminateMsg)
+                // Clear pending terminate state
+                hasPendingTerminate = false
+                pendingTerminateText = ""
+                pendingTerminateFiles = emptyList()
+                pendingTerminateSuccess = false
+                userStopped = false
+                reachedMaxSteps = false
+                
                 isRunning = false
                 cachedAgentKbContext = ""
                 currentContext = ""
@@ -685,19 +765,19 @@ class AgentEngine(private val context: Context) {
     
     /**
      * Stop agent execution
+     * NOTE: Do NOT clear hasPendingTerminate here. The finally block in executeTask
+     * will handle writing </agent> tag and terminate message after LLM output completes.
      */
     fun stop() {
         LogManager.logI(TAG, "Stopping agent execution")
         shouldStop = true
+        userStopped = true
         currentJob?.cancel()
+        // Must set isRunning=false here - if old task is stuck in blocking call (latch.await)
+        // or coroutine cancel races with new task start, finally block may not execute in time.
+        // The finally block's </agent> writing uses hasUnclosedAgent check so no duplication.
         isRunning = false
-        cachedAgentKbContext = ""
-        currentContext = ""
-        contextFactHistory.clear()
-        currentContextText = ""
-        AgentAccessibilityService.getInstance()?.currentContext = ""
-        // Deactivate accessibility service
-        AgentAccessibilityService.getInstance()?.setAgentActive(false)
+        // Do NOT clear pending terminate state - let finally block write </agent>
     }
     
     /**
@@ -933,6 +1013,7 @@ class AgentEngine(private val context: Context) {
         is AgentAction.PythonRun -> "python_run(\"${(action.code ?: action.file ?: "").ellipsis(50)}\")"
         is AgentAction.PythonStatus -> "python_status"
         is AgentAction.PythonKill -> "python_kill"
+        is AgentAction.ShowOutput -> "show_output(size=${action.size}, text=\"${action.text.ellipsis(40)}\")"
     }
 
     /**

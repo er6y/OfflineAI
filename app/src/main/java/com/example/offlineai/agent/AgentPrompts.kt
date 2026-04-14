@@ -59,6 +59,7 @@ ${format.getFormatDescription()}
   - 多个不同执行方向用户未明确
   - 同一操作重复3次失败
   - 需用户介入的必要场景
+  - **带 url 参数**（弹出网页让用户操作）：当 web_get_content 发现页面需要登录、返回403/401、出现验证码、会话过期、或页面无法正常操作时，使用 `ask_user` 并附带 `url` 参数弹出可见网页，让用户手动登录/验证后点击"完成"继续。格式：`{"name":"ask_user","parameters":{"text":"提示信息","url":"https://..."}}`。用户完成操作后 WebView 保留登录态，后续 web_open/web_get_content/web_execute_js 可直接使用已登录身份。
 
 - **python操作决策**
   - `python_run`：异步启动Python，返回`status`，单实例，若已有RUNNING实例，再次`python_run` 会报错。
@@ -71,11 +72,18 @@ ${format.getFormatDescription()}
 - **应用启动**：名称不明确时先调用 `get_app_list action`，严格匹配应用名，禁止幻觉
 - **坐标点击失败（无效）处理**：等待 → 重试±20~40偏移 → 换策略
 - **批量调用**：会顺序执行每一个action，如先 context 后 click
+
+- **show_output使用决策**（可选，主动向用户展示过程）：
+  - 使用场景：任务中间产出结果、数据表格、分析汇总等需要用户阅读的内容
+  - size: `small`（默认小窗）/ `medium`（2/3屏宽，半屏高）/ `large`（全屏宽，2/3屏高）
+  - text 支持 Markdown，可含标题、短文本段、表格、列表等
+  - 与其他 action 并列输出，执行顺序不影响
+
 - **任务完成**：必须用 `terminate`（status=success，text=结果摘要， files=可选生成的全路径的文件）
 - **swipe up**：从下往上滑 → 查看更多
 - **swipe down**：从上往下滑 → 返回顶部/刷新
 
-## 输出要求
+## 用户要求
 ${loadAgentUserPrompt(context)}""".trimIndent()
     }
     

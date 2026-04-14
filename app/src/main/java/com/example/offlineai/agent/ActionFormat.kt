@@ -123,6 +123,7 @@ class OpenAiFuncCallFormat : BaseActionFormat() {
 {"name":"wait","parameters":{"duration":3}}
 {"name":"terminate","parameters":{"status":"success/fail","text":"总结","files":["/sdcard/output.png"]}}
 {"name":"ask_user","parameters":{"text":"给用户的问题或操作说明"}}
+{"name":"ask_user","parameters":{"text":"请登录后点击完成","url":"https://example.com/login"}}
 {"name":"get_app_list","parameters":{}}
 {"name":"web_open","parameters":{"url":"https://example.com"}}
 {"name":"web_get_content","parameters":{}}
@@ -130,6 +131,8 @@ class OpenAiFuncCallFormat : BaseActionFormat() {
 {"name":"data_memory","parameters":{"operation":"set","key":"name","value":"content"}}
 {"name":"data_memory","parameters":{"operation":"get","key":"name"}}
 {"name":"data_memory","parameters":{"operation":"list"}}
+{"name":"show_output","parameters":{"text":"TEXT，## Result\n| Col | Value |\n|---|---|\n| A | 1 |","size":"small|medium|large"}}
+
 
 File & text operations:
 {"name":"create_file","parameters":{"path":"/sdcard/new.txt","content":"line1\nline2"}}
@@ -302,7 +305,10 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                         AgentAction.Context(text = text, fact = fact)
                     }
                 }
-                "ask_user" -> AgentAction.AskUser(params.getString("text"))
+                "ask_user" -> AgentAction.AskUser(
+                    params.getString("text"),
+                    url = params.optString("url").takeIf { it.isNotEmpty() }
+                )
                 "get_app_list" -> AgentAction.GetAppList
                 "kb_insert" -> AgentAction.KbInsert(params.optString("text", ""))
                 "kb_delete" -> AgentAction.KbDelete(params.optString("ids", ""))
@@ -393,6 +399,12 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                 }
                 "python_status" -> AgentAction.PythonStatus()
                 "python_kill" -> AgentAction.PythonKill()
+                "show_output" -> AgentAction.ShowOutput(
+                    text = params.optString("text", ""),
+                    size = params.optString("size", "small").lowercase().let {
+                        if (it in listOf("small", "medium", "large")) it else "small"
+                    }
+                )
                 else -> {
                     lastParseError = "Unknown action name: '$name'"
                     null

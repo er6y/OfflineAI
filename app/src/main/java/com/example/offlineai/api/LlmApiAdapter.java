@@ -182,15 +182,23 @@ public class LlmApiAdapter {
         LogManager.logD(TAG, "检测到API类型: " + apiType.name());
         LogManager.logD(TAG, "[STREAM] onStart - source=api, model=" + model + ", thread=" + Thread.currentThread().getName());
         
-        // MiniMax Chat Completion API does NOT support multimodal image input
-        // MiniMax's OpenAI-compatible API only supports text chat
+        // MiniMax: images must go through VLM first (/v1/coding_plan/vlm), then text to chat model
         final List<String> finalImagePaths;
+        final String finalUserPrompt;
         if (apiType == ApiType.MINIMAX && imagePaths != null && !imagePaths.isEmpty()) {
-            LogManager.logW(TAG, "[MINIMAX] MiniMax Chat API does not support image input, clearing " + imagePaths.size() + " image(s)");
-            LogManager.logW(TAG, "[MINIMAX] If you need image understanding, please use MiniMax-VL-01 model or Hailuo AI with vision capabilities");
-            finalImagePaths = null;
+            LogManager.logI(TAG, "[MINIMAX_VLM] Detected " + imagePaths.size() + " image(s), calling VLM first...");
+            String vlmDesc = streamingClient.callMinimaxVlmSync(apiKey, imagePaths, userPrompt);
+            if (vlmDesc != null && !vlmDesc.isEmpty()) {
+                finalUserPrompt = "[图片内容分析]\n" + vlmDesc + "\n\n[用户指令]\n" + userPrompt;
+                LogManager.logI(TAG, "[MINIMAX_VLM] VLM desc merged into prompt, desc_len=" + vlmDesc.length());
+            } else {
+                finalUserPrompt = userPrompt;
+                LogManager.logW(TAG, "[MINIMAX_VLM] VLM returned null, proceeding with text-only");
+            }
+            finalImagePaths = null; // Chat model receives text only
         } else {
             finalImagePaths = imagePaths;
+            finalUserPrompt = userPrompt;
         }
         
         try {
@@ -198,7 +206,7 @@ public class LlmApiAdapter {
             String cachedEndpoint = endpointCache.get(apiUrl);
             if (cachedEndpoint != null) {
                 LogManager.logD(TAG, "Using cached endpoint: " + cachedEndpoint);
-                makeStreamingRequestWithSeparatePrompts(cachedEndpoint, apiKey, model, systemPrompt, userPrompt, finalImagePaths, audioPaths, apiType, callback, null);
+                makeStreamingRequestWithSeparatePrompts(cachedEndpoint, apiKey, model, systemPrompt, finalUserPrompt, finalImagePaths, audioPaths, apiType, callback, null);
                 return;
             }
             
@@ -232,7 +240,7 @@ public class LlmApiAdapter {
             String standardEndpoint = getStandardEndpoint(apiUrl);
             LogManager.logD(TAG, "Trying standard endpoint: " + standardEndpoint);
             
-            makeStreamingRequestWithSeparatePrompts(standardEndpoint, apiKey, model, systemPrompt, userPrompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
+            makeStreamingRequestWithSeparatePrompts(standardEndpoint, apiKey, model, systemPrompt, finalUserPrompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
                 @Override
                 public void onSuccess(String response) {
                     endpointCache.put(apiUrl, standardEndpoint);
@@ -256,7 +264,7 @@ public class LlmApiAdapter {
                     String vendorEndpoint = getFullApiUrl(apiUrl, apiType);
                     LogManager.logD(TAG, "Trying vendor endpoint: " + vendorEndpoint);
                     
-                    makeStreamingRequestWithSeparatePrompts(vendorEndpoint, apiKey, model, systemPrompt, userPrompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
+                    makeStreamingRequestWithSeparatePrompts(vendorEndpoint, apiKey, model, systemPrompt, finalUserPrompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
                         @Override
                         public void onSuccess(String response) {
                             endpointCache.put(apiUrl, vendorEndpoint);
@@ -299,14 +307,23 @@ public class LlmApiAdapter {
                 + ", thread=" + Thread.currentThread().getName());
         
         try {
-            // MiniMax Chat Completion API does NOT support multimodal image input
+            // MiniMax: images must go through VLM first (/v1/coding_plan/vlm), then text to chat model
             final List<String> finalImagePaths;
+            final String minimaxFinalPrompt;
             if (apiType == ApiType.MINIMAX && imagePaths != null && !imagePaths.isEmpty()) {
-                LogManager.logW(TAG, "[MINIMAX] MiniMax Chat API does not support image input, clearing " + imagePaths.size() + " image(s)");
-                LogManager.logW(TAG, "[MINIMAX] If you need image understanding, please use MiniMax-VL-01 model or Hailuo AI with vision capabilities");
-                finalImagePaths = null;
+                LogManager.logI(TAG, "[MINIMAX_VLM] Detected " + imagePaths.size() + " image(s), calling VLM first...");
+                String vlmDesc = streamingClient.callMinimaxVlmSync(apiKey, imagePaths, prompt);
+                if (vlmDesc != null && !vlmDesc.isEmpty()) {
+                    minimaxFinalPrompt = "[图片内容分析]\n" + vlmDesc + "\n\n[用户指令]\n" + prompt;
+                    LogManager.logI(TAG, "[MINIMAX_VLM] VLM desc merged into prompt, desc_len=" + vlmDesc.length());
+                } else {
+                    minimaxFinalPrompt = prompt;
+                    LogManager.logW(TAG, "[MINIMAX_VLM] VLM returned null, proceeding with text-only");
+                }
+                finalImagePaths = null; // Chat model receives text only
             } else {
                 finalImagePaths = imagePaths;
+                minimaxFinalPrompt = prompt;
             }
             
             // 如果是本地模型，使用本地适配器
@@ -347,7 +364,7 @@ public class LlmApiAdapter {
             String cachedEndpoint = endpointCache.get(apiUrl);
             if (cachedEndpoint != null) {
                 LogManager.logD(TAG, "Using cached endpoint: " + cachedEndpoint);
-                makeStreamingRequest(cachedEndpoint, apiKey, model, prompt, finalImagePaths, audioPaths, apiType, callback);
+                makeStreamingRequest(cachedEndpoint, apiKey, model, minimaxFinalPrompt, finalImagePaths, audioPaths, apiType, callback);
                 return;
             }
             
@@ -356,7 +373,7 @@ public class LlmApiAdapter {
                 String vendorEndpoint = getFullApiUrl(apiUrl, apiType);
                 LogManager.logD(TAG, "Using DOUBAO vendor endpoint directly: " + vendorEndpoint);
                 
-                makeStreamingRequest(vendorEndpoint, apiKey, model, prompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
+                makeStreamingRequest(vendorEndpoint, apiKey, model, minimaxFinalPrompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
                     @Override
                     public void onSuccess(String response) {
                         endpointCache.put(apiUrl, vendorEndpoint);
@@ -383,7 +400,7 @@ public class LlmApiAdapter {
             
             AtomicBoolean retryWithVendor = new AtomicBoolean(false);
             
-            makeStreamingRequest(standardEndpoint, apiKey, model, prompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
+            makeStreamingRequest(standardEndpoint, apiKey, model, minimaxFinalPrompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
                 @Override
                 public void onSuccess(String response) {
                     // Standard endpoint works, cache it
@@ -410,7 +427,7 @@ public class LlmApiAdapter {
                     String vendorEndpoint = getFullApiUrl(apiUrl, apiType);
                     LogManager.logD(TAG, "Trying vendor endpoint: " + vendorEndpoint);
                     
-                    makeStreamingRequest(vendorEndpoint, apiKey, model, prompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
+                    makeStreamingRequest(vendorEndpoint, apiKey, model, minimaxFinalPrompt, finalImagePaths, audioPaths, apiType, new ApiCallback() {
                         @Override
                         public void onSuccess(String response) {
                             // Vendor endpoint works, cache it

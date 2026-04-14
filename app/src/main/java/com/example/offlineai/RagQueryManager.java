@@ -198,6 +198,16 @@ public class RagQueryManager {
     private volatile boolean userRequestedStop = false;
     // Task cancelled flag - set when current task is cancelled
     private volatile boolean taskCancelled = false;
+    // Skip conversation.md persistence for current query (used by Agent experience summary step)
+    private volatile boolean skipConversationPersist = false;
+
+    public void setSkipConversationPersist(boolean skip) {
+        this.skipConversationPersist = skip;
+    }
+
+    public boolean isSkipConversationPersist() {
+        return skipConversationPersist;
+    }
 
     // ========== SINGLETON PATTERN ==========
     // Manager is a singleton to survive Fragment destruction and recreation.
@@ -591,49 +601,54 @@ public class RagQueryManager {
                     LogManager.logD(TAG, "[MGR][LLM] Response length: " + (response == null ? 0 : response.length()) + " characters");
 
                     // CRITICAL: Persist full response (with debug) to chat history
-                    try {
-                        String chatFolderPath = ConfigManager.getString(appContext, ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
-                        if (!chatFolderPath.isEmpty()) {
-                            String fullResponse = fullResponseAccumulator.toString();
-                            String persistedResponse = fullResponse.replaceAll("\\[AUDIO:[^\\]]*\\]", "");
-                            LogManager.logI(TAG, "[MGR][HISTORY] Saving response with debug, len=" + persistedResponse.length());
+                    // Skip during experience summary step to avoid polluting conversation.md
+                    if (skipConversationPersist) {
+                        LogManager.logI(TAG, "[MGR][HISTORY] Skipping conversation.md persist (skipConversationPersist=true)");
+                    } else {
+                        try {
+                            String chatFolderPath = ConfigManager.getString(appContext, ConfigManager.KEY_CURRENT_CHAT_FOLDER, "");
+                            if (!chatFolderPath.isEmpty()) {
+                                String fullResponse = fullResponseAccumulator.toString();
+                                String persistedResponse = fullResponse.replaceAll("\\[AUDIO:[^\\]]*\\]", "");
+                                LogManager.logI(TAG, "[MGR][HISTORY] Saving response with debug, len=" + persistedResponse.length());
 
-                            java.util.regex.Pattern imagePattern = java.util.regex.Pattern.compile("\\[IMAGE:([^\\]]+)\\]");
-                            java.util.regex.Matcher imageMatcher = imagePattern.matcher(fullResponse);
-                            
-                            if (imageMatcher.find()) {
-                                String imagePath = imageMatcher.group(1);
-                                LogManager.logI(TAG, "[MGR][HISTORY] Detected Diffusion image: " + imagePath);
+                                java.util.regex.Pattern imagePattern = java.util.regex.Pattern.compile("\\[IMAGE:([^\\]]+)\\]");
+                                java.util.regex.Matcher imageMatcher = imagePattern.matcher(fullResponse);
                                 
-                                String perfText = null;
-                                java.util.regex.Pattern perfPattern = java.util.regex.Pattern.compile("<performance>([\\s\\S]*?)</performance>");
-                                java.util.regex.Matcher perfMatcher = perfPattern.matcher(fullResponse);
-                                if (perfMatcher.find()) {
-                                    perfText = "<performance>" + perfMatcher.group(1) + "</performance>";
+                                if (imageMatcher.find()) {
+                                    String imagePath = imageMatcher.group(1);
+                                    LogManager.logI(TAG, "[MGR][HISTORY] Detected Diffusion image: " + imagePath);
+                                    
+                                    String perfText = null;
+                                    java.util.regex.Pattern perfPattern = java.util.regex.Pattern.compile("<performance>([\\s\\S]*?)</performance>");
+                                    java.util.regex.Matcher perfMatcher = perfPattern.matcher(fullResponse);
+                                    if (perfMatcher.find()) {
+                                        perfText = "<performance>" + perfMatcher.group(1) + "</performance>";
+                                    }
+                                    
+                                    String debugText = null;
+                                    java.util.regex.Pattern debugPattern = java.util.regex.Pattern.compile("<debug>([\\s\\S]*?)</debug>");
+                                    java.util.regex.Matcher debugMatcher = debugPattern.matcher(fullResponse);
+                                    if (debugMatcher.find()) {
+                                        debugText = "<debug>" + debugMatcher.group(1) + "</debug>";
+                                    }
+                                    
+                                    ChatHistoryManager.appendAssistantImageMessage(appContext, chatFolderPath, imagePath, perfText, debugText);
+                                } else {
+                                    ChatHistoryManager.appendAssistantTextMessage(appContext, chatFolderPath, persistedResponse);
                                 }
                                 
-                                String debugText = null;
-                                java.util.regex.Pattern debugPattern = java.util.regex.Pattern.compile("<debug>([\\s\\S]*?)</debug>");
-                                java.util.regex.Matcher debugMatcher = debugPattern.matcher(fullResponse);
-                                if (debugMatcher.find()) {
-                                    debugText = "<debug>" + debugMatcher.group(1) + "</debug>";
-                                }
-                                
-                                ChatHistoryManager.appendAssistantImageMessage(appContext, chatFolderPath, imagePath, perfText, debugText);
-                            } else {
-                                ChatHistoryManager.appendAssistantTextMessage(appContext, chatFolderPath, persistedResponse);
+                                // CRITICAL: Do NOT call markPersisted() here!
+                                // Polling may still be reading data from buffer. If we mark persisted now,
+                                // polling will stop reading and UI will miss the model's response.
+                                // Instead, markPersisted() will be called by resetSendingState() after polling completes.
+                                // if (taskId != null && !taskId.isEmpty()) {
+                                //     resetLogConsumerCursorAfterPersist(taskId);
+                                // }
                             }
-                            
-                            // CRITICAL: Do NOT call markPersisted() here!
-                            // Polling may still be reading data from buffer. If we mark persisted now,
-                            // polling will stop reading and UI will miss the model's response.
-                            // Instead, markPersisted() will be called by resetSendingState() after polling completes.
-                            // if (taskId != null && !taskId.isEmpty()) {
-                            //     resetLogConsumerCursorAfterPersist(taskId);
-                            // }
+                        } catch (Exception e) {
+                            LogManager.logE(TAG, "[MGR][HISTORY] Failed to save response: " + e.getMessage(), e);
                         }
-                    } catch (Exception e) {
-                        LogManager.logE(TAG, "[MGR][HISTORY] Failed to save response: " + e.getMessage(), e);
                     }
 
                     if (taskId != null && !taskId.isEmpty()) {

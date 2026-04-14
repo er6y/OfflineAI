@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#80000000">
+
+    <!-- Card-style container in upper portion -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:layout_marginTop="24dp"
+        android:layout_marginStart="8dp"
+        android:layout_marginEnd="8dp"
+        android:layout_marginBottom="8dp"
+        android:background="@drawable/agent_floating_window_bg">
+
+        <!-- Top hint bar with Done button -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="#CC000000"
+            android:padding="8dp">
+
+            <TextView
+                android:id="@+id/textViewHint"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Please complete the operation"
+                android:textColor="#FFFFFF"
+                android:textSize="13sp"
+                android:maxLines="2"
+                android:ellipsize="end" />
+
+            <Button
+                android:id="@+id/buttonDone"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="Done"
+                android:textSize="13sp"
+                android:textColor="#FFFFFF"
+                android:background="@drawable/agent_button_bg"
+                android:paddingStart="16dp"
+                android:paddingEnd="16dp"
+                android:layout_marginStart="8dp" />
+        </LinearLayout>
+
+        <!-- WebView fills remaining space -->
+        <FrameLayout
+            android:id="@+id/webViewContainer"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+    </LinearLayout>
+</FrameLayout>

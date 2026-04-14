@@ -476,5 +476,99 @@ public class StreamingApiClient {
     public OkHttpClient getClient() {
         return client;
     }
+
+    /**
+     * Synchronously call MiniMax VLM interface to convert images to text description.
+     * MiniMax VLM (GUI understanding model) can extract text, coordinates, buttons from screenshots.
+     * Must be called on a background thread.
+     *
+     * @param apiKey        MiniMax API key
+     * @param imagePaths    List of local image file paths
+     * @param userPrompt    Reserved, not used by VLM (VLM uses a fixed universal analysis prompt)
+     * @return              Text description of images, or null if failed
+     */
+    public String callMinimaxVlmSync(String apiKey, List<String> imagePaths, String userPrompt) {
+        if (imagePaths == null || imagePaths.isEmpty()) return null;
+
+        try {
+            // Build VLM request body
+            JSONObject requestBody = new JSONObject();
+
+            // Fixed universal image analysis prompt - userPrompt is for downstream chat only
+            String vlmPrompt =
+                "Analyze this image comprehensively and output a structured report with the following sections:\n\n" +
+                "## 1. Overall Description\n" +
+                "Briefly describe the overall content and purpose of the image (1-3 sentences).\n\n" +
+                "## 2. Text Content (OCR)\n" +
+                "List ALL visible text in the image, preserving the original language. " +
+                "For each text block, provide: text content and approximate position (e.g., top-left, center, bottom-right).\n\n" +
+                "## 3. UI Elements & Coordinates (GUI)\n" +
+                "List ALL interactive UI elements (buttons, icons, input fields, tabs, menus, links, etc.). " +
+                "For each element, provide:\n" +
+                "- Element type (button/icon/input/tab/etc.)\n" +
+                "- Label or description\n" +
+                "- Center coordinate as [x, y] in normalized range 0-999, " +
+                "where [0,0] is top-left and [999,999] is bottom-right of the image, " +
+                "x increases rightward, y increases downward\n\n" +
+                "## 4. Layout Structure\n" +
+                "Describe the overall layout: navigation bars, content areas, key sections.\n\n" +
+                "Be precise with coordinates. If the image is a mobile screenshot, " +
+                "note the screen resolution if visible.";
+            requestBody.put("prompt", vlmPrompt);
+
+            // Encode first image to base64 data URL (API accepts single image_url)
+            String firstImagePath = imagePaths.get(0);
+            String base64 = ApiUtils.encodeImageToBase64(firstImagePath);
+            if (base64 == null) {
+                LogManager.logW(TAG, "[MINIMAX_VLM] Failed to encode image, skipping VLM");
+                return null;
+            }
+            // Determine MIME type from file extension
+            String mimeType = "image/jpeg";
+            String lowerPath = firstImagePath.toLowerCase();
+            if (lowerPath.endsWith(".png")) mimeType = "image/png";
+            else if (lowerPath.endsWith(".gif")) mimeType = "image/gif";
+            else if (lowerPath.endsWith(".webp")) mimeType = "image/webp";
+            String imageDataUrl = "data:" + mimeType + ";base64," + base64;
+            requestBody.put("image_url", imageDataUrl);
+            LogManager.logI(TAG, "[MINIMAX_VLM] Encoded image: " + firstImagePath + ", mimeType=" + mimeType);
+
+            // Build request with mandatory mm-api-source header
+            Request request = new Request.Builder()
+                    .url("https://api.minimax.chat/v1/coding_plan/vlm")
+                    .header("Content-Type", "application/json")
+                    .header("Authorization", "Bearer " + apiKey)
+                    .header("mm-api-source", "minimax-mcp")
+                    .post(RequestBody.create(requestBody.toString(), MediaType.parse("application/json")))
+                    .build();
+
+            LogManager.logI(TAG, "[MINIMAX_VLM] Calling VLM endpoint...");
+
+            Response response = client.newCall(request).execute();
+            if (!response.isSuccessful()) {
+                String errorBody = response.body() != null ? response.body().string() : "no body";
+                LogManager.logE(TAG, "[MINIMAX_VLM] VLM request failed: " + response.code() + " - " + errorBody);
+                return null;
+            }
+
+            String responseStr = response.body().string();
+            LogManager.logI(TAG, "[MINIMAX_VLM] VLM response length: " + responseStr.length());
+
+            // Parse response: { "content": "..." }
+            JSONObject responseJson = new JSONObject(responseStr);
+            String content = responseJson.optString("content", "");
+            if (content.isEmpty()) {
+                LogManager.logW(TAG, "[MINIMAX_VLM] VLM returned empty content, raw: " + responseStr.substring(0, Math.min(200, responseStr.length())));
+                return null;
+            }
+
+            LogManager.logI(TAG, "[MINIMAX_VLM] VLM description length: " + content.length());
+            return content;
+
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[MINIMAX_VLM] VLM call failed: " + e.getMessage(), e);
+            return null;
+        }
+    }
 }
 

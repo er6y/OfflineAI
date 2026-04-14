@@ -75,6 +75,8 @@ class AgentAccessibilityService : AccessibilityService() {
     internal var floatingWindow: AgentFloatingWindow? = null
     private var currentStep = 0
     private val maxSteps = 20
+    @Volatile private var currentAgentSessionId: Long = 0L
+    @Volatile private var currentAgentSessionStartMs: Long = 0L
     private var cachedAppList: List<String>? = null  // Cache app list to avoid repeated queries
     private var savedTemperature: Float? = null  // Save original temperature before Agent starts
     private var agentTts: AgentTtsHelper? = null  // System TTS for Terminate/AskUser announcements
@@ -85,6 +87,7 @@ class AgentAccessibilityService : AccessibilityService() {
         initializeFloatingWindow()
         agentWebView = AgentWebView(applicationContext)
         createNotificationChannel()
+        LogManager.logI(TAG, "[AGENT_LOG_HINT] Ignore external system noise tags (e.g. AccessibilityManagerService readInstalledAccessibilityServiceLocked) unless Agent callbacks are missing")
         LogManager.logI(TAG, "Accessibility service connected")
     }
     
@@ -216,27 +219,44 @@ class AgentAccessibilityService : AccessibilityService() {
                 override fun onTaskCompleted(success: Boolean, message: String) {
                     LogManager.logI(TAG, "[AGENT] Task completed: $success")
                     
-                    // NOTE: </agent> marker, terminate text and file attachments are now written
-                    // by AgentEngine in the Terminate action handler, BEFORE this callback is invoked.
+                    // NOTE: </agent> + terminate message are written in AgentEngine's finally block
+                    // BEFORE this callback is invoked. conversation.md is fully updated at this point.
                     
-                    // Trigger UI reload so the merged agent block renders correctly
+                    // Trigger UI: stop polling + reload history so agent block folds and terminate text/file shows.
+                    // Fragment's onRequestReloadChatHistory handles stopping poll before reload.
                     ragQueryManager?.requestReloadChatHistory()
                     
-                    // Experience summary is now handled inside AgentEngine.executeTask()
-                    // When terminate is detected and summary is enabled, AgentEngine will:
-                    // 1. Execute one more step with summary prompt
-                    // 2. Call onExperienceSummaryGenerated() to show save button
-                    // 3. Then call this callback
-                    
-                    // If no summary was generated (disabled or failed), just log
-                    LogManager.logI(TAG, "[AGENT] Task completed, waiting for user action or timeout")
+                    LogManager.logI(TAG, "[AGENT] Task completed, UI reload requested")
                 }
                 
                 override fun onError(error: String) {
                     LogManager.logE(TAG, "[AGENT] Error: $error")
                 }
                 
-                override suspend fun onAskUser(question: String): String {
+                override suspend fun onAskUser(question: String, url: String?): String {
+                    if (url != null && url.isNotBlank()) {
+                        // WebView mode: expand floating window, load URL, let user interact
+                        LogManager.logI(TAG, "[AGENT] AskUser+WebView: url=$url, hint=$question")
+                        val webView = agentWebView?.getWebView()
+                        if (webView != null && floatingWindow != null) {
+                            val result = floatingWindow!!.showWebViewAndWait(webView, url, question)
+                            // Flush cookies after user finishes (login state persisted)
+                            agentWebView?.flushCookies()
+                            // Reload the background WebView with updated cookies and WAIT for it to
+                            // finish loading. Then return a status the model can act on directly,
+                            // so it knows to call web_get_content instead of AskUser again.
+                            val loaded = agentWebView?.loadUrl(url) ?: false
+                            val finalUrl = agentWebView?.getCurrentUrl() ?: url
+                            LogManager.logI(TAG, "[AGENT] AskUser+WebView: background reload done, loaded=$loaded, finalUrl=$finalUrl")
+                            return if (loaded) {
+                                "Login/interaction completed. Background WebView loaded: $finalUrl. Please call web_get_content to read the page content."
+                            } else {
+                                "Login/interaction completed (user confirmed). WebView may still be loading. Please call web_get_content to read the page content."
+                            }
+                        }
+                        LogManager.logW(TAG, "[AGENT] AskUser+WebView: webView or floatingWindow is null, falling back to text mode")
+                    }
+                    // Text-only mode (original behavior)
                     LogManager.logI(TAG, "[AGENT] AskUser: showing input UI for question: $question")
                     return floatingWindow?.showAskUserInputAndWait(question) ?: ""
                 }
@@ -260,6 +280,14 @@ class AgentAccessibilityService : AccessibilityService() {
         
         // Stop existing loop if any
         stopAgentLoop()
+
+        val sessionStartMs = System.currentTimeMillis()
+        currentAgentSessionId = sessionStartMs
+        currentAgentSessionStartMs = sessionStartMs
+        LogManager.logI(
+            TAG,
+            "[AGENT_SESSION] START sessionId=$currentAgentSessionId startEpochMs=$sessionStartMs hint=If logcat clear fails, filter lines after this marker"
+        )
         
         LogManager.logI(TAG, "Starting Agent loop: $taskGoal")
         setAgentActive(true)
@@ -389,35 +417,35 @@ class AgentAccessibilityService : AccessibilityService() {
      */
     fun stopAgentLoop() {
         LogManager.logI(TAG, "Agent loop stopped")
+        val sessionId = currentAgentSessionId
+        if (sessionId != 0L) {
+            LogManager.logI(
+                TAG,
+                "[AGENT_SESSION] END sessionId=$sessionId startEpochMs=$currentAgentSessionStartMs endEpochMs=${System.currentTimeMillis()}"
+            )
+            currentAgentSessionId = 0L
+            currentAgentSessionStartMs = 0L
+        }
+        
+        // CRITICAL: Stop LLM streaming output FIRST so no more data is written to conversation.md
+        // after we close the <agent> tag.
+        ragQueryManager?.requestStopFromManager()
+        LogManager.logI(TAG, "[AGENT_BLOCK] Requested LLM stop via requestStopFromManager")
+        
+        // Signal AgentEngine to stop (sets shouldStop, userStopped, isRunning=false, cancels job).
+        agentEngine?.stop()
+        LogManager.logI(TAG, "[AGENT_BLOCK] AgentEngine.stop() called")
+        
         agentLoopJob?.cancel()
         agentLoopJob = null
+        
+        // NOTE: </agent> tag writing is handled exclusively by AgentEngine.finally block.
+        // It runs unconditionally for all termination reasons (normal-terminate, user-stop, error-abort).
+        // Do NOT write it here to avoid race conditions with AgentEngine.finally.
         isAgentActive = false
         cachedAppList = null  // Clear cache when agent stops
         agentTts?.shutdown()
         agentTts = null
-        
-        // Close unclosed <agent> tag in conversation.md to keep history parseable
-        try {
-            val chatFolderPath = ConfigManager.getString(
-                applicationContext, ConfigManager.KEY_CURRENT_CHAT_FOLDER, ""
-            )
-            if (chatFolderPath.isNotEmpty()) {
-                val conversationFile = java.io.File(chatFolderPath, "conversation.md")
-                if (conversationFile.exists()) {
-                    val content = conversationFile.readText()
-                    val lastOpen = content.lastIndexOf("<agent>")
-                    val lastClose = content.lastIndexOf("</agent>")
-                    if (lastOpen >= 0 && lastOpen > lastClose) {
-                        java.io.FileWriter(conversationFile, true).use { writer ->
-                            writer.write("\n</agent>\n")
-                        }
-                        LogManager.logI(TAG, "[AGENT_BLOCK] Appended </agent> on user stop (unclosed block)")
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            LogManager.logE(TAG, "[AGENT_BLOCK] Failed to close agent tag on stop", e)
-        }
         
         // If waiting for experience save, user clicked stop = cancel
         if (isWaitingForExperienceSave) {
@@ -562,7 +590,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 val imagePaths = if (screenshotPath != null) listOf(screenshotPath) else null
                 
                 // Save user message to conversation.md BEFORE calling model
-                // Use the same userPromptWithHistory that is sent to model (single source of truth)
+                // All steps (including experience summary) are recorded inside the <agent> block
                 try {
                     val chatFolderPath = ConfigManager.getString(
                         context,
@@ -639,6 +667,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 )
                 
                 // Fully reuse RagQueryManager pipeline: RAG retrieval + prompt building + LLM call
+                // All steps (including experience summary) are recorded to conversation.md inside <agent> block
                 val result = ragMgr.querySync(request)
                 
                 if (result.isNullOrEmpty()) {
@@ -1112,7 +1141,7 @@ class AgentAccessibilityService : AccessibilityService() {
             if (skillCatalog.isNotEmpty()) {
                 prompt.append("\n## 可用技能\n以下是已安装的技能，如任务需要用到，必须先 read_file 对应 SKILL.md 学习用法后再编写脚本：\n")
                 prompt.append(skillCatalog)
-                prompt.append("\n⚠️ 如果任务涉及以上技能，首轮 context.fact 必须记录：所需 SKILL.md 全路径 + 默认工作目录，供后续 step 参考。不涉及则忽略。\n\n")
+                prompt.append("\n⚠️ 如果 `## 用户要求` 中未有必选的技能，但是任务涉及以上技能，首轮 context.fact 必须记录：所需 SKILL.md 全路径 + 默认工作目录，供后续 step 参考。不涉及则忽略。\n\n")
             }
             // Inject workspace path (only at Step 0)
             if (agentWorkspacePath.isNotEmpty()) {
@@ -1512,6 +1541,9 @@ $kbActionDesc
                     }
                     is AgentAction.PythonKill -> {
                         result.append(" (kill active python instance)")
+                    }
+                    is AgentAction.ShowOutput -> {
+                        result.append(" (size=${action.size}, text=${action.text.length} chars)")
                     }
                 }
                 result.append("\n")

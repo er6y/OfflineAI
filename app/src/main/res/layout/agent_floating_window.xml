@@ -25,7 +25,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="🤖 Agent Executing"
+                android:text="🦞 Agent Executing"
                 android:textColor="#FFFFFF"
                 android:textSize="14sp"
                 android:textStyle="bold" />
@@ -144,6 +144,55 @@
                 android:layout_marginTop="6dp" />
         </LinearLayout>
 
+        <!-- WebView container: shown when ask_user has url parameter -->
+        <FrameLayout
+            android:id="@+id/layoutWebView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:visibility="gone">
+
+            <!-- WebView will be dynamically attached here -->
+            <FrameLayout
+                android:id="@+id/webViewContainer"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <!-- Top hint bar -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:background="#CC000000"
+                android:padding="6dp"
+                android:layout_gravity="top">
+
+                <TextView
+                    android:id="@+id/textViewWebViewHint"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Please complete the operation"
+                    android:textColor="#FFFFFF"
+                    android:textSize="12sp"
+                    android:maxLines="2"
+                    android:ellipsize="end" />
+
+                <Button
+                    android:id="@+id/buttonWebViewDone"
+                    android:layout_width="wrap_content"
+                    android:layout_height="32dp"
+                    android:text="Done"
+                    android:textSize="12sp"
+                    android:textColor="#FFFFFF"
+                    android:background="@drawable/agent_button_bg"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:layout_marginStart="8dp" />
+            </LinearLayout>
+        </FrameLayout>
+
         <!-- Control buttons -->
         <LinearLayout
             android:layout_width="match_parent"
@@ -189,7 +238,7 @@
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="🤖"
+            android:text="🦞"
             android:textSize="24sp" />
 
         <TextView

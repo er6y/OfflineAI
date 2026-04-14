@@ -1025,8 +1025,19 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 @Override
                 public void onRequestReloadChatHistory() {
                     if (mainHandler != null) {
-                        mainHandler.post(() -> loadChatHistory());
+                        mainHandler.post(() -> {
+                            // Stop buffer polling first to prevent stale data from overwriting reloaded history
+                            stopBufferPollLoop();
+                            queryCompleted = false;
+                            lastDataReadTime = 0;
+                            uiBufferReadPos = -1;
+                            loadChatHistory();
+                        });
                     } else {
+                        stopBufferPollLoop();
+                        queryCompleted = false;
+                        lastDataReadTime = 0;
+                        uiBufferReadPos = -1;
                         loadChatHistory();
                     }
                 }
@@ -1417,6 +1428,15 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         }
         applyModeUiVisibility();
         if (uiReady) {
+            // CRITICAL: Stop buffer polling and reset streaming state BEFORE switching chat folder.
+            // If an LLM query from the previous mode is still running/completing, its polling data
+            // would be appended to the new mode's chatMessages, causing history mixing.
+            stopBufferPollLoop();
+            queryCompleted = false;
+            lastDataReadTime = 0;
+            uiBufferReadPos = -1;
+            LogManager.logI(TAG, "[MODE] Stopped buffer poll and reset streaming state before mode switch");
+            
             loadConfig();
             // Force refresh model list to ensure spinner displays correct model for current mode
             fetchModelsForApi();
@@ -2833,6 +2853,12 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         // Update our read position for next poll
         uiBufferReadPos = result.newReadPos;
         lastDataReadTime = System.currentTimeMillis(); // Record data read time
+
+        // Skip UI display during experience summary step (internal process, not for user)
+        // Buffer is still read (position advanced) so querySync can retrieve the result
+        if (ragQueryManager.isSkipConversationPersist()) {
+            return;
+        }
 
         // Ensure assistant placeholder exists before updating
         ensureAssistantPlaceholderForReplay();
@@ -4951,31 +4977,37 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] history loaded: " + (history != null ? history.size() : "null") + " items");
             
             if (history != null && !history.isEmpty()) {
+                // CRITICAL: Data mutation and adapter notification MUST happen atomically.
+                // Previously chatMessages was modified here but adapter.notifyDataSetChanged()
+                // was deferred to post(), causing RecyclerView to rebind stale ViewHolders
+                // during the gap, which mixed old/new mode data.
                 chatMessages.clear();
                 chatMessages.addAll(history);
                 LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] chatMessages.size() after addAll: " + chatMessages.size());
 
-                if (recyclerViewChat != null) {
+                if (recyclerViewChat != null && chatAdapter != null) {
                     LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] RecyclerView adapter: " + recyclerViewChat.getAdapter());
+                    // Notify adapter immediately so RecyclerView sees consistent data
+                    chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
+                    LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] chatAdapter.getItemCount(): " + chatAdapter.getItemCount());
+                    // Scroll in post() to ensure layout pass completes first
                     recyclerViewChat.post(() -> {
                         try {
-                            if (chatAdapter != null) {
-                                LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] Calling chatAdapter.updateModelNameAndItems() on RecyclerView.post");
-                                chatAdapter.updateModelNameAndItems(getCurrentModelName(), chatMessages);
-                                LogManager.logD(TAG, "[CHAT_HISTORY_DEBUG] chatAdapter.getItemCount(): " + chatAdapter.getItemCount());
-                            } else {
-                                LogManager.logE(TAG, "[CHAT_HISTORY_DEBUG] ❌ chatAdapter is NULL! Cannot update UI!");
+                            if (recyclerViewChat != null && chatMessages.size() > 0) {
+                                recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
+                                LogManager.logD(TAG, "[CHAT_HISTORY] Auto-scrolled to bottom");
                             }
-
-                            // Auto-scroll to bottom after loading history
-                            recyclerViewChat.scrollToPosition(chatMessages.size() - 1);
-                            LogManager.logD(TAG, "[CHAT_HISTORY] Auto-scrolled to bottom");
                         } catch (Exception e) {
-                            LogManager.logE(TAG, "[CHAT_HISTORY] Error updating RecyclerView after history load", e);
+                            LogManager.logE(TAG, "[CHAT_HISTORY] Error scrolling after history load", e);
                         }
                     });
                 } else {
-                    LogManager.logE(TAG, "[CHAT_HISTORY_DEBUG] ❌ recyclerViewChat is NULL!");
+                    if (chatAdapter == null) {
+                        LogManager.logE(TAG, "[CHAT_HISTORY_DEBUG] chatAdapter is NULL! Cannot update UI!");
+                    }
+                    if (recyclerViewChat == null) {
+                        LogManager.logE(TAG, "[CHAT_HISTORY_DEBUG] recyclerViewChat is NULL!");
+                    }
                 }
 
                 LogManager.logI(TAG, "[CHAT_HISTORY] Loaded " + history.size() + " messages from history");

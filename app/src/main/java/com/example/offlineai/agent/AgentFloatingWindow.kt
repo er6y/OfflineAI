@@ -6,18 +6,24 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.webkit.WebView
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
 import com.example.offlineai.LogManager
 import com.example.offlineai.R
+import io.noties.markwon.Markwon
+import io.noties.markwon.ext.tables.TablePlugin
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -32,6 +38,21 @@ class AgentFloatingWindow(private val context: Context) {
         private const val SCROLL_HEIGHT_NORMAL_DP = 100
         private const val SCROLL_HEIGHT_ASK_USER_DP = 60
         private const val SCROLL_HEIGHT_TERMINATE_DP = 150
+        // Window width constants for size presets
+        private const val WINDOW_WIDTH_SMALL_DP = 240   // fixed small, compact
+        // medium = 2/3 screen width, large = full screen width (computed at runtime)
+    }
+
+    // Current output size, persists across steps (starts small, updated by show_output)
+    private var currentOutputSize: String = "small"
+
+    // Markwon instance (lazy, created once on first use)
+    private var markwon: Markwon? = null
+
+    private fun getMarkwon(): Markwon {
+        return markwon ?: Markwon.builder(context)
+            .usePlugin(TablePlugin.create(context))
+            .build().also { markwon = it }
     }
     
     private val windowManager: WindowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -70,8 +91,20 @@ class AgentFloatingWindow(private val context: Context) {
     private var textViewTakeOverQuestion: TextView? = null
     private var editTextTakeOverInput: EditText? = null
     private var buttonTakeOverConfirm: Button? = null
+    // WebView mode UI components
+    private var layoutWebView: FrameLayout? = null
+    private var webViewContainer: FrameLayout? = null
+    private var textViewWebViewHint: TextView? = null
+    private var buttonWebViewDone: Button? = null
     // Window params reference for focusable toggling
     private var windowParams: WindowManager.LayoutParams? = null
+    // Saved window state for restore after WebView mode
+    private var savedWidth = WindowManager.LayoutParams.WRAP_CONTENT
+    private var savedHeight = WindowManager.LayoutParams.WRAP_CONTENT
+    private var savedGravity = Gravity.TOP or Gravity.END
+    private var savedX = 10
+    private var savedY = 200
+    private var isWebViewMode = false
     
     // Callbacks
     private var onStopClickListener: (() -> Unit)? = null
@@ -117,6 +150,10 @@ class AgentFloatingWindow(private val context: Context) {
             textViewTakeOverQuestion = floatingView?.findViewById(R.id.textViewTakeOverQuestion)
             editTextTakeOverInput = floatingView?.findViewById(R.id.editTextTakeOverInput)
             buttonTakeOverConfirm = floatingView?.findViewById(R.id.buttonTakeOverConfirm)
+            layoutWebView = floatingView?.findViewById(R.id.layoutWebView)
+            webViewContainer = floatingView?.findViewById(R.id.webViewContainer)
+            textViewWebViewHint = floatingView?.findViewById(R.id.textViewWebViewHint)
+            buttonWebViewDone = floatingView?.findViewById(R.id.buttonWebViewDone)
 
             // Setup window parameters
             val windowType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -315,15 +352,46 @@ class AgentFloatingWindow(private val context: Context) {
         }
     }
 
-    fun updateOutput(output: String) {
-        val compact = buildCompactOutput(output)
+    /**
+     * Update output area with context.text (fallback display when no show_output action).
+     * Renders plain text compactly - no size change, respects inherited currentOutputSize.
+     */
+    fun updateContextText(text: String) {
+        if (text.isBlank()) return
+        val compact = buildCompactOutput(text)
         runOnMainThread {
-            textViewOutput?.text = compact
-            textViewOutput?.setTextColor(0x99FFFFFF.toInt())
-            textViewOutput?.textSize = 10f
-            // Reset ScrollView height back to normal in case showTerminateResult had expanded it
-            setScrollViewHeight(SCROLL_HEIGHT_NORMAL_DP)
+            textViewOutput?.let { tv ->
+                getMarkwon().setMarkdown(tv, compact)
+                tv.setTextColor(0x99FFFFFF.toInt())
+                tv.textSize = 10f
+            }
         }
+    }
+
+    /**
+     * Show output with explicit size control (triggered by show_output action).
+     * Updates currentOutputSize so subsequent steps inherit this size.
+     */
+    fun showOutput(text: String, size: String) {
+        val validSize = if (size in listOf("small", "medium", "large")) size else "small"
+        currentOutputSize = validSize
+        runOnMainThread {
+            applyWindowSize(validSize)
+            textViewOutput?.let { tv ->
+                getMarkwon().setMarkdown(tv, text)
+                tv.setTextColor(0xFFFFFFFF.toInt())
+                tv.textSize = 11f
+            }
+            scrollViewOutput?.scrollTo(0, 0)
+            LogManager.logD(TAG, "[SHOW_OUTPUT] size=$validSize, text=${text.length} chars")
+        }
+    }
+
+    /**
+     * Legacy updateOutput - kept for compatibility, uses context text display path.
+     */
+    fun updateOutput(output: String) {
+        updateContextText(output)
     }
 
     /**
@@ -335,10 +403,11 @@ class AgentFloatingWindow(private val context: Context) {
     fun showTerminateResult(text: String) {
         val display = text.trim().ifEmpty { "Task completed." }
         runOnMainThread {
-            textViewOutput?.text = display
-            // Use brighter colour and slightly larger font to distinguish from step output
-            textViewOutput?.setTextColor(0xFFFFFFFF.toInt())
-            textViewOutput?.textSize = 11f
+            textViewOutput?.let { tv ->
+                getMarkwon().setMarkdown(tv, display)
+                tv.setTextColor(0xFFFFFFFF.toInt())
+                tv.textSize = 11f
+            }
             // Expand ScrollView to 200dp so long terminate text is scrollable without overflowing screen
             setScrollViewHeight(SCROLL_HEIGHT_TERMINATE_DP)
             // Scroll to top so user reads from beginning
@@ -351,6 +420,82 @@ class AgentFloatingWindow(private val context: Context) {
         val lp = scrollViewOutput?.layoutParams ?: return
         lp.height = px
         scrollViewOutput?.layoutParams = lp
+    }
+
+    private fun setScrollViewHeightPx(px: Int) {
+        val lp = scrollViewOutput?.layoutParams ?: return
+        lp.height = px
+        scrollViewOutput?.layoutParams = lp
+    }
+
+    /**
+     * Apply window size preset: adjusts WindowManager params AND layoutExpanded width so
+     * the inner LinearLayout actually expands. ScrollView height uses screen height ratio.
+     * small: 240dp fixed
+     * medium: 2/3 screen width, 1/2 screen height scrollable
+     * large: full screen width, 2/3 screen height scrollable
+     */
+    private fun applyWindowSize(size: String) {
+        val dm = context.resources.displayMetrics
+        val density = dm.density
+        val screenWidthPx = dm.widthPixels
+        val screenHeightPx = dm.heightPixels
+        val params = windowParams ?: return
+        val view = floatingView ?: return
+
+        val targetWidthPx: Int
+        val scrollHeightPx: Int
+
+        // Fixed UI area above ScrollView: title + dividers + task/step/status text + bottom buttons (~160dp)
+        val fixedUiHeightPx = (160 * density).toInt()
+        // Window Y offset (200px) leaves available height = screenHeight - windowY - fixedUI
+        val windowYOffset = params.y  // current y position in px
+        val availableHeightPx = screenHeightPx - windowYOffset - fixedUiHeightPx
+
+        when (size) {
+            "medium" -> {
+                targetWidthPx = screenWidthPx * 2 / 3
+                // ScrollView = 1/2 of available height
+                scrollHeightPx = (availableHeightPx / 2).coerceAtLeast((SCROLL_HEIGHT_NORMAL_DP * density).toInt())
+            }
+            "large" -> {
+                targetWidthPx = screenWidthPx
+                // ScrollView = 2/3 of available height
+                scrollHeightPx = (availableHeightPx * 2 / 3).coerceAtLeast((SCROLL_HEIGHT_NORMAL_DP * density).toInt())
+            }
+            else -> { // "small" and fallback
+                targetWidthPx = (WINDOW_WIDTH_SMALL_DP * density).toInt()
+                scrollHeightPx = (SCROLL_HEIGHT_NORMAL_DP * density).toInt()
+            }
+        }
+
+        // Update WindowManager params width
+        params.width = targetWidthPx
+
+        // CRITICAL: Also update layoutExpanded width so inner LinearLayout actually expands
+        layoutExpanded?.layoutParams?.let { lp ->
+            lp.width = targetWidthPx
+            layoutExpanded?.layoutParams = lp
+        }
+
+        // Update scrollView height in px directly
+        scrollViewOutput?.layoutParams?.let { lp ->
+            lp.height = scrollHeightPx
+            scrollViewOutput?.layoutParams = lp
+        }
+
+        try { windowManager.updateViewLayout(view, params) } catch (e: Exception) {
+            LogManager.logW(TAG, "[SIZE] updateViewLayout failed: ${e.message}")
+        }
+        LogManager.logD(TAG, "[SIZE] Applied size=$size, windowW=$targetWidthPx, scrollH=$scrollHeightPx, screenW=$screenWidthPx, screenH=$screenHeightPx")
+    }
+
+    /**
+     * Reset output size to small at task start.
+     */
+    fun resetOutputSize() {
+        currentOutputSize = "small"
+        runOnMainThread { applyWindowSize("small") }
     }
 
     private fun buildCompactOutput(output: String): String {
@@ -467,6 +612,102 @@ class AgentFloatingWindow(private val context: Context) {
         }
     }
     
+    /**
+     * Show WebView mode: launch a transparent Activity with its own WebView.
+     * The floating window hides during this time. Activity shares cookies via
+     * global CookieManager. Suspends until user clicks "Done" in Activity.
+     */
+    suspend fun showWebViewAndWait(webView: WebView, url: String, hint: String): String {
+        return suspendCancellableCoroutine { continuation ->
+            runOnMainThread {
+                LogManager.logI(TAG, "[WEBVIEW_MODE] Launching AgentWebViewActivity, url=$url")
+                isWebViewMode = true
+
+                // Hide the floating window while the Activity is shown
+                floatingView?.visibility = View.GONE
+
+                // Set static callback so Activity can deliver result
+                com.example.offlineai.agent.AgentWebViewActivity.resultCallback = { result ->
+                    mainHandler.post {
+                        LogManager.logI(TAG, "[WEBVIEW_MODE] Activity returned result=$result")
+                        isWebViewMode = false
+                        // Restore floating window visibility
+                        floatingView?.visibility = View.VISIBLE
+                        if (continuation.isActive) continuation.resume(result)
+                    }
+                }
+
+                // Launch the Activity
+                com.example.offlineai.agent.AgentWebViewActivity.start(context, url, hint)
+
+                continuation.invokeOnCancellation {
+                    LogManager.logI(TAG, "[WEBVIEW_MODE] Cancelled")
+                    com.example.offlineai.agent.AgentWebViewActivity.resultCallback = null
+                    mainHandler.post {
+                        isWebViewMode = false
+                        floatingView?.visibility = View.VISIBLE
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Hide WebView mode: detach WebView (without destroying), restore window to normal size.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun hideWebViewMode(webView: WebView) {
+        if (!isWebViewMode) return
+        isWebViewMode = false
+
+        // Detach WebView from container (do NOT destroy - keep login state)
+        webViewContainer?.removeView(webView)
+
+        // Hide WebView layout, restore scroll output
+        layoutWebView?.visibility = View.GONE
+        scrollViewOutput?.visibility = View.VISIBLE
+
+        // Restore window params
+        windowParams?.let { p ->
+            p.width = savedWidth
+            p.height = savedHeight
+            p.gravity = savedGravity
+            p.x = savedX
+            p.y = savedY
+            // Restore non-focusable, clear WebView-mode-only flags
+            p.flags = p.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            p.flags = p.flags and WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS.inv()
+            p.flags = p.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL.inv()
+            p.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_UNSPECIFIED
+            try { floatingView?.let { windowManager.updateViewLayout(it, p) } } catch (e: Exception) {
+                LogManager.logE(TAG, "[WEBVIEW_MODE] Failed to restore window", e)
+            }
+        }
+
+        // Restore drag listener
+        floatingView?.setOnTouchListener { _, event ->
+            val params = windowParams ?: return@setOnTouchListener false
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x
+                    initialY = params.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = initialX - (event.rawX - initialTouchX).toInt()
+                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    try { floatingView?.let { windowManager.updateViewLayout(it, params) } } catch (_: Exception) {}
+                    true
+                }
+                else -> false
+            }
+        }
+
+        LogManager.logI(TAG, "[WEBVIEW_MODE] WebView mode hidden, window restored")
+    }
+
     private fun toggleMinimize() {
         runOnMainThread {
             isMinimized = !isMinimized

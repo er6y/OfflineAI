@@ -275,12 +275,15 @@ sealed class AgentAction {
     /**
      * Ask user - request user intervention with optional question/instruction
      * {"action": "ask_user", "text": "question or instruction for user"}
+     * {"action": "ask_user", "text": "hint text", "url": "https://example.com"}
+     * When url is provided: floating window expands to show WebView for user to login/interact
      * After user confirms (with optional text input), agent continues with user response injected
      */
-    data class AskUser(val text: String) : AgentAction() {
+    data class AskUser(val text: String, val url: String? = null) : AgentAction() {
         override fun toJson() = JSONObject().apply {
             put("action", "ask_user")
             put("text", text)
+            url?.let { put("url", it) }
         }
         // No screenshot needed: user handles the task, then confirms to continue
         override fun needsScreenshot() = false
@@ -536,6 +539,24 @@ sealed class AgentAction {
     ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
             put("action", "python_kill")
+        }
+        override fun needsScreenshot() = false
+    }
+
+    /**
+     * Show output text in the floating window output area, with optional size control.
+     * size: "small" (default, compact) / "medium" (2/3 screen width, half height) / "large" (full width, 2/3 height)
+     * text supports Markdown (tables, bold, code blocks, lists, etc.)
+     * {"name":"show_output","parameters":{"text":"## Result\n| Col1 | Col2 |\n|---|---|\n| a | b |","size":"medium"}}
+     */
+    data class ShowOutput(
+        val text: String,
+        val size: String = "small"  // "small" / "medium" / "large"
+    ) : AgentAction() {
+        override fun toJson() = JSONObject().apply {
+            put("action", "show_output")
+            put("text", text)
+            put("size", size)
         }
         override fun needsScreenshot() = false
     }

@@ -89,7 +89,7 @@ public class AgentManager {
             }
             
             @Override
-            public Object onAskUser(@NotNull String question, @NotNull kotlin.coroutines.Continuation<? super String> continuation) {
+            public Object onAskUser(@NotNull String question, @org.jetbrains.annotations.Nullable String url, @NotNull kotlin.coroutines.Continuation<? super String> continuation) {
                 // AgentManager path has no floating window UI; return empty string synchronously
                 return "";
             }

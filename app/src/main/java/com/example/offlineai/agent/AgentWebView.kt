@@ -2,8 +2,10 @@ package com.example.offlineai.agent
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.webkit.CookieManager
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
@@ -23,9 +25,33 @@ class AgentWebView(context: Context) {
 
     companion object {
         private const val TAG = "AgentWebView"
-        private const val PAGE_LOAD_TIMEOUT_MS = 15_000L
+        private const val PAGE_LOAD_TIMEOUT_MS = 45_000L
         private const val CONTENT_EXTRACT_TIMEOUT_MS = 8_000L
         private const val JS_EXECUTE_TIMEOUT_MS = 5_000L
+
+        // JS to convert password inputs to text + CSS masking.
+        // This prevents the system secure keyboard from being triggered
+        // on overlay windows (TYPE_APPLICATION_OVERLAY), which causes
+        // keyboard flickering due to ERROR_NOT_IME_TARGET_WINDOW.
+        private const val JS_DISABLE_SECURE_KEYBOARD = """
+            (function() {
+                function convertPasswordInputs() {
+                    var inputs = document.querySelectorAll('input[type="password"]');
+                    for (var i = 0; i < inputs.length; i++) {
+                        var inp = inputs[i];
+                        if (inp.getAttribute('data-agent-converted')) continue;
+                        inp.setAttribute('type', 'text');
+                        inp.style.webkitTextSecurity = 'disc';
+                        inp.setAttribute('autocomplete', 'off');
+                        inp.setAttribute('data-agent-converted', '1');
+                    }
+                }
+                convertPasswordInputs();
+                var observer = new MutationObserver(function() { convertPasswordInputs(); });
+                observer.observe(document.body || document.documentElement,
+                    {childList: true, subtree: true, attributes: true, attributeFilter: ['type']});
+            })();
+        """
     }
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -35,10 +61,35 @@ class AgentWebView(context: Context) {
         wv.settings.apply {
             javaScriptEnabled = true
             domStorageEnabled = true
+            databaseEnabled = true
+            @Suppress("DEPRECATION")
+            saveFormData = true
+            @Suppress("DEPRECATION")
+            savePassword = false
+            loadWithOverviewMode = true
+            useWideViewPort = true
+            builtInZoomControls = true
+            displayZoomControls = false
             userAgentString = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
+        }
+        // Enable cookie persistence
+        CookieManager.getInstance().apply {
+            setAcceptCookie(true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                setAcceptThirdPartyCookies(wv, true)
+            }
         }
         wv.addJavascriptInterface(AgentJsBridge(), "AgentBridge")
     }
+
+    /**
+     * Expose internal WebView for floating window attach/detach.
+     * The caller must NOT destroy this view; use [destroy] instead.
+     */
+    fun getWebView(): WebView = webView
+
+    /** Return the last successfully loaded URL (empty string if none yet). */
+    fun getCurrentUrl(): String = currentUrl
 
     // Pending continuation for page load
     @Volatile private var pageLoadContinuation: kotlinx.coroutines.CancellableContinuation<Boolean>? = null
@@ -53,6 +104,9 @@ class AgentWebView(context: Context) {
                 override fun onPageFinished(view: WebView, url: String) {
                     LogManager.logI(TAG, "[PAGE_LOADED] url=$url")
                     currentUrl = url
+                    // Inject JS to convert password fields to text inputs with CSS masking
+                    // to prevent system secure keyboard from flickering on overlay windows
+                    view.evaluateJavascript(JS_DISABLE_SECURE_KEYBOARD, null)
                     pageLoadContinuation?.let { cont ->
                         pageLoadContinuation = null
                         if (cont.isActive) cont.resume(true)
@@ -170,10 +224,17 @@ class AgentWebView(context: Context) {
     }
 
     /**
-     * Release WebView resources.
+     * Flush cookies to persistent storage.
+     * Should be called after user completes login in WebView mode.
      */
+    fun flushCookies() {
+        CookieManager.getInstance().flush()
+        LogManager.logI(TAG, "[COOKIES] Flushed cookies to persistent storage")
+    }
+
     fun destroy() {
         mainHandler.post {
+            CookieManager.getInstance().flush()
             webView.stopLoading()
             webView.destroy()
             LogManager.logI(TAG, "[DESTROY] AgentWebView destroyed")
