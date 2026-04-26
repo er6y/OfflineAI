@@ -60,13 +60,32 @@ sealed class AgentAction {
     }
     
     /**
-     * Type text
-     * {"action": "type", "text": "..."}
+     * Type text.
+     *
+     * Two forms:
+     *   1) {"action": "type", "text": "..."}                       -- legacy
+     *   2) {"action": "type", "coordinate": [x, y], "text": "..."} -- targeted
+     *
+     * Form 2 clicks at (x, y) first, then sets text directly on the node
+     * under that point via Accessibility. This is required for apps whose
+     * input boxes don't expose FOCUS_INPUT after a click (common in
+     * self-drawn / WebView-based mainland finance apps e.g. THS).
+     * When x/y are null, falls back to legacy findFocus(FOCUS_INPUT) path.
      */
-    data class Type(val text: String) : AgentAction() {
+    data class Type(
+        val text: String,
+        val x: Int? = null,
+        val y: Int? = null
+    ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
             put("action", "type")
             put("text", text)
+            if (x != null && y != null) {
+                put("coordinate", org.json.JSONArray().apply {
+                    put(x)
+                    put(y)
+                })
+            }
         }
     }
     
@@ -151,12 +170,19 @@ sealed class AgentAction {
     }
     
     /**
-     * Wait for UI to stabilize
-     * {"action": "wait"}
+     * Wait for a given number of seconds.
+     * {"action": "wait"}                 -> 1 second (default, used for UI stabilization)
+     * {"action": "wait", "seconds": 300} -> 5 minutes (used by long-horizon monitoring loops)
+     *
+     * Allowed range: [1, 86400] (1 second ~ 24 hours). Values outside the range
+     * are clamped by UnifiedActionExecutor.validateActionParameters.
+     * During the wait, the floating-window status bar shows a live countdown
+     * ("Agent等待剩余 hh:mm:ss，约于 HH:MM:SS 继续") refreshed every 1 second.
      */
-    object Wait : AgentAction() {
+    data class Wait(val seconds: Int = 1) : AgentAction() {
         override fun toJson() = JSONObject().apply {
             put("action", "wait")
+            if (seconds != 1) put("seconds", seconds)
         }
     }
     
@@ -172,20 +198,31 @@ sealed class AgentAction {
     }
     
     /**
-     * Terminate task with status
-     * {"action": "terminate", "status": "success/fail", "text": "summary", "files": ["/path/to/file"]}
-     * files: optional list of file paths to attach (image/audio/generic file)
+     * Terminate task with status.
+     * {"action": "terminate", "status": "success/fail", "text": "markdown result", "size": "small|medium|large", "files": ["/path/to/file"]}
+     * text:  user-facing essential information in Markdown (not a short summary).
+     * size:  floating-window size preset, same semantics as show_output.
+     *        "small"  (default, compact 240dp)
+     *        "medium" (2/3 screen width, half screen height scrollable)
+     *        "large"  (full screen width, 2/3 screen height scrollable)
+     * files: optional list of file paths to attach (image/audio/generic file).
      */
-    data class Terminate(val status: Status, val text: String = "", val files: List<String> = emptyList()) : AgentAction() {
+    data class Terminate(
+        val status: Status,
+        val text: String = "",
+        val size: String = "small",
+        val files: List<String> = emptyList()
+    ) : AgentAction() {
         enum class Status(val value: String) {
             SUCCESS("success"),
             FAIL("fail")
         }
-        
+
         override fun toJson() = JSONObject().apply {
             put("action", "terminate")
             put("status", status.value)
             if (text.isNotEmpty()) put("text", text)
+            put("size", size)
             if (files.isNotEmpty()) put("files", JSONArray(files))
         }
         override fun needsScreenshot() = false  // Task ended, no screenshot needed
@@ -499,26 +536,40 @@ sealed class AgentAction {
     }
 
     /**
-     * Run Python code asynchronously via Chaquopy
-     * {"action": "python_run", "code": "print('hello')"}
-     * {"action": "python_run", "file": "/sdcard/script.py", "args": ["--port", "8000"]}
+     * Run Python. Argv-only API (no shell). Semantics equivalent to
+     * `subprocess.run([...])` on PC: no shell expansion, no pipes, no redirects.
+     *
+     * Forms:
+     *   Script:  {"argv":["/path/stock.py","quote","600519"]}
+     *   Inline:  {"argv":["-c","print(1+1)"]}
+     *   With leading python: {"argv":["python","stock.py","quote","600519"]}   (auto-stripped)
+     *
+     * Single knob controls sync/async:
+     *   timeout_sec > 0  : sync, block up to N seconds; on timeout leave job running in background
+     *   timeout_sec = 0  : fully async, return immediately with RUNNING (fire-and-forget)
+     *   (default 60)     : sync 60 seconds — covers most cases
+     *
+     * Backend normalization:
+     *   1. Resolve ${SKILL_DIR}/${WORKSPACE} in every argv element
+     *   2. Strip leading "python"/"python3" if present
+     *   3. If argv[0] == "-c" -> exec inline code; else treat argv[0] as script path
+     *   4. Set sys.argv, __file__ (for script), __name__="__main__"
      */
-    data class PythonRun(
-        val code: String? = null,
-        val file: String? = null,
-        val args: List<String> = emptyList()
+    data class Python(
+        val argv: List<String>,
+        val timeoutSec: Int = 60
     ) : AgentAction() {
         override fun toJson() = JSONObject().apply {
-            put("action", "python_run")
-            code?.let { put("code", it) }
-            file?.let { put("file", it) }
-            if (args.isNotEmpty()) put("args", JSONArray(args))
+            put("action", "python")
+            put("argv", JSONArray(argv))
+            if (timeoutSec != 60) put("timeout_sec", timeoutSec)
         }
         override fun needsScreenshot() = false
     }
 
     /**
-     * Query all Python sessions status
+     * Query Python instance status.
+     * Returns unified JSON: {status, output, exit_code, duration_sec, log_file, truncated}
      * {"action": "python_status"}
      */
     data class PythonStatus(
@@ -531,7 +582,7 @@ sealed class AgentAction {
     }
 
     /**
-     * Kill Python session
+     * Kill the current running Python instance.
      * {"action": "python_kill"}
      */
     data class PythonKill(
@@ -557,6 +608,63 @@ sealed class AgentAction {
             put("action", "show_output")
             put("text", text)
             put("size", size)
+        }
+        override fun needsScreenshot() = false
+    }
+
+    /**
+     * Query status of all 4 scheduled task slots.
+     * Returns a markdown table summarizing master switch and per-task config.
+     * {"name":"schedule_get","parameters":{}}
+     */
+    object ScheduleGet : AgentAction() {
+        override fun toJson() = JSONObject().apply {
+            put("action", "schedule_get")
+        }
+        override fun needsScreenshot() = false
+    }
+
+    /**
+     * Patch-update a single scheduled task slot.
+     * Only fields present in parameters are updated; others keep their existing values.
+     * The master switch (schedule_enabled) is NOT controllable by agent — only the user
+     * can toggle it via the Settings UI. This action only modifies per-task configuration.
+     *
+     * taskId: 1..4 (required)
+     * Optional fields (all patch-style):
+     *   enabled / oneShot: Boolean
+     *   weekdays: comma-separated "1,2,3,4,5" (1=Mon .. 7=Sun)
+     *   start / end: "HH:MM" string
+     *   intervalMin: minutes between triggers (>=1)
+     *   agentPreset: preset name (filename without .txt) under agent_user/ (e.g. "stock_agent").
+     *                Use schedule_get to discover available presets, or list_dir on agent_user/.
+     *                Empty string (unset) keeps the previous value.
+     *   prompt: explicit prompt text (overrides agentPreset if both set, same as UI)
+     *
+     * {"name":"schedule_set","parameters":{"task_id":1,"enabled":true,"start":"09:30","end":"15:30","interval_min":30,"agent_preset":"stock_agent"}}
+     */
+    data class ScheduleSet(
+        val taskId: Int,
+        val enabled: Boolean? = null,
+        val oneShot: Boolean? = null,
+        val weekdays: String? = null,
+        val start: String? = null,
+        val end: String? = null,
+        val intervalMin: Int? = null,
+        val agentPreset: String? = null,
+        val prompt: String? = null
+    ) : AgentAction() {
+        override fun toJson() = JSONObject().apply {
+            put("action", "schedule_set")
+            put("task_id", taskId)
+            enabled?.let { put("enabled", it) }
+            oneShot?.let { put("one_shot", it) }
+            weekdays?.let { put("weekdays", it) }
+            start?.let { put("start", it) }
+            end?.let { put("end", it) }
+            intervalMin?.let { put("interval_min", it) }
+            agentPreset?.let { put("agent_preset", it) }
+            prompt?.let { put("prompt", it) }
         }
         override fun needsScreenshot() = false
     }

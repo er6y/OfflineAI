@@ -267,39 +267,64 @@ public class AgentManager {
     }
     
     /**
-     * Called when MediaProjection permission is granted
+     * Called when MediaProjection permission is granted.
+     *
+     * IMPORTANT (Android 14+): MediaProjectionManager.getMediaProjection() may
+     * ONLY be called AFTER a foreground service with type
+     * FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION has actually been promoted.
+     * Since startForegroundService() is asynchronous, we register a one-shot
+     * ready-callback on UnifiedForegroundService and call getMediaProjection()
+     * inside that callback instead of blocking the main thread with sleep().
      */
     public void onMediaProjectionGranted(int resultCode, Intent data) {
-        LogManager.logI(TAG, "MediaProjection permission granted, initializing ScreenshotCapture");
+        LogManager.logI(TAG, "MediaProjection permission granted, scheduling foreground service upgrade");
         waitingForMediaProjection = false;
-        
-        // CRITICAL: Start foreground service with mediaProjection type BEFORE initializing MediaProjection
-        // This is required on Android 14+ to avoid SecurityException
+
+        final int rc = resultCode;
+        final Intent projectionData = data;
+
+        // Register ready-callback BEFORE starting the service, so we won't miss
+        // the signal if the service upgrades very quickly.
+        com.example.offlineai.UnifiedForegroundService.setMediaProjectionReadyCallback(() -> {
+            LogManager.logI(TAG, "FGS promoted to mediaProjection, now initializing ScreenshotCapture");
+            try {
+                screenshotCapture.initMediaProjection(rc, projectionData);
+            } catch (Throwable t) {
+                LogManager.logE(TAG, "initMediaProjection failed: " + t.getMessage());
+                if (callback != null) {
+                    callback.onAgentError("屏幕录制初始化失败: " + t.getMessage());
+                }
+                return;
+            }
+
+            // Resume pending Agent loop if any
+            if (pendingTaskGoal != null && pendingRagQueryManager != null) {
+                LogManager.logI(TAG, "Resuming pending Agent loop");
+                String taskGoal = pendingTaskGoal;
+                com.example.offlineai.RagQueryManager ragQueryManager = pendingRagQueryManager;
+                pendingTaskGoal = null;
+                pendingRagQueryManager = null;
+                startAgentLoop(taskGoal, ragQueryManager);
+            }
+        });
+
         Intent serviceIntent = new Intent(context, com.example.offlineai.UnifiedForegroundService.class);
         serviceIntent.putExtra("media_projection", true);
         context.startForegroundService(serviceIntent);
-        LogManager.logI(TAG, "Started foreground service with mediaProjection type");
-        
-        // Wait a bit for service to start
-        try {
-            Thread.sleep(200);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        
-        // Initialize ScreenshotCapture
-        screenshotCapture.initMediaProjection(resultCode, data);
-        
-        // Resume pending Agent loop if exists
-        if (pendingTaskGoal != null && pendingRagQueryManager != null) {
-            LogManager.logI(TAG, "Resuming pending Agent loop");
-            String taskGoal = pendingTaskGoal;
-            com.example.offlineai.RagQueryManager ragQueryManager = pendingRagQueryManager;
-            pendingTaskGoal = null;
-            pendingRagQueryManager = null;
-            
-            startAgentLoop(taskGoal, ragQueryManager);
-        }
+        LogManager.logI(TAG, "Foreground service upgrade requested (waiting for async promotion)");
+
+        // Safety net: if callback hasn't fired within 3s, abort cleanly instead of hanging.
+        new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(() -> {
+            if (!com.example.offlineai.UnifiedForegroundService.isMediaProjectionReady()) {
+                LogManager.logE(TAG, "FGS mediaProjection upgrade timed out after 3s");
+                com.example.offlineai.UnifiedForegroundService.setMediaProjectionReadyCallback(null);
+                pendingTaskGoal = null;
+                pendingRagQueryManager = null;
+                if (callback != null) {
+                    callback.onAgentError("前台服务升级超时，请重试");
+                }
+            }
+        }, 3000);
     }
     
     /**

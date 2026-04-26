@@ -1,7 +1,6 @@
 package com.example.offlineai;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.util.Log;
 import android.content.res.AssetManager;
 
@@ -26,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.example.offlineai.FileUtil;
 // Removed: import com.example.offlineai.SQLiteVectorDatabaseHandler; - Now using KnowledgeGraphDatabase directly
@@ -128,6 +128,23 @@ public class ConfigManager {
     public static final String KEY_AGENT_EXPERIENCE_SUMMARY = "agent_experience_summary"; // Agent经验总结开关
     public static final String KEY_AGENT_TTS_ENABLED = "agent_tts_enabled"; // Agent语音播报开关
     public static final String KEY_AGENT_MAX_STEPS = "agent_max_steps"; // Agent最大执行轮数（默认50，0表示无限制）
+    
+    // Agent user prompt file selection (for RAG Agent mode dropdown)
+    public static final String KEY_AGENT_USER_PROMPT_FILE = "agent_user_prompt_file"; // Selected .txt in agent_user/
+
+    // Scheduled task: 4 task groups (index 0~3). Keys use prefix "schedule_task_N_".
+    public static final int SCHEDULE_TASK_COUNT = 4;
+    // Global master switch (any task group enabled -> heartbeat runs)
+    public static final String KEY_SCHEDULE_ENABLED = "schedule_enabled";
+    // Per-task keys (use scheduleTaskKey(index, suffix) to build full key)
+    // suffix: enabled, one_shot, weekdays, start_hour, start_min, end_hour, end_min, interval, prompt_file
+    public static final String SCHEDULE_TASK_PREFIX = "schedule_task_";
+
+    /** Build per-task config key: e.g. "schedule_task_0_enabled" */
+    public static String scheduleTaskKey(int taskIndex, String suffix) {
+        return SCHEDULE_TASK_PREFIX + taskIndex + "_" + suffix;
+    }
+    
     public static final String KEY_THREADS = "threads"; // ONNX推理线程数
     public static final String KEY_EMBEDDING_CONCURRENCY = "embedding_concurrency"; // Embedding session concurrency for knowledge base building
     public static final String KEY_EMBEDDING_THREADS = "embedding_threads"; // MNN threads per embedding session for knowledge base building
@@ -237,6 +254,7 @@ public class ConfigManager {
     private static final String SUBDIR_CHAT_HISTORY = "chathistory";
     private static final String SUBDIR_SKILLS = "skills";
     private static final String SUBDIR_AGENT_WORKSPACE = "agent_workspace";
+    public static final String SUBDIR_AGENT_USER = "agent_user";
 
     public static final float DEFAULT_TEXT_SIZE = 14f;
     
@@ -1558,6 +1576,81 @@ public class ConfigManager {
     }
 
     /**
+     * Get the agent_user directory path under data root.
+     */
+    public static String getAgentUserPath(Context context) {
+        return new File(getDataRootPath(context), SUBDIR_AGENT_USER).getAbsolutePath();
+    }
+
+    /**
+     * Ensure agent_user directory exists under data root.
+     * Scans assets/agent_user/ and copies any file that does not already exist
+     * in {dataRoot}/agent_user/. Existing files are never overwritten (user may have customized).
+     */
+    public static void ensureAgentUserDir(Context context) {
+        try {
+            String dataRootPath = getDataRootPath(context);
+            if (dataRootPath == null || dataRootPath.isEmpty()) return;
+
+            File agentUserDir = new File(dataRootPath, SUBDIR_AGENT_USER);
+            if (!agentUserDir.exists() && !agentUserDir.mkdirs()) {
+                LogManager.logW(TAG, "[AGENT_USER] Failed to create agent_user dir");
+                return;
+            }
+
+            // Scan assets/agent_user/ directory and copy missing files
+            AssetManager assetManager = context.getAssets();
+            String[] assetFiles = assetManager.list("agent_user");
+            if (assetFiles == null || assetFiles.length == 0) {
+                LogManager.logW(TAG, "[AGENT_USER] No files found in assets/agent_user/");
+                return;
+            }
+
+            int copiedCount = 0;
+            for (String fileName : assetFiles) {
+                File targetFile = new File(agentUserDir, fileName);
+                if (targetFile.exists()) continue; // User may have customized it, skip
+
+                try (InputStream in = assetManager.open("agent_user/" + fileName);
+                     FileOutputStream out = new FileOutputStream(targetFile)) {
+                    byte[] buf = new byte[4096];
+                    int len;
+                    while ((len = in.read(buf)) != -1) out.write(buf, 0, len);
+                    out.flush();
+                    copiedCount++;
+                    LogManager.logI(TAG, "[AGENT_USER] Copied " + fileName + " to " + targetFile.getAbsolutePath());
+                }
+            }
+
+            if (copiedCount > 0) {
+                LogManager.logI(TAG, "[AGENT_USER] Synced " + copiedCount + " new file(s) to " + agentUserDir.getAbsolutePath());
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[AGENT_USER] ensureAgentUserDir failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * List .txt file names in agent_user directory (without path, with extension).
+     * Returns empty list if directory does not exist.
+     */
+    public static java.util.List<String> listAgentUserFiles(Context context) {
+        java.util.List<String> result = new java.util.ArrayList<>();
+        try {
+            File dir = new File(getDataRootPath(context), SUBDIR_AGENT_USER);
+            if (!dir.isDirectory()) return result;
+            File[] files = dir.listFiles((d, name) -> name.endsWith(".txt"));
+            if (files != null) {
+                java.util.Arrays.sort(files);
+                for (File f : files) result.add(f.getName());
+            }
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[AGENT_USER] listAgentUserFiles failed: " + e.getMessage());
+        }
+        return result;
+    }
+
+    /**
      * Ensure agent_workspace directory exists under data root.
      * Creates it if missing. Returns the absolute path.
      */
@@ -1568,6 +1661,51 @@ public class ConfigManager {
             LogManager.logI(TAG, "[AGENT_WS] Created agent_workspace: " + created + " -> " + wsDir.getAbsolutePath());
         }
         return wsDir.getAbsolutePath();
+    }
+
+    /**
+     * Single-flight guard: prevent the skills sync from running concurrently
+     * (cold-start seed thread vs foreground-resume hook may race).
+     */
+    private static final AtomicBoolean SKILLS_SYNC_RUNNING = new AtomicBoolean(false);
+
+    /**
+     * Async, single-flight wrapper around {@link #ensureAssetSkillsInDataRoot}.
+     * Safe to call from any thread, any time. If a sync is already in flight,
+     * this is a no-op. Otherwise it spawns a daemon thread to run the sync so
+     * the caller (e.g. UI thread) is never blocked.
+     *
+     * Intended to be called both at app cold start AND every time the app
+     * returns to foreground, so that asset-shipped skill folders that were
+     * deleted while the process was still alive get re-seeded automatically.
+     *
+     * @param context any Context (Application context recommended)
+     * @param trigger short tag describing why this was triggered (for logs)
+     */
+    public static void ensureAssetSkillsInDataRootAsync(Context context, String trigger) {
+        if (context == null) return;
+        if (!SKILLS_SYNC_RUNNING.compareAndSet(false, true)) {
+            // Another sync already in flight; skip to avoid double work.
+            LogManager.logD(TAG, "[SKILLS_SYNC] skipped (already running) trigger=" + trigger);
+            return;
+        }
+        final Context appCtx = context.getApplicationContext();
+        Thread t = new Thread(() -> {
+            long startMs = System.currentTimeMillis();
+            try {
+                int copied = ensureAssetSkillsInDataRoot(appCtx);
+                LogManager.logI(TAG, "[SKILLS_SYNC] async done trigger=" + trigger
+                        + " copied=" + copied
+                        + " costMs=" + (System.currentTimeMillis() - startMs));
+            } catch (Throwable th) {
+                LogManager.logE(TAG, "[SKILLS_SYNC] async failed trigger=" + trigger
+                        + ": " + th.getMessage(), th);
+            } finally {
+                SKILLS_SYNC_RUNNING.set(false);
+            }
+        }, "SkillsSyncThread");
+        t.setDaemon(true);
+        t.start();
     }
 
     /**
@@ -3033,16 +3171,6 @@ public class ConfigManager {
     }
 
     /**
-     * 检查是否启用调试模式
-     * @param context 上下文
-     * @return 是否启用调试模式
-     */
-    public static boolean isDebugMode(Context context) {
-        SharedPreferences prefs = getSharedPreferences(context);
-        return prefs.getBoolean(KEY_DEBUG_MODE, false);
-    }
-
-    /**
      * 创建默认配置
      * @return 默认配置
      */
@@ -3136,11 +3264,8 @@ public class ConfigManager {
         }
     }
     
-    private static SharedPreferences getSharedPreferences(Context context) {
-        return context.getSharedPreferences("config", Context.MODE_PRIVATE);
-    }
-
     // ========== TTS Parameter Getters/Setters ==========
+
 
     /**
      * Get TTS speaker ID (0-9)

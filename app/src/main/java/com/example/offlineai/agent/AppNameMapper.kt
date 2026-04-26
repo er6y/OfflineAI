@@ -155,96 +155,30 @@ object AppNameMapper {
     }
     
     /**
-     * Popular apps filter list (China-focused)
-     * Only these apps will be included in system prompt to reduce token usage
-     */
-    private val POPULAR_APPS_FILTER = setOf(
-        // Browsers
-        "chrome", "edge", "firefox", "opera", "uc", "qq浏览器", "百度", "夸克", "via",
-        "浏览器", "browser", "搜狗",
-        
-        // Social & Communication
-        "微信", "wechat", "企业微信", "wecom", "钉钉", "dingtalk", "qq", "tim",
-        "telegram", "whatsapp", "微博", "weibo", "小红书", "xhs", "抖音", "douyin",
-        "tiktok", "快手", "kuaishou", "bilibili", "b站",
-        
-        // Shopping & Payment
-        "支付宝", "alipay", "淘宝", "taobao", "天猫", "tmall", "京东", "jd", "jingdong",
-        "拼多多", "pinduoduo", "美团", "meituan", "饿了么", "eleme", "盒马", "hema",
-        "大众点评", "dianping", "闲鱼", "xianyu", "唯品会", "vipshop",
-        "瑞幸咖啡", "luckin",
-        
-        // Maps & Travel
-        "高德", "amap", "百度地图", "baidu map", "腾讯地图", "tencent map", "滴滴",
-        "didi", "美团打车", "携程", "ctrip", "去哪儿", "qunar", "飞猪", "fliggy",
-        "12306", "地图", "maps", "导航",
-        
-        // Delivery & Logistics
-        "菜鸟", "cainiao", "顺丰", "sf", "韵达", "圆通", "中通", "申通",
-        
-        // News & Reading
-        "今日头条", "toutiao", "腾讯新闻", "网易新闻", "搜狐", "知乎", "zhihu",
-        "豆瓣", "douban", "得到", "微信读书", "kindle",
-        
-        // Entertainment
-        "网易云音乐", "netease", "qq音乐", "酷狗", "kugou", "酷我", "kuwo",
-        "爱奇艺", "iqiyi", "优酷", "youku", "腾讯视频", "芒果tv", "哔哩哔哩",
-        
-        // Tools & Productivity
-        "wps", "office", "钉钉文档", "石墨", "印象笔记", "有道云笔记", "flomo",
-        "番茄todo", "forest", "滴答清单", "ticktick", "日历", "calendar",
-        "计算器", "calculator", "时钟", "clock", "天气", "weather",
-        
-        // System Apps
-        "设置", "settings", "相机", "camera", "图库", "gallery", "photos",
-        "电话", "phone", "dialer", "联系人", "contacts", "短信", "messages", "sms",
-        "文件", "files", "下载", "downloads", "音乐", "music", "视频", "video"
-    )
-    
-    /**
-     * Check if app name matches popular filter
-     * Strategy: Case-insensitive, one-way fuzzy matching (app name contains keyword)
-     * Example: "微信" matches "微信", "企业微信", "微信读书"
-     *          "chrome" matches "Chrome", "Google Chrome"
-     */
-    private fun matchesPopularFilter(appName: String): Boolean {
-        val lowerName = appName.lowercase()
-        return POPULAR_APPS_FILTER.any { filter ->
-            // One-way match: app name contains filter keyword
-            lowerName.contains(filter.lowercase())
-        }
-    }
-    
-    /**
-     * Get all launchable app names (apps with LAUNCHER intent)
-     * Returns list of (appName, packageName) pairs
-     * Filtered to only include popular apps to reduce system prompt size
+     * Get all launchable app names (apps with LAUNCHER intent).
+     * Returns list of (appName, packageName) pairs, de-duplicated by package and
+     * sorted alphabetically by display name. NO allow-list filter and NO count
+     * cap: the agent needs to see every launchable app on the device, otherwise
+     * custom / enterprise / long-tail apps look "not installed" to the model.
      */
     fun getAllInstalledAppNames(context: Context): List<Pair<String, String>> {
         val pm = context.packageManager
         val launchIntent = Intent(Intent.ACTION_MAIN, null).apply {
             addCategory(Intent.CATEGORY_LAUNCHER)
         }
-        
+
         return pm.queryIntentActivities(launchIntent, 0)
             .mapNotNull { resolveInfo ->
                 try {
                     val appInfo = resolveInfo.activityInfo.applicationInfo
                     val label = pm.getApplicationLabel(appInfo).toString()
                     val packageName = appInfo.packageName
-                    
-                    // Filter: only include popular apps
-                    if (matchesPopularFilter(label)) {
-                        Pair(label, packageName)
-                    } else {
-                        null
-                    }
+                    Pair(label, packageName)
                 } catch (e: Exception) {
                     null
                 }
             }
-            .distinctBy { it.second } // Remove duplicates by package name
+            .distinctBy { it.second } // De-duplicate by package name
             .sortedBy { it.first }
-            .take(100) // Limit to max 100 apps
     }
 }

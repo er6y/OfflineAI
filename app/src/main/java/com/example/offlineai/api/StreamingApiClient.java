@@ -217,59 +217,67 @@ public class StreamingApiClient {
             requestBody.put("messages", messages);
             requestBody.put("stream", true);
             
-            // ========== Configure thinking mode based on API type ==========
+            // ========== Configure thinking mode based on API gateway ==========
+            // The thinking parameter format is decided by the API gateway, not the model.
+            // Verified against official docs as of 2026/04. Classification:
+            //
+            //   Family A: top-level "thinking": {"type": "enabled"|"disabled"}
+            //     - DOUBAO   (Volcengine Ark, ark.cn-beijing.volces.com) -> Doubao Seed series
+            //     - ZHIPU    (BigModel, open.bigmodel.cn)                -> GLM-4.5 / GLM-Z series
+            //     - DEEPSEEK (api.deepseek.com)                          -> deepseek-v4-pro/flash
+            //                  Also supports "reasoning_effort": "high"|"max" for effort control.
+            //     - MOONSHOT (api.moonshot.ai)                           -> kimi-k2.6 / kimi-k2.5 / kimi-k2-thinking
+            //                  Default is enabled; pass disabled to turn off.
+            //
+            //   Family B: "extra_body": {"enable_thinking": true|false}
+            //     - QIANWEN (DashScope, dashscope.aliyuncs.com)          -> Qwen3 series
+            //     - MIMO    (Xiaomi MiMo, OpenAI-compatible)             -> MiMo-V2 series
+            //     - OPENAI  (OpenAI-compatible, e.g. self-hosted vLLM)   -> Qwen3 / DeepSeek deploys
+            //
+            //   Family D: no thinking param (model name selects thinking mode, or no thinking at all)
+            //     - MINIMAX  -> abab/Text-01 (no think) vs MiniMax-M1 (forced think)
+            //     - OLLAMA / LOCAL -> not applicable (handled elsewhere)
+            //
+            // Note: We do NOT check whether the specific model supports thinking. If the user
+            // toggles thinking on for a model that doesn't support it, the gateway may return
+            // 400 - that's expected user-visible behavior, not something to silently swallow.
             if (thinkingEnabled != null && apiType != null) {
-                // Qwen3/Qwen3.5/百炼云: Uses enable_thinking in extra_body
-                if (apiType == LlmApiAdapter.ApiType.QIANWEN) {
+                // Family A: top-level thinking.type ("enabled" / "disabled")
+                if (apiType == LlmApiAdapter.ApiType.DOUBAO
+                        || apiType == LlmApiAdapter.ApiType.ZHIPU
+                        || apiType == LlmApiAdapter.ApiType.DEEPSEEK
+                        || apiType == LlmApiAdapter.ApiType.MOONSHOT) {
+                    try {
+                        JSONObject thinking = new JSONObject();
+                        thinking.put("type", thinkingEnabled ? "enabled" : "disabled");
+                        requestBody.put("thinking", thinking);
+                        LogManager.logI(TAG, "[THINKING] " + apiType.name()
+                                + " top-level thinking set: type=" + (thinkingEnabled ? "enabled" : "disabled"));
+                    } catch (JSONException e) {
+                        LogManager.logE(TAG, "Failed to set thinking parameter for " + apiType.name(), e);
+                    }
+                }
+
+                // Family B: extra_body.enable_thinking (boolean)
+                else if (apiType == LlmApiAdapter.ApiType.QIANWEN
+                        || apiType == LlmApiAdapter.ApiType.MIMO
+                        || apiType == LlmApiAdapter.ApiType.OPENAI) {
                     try {
                         JSONObject extraBody = new JSONObject();
                         extraBody.put("enable_thinking", thinkingEnabled);
                         requestBody.put("extra_body", extraBody);
-                        LogManager.logI(TAG, "[THINKING] Qwen extra_body set: enable_thinking=" + thinkingEnabled);
+                        LogManager.logI(TAG, "[THINKING] " + apiType.name()
+                                + " extra_body set: enable_thinking=" + thinkingEnabled);
                     } catch (JSONException e) {
-                        LogManager.logE(TAG, "Failed to set enable_thinking", e);
+                        LogManager.logE(TAG, "Failed to set enable_thinking for " + apiType.name(), e);
                     }
                 }
-                
-                // DeepSeek: May support enable_thinking in extra_body
-                if (apiType == LlmApiAdapter.ApiType.DEEPSEEK) {
-                    try {
-                        JSONObject extraBody = new JSONObject();
-                        extraBody.put("enable_thinking", thinkingEnabled);
-                        requestBody.put("extra_body", extraBody);
-                        LogManager.logI(TAG, "[THINKING] DeepSeek extra_body set: enable_thinking=" + thinkingEnabled);
-                    } catch (JSONException e) {
-                        LogManager.logE(TAG, "Failed to set enable_thinking for DeepSeek", e);
-                    }
+
+                // Family D: no parameter (MINIMAX / OLLAMA / LOCAL)
+                else {
+                    LogManager.logI(TAG, "[THINKING] " + apiType.name()
+                            + " uses model-name-based thinking selection; no parameter sent");
                 }
-                
-                // Moonshot: May support enable_thinking in extra_body
-                if (apiType == LlmApiAdapter.ApiType.MOONSHOT) {
-                    try {
-                        JSONObject extraBody = new JSONObject();
-                        extraBody.put("enable_thinking", thinkingEnabled);
-                        requestBody.put("extra_body", extraBody);
-                        LogManager.logI(TAG, "[THINKING] Moonshot extra_body set: enable_thinking=" + thinkingEnabled);
-                    } catch (JSONException e) {
-                        LogManager.logE(TAG, "Failed to set enable_thinking for Moonshot", e);
-                    }
-                }
-                
-                // OPENAI兼容格式: 本地部署的Qwen、DeepSeek等模型（通过vLLM等）
-                // 大多数OpenAI兼容的推理服务（如vLLM）支持extra_body.enable_thinking参数
-                if (apiType == LlmApiAdapter.ApiType.OPENAI) {
-                    try {
-                        JSONObject extraBody = new JSONObject();
-                        extraBody.put("enable_thinking", thinkingEnabled);
-                        requestBody.put("extra_body", extraBody);
-                        LogManager.logI(TAG, "[THINKING] OpenAI-compatible extra_body set: enable_thinking=" + thinkingEnabled);
-                    } catch (JSONException e) {
-                        LogManager.logE(TAG, "Failed to set enable_thinking for OpenAI-compatible API", e);
-                    }
-                }
-                
-                // NOTE: DOUBAO (Volcengine) API uses standard OpenAI-compatible format
-                // It does not support special thinking parameters, so we don't add any
             }
             
             LogManager.logI(TAG, "[DEBUG_REQUEST] Request body size: " + requestBody.toString().length() + " bytes");

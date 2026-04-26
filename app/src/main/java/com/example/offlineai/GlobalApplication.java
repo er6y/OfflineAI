@@ -1,14 +1,15 @@
 package com.example.offlineai;
 
+import android.app.Activity;
 import android.app.Application;
 import android.content.Context;
 import android.app.ActivityManager;
 import android.content.res.Configuration;
 import android.content.res.Resources;
+import android.os.Bundle;
 import android.util.Log;
 import java.util.Locale;
-import com.chaquo.python.Python;
-import com.chaquo.python.android.AndroidPlatform;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 全局应用类，用于提供应用上下文
@@ -22,19 +23,16 @@ public class GlobalApplication extends Application {
         super.onCreate();
         appContext = getApplicationContext();
 
-        long startMs = System.currentTimeMillis();
-        String processName = getCurrentProcessName();
+        final long startMs = System.currentTimeMillis();
+        final String processName = getCurrentProcessName();
         Log.i(TAG, "[STARTUP_TRACE] GlobalApplication.onCreate start, process=" + processName + ", timeMs=" + startMs);
 
-        // Initialize Chaquopy Python (required for python_run action)
-        long stepStart = System.currentTimeMillis();
-        if (!Python.isStarted()) {
-            Python.start(new AndroidPlatform(this));
-            Log.i(TAG, "✅ Chaquopy Python initialized");
-        }
-        Log.i(TAG, "[STARTUP_TRACE] Python.start finished, costMs=" + (System.currentTimeMillis() - stepStart));
+        // NOTE: Chaquopy Python.start() is intentionally NOT called here anymore.
+        // It used to block onCreate for 10+ seconds on some devices (userfaultfd /
+        // ART GC stalls) and caused "failed to complete startup" ANRs. We now
+        // lazy-start Python on first use via PythonBootstrapper.ensureStarted().
 
-        stepStart = System.currentTimeMillis();
+        long stepStart = System.currentTimeMillis();
         initLanguageSettings();
         Log.i(TAG, "[STARTUP_TRACE] initLanguageSettings finished, costMs=" + (System.currentTimeMillis() - stepStart));
 
@@ -67,23 +65,90 @@ public class GlobalApplication extends Application {
         }
         Log.i(TAG, "[STARTUP_TRACE] registerCPUGroupNorm finished, costMs=" + (System.currentTimeMillis() - stepStart));
 
-        // Initialize example dictionary
-        stepStart = System.currentTimeMillis();
-        initializeExampleDictionary();
-        Log.i(TAG, "[STARTUP_TRACE] initializeExampleDictionary finished, costMs=" + (System.currentTimeMillis() - stepStart));
+        // Offload all asset-copy / directory-seed work to a background thread so
+        // Application.onCreate returns quickly and avoids startup-timeout ANRs.
+        // These operations are idempotent ("copy if not exists") so it is safe
+        // even if the UI briefly reaches a state before they finish.
+        Thread seedThread = new Thread(() -> {
+            long seedStart = System.currentTimeMillis();
+            try {
+                long t;
 
-        // Ensure text-editor seed files in data root
-        stepStart = System.currentTimeMillis();
-        initializeTextEditorSeedFiles();
-        Log.i(TAG, "[STARTUP_TRACE] initializeTextEditorSeedFiles finished, costMs=" + (System.currentTimeMillis() - stepStart));
+                t = System.currentTimeMillis();
+                initializeExampleDictionary();
+                Log.i(TAG, "[STARTUP_TRACE][ASYNC] initializeExampleDictionary finished, costMs=" + (System.currentTimeMillis() - t));
 
-        // Ensure skill folders from assets are present in data root
-        stepStart = System.currentTimeMillis();
-        int skillsCopied = ConfigManager.ensureAssetSkillsInDataRoot(this);
-        Log.i(TAG, "[STARTUP_TRACE] ensureAssetSkillsInDataRoot finished, copied=" + skillsCopied + ", costMs=" + (System.currentTimeMillis() - stepStart));
+                t = System.currentTimeMillis();
+                initializeTextEditorSeedFiles();
+                Log.i(TAG, "[STARTUP_TRACE][ASYNC] initializeTextEditorSeedFiles finished, costMs=" + (System.currentTimeMillis() - t));
+
+                t = System.currentTimeMillis();
+                ConfigManager.ensureAgentUserDir(GlobalApplication.this);
+                Log.i(TAG, "[STARTUP_TRACE][ASYNC] ensureAgentUserDir finished, costMs=" + (System.currentTimeMillis() - t));
+
+                // Cold-start skills sync. Routed through the single-flight
+                // async wrapper so it shares a guard with the foreground-resume
+                // hook installed below (no double-copy if both fire close to
+                // each other).
+                ConfigManager.ensureAssetSkillsInDataRootAsync(GlobalApplication.this, "cold_start");
+                Log.i(TAG, "[STARTUP_TRACE][ASYNC] ensureAssetSkillsInDataRootAsync dispatched (cold_start)");
+            } catch (Throwable t) {
+                Log.e(TAG, "[STARTUP_TRACE][ASYNC] seed thread failed: " + t.getMessage(), t);
+            } finally {
+                Log.i(TAG, "[STARTUP_TRACE][ASYNC] seed thread done, totalCostMs=" + (System.currentTimeMillis() - seedStart));
+            }
+        }, "StartupSeedThread");
+        seedThread.setDaemon(true);
+        seedThread.start();
+
+        // Foreground-resume hook: re-run skills sync every time the app is
+        // brought to foreground, so that asset-shipped skill folders that the
+        // user (or adb) deleted while the process was still alive get
+        // re-seeded automatically. ConfigManager's single-flight guard makes
+        // this safe even if the cold-start seed thread is still running.
+        registerForegroundSkillsSyncHook();
 
         long totalCost = System.currentTimeMillis() - startMs;
-        Log.i(TAG, "[STARTUP_TRACE] GlobalApplication.onCreate end, process=" + processName + ", totalCostMs=" + totalCost);
+        Log.i(TAG, "[STARTUP_TRACE] GlobalApplication.onCreate end (sync portion), process=" + processName + ", totalCostMs=" + totalCost);
+    }
+
+    /**
+     * Counts the number of started (visible) Activities. Transitions:
+     *   0 -> 1  : app entered foreground (cold start or returned from bg)
+     *   1 -> 0  : app went to background
+     */
+    private final AtomicInteger startedActivityCount = new AtomicInteger(0);
+
+    /**
+     * Register an ActivityLifecycleCallbacks that detects 0->1 transitions
+     * of the started-activity counter and triggers a skills sync. We use
+     * onActivityStarted/onActivityStopped (not Resumed/Paused) because Started
+     * roughly equals "visible to user" without firing on every dialog/popup.
+     */
+    private void registerForegroundSkillsSyncHook() {
+        registerActivityLifecycleCallbacks(new ActivityLifecycleCallbacks() {
+            @Override public void onActivityCreated(Activity activity, Bundle savedInstanceState) {}
+            @Override public void onActivityStarted(Activity activity) {
+                int count = startedActivityCount.incrementAndGet();
+                if (count == 1) {
+                    // 0 -> 1 means app just entered foreground.
+                    Log.i(TAG, "[FOREGROUND] app entered foreground, trigger skills sync");
+                    ConfigManager.ensureAssetSkillsInDataRootAsync(
+                            GlobalApplication.this, "foreground_resume");
+                }
+            }
+            @Override public void onActivityResumed(Activity activity) {}
+            @Override public void onActivityPaused(Activity activity) {}
+            @Override public void onActivityStopped(Activity activity) {
+                int count = startedActivityCount.decrementAndGet();
+                if (count < 0) {
+                    // Defensive: if something went wrong with counting, clamp to 0.
+                    startedActivityCount.set(0);
+                }
+            }
+            @Override public void onActivitySaveInstanceState(Activity activity, Bundle outState) {}
+            @Override public void onActivityDestroyed(Activity activity) {}
+        });
     }
     
     /**
@@ -139,9 +204,7 @@ public class GlobalApplication extends Application {
         try {
             boolean modelListReady = ConfigManager.ensureAssetFileInDataRoot(this,
                     "ModelDownloadList.txt", "ModelDownloadList.txt");
-            boolean agentUserReady = ConfigManager.ensureAssetFileInDataRoot(this,
-                    "agent_user.txt", "agent_user.txt");
-            Log.i(TAG, "[TEXT_EDITOR_SEED] modelListReady=" + modelListReady + ", agentUserReady=" + agentUserReady);
+            Log.i(TAG, "[TEXT_EDITOR_SEED] modelListReady=" + modelListReady);
         } catch (Exception e) {
             Log.e(TAG, "[TEXT_EDITOR_SEED] Failed to initialize text editor seed files: " + e.getMessage(), e);
         }

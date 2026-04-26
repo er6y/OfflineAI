@@ -16,6 +16,7 @@ import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
@@ -102,6 +103,23 @@ public class SettingsFragment extends Fragment {
     private Switch switchAgentTts;
     private SeekBar seekBarAgentMaxSteps;
     private TextView textViewAgentMaxStepsValue;
+    
+    // Scheduled task UI components (multi-group)
+    private Switch switchScheduleEnabled;
+    private LinearLayout layoutScheduleDetails;
+    private Button[] btnScheduleTasks = new Button[ConfigManager.SCHEDULE_TASK_COUNT];
+    private int currentScheduleTaskIndex = 0;
+    // Per-task shared UI (content swaps when tab changes)
+    private CheckBox cbScheduleTaskEnabled;
+    private CheckBox cbScheduleTaskOneShot;
+    private CheckBox[] cbWeekdays = new CheckBox[7];
+    private Spinner spinnerScheduleStartHour, spinnerScheduleStartMin;
+    private Spinner spinnerScheduleEndHour, spinnerScheduleEndMin;
+    private SeekBar seekBarScheduleInterval;
+    private TextView textViewScheduleIntervalValue;
+    private Spinner spinnerSchedulePromptFile;
+    private EditText editTextSchedulePrompt;
+    private boolean isLoadingScheduleTask = false; // Guard to avoid save-during-load
     
     private EditText editTextDataRootPath;
     private Button buttonSelectDataRootPath;
@@ -255,6 +273,27 @@ public class SettingsFragment extends Fragment {
         seekBarAgentMaxSteps = view.findViewById(R.id.seekBarAgentMaxSteps);
         textViewAgentMaxStepsValue = view.findViewById(R.id.textViewAgentMaxStepsValue);
         
+        // Scheduled task UI (multi-group)
+        switchScheduleEnabled = view.findViewById(R.id.switchScheduleEnabled);
+        layoutScheduleDetails = view.findViewById(R.id.layoutScheduleDetails);
+        btnScheduleTasks[0] = view.findViewById(R.id.btnScheduleTask0);
+        btnScheduleTasks[1] = view.findViewById(R.id.btnScheduleTask1);
+        btnScheduleTasks[2] = view.findViewById(R.id.btnScheduleTask2);
+        btnScheduleTasks[3] = view.findViewById(R.id.btnScheduleTask3);
+        cbScheduleTaskEnabled = view.findViewById(R.id.cbScheduleTaskEnabled);
+        cbScheduleTaskOneShot = view.findViewById(R.id.cbScheduleTaskOneShot);
+        int[] weekdayIds = {R.id.cbWeekday1, R.id.cbWeekday2, R.id.cbWeekday3, R.id.cbWeekday4,
+                R.id.cbWeekday5, R.id.cbWeekday6, R.id.cbWeekday7};
+        for (int i = 0; i < 7; i++) cbWeekdays[i] = view.findViewById(weekdayIds[i]);
+        spinnerScheduleStartHour = view.findViewById(R.id.spinnerScheduleStartHour);
+        spinnerScheduleStartMin = view.findViewById(R.id.spinnerScheduleStartMin);
+        spinnerScheduleEndHour = view.findViewById(R.id.spinnerScheduleEndHour);
+        spinnerScheduleEndMin = view.findViewById(R.id.spinnerScheduleEndMin);
+        seekBarScheduleInterval = view.findViewById(R.id.seekBarScheduleInterval);
+        textViewScheduleIntervalValue = view.findViewById(R.id.textViewScheduleIntervalValue);
+        spinnerSchedulePromptFile = view.findViewById(R.id.spinnerSchedulePromptFile);
+        editTextSchedulePrompt = view.findViewById(R.id.editTextSchedulePrompt);
+        
         editTextDataRootPath = view.findViewById(R.id.editTextDataRootPath);
         buttonSelectDataRootPath = view.findViewById(R.id.buttonSelectDataRootPath);
         switchShowDebugPerformance = view.findViewById(R.id.switchShowDebugPerformance); // Show debug & performance switch
@@ -361,6 +400,9 @@ public class SettingsFragment extends Fragment {
         initializeAgentExperienceSummarySwitch();
         initializeAgentTtsSwitch();
         initializeAgentMaxStepsSeekBar();
+        
+        // 初始化定时任务设置
+        initializeScheduleSettings();
         
         // 加载当前设置
         loadSettings();
@@ -2171,5 +2213,212 @@ public class SettingsFragment extends Fragment {
             ConfigManager.setAgentExperienceSummaryEnabled(requireContext(), isChecked);
             LogManager.logD(TAG, "[AGENT_EXP_SUMMARY] Experience summary enabled: " + isChecked);
         });
+    }
+
+    /**
+     * Initialize scheduled task settings UI (multi-group, 4 tasks)
+     */
+    private void initializeScheduleSettings() {
+        android.content.Context ctx = requireContext();
+
+        // --- Master enable switch ---
+        boolean enabled = ConfigManager.getBoolean(ctx, ConfigManager.KEY_SCHEDULE_ENABLED, false);
+        switchScheduleEnabled.setChecked(enabled);
+        layoutScheduleDetails.setVisibility(enabled ? View.VISIBLE : View.GONE);
+        switchScheduleEnabled.setOnCheckedChangeListener((btn, isChecked) -> {
+            ConfigManager.setBoolean(ctx, ConfigManager.KEY_SCHEDULE_ENABLED, isChecked);
+            layoutScheduleDetails.setVisibility(isChecked ? View.VISIBLE : View.GONE);
+            LogManager.logD(TAG, "[SCHEDULE] master enabled: " + isChecked);
+            notifyScheduleServiceChanged(isChecked);
+        });
+
+        // --- Task tab buttons ---
+        for (int i = 0; i < ConfigManager.SCHEDULE_TASK_COUNT; i++) {
+            final int idx = i;
+            btnScheduleTasks[i].setText(String.format(getString(R.string.schedule_task_label), i + 1));
+            btnScheduleTasks[i].setOnClickListener(v -> selectScheduleTask(idx));
+        }
+
+        // --- Hour/Min spinner adapters ---
+        java.util.List<String> hours = new java.util.ArrayList<>();
+        for (int h = 0; h < 24; h++) hours.add(String.valueOf(h));
+        java.util.List<String> mins = new java.util.ArrayList<>();
+        for (int m = 0; m < 60; m++) mins.add(String.valueOf(m));
+        ArrayAdapter<String> hourAdapter = new ArrayAdapter<>(ctx, android.R.layout.simple_spinner_item, hours);
+        hourAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        ArrayAdapter<String> minAdapter = new ArrayAdapter<>(ctx, android.R.layout.simple_spinner_item, mins);
+        minAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerScheduleStartHour.setAdapter(hourAdapter);
+        spinnerScheduleEndHour.setAdapter(hourAdapter);
+        spinnerScheduleStartMin.setAdapter(minAdapter);
+        spinnerScheduleEndMin.setAdapter(minAdapter);
+
+        // --- Prompt file spinner ---
+        loadSchedulePromptFileSpinner(ctx);
+
+        // --- Per-task change listeners (save on change) ---
+        cbScheduleTaskEnabled.setOnCheckedChangeListener((btn, isChecked) -> {
+            if (!isLoadingScheduleTask) saveCurrentScheduleTask();
+        });
+        cbScheduleTaskOneShot.setOnCheckedChangeListener((btn, isChecked) -> {
+            if (!isLoadingScheduleTask) saveCurrentScheduleTask();
+        });
+        for (int i = 0; i < 7; i++) {
+            cbWeekdays[i].setOnCheckedChangeListener((btn, isChecked) -> {
+                if (!isLoadingScheduleTask) saveCurrentScheduleTask();
+            });
+        }
+        AdapterView.OnItemSelectedListener spinnerSaveListener = new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                if (!isLoadingScheduleTask) saveCurrentScheduleTask();
+            }
+            @Override public void onNothingSelected(AdapterView<?> p) {}
+        };
+        spinnerScheduleStartHour.setOnItemSelectedListener(spinnerSaveListener);
+        spinnerScheduleStartMin.setOnItemSelectedListener(spinnerSaveListener);
+        spinnerScheduleEndHour.setOnItemSelectedListener(spinnerSaveListener);
+        spinnerScheduleEndMin.setOnItemSelectedListener(spinnerSaveListener);
+        spinnerSchedulePromptFile.setOnItemSelectedListener(spinnerSaveListener);
+
+        seekBarScheduleInterval.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                int value = progress + 1;
+                textViewScheduleIntervalValue.setText(String.valueOf(value));
+                if (fromUser && !isLoadingScheduleTask) saveCurrentScheduleTask();
+            }
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+        editTextSchedulePrompt.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus && !isLoadingScheduleTask) saveCurrentScheduleTask();
+        });
+
+        // Load task 0 by default
+        selectScheduleTask(0);
+    }
+
+    private void loadSchedulePromptFileSpinner(android.content.Context ctx) {
+        java.util.List<String> files = ConfigManager.listAgentUserFiles(ctx);
+        if (files.isEmpty()) files.add("common_agent.txt");
+        java.util.List<String> displayNames = new java.util.ArrayList<>();
+        for (String f : files) displayNames.add(f.endsWith(".txt") ? f.substring(0, f.length() - 4) : f);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(ctx, android.R.layout.simple_spinner_item, displayNames);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerSchedulePromptFile.setAdapter(adapter);
+    }
+
+    private void selectScheduleTask(int index) {
+        // Save current before switching (if not first load)
+        if (!isLoadingScheduleTask && currentScheduleTaskIndex != index) {
+            saveCurrentScheduleTask();
+        }
+        currentScheduleTaskIndex = index;
+        // Highlight selected tab button
+        for (int i = 0; i < ConfigManager.SCHEDULE_TASK_COUNT; i++) {
+            btnScheduleTasks[i].setAlpha(i == index ? 1.0f : 0.5f);
+        }
+        loadScheduleTaskConfig(index);
+    }
+
+    private void loadScheduleTaskConfig(int index) {
+        isLoadingScheduleTask = true;
+        try {
+            android.content.Context ctx = requireContext();
+            cbScheduleTaskEnabled.setChecked(ConfigManager.getBoolean(ctx, ConfigManager.scheduleTaskKey(index, "enabled"), false));
+            cbScheduleTaskOneShot.setChecked(ConfigManager.getBoolean(ctx, ConfigManager.scheduleTaskKey(index, "one_shot"), false));
+
+            // Weekdays
+            String weekdays = ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(index, "weekdays"), "1,2,3,4,5");
+            java.util.Set<String> wdSet = new java.util.HashSet<>(java.util.Arrays.asList(weekdays.split(",")));
+            for (int i = 0; i < 7; i++) {
+                cbWeekdays[i].setChecked(wdSet.contains(String.valueOf(i + 1)));
+            }
+
+            // Start/End time (clamp to valid range)
+            spinnerScheduleStartHour.setSelection(Math.max(0, Math.min(23, ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(index, "start_hour"), 9))));
+            spinnerScheduleStartMin.setSelection(Math.max(0, Math.min(59, ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(index, "start_min"), 0))));
+            spinnerScheduleEndHour.setSelection(Math.max(0, Math.min(23, ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(index, "end_hour"), 17))));
+            spinnerScheduleEndMin.setSelection(Math.max(0, Math.min(59, ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(index, "end_min"), 0))));
+
+            // Interval
+            int interval = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(index, "interval"), 30);
+            seekBarScheduleInterval.setProgress(Math.max(0, Math.min(59, interval - 1)));
+            textViewScheduleIntervalValue.setText(String.valueOf(interval));
+
+            // Prompt file
+            String promptFile = ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(index, "prompt_file"), "common_agent.txt");
+            String display = promptFile.endsWith(".txt") ? promptFile.substring(0, promptFile.length() - 4) : promptFile;
+            ArrayAdapter<String> adapter = (ArrayAdapter<String>) spinnerSchedulePromptFile.getAdapter();
+            if (adapter != null) {
+                int pos = -1;
+                for (int i = 0; i < adapter.getCount(); i++) {
+                    if (adapter.getItem(i).equals(display)) { pos = i; break; }
+                }
+                if (pos >= 0) spinnerSchedulePromptFile.setSelection(pos);
+            }
+
+            // Prompt text
+            editTextSchedulePrompt.setText(ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(index, "prompt"), ""));
+        } finally {
+            isLoadingScheduleTask = false;
+        }
+    }
+
+    private void saveCurrentScheduleTask() {
+        try {
+            android.content.Context ctx = requireContext();
+            int index = currentScheduleTaskIndex;
+
+            ConfigManager.setBoolean(ctx, ConfigManager.scheduleTaskKey(index, "enabled"), cbScheduleTaskEnabled.isChecked());
+            ConfigManager.setBoolean(ctx, ConfigManager.scheduleTaskKey(index, "one_shot"), cbScheduleTaskOneShot.isChecked());
+
+            // Weekdays
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 7; i++) {
+                if (cbWeekdays[i].isChecked()) {
+                    if (sb.length() > 0) sb.append(",");
+                    sb.append(i + 1);
+                }
+            }
+            ConfigManager.setString(ctx, ConfigManager.scheduleTaskKey(index, "weekdays"), sb.toString());
+
+            ConfigManager.setInt(ctx, ConfigManager.scheduleTaskKey(index, "start_hour"), spinnerScheduleStartHour.getSelectedItemPosition());
+            ConfigManager.setInt(ctx, ConfigManager.scheduleTaskKey(index, "start_min"), spinnerScheduleStartMin.getSelectedItemPosition());
+            ConfigManager.setInt(ctx, ConfigManager.scheduleTaskKey(index, "end_hour"), spinnerScheduleEndHour.getSelectedItemPosition());
+            ConfigManager.setInt(ctx, ConfigManager.scheduleTaskKey(index, "end_min"), spinnerScheduleEndMin.getSelectedItemPosition());
+            ConfigManager.setInt(ctx, ConfigManager.scheduleTaskKey(index, "interval"), seekBarScheduleInterval.getProgress() + 1);
+
+            // Prompt file
+            Object selected = spinnerSchedulePromptFile.getSelectedItem();
+            if (selected != null) {
+                ConfigManager.setString(ctx, ConfigManager.scheduleTaskKey(index, "prompt_file"), selected.toString() + ".txt");
+            }
+
+            ConfigManager.setString(ctx, ConfigManager.scheduleTaskKey(index, "prompt"), editTextSchedulePrompt.getText().toString().trim());
+
+            LogManager.logD(TAG, "[SCHEDULE] Saved task " + index + " config");
+        } catch (Exception e) {
+            LogManager.logW(TAG, "[SCHEDULE] saveCurrentScheduleTask error: " + e.getMessage());
+        }
+    }
+
+    private void notifyScheduleServiceChanged(boolean scheduleEnabled) {
+        try {
+            UnifiedForegroundService svc = UnifiedForegroundService.getInstance();
+            if (svc != null) {
+                if (scheduleEnabled) {
+                    svc.startScheduleHeartbeat();
+                } else {
+                    svc.stopScheduleHeartbeat();
+                }
+            } else if (scheduleEnabled) {
+                // Service not running yet, start it
+                android.content.Intent intent = new android.content.Intent(requireContext(), UnifiedForegroundService.class);
+                androidx.core.content.ContextCompat.startForegroundService(requireContext(), intent);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[SCHEDULE] Failed to notify service: " + e.getMessage());
+        }
     }
 }

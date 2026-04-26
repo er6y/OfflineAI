@@ -34,21 +34,21 @@ The goal is to find and download the `.zip` package. Follow this escalation chai
 2. The result is JSON with `links[]` and `buttons[]`. Check:
    - Any `href` containing `.zip` or `download` or `archive`
    - Any link/button text matching "Download zip", "下载ZIP", "下载", "Code" etc.
-3. If a direct `.zip` URL is found → download with `python_run` + `requests` as in (B). **Done.**
+3. If a direct `.zip` URL is found → download with `python` + `requests` as in (B). **Done.**
 
 **Approach 2 — Navigate to the files/download tab (1-2 steps max)**:
 Many registries (ModelScope, GitHub) show skill intro on the landing page but put the download link on a separate "Files" or "Code" tab.
 1. Look at `web_get_content` text for tab labels like "Skill 文件", "Files", "Code".
 2. Use `web_execute_js` to click that tab, e.g.: `document.querySelector('a[href*="file"]').click()` or similar.
 3. Then `web_get_content` again to find the zip link.
-4. If found → download with `python_run` + `requests`. **Done.**
+4. If found → download with `python` + `requests`. **Done.**
 
 **Approach 3 — GUI operations with screenshot (2-3 steps max)**:
 If DOM scripting fails (SPA pages may render download buttons outside normal DOM), use **GUI mode**:
 1. The page should already be open. Use `take_screenshot` to see the actual rendered page.
 2. Look for a visible "Download zip" / "下载" button in the screenshot.
 3. If found, use `click` at the button coordinates to trigger the browser download.
-4. `wait` 5 seconds, then use `python_run` to check `/sdcard/Download/` for newly downloaded `.zip` files:
+4. `wait` 5 seconds, then use `python` to check `/sdcard/Download/` for newly downloaded `.zip` files:
    ```python
    import os, glob
    zips = sorted(glob.glob('/sdcard/Download/*.zip'), key=os.path.getmtime, reverse=True)

@@ -24,6 +24,7 @@ import io.noties.markwon.AbstractMarkwonPlugin
 import io.noties.markwon.Markwon
 import io.noties.markwon.MarkwonPlugin
 import io.noties.markwon.ext.latex.JLatexMathPlugin
+import io.noties.markwon.ext.tables.TablePlugin
 import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
 
 object ChatViewHolders {
@@ -228,13 +229,14 @@ object ChatViewHolders {
         private val ivPerformanceHeader: ImageView = view.findViewById(R.id.iv_performance_header)
         private val performanceMarker: View = view.findViewById(R.id.view_performance_marker)
         
-        // Markwon with LaTeX support (inline $...$ and block $$...$$)
+        // Markwon with LaTeX + Table support (inline $...$ and block $$...$$, GFM tables)
         // Also includes file link handler for clickable file links in assistant messages
         private val markdown = Markwon.builder(itemView.context)
             .usePlugin(MarkwonInlineParserPlugin.create())  // Required for inline LaTeX
             .usePlugin(JLatexMathPlugin.create(32f) { builder ->
                 builder.inlinesEnabled(true)  // Enable $...$ inline formulas
             })
+            .usePlugin(TablePlugin.create(itemView.context))  // Enable GFM markdown tables
             .usePlugin(createFileLinkPlugin(itemView.context))
             .build()
         

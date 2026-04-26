@@ -1316,4 +1316,34 @@
     <string name="agent_save_experience">保存经验</string>
     <string name="agent_experience_saved">经验已保存到AgentKB</string>
     <string name="agent_experience_save_failed">保存经验失败</string>
+    
+    <!-- Agent user preset label (RAG Agent mode spinner) -->
+    <string name="label_agent_user_preset">用户预设</string>
+
+    <!-- Scheduled Task Settings (multi-group) -->
+    <string name="settings_category_schedule">定时任务</string>
+    <string name="label_schedule_enabled">启用定时任务</string>
+    <string name="schedule_enabled_hint">按计划自动触发Agent执行任务</string>
+    <string name="label_schedule_task_enabled">启用</string>
+    <string name="label_schedule_one_shot">一次执行</string>
+    <string name="label_schedule_weekdays">执行日期</string>
+    <string name="label_schedule_start_time">开始</string>
+    <string name="label_schedule_end_time">结束</string>
+    <string name="label_schedule_interval">间隔(分钟)</string>
+    <string name="label_schedule_prompt_file">提示词文件</string>
+    <string name="label_schedule_prompt">任务提示词</string>
+    <string name="schedule_prompt_hint">Agent将使用此提示词执行任务</string>
+    <string name="schedule_weekday_mon">一</string>
+    <string name="schedule_weekday_tue">二</string>
+    <string name="schedule_weekday_wed">三</string>
+    <string name="schedule_weekday_thu">四</string>
+    <string name="schedule_weekday_fri">五</string>
+    <string name="schedule_weekday_sat">六</string>
+    <string name="schedule_weekday_sun">日</string>
+    <string name="schedule_reminder_title">定时任务待执行</string>
+    <string name="schedule_reminder_text">请解锁屏幕以执行Agent定时任务</string>
+    <string name="schedule_notification_channel">定时任务提醒</string>
+    <string name="schedule_task_label">任务%d</string>
+    <string name="schedule_time_hour">时</string>
+    <string name="schedule_time_min">分</string>
 </resources>

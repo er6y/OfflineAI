@@ -25,6 +25,13 @@ class UnifiedActionExecutor(private val context: Context) {
     companion object {
         private const val TAG = "UnifiedActionExecutor"
         private const val ACTION_DELAY_MS = 1000L
+        // [IMPROVEMENT 4+5] Cache TTLs. Values picked empirically: web_open
+        // is "did the page actually load", which the WebView keeps fresh for
+        // ~30s before the LLM might genuinely need a refresh; web_get_content
+        // returns DOM-text, which is cheap to recompute but >50% of LLM
+        // duplicate-fetch loops happen within a 60s window.
+        private const val WEB_OPEN_DEDUP_MS = 30_000L
+        private const val WEB_GET_CACHE_TTL_MS = 60_000L
     }
 
     private fun executeCreateFile(path: String, content: String): ExecutionResult {
@@ -103,7 +110,40 @@ class UnifiedActionExecutor(private val context: Context) {
     
     private var installedAppList: List<Pair<String, String>>? = null
     private var isLoadingAppList = false
-    
+
+    // [IMPROVEMENT 4+5] Per-task web caches.
+    //   web_open  : if same URL was opened < WEB_OPEN_DEDUP_MS ago, skip the
+    //               actual reload (page is still in WebView).
+    //   web_get   : if same URL was fetched < WEB_GET_CACHE_TTL_MS ago, return
+    //               the cached content without re-running the JS scrape.
+    // Both are reset at task start via resetTaskCaches() so a new task always
+    // starts with a clean slate.
+    @Volatile private var lastWebOpenUrl: String? = null
+    @Volatile private var lastWebOpenTs: Long = 0L
+    @Volatile private var lastWebOpenStep: Int = -1
+    @Volatile private var lastWebGetUrl: String? = null
+    @Volatile private var lastWebGetTs: Long = 0L
+    @Volatile private var lastWebGetContent: String? = null
+    @Volatile private var lastWebGetStep: Int = -1
+    private val webStepCounter = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * Clear all per-task caches. Called by AgentEngine.executeTask() at the
+     * start of every new agent task so the previous task's state never leaks
+     * into the new run.
+     */
+    fun resetTaskCaches() {
+        lastWebOpenUrl = null
+        lastWebOpenTs = 0L
+        lastWebOpenStep = -1
+        lastWebGetUrl = null
+        lastWebGetTs = 0L
+        lastWebGetContent = null
+        lastWebGetStep = -1
+        webStepCounter.set(0)
+        LogManager.logI(TAG, "[EXEC_RESET] task-scoped web caches cleared")
+    }
+
     private val accessibilityService: AgentAccessibilityService?
         get() = AgentAccessibilityService.getInstance()
     
@@ -141,6 +181,40 @@ class UnifiedActionExecutor(private val context: Context) {
         }
     }
     
+    // ============================================================================
+    // Path variable substitution: ${SKILL_DIR}, ${WORKSPACE}
+    // ============================================================================
+
+    private fun resolveVar(s: String): String {
+        var r = s
+        if (r.contains("\${SKILL_DIR}")) {
+            r = r.replace("\${SKILL_DIR}", ConfigManager.getSkillsPath(context))
+        }
+        if (r.contains("\${WORKSPACE}")) {
+            r = r.replace("\${WORKSPACE}", ConfigManager.ensureAgentWorkspace(context))
+        }
+        return r
+    }
+
+    private fun resolveVariables(action: AgentAction): AgentAction = when (action) {
+        is AgentAction.Python -> action.copy(
+            argv = action.argv.map { resolveVar(it) }
+        )
+        is AgentAction.CreateFile -> action.copy(path = resolveVar(action.path))
+        is AgentAction.ReadFile -> action.copy(path = resolveVar(action.path))
+        is AgentAction.WriteFile -> action.copy(path = resolveVar(action.path))
+        is AgentAction.ReadLines -> action.copy(path = resolveVar(action.path))
+        is AgentAction.EditLines -> action.copy(path = resolveVar(action.path))
+        is AgentAction.Grep -> action.copy(path = resolveVar(action.path))
+        is AgentAction.RenameFile -> action.copy(oldPath = resolveVar(action.oldPath), newPath = resolveVar(action.newPath))
+        is AgentAction.DeleteFile -> action.copy(path = resolveVar(action.path))
+        is AgentAction.CopyFile -> action.copy(src = resolveVar(action.src), dst = resolveVar(action.dst))
+        is AgentAction.ListDir -> action.copy(path = resolveVar(action.path))
+        is AgentAction.Mkdir -> action.copy(path = resolveVar(action.path))
+        is AgentAction.SearchFiles -> action.copy(path = resolveVar(action.path))
+        else -> action
+    }
+
     /**
      * Execute an AgentAction.
      */
@@ -149,39 +223,83 @@ class UnifiedActionExecutor(private val context: Context) {
             return ExecutionResult(false, "Accessibility service not available")
         }
 
-        validateActionParameters(action)?.let { errorMsg ->
-            LogManager.logW(TAG, "[ACTION_VALIDATION] Rejected ${action.javaClass.simpleName}: $errorMsg")
+        // Resolve path variables before validation and execution
+        val resolved = resolveVariables(action)
+
+        validateActionParameters(resolved)?.let { errorMsg ->
+            LogManager.logW(TAG, "[ACTION_VALIDATION] Rejected ${resolved.javaClass.simpleName}: $errorMsg")
             return ExecutionResult(false, errorMsg)
         }
         
-        LogManager.logI(TAG, "Executing action: ${action.javaClass.simpleName}")
+        LogManager.logI(TAG, "Executing action: ${resolved.javaClass.simpleName}")
         
         // Hide floating window for screen interactions
-        val needsHide = action is AgentAction.Click || action is AgentAction.LongPress ||
-            action is AgentAction.DoubleClick || action is AgentAction.Type ||
-            action is AgentAction.Swipe || action is AgentAction.Drag ||
-            action is AgentAction.SystemButton
+        val needsHide = resolved is AgentAction.Click || resolved is AgentAction.LongPress ||
+            resolved is AgentAction.DoubleClick || resolved is AgentAction.Type ||
+            resolved is AgentAction.Swipe || resolved is AgentAction.Drag ||
+            resolved is AgentAction.SystemButton
         
         if (needsHide) {
-            accessibilityService?.floatingWindow?.temporaryHide()
-            delay(50)
+            // ROOT-CAUSE FIX: temporaryHide() posts to the main thread and returns
+            // immediately. The previous delay(50) was NOT enough for:
+            //   1) main-thread post to actually run visibility=GONE,
+            //   2) the next frame post {} callback to fire,
+            //   3) WindowManager to propagate the visibility change into the
+            //      accessibility node tree (rootInActiveWindow becomes null
+            //      mid-transition).
+            // For Type especially, the executor immediately reads
+            // rootInActiveWindow inside inputTextAtCoordinate -- if the floating
+            // window is still in transition, root is null and the whole call
+            // fails with "no_active_window". Switch to a synchronous latch so
+            // we only proceed AFTER the UI frame containing visibility=GONE has
+            // actually been rendered. Then add a small settle delay to let the
+            // accessibility tree catch up.
+            val hideLatch = java.util.concurrent.CountDownLatch(1)
+            val hideRequested = accessibilityService?.floatingWindow != null
+            if (hideRequested) {
+                accessibilityService?.floatingWindow?.temporaryHide { hideLatch.countDown() }
+                if (!hideLatch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    LogManager.logW(TAG, "[ACTION_HIDE] Timeout(500ms) waiting for floating window to hide; proceeding anyway")
+                }
+            }
+            // Settle delay: WindowManager -> accessibility tree propagation.
+            // Empirically rootInActiveWindow can stay null for ~100-200ms after
+            // a window-level visibility change on Huawei/Honor; 150ms covers
+            // it without noticeably slowing the action.
+            delay(150)
+            // [B5] For Type actions specifically, we additionally poll the a11y
+            // tree for an effective root up to 600ms BEFORE dispatching the
+            // gesture. Type is the only action that immediately reads the tree
+            // (findFocus, findNodeAtPoint, walkUpToEditable). Click/Swipe/Drag
+            // only dispatchGesture and do not depend on root readiness, so the
+            // 150ms delay above is sufficient for them. Root 5 times in log2.txt
+            // showed rootInActiveWindow null at 11:04:17.816 (+5ms after hide),
+            // causing all 5 Type calls to fail -- the wait here eliminates
+            // that race condition.
+            if (resolved is AgentAction.Type) {
+                val t0 = System.currentTimeMillis()
+                val ready = accessibilityService?.waitForRootReady(600L) != null
+                val waited = System.currentTimeMillis() - t0
+                LogManager.logI(TAG, "[ACTION_ROOT_WAIT] type=${resolved.javaClass.simpleName} " +
+                    "rootReady=$ready waitedMs=$waited")
+            }
         }
         
         val result = try {
-            when (action) {
-                is AgentAction.Click -> executeClick(action.x, action.y)
-                is AgentAction.LongPress -> executeLongPress(action.x, action.y)
-                is AgentAction.DoubleClick -> executeDoubleClick(action.x, action.y)
-                is AgentAction.Type -> executeType(action.text)
-                is AgentAction.Swipe -> executeSwipe(action)
-                is AgentAction.Drag -> executeDrag(action.startX, action.startY, action.endX, action.endY)
-                is AgentAction.Open -> executeOpen(action.appName)
-                is AgentAction.SystemButton -> executeSystemButton(action.button)
-                is AgentAction.Wait -> { delay(1000); ExecutionResult(true, "Waited") }
-                is AgentAction.Terminate -> ExecutionResult(true, "Task ${action.status.value}")
+            when (resolved) {
+                is AgentAction.Click -> executeClick(resolved.x, resolved.y)
+                is AgentAction.LongPress -> executeLongPress(resolved.x, resolved.y)
+                is AgentAction.DoubleClick -> executeDoubleClick(resolved.x, resolved.y)
+                is AgentAction.Type -> executeType(resolved.text, resolved.x, resolved.y)
+                is AgentAction.Swipe -> executeSwipe(resolved)
+                is AgentAction.Drag -> executeDrag(resolved.startX, resolved.startY, resolved.endX, resolved.endY)
+                is AgentAction.Open -> executeOpen(resolved.appName)
+                is AgentAction.SystemButton -> executeSystemButton(resolved.button)
+                is AgentAction.Wait -> executeWait(resolved.seconds)
+                is AgentAction.Terminate -> ExecutionResult(true, "Task ${resolved.status.value}")
                 is AgentAction.Context -> ExecutionResult(true, "Context updated")
-                is AgentAction.AskUser -> ExecutionResult(true, "AskUser: ${action.text}")
-                is AgentAction.ShowOutput -> ExecutionResult(true, "ShowOutput: size=${action.size}")
+                is AgentAction.AskUser -> ExecutionResult(true, "AskUser: ${resolved.text}")
+                is AgentAction.ShowOutput -> ExecutionResult(true, "ShowOutput: size=${resolved.size}")
                 is AgentAction.GetAppList -> executeGetAppList()
                 is AgentAction.KbInsert -> {
                     LogManager.logI(TAG, "[KB] kb_insert deferred to experience save flow")
@@ -191,33 +309,45 @@ class UnifiedActionExecutor(private val context: Context) {
                     LogManager.logI(TAG, "[KB] kb_delete deferred to experience save flow")
                     ExecutionResult(true, "KB delete deferred")
                 }
-                is AgentAction.WebOpen -> executeWebOpen(action.url)
+                is AgentAction.WebOpen -> executeWebOpen(resolved.url)
                 is AgentAction.WebGetContent -> executeWebGetContent()
-                is AgentAction.WebExecuteJs -> executeWebExecuteJs(action.script)
+                is AgentAction.WebExecuteJs -> executeWebExecuteJs(resolved.script)
                 is AgentAction.DataMemory -> ExecutionResult(true, "data_memory handled by AgentEngine")
-                is AgentAction.CreateFile -> executeCreateFile(action.path, action.content)
-                is AgentAction.ReadFile -> executeReadFile(action.path)
-                is AgentAction.WriteFile -> executeWriteFile(action.path, action.content)
-                is AgentAction.ReadLines -> executeReadLines(action.path, action.startLine, action.endLine)
-                is AgentAction.EditLines -> executeEditLines(action.path, action.startLine, action.endLine, action.content)
-                is AgentAction.Grep -> executeGrep(action.path, action.keyword)
-                is AgentAction.RenameFile -> executeRenameFile(action.oldPath, action.newPath)
-                is AgentAction.DeleteFile -> executeDeleteFile(action.path, action.recursive)
-                is AgentAction.CopyFile -> executeCopyFile(action.src, action.dst)
-                is AgentAction.ListDir -> executeListDir(action.path)
-                is AgentAction.Mkdir -> executeMkdir(action.path)
-                is AgentAction.SearchFiles -> executeSearchFiles(action.path, action.keyword)
-                is AgentAction.PythonRun -> executePythonRun(action)
-                is AgentAction.PythonStatus -> executePythonStatus(action)
-                is AgentAction.PythonKill -> executePythonKill(action)
+                is AgentAction.CreateFile -> executeCreateFile(resolved.path, resolved.content)
+                is AgentAction.ReadFile -> executeReadFile(resolved.path)
+                is AgentAction.WriteFile -> executeWriteFile(resolved.path, resolved.content)
+                is AgentAction.ReadLines -> executeReadLines(resolved.path, resolved.startLine, resolved.endLine)
+                is AgentAction.EditLines -> executeEditLines(resolved.path, resolved.startLine, resolved.endLine, resolved.content)
+                is AgentAction.Grep -> executeGrep(resolved.path, resolved.keyword)
+                is AgentAction.RenameFile -> executeRenameFile(resolved.oldPath, resolved.newPath)
+                is AgentAction.DeleteFile -> executeDeleteFile(resolved.path, resolved.recursive)
+                is AgentAction.CopyFile -> executeCopyFile(resolved.src, resolved.dst)
+                is AgentAction.ListDir -> executeListDir(resolved.path)
+                is AgentAction.Mkdir -> executeMkdir(resolved.path)
+                is AgentAction.SearchFiles -> executeSearchFiles(resolved.path, resolved.keyword)
+                is AgentAction.Python -> executePython(resolved)
+                is AgentAction.PythonStatus -> executePythonStatus(resolved)
+                is AgentAction.PythonKill -> executePythonKill(resolved)
+                is AgentAction.ScheduleGet -> executeScheduleGet()
+                is AgentAction.ScheduleSet -> executeScheduleSet(resolved)
             }
         } finally {
             if (needsHide) {
-                accessibilityService?.floatingWindow?.temporaryShow()
+                // Synchronous show: matches the synchronous hide above so we
+                // never leave the floating window invisible if the next action
+                // fires immediately. Same latch + timeout pattern.
+                val showLatch = java.util.concurrent.CountDownLatch(1)
+                val showRequested = accessibilityService?.floatingWindow != null
+                if (showRequested) {
+                    accessibilityService?.floatingWindow?.temporaryShow { showLatch.countDown() }
+                    if (!showLatch.await(500, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                        LogManager.logW(TAG, "[ACTION_SHOW] Timeout(500ms) waiting for floating window to show")
+                    }
+                }
             }
         }
         
-        if (result.success && action !is AgentAction.Wait) {
+        if (result.success && resolved !is AgentAction.Wait) {
             delay(ACTION_DELAY_MS)
         }
         
@@ -257,7 +387,22 @@ class UnifiedActionExecutor(private val context: Context) {
                     ?: validateNormalizedCoordinate(action.endX, "endX")
                     ?: validateNormalizedCoordinate(action.endY, "endY")
             }
-            is AgentAction.Type -> requireNonBlank(action.text, "type.text")
+            is AgentAction.Type -> {
+                requireNonBlank(action.text, "type.text")
+                    ?: run {
+                        // coordinate is REQUIRED. Guarantees a single unified
+                        // input path (inputTextAtCoordinate) which works on
+                        // EditText / WebView / self-drawn boxes alike. Naked
+                        // type is deprecated because it silently fails on
+                        // real-phone self-drawn inputs (no FOCUS_INPUT).
+                        if (action.x == null || action.y == null) {
+                            "type.coordinate 必填：必须提供 [x,y] 指向目标输入框屏幕坐标"
+                        } else {
+                            validateNormalizedCoordinate(action.x, "x")
+                                ?: validateNormalizedCoordinate(action.y, "y")
+                        }
+                    }
+            }
             is AgentAction.Open -> requireNonBlank(action.appName, "open.text")
             is AgentAction.AskUser -> requireNonBlank(action.text, "ask_user.text")
             is AgentAction.WebOpen -> {
@@ -305,19 +450,217 @@ class UnifiedActionExecutor(private val context: Context) {
                 requireNonBlank(action.path, "search_files.path")
                     ?: requireNonBlank(action.keyword, "search_files.keyword")
             }
-            is AgentAction.PythonRun -> {
-                if (action.code == null && action.file == null) {
-                    "python_run requires either 'code' or 'file' parameter"
-                } else if (action.code != null && action.file != null) {
-                    "python_run cannot have both 'code' and 'file' parameters"
+            is AgentAction.Python -> {
+                if (action.argv.isEmpty()) {
+                    "python requires non-empty 'argv' array (no shell; use argv=[...] semantics like subprocess.run)"
+                } else if (action.timeoutSec < 0) {
+                    "python.timeout_sec must be >= 0"
                 } else {
                     null
                 }
             }
             is AgentAction.PythonStatus -> null  // No parameters needed
             is AgentAction.PythonKill -> null  // No parameters needed
+            is AgentAction.ScheduleSet -> validateScheduleSet(action)
+            is AgentAction.Wait -> {
+                // Allowed range: 1 second ~ 24 hours (86400s)
+                if (action.seconds < 1 || action.seconds > 86400) {
+                    "wait.seconds must be in [1, 86400] (1s ~ 24h), got ${action.seconds}"
+                } else null
+            }
             else -> null
         }
+    }
+
+    // ============================================================================
+    // Schedule task management
+    // ============================================================================
+
+    /** Validate schedule_set parameters (task_id range + each optional field). */
+    private fun validateScheduleSet(a: AgentAction.ScheduleSet): String? {
+        if (a.taskId < 1 || a.taskId > ConfigManager.SCHEDULE_TASK_COUNT) {
+            return "schedule_set.task_id must be 1..${ConfigManager.SCHEDULE_TASK_COUNT}, got ${a.taskId}"
+        }
+        a.weekdays?.let { wd ->
+            if (wd.isNotEmpty()) {
+                val parts = wd.split(",").map { it.trim() }
+                for (p in parts) {
+                    val d = p.toIntOrNull()
+                    if (d == null || d !in 1..7) {
+                        return "schedule_set.weekdays must be comma-separated ints 1..7 (1=Mon..7=Sun), got '$wd'"
+                    }
+                }
+            }
+        }
+        a.start?.let { parseHHMM(it) ?: return "schedule_set.start must be 'HH:MM' (00:00~23:59), got '$it'" }
+        a.end?.let { parseHHMM(it) ?: return "schedule_set.end must be 'HH:MM' (00:00~23:59), got '$it'" }
+        a.intervalMin?.let { if (it < 1) return "schedule_set.interval_min must be >= 1, got $it" }
+        return null
+    }
+
+    /** Parse 'HH:MM' -> Pair<hour, min> or null if invalid. */
+    private fun parseHHMM(s: String): Pair<Int, Int>? {
+        val parts = s.split(":")
+        if (parts.size != 2) return null
+        val h = parts[0].toIntOrNull() ?: return null
+        val m = parts[1].toIntOrNull() ?: return null
+        if (h !in 0..23 || m !in 0..59) return null
+        return h to m
+    }
+
+    /**
+     * Build a markdown summary of master switch + 4 task configs.
+     * Returned via ExecutionResult.returnData so AgentEngine injects it into the next step.
+     */
+    private fun executeScheduleGet(): ExecutionResult {
+        LogManager.logI(TAG, "[SCHEDULE] schedule_get requested")
+        val ctx = context
+        val masterEnabled = ConfigManager.getBoolean(ctx, ConfigManager.KEY_SCHEDULE_ENABLED, false)
+        val sb = StringBuilder()
+        sb.append("# Scheduled Tasks\n\n")
+        sb.append("**Master switch (user-controlled only)**: ")
+            .append(if (masterEnabled) "ON" else "OFF")
+            .append("\n\n")
+        if (!masterEnabled) {
+            sb.append("> NOTE: master switch is OFF — no task will trigger regardless of per-task settings. ")
+                .append("Only the user can toggle this switch in the Settings page.\n\n")
+        }
+        sb.append("| task | enabled | one_shot | weekdays | start | end | interval_min | agent_preset | prompt |\n")
+        sb.append("|---|---|---|---|---|---|---|---|---|\n")
+        for (i in 0 until ConfigManager.SCHEDULE_TASK_COUNT) {
+            val enabled = ConfigManager.getBoolean(ctx, ConfigManager.scheduleTaskKey(i, "enabled"), false)
+            val oneShot = ConfigManager.getBoolean(ctx, ConfigManager.scheduleTaskKey(i, "one_shot"), false)
+            val weekdays = ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(i, "weekdays"), "1,2,3,4,5")
+            val sh = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "start_hour"), 9)
+            val sm = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "start_min"), 0)
+            val eh = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "end_hour"), 17)
+            val em = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "end_min"), 0)
+            val interval = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "interval"), 30)
+            // Stored value includes .txt; strip extension for the agent-facing `agent_preset` name
+            val storedPreset = ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(i, "prompt_file"), "common_agent.txt")
+            val presetName = if (storedPreset.endsWith(".txt")) storedPreset.dropLast(4) else storedPreset
+            val prompt = ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(i, "prompt"), "")
+            val promptPreview = if (prompt.length > 60) prompt.substring(0, 60) + "…" else prompt
+            // Escape pipe characters that would break the markdown table layout
+            val promptEscaped = promptPreview.replace("|", "\\|").replace("\n", " ")
+            sb.append("| ").append(i + 1)
+                .append(" | ").append(enabled)
+                .append(" | ").append(oneShot)
+                .append(" | ").append(weekdays)
+                .append(" | ").append(String.format("%02d:%02d", sh, sm))
+                .append(" | ").append(String.format("%02d:%02d", eh, em))
+                .append(" | ").append(interval)
+                .append(" | ").append(presetName)
+                .append(" | ").append(promptEscaped)
+                .append(" |\n")
+        }
+
+        // Append the list of available agent_user presets (filename w/o .txt) so the model
+        // can pick a valid `agent_preset` value without guessing the path.
+        val available = ConfigManager.listAgentUserFiles(ctx)
+        sb.append("\n**可用 agent_preset**（填入下面任一值，不要带扩展名，也不要填路径）: ")
+        if (available.isEmpty()) {
+            sb.append("(none — agent_user/ 目录为空，必须先 create_file 到该目录新建 .txt 文件)")
+        } else {
+            sb.append(available.joinToString(", ") { if (it.endsWith(".txt")) it.dropLast(4) else it })
+        }
+        sb.append("\n说明：跨夜时段允许（end < start 表示到次日 end 时刻），`weekdays` 必须覆盖实际触发日期（含跨夜的次日）。\n")
+
+        return ExecutionResult(
+            success = true,
+            message = "schedule_get: master=$masterEnabled, ${ConfigManager.SCHEDULE_TASK_COUNT} tasks, presets=${available.size}",
+            returnData = sb.toString()
+        )
+    }
+
+    /**
+     * Patch-update a single task slot. Only fields present are written.
+     * Does NOT touch master switch (user-controlled).
+     */
+    private fun executeScheduleSet(a: AgentAction.ScheduleSet): ExecutionResult {
+        val ctx = context
+        val index = a.taskId - 1  // external 1-based, internal 0-based
+        val changed = mutableListOf<String>()
+
+        a.enabled?.let {
+            ConfigManager.setBoolean(ctx, ConfigManager.scheduleTaskKey(index, "enabled"), it)
+            changed.add("enabled=$it")
+        }
+        a.oneShot?.let {
+            ConfigManager.setBoolean(ctx, ConfigManager.scheduleTaskKey(index, "one_shot"), it)
+            changed.add("one_shot=$it")
+        }
+        a.weekdays?.let { wd ->
+            // Normalize: strip spaces, keep 1..7 order-preserving
+            val normalized = wd.split(",").map { it.trim() }.filter { it.isNotEmpty() }.joinToString(",")
+            ConfigManager.setString(ctx, ConfigManager.scheduleTaskKey(index, "weekdays"), normalized)
+            changed.add("weekdays=$normalized")
+        }
+        a.start?.let { s ->
+            parseHHMM(s)?.let { (h, m) ->
+                ConfigManager.setInt(ctx, ConfigManager.scheduleTaskKey(index, "start_hour"), h)
+                ConfigManager.setInt(ctx, ConfigManager.scheduleTaskKey(index, "start_min"), m)
+                changed.add("start=${String.format("%02d:%02d", h, m)}")
+            }
+        }
+        a.end?.let { s ->
+            parseHHMM(s)?.let { (h, m) ->
+                ConfigManager.setInt(ctx, ConfigManager.scheduleTaskKey(index, "end_hour"), h)
+                ConfigManager.setInt(ctx, ConfigManager.scheduleTaskKey(index, "end_min"), m)
+                changed.add("end=${String.format("%02d:%02d", h, m)}")
+            }
+        }
+        a.intervalMin?.let {
+            ConfigManager.setInt(ctx, ConfigManager.scheduleTaskKey(index, "interval"), it)
+            changed.add("interval_min=$it")
+        }
+        a.agentPreset?.let { pf ->
+            // Only validate when non-blank (blank string means "no update", for backward compat with optStr default)
+            if (pf.isNotBlank()) {
+                // Validate against agent_user directory listing; accept both "stock_agent" and "stock_agent.txt"
+                val available = ConfigManager.listAgentUserFiles(ctx)
+                val normalizedName = if (pf.endsWith(".txt")) pf else "$pf.txt"
+                if (available.isNotEmpty() && normalizedName !in available) {
+                    // Strip .txt for display so the error mirrors what the model should fill in next time
+                    val availableDisplay = available.joinToString(", ") {
+                        if (it.endsWith(".txt")) it.dropLast(4) else it
+                    }
+                    return ExecutionResult(
+                        success = false,
+                        message = "schedule_set.agent_preset '$pf' not found in agent_user/. " +
+                                "You provided '$pf'. Available presets (填入不带扩展名的名字): $availableDisplay"
+                    )
+                }
+                // Store full filename (with .txt) for UI/service compatibility; agent-facing name has no extension
+                ConfigManager.setString(ctx, ConfigManager.scheduleTaskKey(index, "prompt_file"), normalizedName)
+                val displayName = if (normalizedName.endsWith(".txt")) normalizedName.dropLast(4) else normalizedName
+                changed.add("agent_preset=$displayName")
+            }
+        }
+        a.prompt?.let {
+            ConfigManager.setString(ctx, ConfigManager.scheduleTaskKey(index, "prompt"), it)
+            changed.add("prompt=(${it.length} chars)")
+        }
+
+        if (changed.isEmpty()) {
+            return ExecutionResult(
+                success = false,
+                message = "schedule_set: no fields provided to update for task ${a.taskId}"
+            )
+        }
+
+        LogManager.logI(TAG, "[SCHEDULE] schedule_set task=${a.taskId} updated: ${changed.joinToString(", ")}")
+
+        // If master switch is OFF, hint the agent so it can surface this to the user.
+        val masterEnabled = ConfigManager.getBoolean(ctx, ConfigManager.KEY_SCHEDULE_ENABLED, false)
+        val suffix = if (!masterEnabled) {
+            " | NOTE: master switch is OFF (user-controlled), changes saved but won't trigger until user enables it in Settings."
+        } else ""
+
+        return ExecutionResult(
+            success = true,
+            message = "schedule_set task ${a.taskId}: ${changed.joinToString(", ")}$suffix"
+        )
     }
 
     private fun executeClick(xNorm: Int, yNorm: Int): ExecutionResult {
@@ -339,10 +682,24 @@ class UnifiedActionExecutor(private val context: Context) {
         return ExecutionResult(ok, if (ok) "Double clicked ($sx,$sy)" else "Failed to double click")
     }
     
-    private fun executeType(text: String): ExecutionResult {
-        val err = accessibilityService?.inputTextWithReason(text)
-        return if (err == null) ExecutionResult(true, "Typed: $text")
-        else ExecutionResult(false, "Failed to type: $err")
+    private fun executeType(text: String, xNorm: Int?, yNorm: Int?): ExecutionResult {
+        // Unified input path: ALL type actions now go through
+        // inputTextAtCoordinate (click + directed setText/paste on the node
+        // under point). The validator above already enforces non-null x,y,
+        // but we re-check here as a defensive second line -- makes the
+        // executor self-contained and surfaces a clear failure message if
+        // validation is ever bypassed.
+        if (xNorm == null || yNorm == null) {
+            return ExecutionResult(
+                success = false,
+                message = "type action 必须带 coordinate:[x,y]（指向目标输入框屏幕坐标）；裸 type 已废弃"
+            )
+        }
+        val (px, py) = normalizedToPixel(xNorm, yNorm)
+        LogManager.logI(TAG, "[TYPE_AT] Normalized: [$xNorm, $yNorm] -> Pixel: ($px, $py), text='$text'")
+        val err = accessibilityService?.inputTextAtCoordinate(px, py, text)
+        return if (err == null) ExecutionResult(true, "Typed at ($px,$py): $text")
+        else ExecutionResult(false, "Failed to type at ($px,$py): $err")
     }
     
     private fun executeSwipe(action: AgentAction.Swipe): ExecutionResult {
@@ -419,6 +776,75 @@ class UnifiedActionExecutor(private val context: Context) {
         } ?: false
         return ExecutionResult(ok, if (ok) "Pressed $button" else "Failed to press $button")
     }
+
+    /**
+     * Execute wait action with a live countdown on the floating-window status bar.
+     *
+     * Design (absolute-time anchoring, not drift-accumulating):
+     *  - Compute absolute end timestamp once (endMs = now + seconds*1000).
+     *  - Each iteration: read current time, compute remaining, update status text,
+     *    then delay at most 1 second (capped by actual time-to-end on the last tick).
+     *  - Total elapsed wall time = seconds ± ~20ms regardless of JVM jitter / GC.
+     *  - `delay()` is a kotlinx.coroutines suspend, so user-triggered job cancel
+     *    (stop button) interrupts the wait immediately via CancellationException.
+     *
+     * The original status text is restored after the wait completes, so subsequent
+     * steps are not polluted with stale countdown text.
+     */
+    private suspend fun executeWait(seconds: Int): ExecutionResult {
+        val clamped = seconds.coerceIn(1, 86400)
+        // Short waits (≤ 3s) keep the legacy silent behavior for UI stabilization.
+        if (clamped <= 3) {
+            delay(clamped * 1000L)
+            return ExecutionResult(true, "Waited ${clamped}s")
+        }
+
+        val floatingWindow = accessibilityService?.floatingWindow
+        val startMs = System.currentTimeMillis()
+        val endMs = startMs + clamped * 1000L
+        val endTimeLabel = formatWallClock(endMs)
+        LogManager.logI(TAG, "[WAIT] Starting ${clamped}s countdown (until $endTimeLabel)")
+
+        try {
+            while (true) {
+                val now = System.currentTimeMillis()
+                val remainingMs = endMs - now
+                if (remainingMs <= 0L) break
+                val remainingSec = ((remainingMs + 999L) / 1000L).toInt()  // ceil to avoid flashing 0
+                floatingWindow?.updateStatus("Agent等待剩余 ${formatHms(remainingSec)}，约于 $endTimeLabel 继续")
+                // Sleep until the next whole-second boundary, but never past endMs.
+                val nextTick = minOf(1000L, remainingMs)
+                delay(nextTick)
+            }
+        } finally {
+            // Restore a neutral status so the countdown text doesn't linger into next step.
+            floatingWindow?.updateStatus("Agent 等待结束，继续执行…")
+        }
+
+        LogManager.logI(TAG, "[WAIT] Countdown finished (waited ${clamped}s)")
+        return ExecutionResult(true, "Waited ${clamped}s")
+    }
+
+    /** Format seconds as HH:MM:SS for countdown display. */
+    private fun formatHms(totalSec: Int): String {
+        val s = totalSec.coerceAtLeast(0)
+        val h = s / 3600
+        val m = (s % 3600) / 60
+        val sec = s % 60
+        return String.format("%02d:%02d:%02d", h, m, sec)
+    }
+
+    /** Format an absolute wall-clock timestamp as HH:MM:SS (local time). */
+    private fun formatWallClock(epochMs: Long): String {
+        val cal = java.util.Calendar.getInstance()
+        cal.timeInMillis = epochMs
+        return String.format(
+            "%02d:%02d:%02d",
+            cal.get(java.util.Calendar.HOUR_OF_DAY),
+            cal.get(java.util.Calendar.MINUTE),
+            cal.get(java.util.Calendar.SECOND)
+        )
+    }
     
     private suspend fun executeGetAppList(): ExecutionResult {
         if (installedAppList == null) loadInstalledAppList()
@@ -443,9 +869,35 @@ class UnifiedActionExecutor(private val context: Context) {
 
     private suspend fun executeWebOpen(url: String): ExecutionResult {
         LogManager.logI(TAG, "[WEB_OPEN] Opening URL: $url")
+        // [IMPROVEMENT 5] Same-URL dedup. Repeated web_open to the identical
+        // URL inside WEB_OPEN_DEDUP_MS skips the actual reload (page already
+        // sitting fresh in the AgentWebView). The message explicitly tells
+        // the LLM "you already opened this", so the model can stop looping.
+        val now = System.currentTimeMillis()
+        val cachedUrl = lastWebOpenUrl
+        if (cachedUrl == url && (now - lastWebOpenTs) < WEB_OPEN_DEDUP_MS) {
+            val ageSec = (now - lastWebOpenTs) / 1000.0
+            LogManager.logI(TAG, "[WEB_OPEN][CACHE_HIT] reused S${lastWebOpenStep} (age=${"%.1f".format(ageSec)}s)")
+            return ExecutionResult(
+                true,
+                "[WEB_OPEN_REUSED_CACHE] $url already opened ${"%.1f".format(ageSec)}s ago at " +
+                    "step S${lastWebOpenStep}; page still loaded in WebView. " +
+                    "Skipping reload. Call web_get_content if you need the content again, " +
+                    "OR open a different URL if the previous load was stale."
+            )
+        }
         val webView = getAgentWebView()
             ?: return ExecutionResult(false, "AgentWebView not available (accessibility service not running)")
         val ok = webView.loadUrl(url)
+        // Update cache regardless of full load success: even a partial load
+        // means the WebView engine is now pointed at this URL.
+        lastWebOpenUrl = url
+        lastWebOpenTs = System.currentTimeMillis()
+        lastWebOpenStep = webStepCounter.incrementAndGet()
+        // [IMPROVEMENT 4] Invalidate stale web_get_content cache: any new
+        // navigation makes the previous DOM scrape outdated.
+        lastWebGetUrl = null
+        lastWebGetContent = null
         return if (ok) {
             ExecutionResult(true, "[WEB_OPEN_OK] Opened URL: $url (page loaded)")
         } else {
@@ -462,9 +914,36 @@ class UnifiedActionExecutor(private val context: Context) {
         LogManager.logI(TAG, "[WEB_GET_CONTENT] Extracting page content")
         val webView = getAgentWebView()
             ?: return ExecutionResult(false, "AgentWebView not available (accessibility service not running)")
+        // [IMPROVEMENT 4] TTL cache by current URL. Same URL within the TTL
+        // window returns the previous content with a [REUSED] marker so the
+        // LLM sees identical content==identical URL==no point re-fetching.
+        // Observed in flash_dram log: 6 consecutive web_get_content calls
+        // returning the same 7089 chars from the same URL.
+        val currentUrl = webView.getCurrentUrl()
+        val now = System.currentTimeMillis()
+        val cacheUrl = lastWebGetUrl
+        val cacheContent = lastWebGetContent
+        if (cacheUrl != null && cacheUrl == currentUrl &&
+            cacheContent != null && (now - lastWebGetTs) < WEB_GET_CACHE_TTL_MS) {
+            val ageSec = (now - lastWebGetTs) / 1000.0
+            LogManager.logI(TAG, "[WEB_GET_CONTENT][CACHE_HIT] reused S${lastWebGetStep} " +
+                "(${cacheContent.length} chars, age=${"%.1f".format(ageSec)}s)")
+            return ExecutionResult(
+                true,
+                "[WEB_GET_REUSED_CACHE] Page content for $currentUrl reused from S${lastWebGetStep} " +
+                    "(${cacheContent.length} chars, ${"%.1f".format(ageSec)}s ago). " +
+                    "If the page changed, call web_open again to refresh.",
+                returnData = cacheContent
+            )
+        }
         val content = webView.getContent()
         return if (content != null) {
             LogManager.logI(TAG, "[WEB_GET_CONTENT] Got ${content.length} chars")
+            // Populate cache for the next call.
+            lastWebGetUrl = currentUrl
+            lastWebGetContent = content
+            lastWebGetTs = System.currentTimeMillis()
+            lastWebGetStep = webStepCounter.incrementAndGet()
             ExecutionResult(true, "Page content extracted (${content.length} chars)", returnData = content)
         } else {
             ExecutionResult(false, "Failed to extract page content (timeout)")
@@ -811,63 +1290,89 @@ class UnifiedActionExecutor(private val context: Context) {
     }
 
     // ============================================================================
-    // Python Operations (via Chaquopy)
+    // Python Operations (via Chaquopy) - PC CLI aligned: sync-by-default, background via flag
     // ============================================================================
 
-    private val pythonOutputMemory = mutableMapOf<String, StringBuilder>()
     private val pythonStateLock = Any()
-    private val PYTHON_STDOUT_KEY = "python_key"
-    private val PYTHON_OUTPUT_MAX_CHARS = 10000
+    // HEAD truncation: skills (e.g. stockpicker) now print critical LLM-facing
+    // content (NEXT_STEP block) at the TOP of their output, so we keep the
+    // beginning when truncation is needed. Cap raised to 20000 to comfortably
+    // hold stockpicker brief (~11K chars incl. matrix-rich NEXT_STEP + human
+    // tables). Matches AgentEngine.formatResultStr's large-payload bucket.
+    private val PYTHON_OUTPUT_MAX_CHARS = 20000  // Head truncation cap for status/result output
+    private val PYTHON_LOG_MAX_CHARS = 200000    // Absolute max for internal log read
     private val sessionCounter = AtomicInteger(0)
     @Volatile private var activePythonSession: PythonSession? = null
     @Volatile private var lastPythonSession: PythonSession? = null
-    
+
     // CRITICAL: Chaquopy requires single-threaded Python execution to avoid "frame does not exist" error
     private val pythonExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
         Thread(r, "Python-Chaquopy-SingleThread").apply { isDaemon = true }
     }
 
-    private fun executePythonRun(action: AgentAction.PythonRun): ExecutionResult {
-        LogManager.logI(TAG, "[PYTHON_RUN] Starting Python session")
+    /**
+     * Normalize argv: strip leading "python" / "python3" if the model included it.
+     * No shell parsing needed (argv-only API).
+     */
+    private fun normalizePythonTokens(action: AgentAction.Python): Pair<List<String>, String?> {
+        val tokens = action.argv
+        if (tokens.isEmpty()) return emptyList<String>() to "python argv is empty"
+        val stripped = if (tokens[0] == "python" || tokens[0] == "python3") tokens.drop(1) else tokens
+        return stripped to null
+    }
 
+    private fun executePython(action: AgentAction.Python): ExecutionResult {
+        LogManager.logI(TAG, "[PYTHON] Starting: timeout_sec=${action.timeoutSec} (0=async, >0=sync)")
+
+        // Lazy-initialize Chaquopy Python on first use (moved out of Application.onCreate
+        // to avoid startup ANRs on slow devices). Safe / idempotent / thread-safe.
+        try {
+            com.example.offlineai.PythonBootstrapper.ensureStarted(context)
+        } catch (t: Throwable) {
+            LogManager.logE(TAG, "[PYTHON] PythonBootstrapper.ensureStarted failed: ${t.message}", t)
+            return ExecutionResult(false, "Python runtime init failed: ${t.message}")
+        }
+
+        // Single-instance gate
         synchronized(pythonStateLock) {
             val running = activePythonSession
             if (running != null && running.state == PythonSession.State.RUNNING) {
                 return ExecutionResult(
                     false,
-                    "Python single-instance mode: another run is active. Wait via python_status or stop via python_kill."
+                    "Python single-instance: another run is active. Use python_status to poll or python_kill to abort."
                 )
             }
         }
 
-        // Validate input
-        if (action.code == null && action.file == null) {
-            return ExecutionResult(false, "python_run requires either 'code' or 'file' parameter")
-        }
-        if (action.code != null && action.file != null) {
-            return ExecutionResult(false, "python_run cannot have both 'code' and 'file' parameters")
+        // Normalize cmd/argv -> tokens
+        val (tokens, normErr) = normalizePythonTokens(action)
+        if (normErr != null) return ExecutionResult(false, normErr)
+        if (tokens.isEmpty()) return ExecutionResult(false, "python command is empty after normalization")
+
+        // Decide: -c inline code vs script file
+        data class PreparedCode(val code: String, val scriptPath: String?, val finalArgv: List<String>)
+        val prepared: PreparedCode = when {
+            tokens[0] == "-c" -> {
+                if (tokens.size < 2) {
+                    return ExecutionResult(false, "python -c requires code string: argv=[\"-c\",\"your code here\"]")
+                }
+                // sys.argv convention: ["-c", ...trailing_args...]
+                PreparedCode(tokens[1], null, listOf("-c") + tokens.drop(2))
+            }
+            else -> {
+                val path = tokens[0]
+                val file = File(path)
+                if (!file.exists()) {
+                    return ExecutionResult(false, "Python script not found: $path")
+                }
+                PreparedCode(file.readText(), path, tokens)
+            }
         }
 
         val sessionId = "py_${System.currentTimeMillis()}_${sessionCounter.incrementAndGet()}"
-
-        // Prepare Python code
-        val pythonCode = when {
-            action.code != null -> action.code
-            action.file != null -> {
-                val file = File(action.file)
-                if (!file.exists()) {
-                    return ExecutionResult(false, "Python file not found: ${action.file}")
-                }
-                file.readText()
-            }
-            else -> return ExecutionResult(false, "No Python code to execute")
-        }
-
-        // Create log file in chat history folder
         val logFile = File(getChatHistoryFolder(), "${sessionId}.log")
         val logWriter = java.io.FileWriter(logFile, true)
 
-        // Create internal single session (ID only for framework debug, not exposed to model)
         val session = PythonSession(
             sessionId = sessionId,
             startTime = System.currentTimeMillis(),
@@ -879,98 +1384,135 @@ class UnifiedActionExecutor(private val context: Context) {
             lastPythonSession = session
         }
 
-        // Prepare wrapped code with stdout/stderr redirection to file
-        val wrappedCode = wrapPythonWithOutputCapture(pythonCode, logFile.absolutePath)
+        // Prepare wrapped code: sets sys.argv, __file__, __name__, then captures stdout/stderr
+        val wrappedCode = wrapPythonWithOutputCapture(
+            code = prepared.code,
+            logFilePath = logFile.absolutePath,
+            sysArgv = prepared.finalArgv,
+            scriptPath = prepared.scriptPath
+        )
 
-        // CRITICAL: Use single-threaded executor to prevent Chaquopy "frame does not exist" error
-        // Python is not thread-safe, must execute sequentially
+        // Submit to single-thread executor (Chaquopy is not thread-safe)
         val future = pythonExecutor.submit<java.lang.Void> {
             try {
                 session.executionThread = Thread.currentThread()
-                LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId started execution on thread: ${Thread.currentThread().name}")
+                LogManager.logI(TAG, "[PYTHON] Session $sessionId exec on ${Thread.currentThread().name}, argv=${prepared.finalArgv}")
                 val python = Python.getInstance()
-                LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId got Python instance")
 
-                // Get CPython thread ident for PyThreadState_SetAsyncExc (used by python_kill)
-                val mainModule = python.getModule("__main__")
+                // Capture CPython thread ident for kill
                 try {
                     val threading = python.getModule("threading")
                     val currentThread = threading.callAttr("current_thread")
                     val ident = currentThread.get("ident")
                     session.pythonThreadIdent = ident?.toLong() ?: -1L
-                    LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId CPython thread ident: ${session.pythonThreadIdent}")
                 } catch (e: Exception) {
-                    LogManager.logW(TAG, "[PYTHON_RUN] Failed to get CPython thread ident: ${e.message}")
+                    LogManager.logW(TAG, "[PYTHON] Failed to get CPython thread ident: ${e.message}")
                 }
 
+                val mainModule = python.getModule("__main__")
                 val mainDict = mainModule.get("__dict__")
                 val builtins = python.builtins
-                LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId executing...")
-
-                // Log wrapped code preview for debugging (first 200 chars)
-                val codePreview = wrappedCode.take(200).replace("\n", "\\n")
-                LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId code preview: $codePreview...")
 
                 builtins.callAttr("exec", wrappedCode, mainDict, mainDict)
 
-                // Update session status on completion
                 if (session.state != PythonSession.State.KILLED) {
-                    session.state = PythonSession.State.COMPLETED
-                    session.exitCode = 0
+                    // Read sys.exit code captured by the wrapper. The wrapper
+                    // catches SystemExit and stores its code in a sentinel
+                    // attribute on __main__, so we can propagate it back to
+                    // the engine and the LLM (instead of swallowing it as 0).
+                    val capturedExit = try {
+                        val sentinel = mainDict?.callAttr("get", "__pyhelper_exit_code__")
+                        sentinel?.toInt() ?: 0
+                    } catch (e: Exception) {
+                        LogManager.logW(TAG, "[PYTHON] Failed to read __pyhelper_exit_code__: ${e.message}")
+                        0
+                    }
+                    session.exitCode = capturedExit
+                    // Non-zero sys.exit() means the script reported failure.
+                    // Surface it as FAILED so the agent treats it like a real
+                    // error (no stale "Success" log, no fake artifact recording).
+                    session.state = if (capturedExit != 0)
+                        PythonSession.State.FAILED
+                    else
+                        PythonSession.State.COMPLETED
+                    if (capturedExit != 0 && session.errorMessage == null) {
+                        session.errorMessage = "script exited with code $capturedExit"
+                    }
                     logWriter.close()
-                    LogManager.logI(TAG, "[PYTHON_RUN] Session $sessionId completed successfully")
+                    LogManager.logI(TAG, "[PYTHON] Session $sessionId completed exitCode=$capturedExit state=${session.state}")
                 }
             } catch (e: Exception) {
                 if (session.state != PythonSession.State.KILLED) {
                     session.state = PythonSession.State.FAILED
                     session.errorMessage = e.message
                     val stackTrace = e.stackTraceToString()
-                    logWriter.append("[PYTHON ERROR] ${e.message}\n")
-                    logWriter.append("[PYTHON STACKTRACE] $stackTrace\n")
-                    logWriter.close()
-                    LogManager.logE(TAG, "[PYTHON_RUN] Session $sessionId failed: ${e.message}")
-                    LogManager.logE(TAG, "[PYTHON_RUN] Session $sessionId stacktrace: $stackTrace")
+                    try {
+                        logWriter.append("[PYTHON ERROR] ${e.message}\n")
+                        logWriter.append("[PYTHON STACKTRACE] $stackTrace\n")
+                        logWriter.close()
+                    } catch (_: Exception) {}
+                    LogManager.logE(TAG, "[PYTHON] Session $sessionId failed: ${e.message}")
                 }
             } finally {
-                // Sync file content to data_memory for model access
-                try {
-                    if (logFile.exists()) {
-                        val finalContent = logFile.readText()
-                        pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(
-                            truncatePythonOutput(finalContent, logFile.absolutePath)
-                        )
+                synchronized(pythonStateLock) {
+                    if (activePythonSession?.sessionId == sessionId && session.state != PythonSession.State.RUNNING) {
+                        activePythonSession = null
                     }
-                } catch (e: Exception) {
-                    LogManager.logE(TAG, "[PYTHON_RUN] Final sync error: ${e.message}")
-                } finally {
-                    synchronized(pythonStateLock) {
-                        if (activePythonSession?.sessionId == sessionId && session.state != PythonSession.State.RUNNING) {
-                            activePythonSession = null
-                        }
-                        lastPythonSession = session
-                    }
+                    lastPythonSession = session
                 }
             }
             null
         }
 
-        // Convert Future to Job-like structure for session management
-        val job = CoroutineScope(Dispatchers.IO).launch {
-            try {
-                future.get()
-            } catch (e: Exception) {
-                LogManager.logE(TAG, "[PYTHON_RUN] Session $sessionId future error: ${e.message}")
-            }
+        session.future = future
+        // Optional: also wrap as a Job for cooperative scope management
+        session.job = CoroutineScope(Dispatchers.IO).launch {
+            try { future.get() } catch (_: Exception) {}
         }
 
-        session.job = job
-        session.future = future
+        // timeout_sec == 0 : fully async, return immediately with RUNNING
+        if (action.timeoutSec == 0) {
+            return ExecutionResult(
+                true,
+                "Python started in background (session=$sessionId, timeout_sec=0). Use python_status to poll or python_kill to abort.",
+                returnData = buildPythonStateJson(
+                    status = "RUNNING",
+                    output = "",
+                    exitCode = -1,
+                    durationSec = 0.0,
+                    logFile = logFile.absolutePath,
+                    truncated = false,
+                    error = null
+                )
+            )
+        }
 
-        return ExecutionResult(
-            true,
-            "Python run started (single-instance mode).",
-            returnData = "{\"status\":\"RUNNING\"}"
-        )
+        // timeout_sec > 0 : sync, block up to N seconds; on timeout leave job running
+        return try {
+            future.get(action.timeoutSec.toLong(), java.util.concurrent.TimeUnit.SECONDS)
+            buildPythonResult(session)
+        } catch (e: java.util.concurrent.TimeoutException) {
+            // Auto-downgrade to background - DO NOT kill the job
+            LogManager.logW(TAG, "[PYTHON] Sync timeout after ${action.timeoutSec}s, auto-downgrade to background")
+            val (output, truncated) = readLogTail(session)
+            ExecutionResult(
+                true,
+                "Python sync timeout after ${action.timeoutSec}s, still running in background. Use python_status/kill.",
+                returnData = buildPythonStateJson(
+                    status = "TIMEOUT",
+                    output = output,
+                    exitCode = -1,
+                    durationSec = action.timeoutSec.toDouble(),
+                    logFile = logFile.absolutePath,
+                    truncated = truncated,
+                    error = null
+                )
+            )
+        } catch (e: Exception) {
+            // future.get threw ExecutionException wrapping user error; session state already updated in runnable
+            LogManager.logW(TAG, "[PYTHON] future.get exception: ${e.message}")
+            buildPythonResult(session)
+        }
     }
 
     private fun getChatHistoryFolder(): File {
@@ -990,75 +1532,39 @@ class UnifiedActionExecutor(private val context: Context) {
         if (session == null) {
             return ExecutionResult(
                 true,
-                "Python status: FAILED (no active instance). Use data_memory get key=python_key for latest synced output.",
-                returnData = "{\"status\":\"FAILED\",\"return\":\"no_active_python_instance\",\"recent_output\":\"\",\"hint\":\"Use data_memory get key=python_key\"}"
+                "No Python instance has been run in this session.",
+                returnData = buildPythonStateJson(
+                    status = "NONE",
+                    output = "",
+                    exitCode = -1,
+                    durationSec = 0.0,
+                    logFile = "",
+                    truncated = false,
+                    error = null
+                )
             )
         }
 
-        val fullOutput = try {
-            if (session.logFile.exists()) {
-                val content = session.logFile.readText()
-                val truncated = truncatePythonOutput(content, session.logFile.absolutePath)
-                pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(truncated)
-                truncated
-            } else {
-                pythonOutputMemory[PYTHON_STDOUT_KEY]?.toString() ?: ""
-            }
-        } catch (e: Exception) {
-            "[Error reading log: ${e.message}]"
-        }
-        val recentOutput = fullOutput.takeLast(500)
-        val returnValue = when (session.state) {
-            PythonSession.State.RUNNING -> "running"
-            PythonSession.State.COMPLETED -> (session.exitCode?.toString() ?: "0")
-            PythonSession.State.FAILED -> (session.errorMessage ?: "failed")
-            PythonSession.State.KILLED -> (session.errorMessage ?: "killed")
-        }
-        val externalStatus = when (session.state) {
-            PythonSession.State.RUNNING -> "RUNNING"
-            PythonSession.State.COMPLETED -> "SUCCESS"
-            PythonSession.State.FAILED -> "FAILED"
-            PythonSession.State.KILLED -> "KILLED"
-        }
-
-        val result = buildString {
-            append("{")
-            append("\"status\":\"$externalStatus\",")
-            append("\"return\":\"${returnValue.escapeJson()}\",")
-            append("\"recent_output\":\"${recentOutput.escapeJson()}\",")
-            append("\"hint\":\"Use data_memory get key=python_key\"")
-            append("}")
-        }
-
-        return ExecutionResult(true, "Python status: $externalStatus. Use data_memory get key=python_key for full output.", returnData = result)
-    }
-
-    fun getPythonOutputSnapshot(): Map<String, String> {
-        return pythonOutputMemory.mapValues { it.value.toString() }
+        return buildPythonResult(session)
     }
 
     private fun executePythonKill(action: AgentAction.PythonKill): ExecutionResult {
         val session = synchronized(pythonStateLock) { activePythonSession }
             ?: return ExecutionResult(
                 true,
-                "Python already stopped. Kill is idempotent.",
-                returnData = "{\"status\":\"SUCCESS\",\"return\":\"already_stopped\",\"hint\":\"Use data_memory get key=python_key\"}"
+                "Python already stopped (no active instance). Kill is idempotent.",
+                returnData = buildPythonStateJson(
+                    status = "NONE",
+                    output = "",
+                    exitCode = -1,
+                    durationSec = 0.0,
+                    logFile = "",
+                    truncated = false,
+                    error = "already_stopped"
+                )
             )
 
         return try {
-            // Sync log before kill
-            try {
-                if (session.logFile.exists()) {
-                    val content = session.logFile.readText()
-                    pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(
-                        truncatePythonOutput(content, session.logFile.absolutePath)
-                    )
-                    LogManager.logI(TAG, "[PYTHON_KILL] Synced ${content.length} chars from log before kill")
-                }
-            } catch (e: Exception) {
-                LogManager.logW(TAG, "[PYTHON_KILL] Log sync failed: ${e.message}")
-            }
-
             session.state = PythonSession.State.KILLED
             session.errorMessage = "Killed by python_kill"
 
@@ -1070,7 +1576,7 @@ class UnifiedActionExecutor(private val context: Context) {
             // Works on ANY pure Python code including "while True: pass".
             var asyncExcInjected = false
             if (!threadDead && session.pythonThreadIdent > 0) {
-                LogManager.logI(TAG, "[PYTHON_KILL] Calling PyThreadState_SetAsyncExc (ident=${session.pythonThreadIdent})")
+                LogManager.logI(TAG, "[PYTHON_KILL] Inject SystemExit via PyThreadState_SetAsyncExc (ident=${session.pythonThreadIdent})")
                 try {
                     val python = Python.getInstance()
                     val ctypes = python.getModule("ctypes")
@@ -1080,8 +1586,8 @@ class UnifiedActionExecutor(private val context: Context) {
                     val systemExit = python.builtins.get("SystemExit")
                     val res = pythonapi?.get("PyThreadState_SetAsyncExc")
                         ?.call(cLong?.call(session.pythonThreadIdent), pyObj?.call(systemExit))
-                    LogManager.logI(TAG, "[PYTHON_KILL] PyThreadState_SetAsyncExc returned: $res")
                     asyncExcInjected = res?.toInt() == 1
+                    LogManager.logI(TAG, "[PYTHON_KILL] PyThreadState_SetAsyncExc returned: $res")
                 } catch (e: Exception) {
                     LogManager.logW(TAG, "[PYTHON_KILL] PyThreadState_SetAsyncExc failed: ${e.message}")
                 }
@@ -1107,16 +1613,6 @@ class UnifiedActionExecutor(private val context: Context) {
             session.job.cancel()
             session.future?.cancel(true)
 
-            // Final log sync after kill
-            try {
-                if (session.logFile.exists()) {
-                    val content = session.logFile.readText()
-                    pythonOutputMemory[PYTHON_STDOUT_KEY] = StringBuilder(
-                        truncatePythonOutput(content, session.logFile.absolutePath)
-                    )
-                }
-            } catch (_: Exception) {}
-
             synchronized(pythonStateLock) {
                 activePythonSession = null
                 lastPythonSession = session
@@ -1128,11 +1624,7 @@ class UnifiedActionExecutor(private val context: Context) {
                 LogManager.logW(TAG, "[PYTHON_KILL] Thread may still be alive after 5s")
             }
 
-            ExecutionResult(
-                true,
-                if (threadDead) "Python killed." else "Python kill sent, thread may still be winding down.",
-                returnData = "{\"status\":\"SUCCESS\",\"return\":\"killed\",\"thread_dead\":$threadDead,\"hint\":\"Use data_memory get key=python_key\"}"
-            )
+            buildPythonResult(session)
         } catch (e: Exception) {
             LogManager.logE(TAG, "[PYTHON_KILL] Exception: ${e.message}")
             synchronized(pythonStateLock) {
@@ -1140,25 +1632,122 @@ class UnifiedActionExecutor(private val context: Context) {
                 lastPythonSession = session
             }
             session.state = PythonSession.State.KILLED
-            ExecutionResult(
-                true,
-                "Python kill completed (exception: ${e.message}).",
-                returnData = "{\"status\":\"SUCCESS\",\"return\":\"killed\",\"hint\":\"Use data_memory get key=python_key\"}"
-            )
+            session.errorMessage = "kill_exception: ${e.message}"
+            buildPythonResult(session)
         }
     }
 
     /**
-     * Truncate Python output to PYTHON_OUTPUT_MAX_CHARS.
-     * If content exceeds the limit, keep only the last PYTHON_OUTPUT_MAX_CHARS chars
-     * and prepend a warning with the full file path.
+     * Read session log with HEAD-truncation semantics, respecting PYTHON_OUTPUT_MAX_CHARS.
+     * Returns Pair<output, truncated>.
+     *
+     * Rationale (2026-04-18): skills place their most important LLM-facing
+     * content (e.g. stockpicker's NEXT_STEP block with [STATE]/[DATA]/[TASK])
+     * at the TOP of stdout. Keeping the head survives downstream truncation.
+     * Function name retained for backward compatibility.
      */
-    private fun truncatePythonOutput(content: String, filePath: String): String {
-        if (content.length <= PYTHON_OUTPUT_MAX_CHARS) return content
-        val tail = content.takeLast(PYTHON_OUTPUT_MAX_CHARS)
-        val warning = "[WARNING] Output too large (${content.length} chars), only last $PYTHON_OUTPUT_MAX_CHARS chars shown. Full log: $filePath\n"
-        LogManager.logW(TAG, "[PYTHON_OUTPUT] Truncated from ${content.length} to $PYTHON_OUTPUT_MAX_CHARS chars, file=$filePath")
-        return warning + tail
+    private fun readLogTail(session: PythonSession): Pair<String, Boolean> {
+        return try {
+            if (!session.logFile.exists()) return "" to false
+            // Internal absolute cap: keep the tail here (full_log_file may grow
+            // unbounded in background sessions; we only ever expose a window).
+            val fullContent = session.logFile.readText().let {
+                if (it.length > PYTHON_LOG_MAX_CHARS) it.takeLast(PYTHON_LOG_MAX_CHARS) else it
+            }
+            if (fullContent.length > PYTHON_OUTPUT_MAX_CHARS) {
+                // HEAD truncation: keep the beginning so NEXT_STEP / TASK survive.
+                // Model can always fetch full via read_file(log_file) when needed.
+                fullContent.take(PYTHON_OUTPUT_MAX_CHARS) to true
+            } else {
+                fullContent to false
+            }
+        } catch (e: Exception) {
+            "[Error reading log: ${e.message}]" to false
+        }
+    }
+
+    /**
+     * Build unified ExecutionResult from session state.
+     * Single source of truth for run/status/kill return format.
+     */
+    private fun buildPythonResult(session: PythonSession): ExecutionResult {
+        val durationMs = System.currentTimeMillis() - session.startTime
+        val durationSec = durationMs / 1000.0
+        val externalStatus = when (session.state) {
+            PythonSession.State.RUNNING -> "RUNNING"
+            PythonSession.State.COMPLETED -> "SUCCESS"
+            PythonSession.State.FAILED -> "FAILED"
+            PythonSession.State.KILLED -> "KILLED"
+        }
+        val (output, truncated) = readLogTail(session)
+        val exitCode = session.exitCode ?: when (session.state) {
+            PythonSession.State.COMPLETED -> 0
+            PythonSession.State.RUNNING -> -1
+            else -> 1
+        }
+
+        val msg = buildString {
+            append("Python $externalStatus")
+            append(" (${"%.2f".format(durationSec)}s")
+            if (output.isNotEmpty()) append(", ${output.length} output chars")
+            if (truncated) append(", truncated")
+            append(")")
+            session.errorMessage?.let { append(" - $it") }
+        }
+
+        // [IMPROVEMENT 3] Surface FAILED/KILLED as ExecutionResult.success=false
+        // so the engine's same-failure counter can break a retry loop. Previously
+        // this was always success=true, which let an LLM hammer the same buggy
+        // command 11+ times without auto-termination (observed in flash_dram
+        // docx generation log: 11 consecutive "exit code 2" failures).
+        // RUNNING/SUCCESS still report success=true (engine treats RUNNING as a
+        // pending background task, not a hard failure).
+        val isSuccessForEngine = when (session.state) {
+            PythonSession.State.COMPLETED -> true
+            PythonSession.State.RUNNING -> true
+            PythonSession.State.FAILED -> false
+            PythonSession.State.KILLED -> false
+        }
+        return ExecutionResult(
+            success = isSuccessForEngine,
+            message = msg,
+            returnData = buildPythonStateJson(
+                status = externalStatus,
+                output = output,
+                exitCode = exitCode,
+                durationSec = durationSec,
+                logFile = session.logFile.absolutePath,
+                truncated = truncated,
+                error = session.errorMessage
+            )
+        )
+    }
+
+    /**
+     * Build the unified JSON payload for python/python_status/python_kill returns.
+     * Schema (stable, model-facing):
+     *   {status, output, exit_code, duration_sec, log_file, truncated, error?}
+     */
+    private fun buildPythonStateJson(
+        status: String,
+        output: String,
+        exitCode: Int,
+        durationSec: Double,
+        logFile: String,
+        truncated: Boolean,
+        error: String?
+    ): String = buildString {
+        append("{")
+        append("\"status\":\"$status\",")
+        append("\"output\":\"${output.escapeJson()}\",")
+        append("\"exit_code\":$exitCode,")
+        append("\"duration_sec\":${"%.2f".format(durationSec)},")
+        append("\"log_file\":\"${logFile.escapeJson()}\",")
+        append("\"truncated\":$truncated")
+        if (!error.isNullOrEmpty()) {
+            append(",\"error\":\"${error.escapeJson()}\"")
+        }
+        append("}")
     }
 
     private fun String.escapeJson(): String {
@@ -1170,17 +1759,40 @@ class UnifiedActionExecutor(private val context: Context) {
             .replace("\t", "\\t")
     }
 
-    private fun wrapPythonWithOutputCapture(code: String, logFilePath: String): String {
+    /**
+     * Wrap user code with:
+     *   1. sys.argv injection (aligned with PC `python` CLI)
+     *   2. __file__ setup (for script path; omitted for -c)
+     *   3. __name__="__main__" (already the case in __main__ scope)
+     *   4. stdout/stderr capture to log file
+     *   5. exception trap with traceback to log
+     */
+    private fun wrapPythonWithOutputCapture(
+        code: String,
+        logFilePath: String,
+        sysArgv: List<String>,
+        scriptPath: String?
+    ): String {
         val escapedPath = logFilePath.replace("\\", "\\\\").replace("'", "\\'")
         val escapedCode = code.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
-        // Kill mechanism: PyThreadState_SetAsyncExc only (from Java side via ctypes).
-        // Zero overhead during normal execution. CPython checks pending async exceptions
-        // every ~5ms, so even "while True: pass" gets killed.
+        // Build Python list literal for sys.argv
+        val argvLiteral = sysArgv.joinToString(", ", "[", "]") { arg ->
+            "'" + arg.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        }
+
         return buildString {
             append("import sys\n")
             append("import traceback\n\n")
 
-            // -- stdout/stderr file capture (no kill logic, pure logging) --
+            // -- sys.argv injection (PC CLI alignment) --
+            append("sys.argv = $argvLiteral\n")
+            if (scriptPath != null) {
+                val escapedScript = scriptPath.replace("\\", "\\\\").replace("'", "\\'")
+                append("__file__ = '$escapedScript'\n")
+            }
+            append("\n")
+
+            // -- stdout/stderr file capture --
             append("_log_file_path = '$escapedPath'\n\n")
             append("class _FileOutputCapture:\n")
             append("    def __init__(self, original, filepath, prefix=''):\n")
@@ -1196,17 +1808,34 @@ class UnifiedActionExecutor(private val context: Context) {
             append("    def flush(self):\n")
             append("        self.original.flush()\n\n")
             append("sys.stdout = _FileOutputCapture(sys.stdout, _log_file_path)\n")
-            append("sys.stderr = _FileOutputCapture(sys.stderr, _log_file_path, '[ERROR] ')\n\n")
+            append("sys.stderr = _FileOutputCapture(sys.stderr, _log_file_path, '[STDERR] ')\n\n")
 
             // -- execute user code --
+            // __pyhelper_exit_code__ is the channel the Kotlin side reads to
+            // get the script's real exit code (sys.exit(N) -> SystemExit). Without
+            // this, Chaquopy swallows the exit code and the engine wrongly reports
+            // SUCCESS even when the script bailed with code != 0.
+            append("__pyhelper_exit_code__ = 0\n")
             append("_user_code = '''${escapedCode}'''\n\n")
             append("try:\n")
             append("    exec(_user_code)\n")
             append("except SystemExit as e:\n")
-            append("    print(str(e))\n")
+            append("    if e.code is None:\n")
+            append("        __pyhelper_exit_code__ = 0\n")
+            append("    elif isinstance(e.code, bool):\n")
+            append("        __pyhelper_exit_code__ = 1 if e.code else 0\n")
+            append("    elif isinstance(e.code, int):\n")
+            append("        __pyhelper_exit_code__ = e.code\n")
+            append("    else:\n")
+            append("        # str / other -> print and treat as failure\n")
+            append("        print('[SystemExit] ' + str(e.code))\n")
+            append("        __pyhelper_exit_code__ = 1\n")
+            append("    if __pyhelper_exit_code__ != 0:\n")
+            append("        print('[SystemExit] ' + str(__pyhelper_exit_code__))\n")
             append("except Exception as e:\n")
             append("    print('[PYTHON EXCEPTION] ' + str(type(e).__name__) + ': ' + str(e))\n")
             append("    print('[PYTHON TRACEBACK] ' + traceback.format_exc())\n")
+            append("    __pyhelper_exit_code__ = 1\n")
             append("    raise\n")
         }
     }

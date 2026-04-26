@@ -148,7 +148,7 @@ public class TextEditorFragment extends Fragment {
         try {
             ConfigManager.ensureDefaultStopwordsExample(requireContext());
             ConfigManager.ensureAssetFileInDataRoot(requireContext(), "ModelDownloadList.txt", "ModelDownloadList.txt");
-            ConfigManager.ensureAssetFileInDataRoot(requireContext(), "agent_user.txt", "agent_user.txt");
+            // agent_user files are now synced from assets/agent_user/ via ensureAgentUserDir()
         } catch (Exception e) {
             LogManager.logE(TAG, "[TEXT_EDITOR] Failed to initialize quick files: " + e.getMessage(), e);
         }
@@ -264,13 +264,19 @@ public class TextEditorFragment extends Fragment {
             ));
         }
 
-        File agentUserFile = ConfigManager.getDataRootFile(requireContext(), "agent_user.txt");
-        if (agentUserFile.exists() && agentUserFile.isFile()) {
-            quickFileItems.add(new QuickFileItem(
-                    getString(R.string.text_editor_quick_agent_user, agentUserFile.getName()),
-                    agentUserFile.getAbsolutePath(),
-                    false
-            ));
+        // Add all agent_user files from agent_user directory
+        File agentUserDir = new File(ConfigManager.getAgentUserPath(requireContext()));
+        if (agentUserDir.isDirectory()) {
+            File[] agentFiles = agentUserDir.listFiles((d, name) -> name.endsWith(".txt"));
+            if (agentFiles != null) {
+                for (File f : agentFiles) {
+                    quickFileItems.add(new QuickFileItem(
+                            getString(R.string.text_editor_quick_agent_user, f.getName()),
+                            f.getAbsolutePath(),
+                            false
+                    ));
+                }
+            }
         }
 
         quickFileItems.add(new QuickFileItem(getString(R.string.text_editor_quick_browse), "", true));

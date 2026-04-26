@@ -3,6 +3,11 @@ package com.example.offlineai.agent
 import com.example.offlineai.agent.model.AgentAction
 import org.json.JSONObject
 
+// Literal placeholders for agent path variables (resolved at runtime by UnifiedActionExecutor.resolveVar).
+// Using these constants avoids the awkward ${"$"}{SKILL_DIR} escape inside raw strings.
+private const val SKILL_DIR = "\${SKILL_DIR}"
+private const val WORKSPACE = "\${WORKSPACE}"
+
 /**
  * Action format interface for different prompt styles.
  * Each format defines: prompt template + parsing logic + KB action descriptions.
@@ -115,13 +120,13 @@ class OpenAiFuncCallFormat : BaseActionFormat() {
 {"name":"click","parameters":{"coordinate":[x,y]}}
 {"name":"long_press","parameters":{"coordinate":[x,y]}}
 {"name":"double_click","parameters":{"coordinate":[x,y]}}
-{"name":"type","parameters":{"text":"文本内容"}}
+{"name":"type","parameters":{"text":"文本内容","coordinate":[x,y]}}  
 {"name":"swipe","parameters":{"direction":"up/down/left/right","coordinate":[x,y]}}
 {"name":"drag","parameters":{"start":[x1,y1],"end":[x2,y2]}}
 {"name":"open","parameters":{"text":"应用名"}}
 {"name":"system_button","parameters":{"button":"back/home/menu/enter"}}
-{"name":"wait","parameters":{"duration":3}}
-{"name":"terminate","parameters":{"status":"success/fail","text":"总结","files":["/sdcard/output.png"]}}
+{"name":"wait","parameters":{"seconds":1}}  # seconds: 1~86400 (1s~24h), default 1. Short wait stabilizes UI; long wait (>3s) shows live countdown on floating window and is interruptible by Stop. Use 60~600s for "check-back later" monitoring loops (e.g. order fill, price watch).
+{"name":"terminate","parameters":{"status":"success/fail","text":"用户需要的必要信息（Markdown）","size":"small|medium|large","files":["/sdcard/output.png"]}}
 {"name":"ask_user","parameters":{"text":"给用户的问题或操作说明"}}
 {"name":"ask_user","parameters":{"text":"请登录后点击完成","url":"https://example.com/login"}}
 {"name":"get_app_list","parameters":{}}
@@ -133,6 +138,9 @@ class OpenAiFuncCallFormat : BaseActionFormat() {
 {"name":"data_memory","parameters":{"operation":"list"}}
 {"name":"show_output","parameters":{"text":"TEXT，## Result\n| Col | Value |\n|---|---|\n| A | 1 |","size":"small|medium|large"}}
 
+Scheduled task management (only when user explicitly requests):
+{"name":"schedule_get","parameters":{}}
+{"name":"schedule_set","parameters":{"task_id":1,"enabled":true,"one_shot":false,"weekdays":"1,2,3,4,5","start":"09:30","end":"15:30","interval_min":30,"agent_preset":"__AGENT_PRESETS__","prompt":"任务提示词"}}
 
 File & text operations:
 {"name":"create_file","parameters":{"path":"/sdcard/new.txt","content":"line1\nline2"}}
@@ -149,8 +157,10 @@ File & text operations:
 {"name":"search_files","parameters":{"path":"/sdcard/","keyword":".txt"}}
 
 Python execution:
-{"name":"python_run","parameters":{"code":"print(1+1)"}}
-{"name":"python_run","parameters":{"file":"/sdcard/script.py","args":["--port","8000"]}}
+{"name":"python","parameters":{"argv":["-c","print(1+1)"]}}
+{"name":"python","parameters":{"argv":["$SKILL_DIR/stock/scripts/stock.py","quote","600519","AAPL"]}}
+{"name":"python","parameters":{"argv":["heavy_train.py","--epochs","10"],"timeout_sec":120}}
+{"name":"python","parameters":{"argv":["server.py"],"timeout_sec":0}}
 {"name":"python_status","parameters":{}}
 {"name":"python_kill","parameters":{}}
 
@@ -263,7 +273,25 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                     val c = params.getJSONArray("coordinate")
                     AgentAction.DoubleClick(c.getInt(0), c.getInt(1))
                 }
-                "type" -> AgentAction.Type(params.getString("text"))
+                "type" -> {
+                    // coordinate is REQUIRED: all type actions go through
+                    // inputTextAtCoordinate (click + directed setText/paste
+                    // on the node under point). This is the only reliable
+                    // path across standard EditText, WebView inputs, and
+                    // self-drawn boxes (e.g. THS code field). Legacy naked
+                    // type is deprecated and rejected at parse time.
+                    if (!params.has("coordinate")) {
+                        lastParseError =
+                            "type action 必须带 coordinate:[x,y]，指向目标输入框屏幕坐标（裸 type 已废弃）"
+                        return null
+                    }
+                    val c = params.getJSONArray("coordinate")
+                    AgentAction.Type(
+                        params.getString("text"),
+                        c.getInt(0),
+                        c.getInt(1)
+                    )
+                }
                 "swipe" -> {
                     val dir = parseSwipeDirection(params.getString("direction")) ?: return null
                     val c = if (params.has("coordinate")) params.getJSONArray("coordinate") else null
@@ -284,7 +312,15 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                     }
                     AgentAction.SystemButton(btn)
                 }
-                "wait" -> AgentAction.Wait
+                "wait" -> {
+                    // Prefer "seconds"; fall back to legacy "duration" for backward compatibility.
+                    val sec = when {
+                        params.has("seconds") -> params.optInt("seconds", 1)
+                        params.has("duration") -> params.optInt("duration", 1)
+                        else -> 1
+                    }
+                    AgentAction.Wait(sec)
+                }
                 "terminate" -> {
                     val st = when (params.optString("status", "fail").lowercase()) {
                         "success" -> AgentAction.Terminate.Status.SUCCESS
@@ -294,7 +330,10 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                     val files = if (filesArray != null) {
                         (0 until filesArray.length()).mapNotNull { filesArray.optString(it).takeIf { s -> s.isNotEmpty() } }
                     } else emptyList()
-                    AgentAction.Terminate(st, params.optString("text", ""), files)
+                    // size: same semantics as show_output (small/medium/large); default small
+                    val sizeRaw = params.optString("size", "small").lowercase()
+                    val size = if (sizeRaw in listOf("small", "medium", "large")) sizeRaw else "small"
+                    AgentAction.Terminate(st, params.optString("text", ""), size, files)
                 }
                 "context" -> {
                     val fact = params.optString("fact", "")
@@ -383,18 +422,21 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                     path = if (params.has("path")) params.getString("path") else params.getString("dir_path"),
                     keyword = params.getString("keyword")
                 )
-                "python_run" -> {
-                    val argsList = mutableListOf<String>()
-                    if (params.has("args")) {
-                        val argsArray = params.getJSONArray("args")
-                        for (i in 0 until argsArray.length()) {
-                            argsList.add(argsArray.getString(i))
-                        }
+                "python" -> {
+                    // Argv-only: no shell. Semantics like subprocess.run([...])
+                    if (!params.has("argv")) {
+                        lastParseError = "python requires 'argv' (JSON array). NO SHELL: use argv=[\"script.py\",\"arg1\",...] or argv=[\"-c\",\"code\"]."
+                        return null
                     }
-                    AgentAction.PythonRun(
-                        code = params.optString("code").takeIf { it.isNotEmpty() },
-                        file = params.optString("file").takeIf { it.isNotEmpty() },
-                        args = argsList
+                    val argvArray = params.getJSONArray("argv")
+                    val argvList = (0 until argvArray.length()).map { argvArray.getString(it) }
+                    if (argvList.isEmpty()) {
+                        lastParseError = "python argv array cannot be empty"
+                        return null
+                    }
+                    AgentAction.Python(
+                        argv = argvList,
+                        timeoutSec = params.optInt("timeout_sec", 60)
                     )
                 }
                 "python_status" -> AgentAction.PythonStatus()
@@ -405,6 +447,33 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                         if (it in listOf("small", "medium", "large")) it else "small"
                     }
                 )
+                "schedule_get" -> AgentAction.ScheduleGet
+                "schedule_set" -> {
+                    if (!params.has("task_id")) {
+                        lastParseError = "schedule_set missing required field: task_id (1..4)"
+                        return null
+                    }
+                    // Helper to read optional Boolean: present but non-bool => null (ignored)
+                    fun optBoolOrNull(key: String): Boolean? =
+                        if (params.has(key)) params.optBoolean(key, false) else null
+                    fun optIntOrNull(key: String): Int? =
+                        if (params.has(key)) params.optInt(key, 0) else null
+                    fun optStrOrNull(key: String): String? =
+                        if (params.has(key)) params.optString(key, "") else null
+                    // Accept both `agent_preset` (new) and `prompt_file` (legacy) for backward compat.
+                    val presetValue = optStrOrNull("agent_preset") ?: optStrOrNull("prompt_file")
+                    AgentAction.ScheduleSet(
+                        taskId = params.getInt("task_id"),
+                        enabled = optBoolOrNull("enabled"),
+                        oneShot = optBoolOrNull("one_shot"),
+                        weekdays = optStrOrNull("weekdays"),
+                        start = optStrOrNull("start"),
+                        end = optStrOrNull("end"),
+                        intervalMin = optIntOrNull("interval_min"),
+                        agentPreset = presetValue,
+                        prompt = optStrOrNull("prompt")
+                    )
+                }
                 else -> {
                     lastParseError = "Unknown action name: '$name'"
                     null

@@ -2,18 +2,14 @@ package com.example.offlineai.agent.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Path
-import android.os.Build
+import android.graphics.Rect
 import android.os.Bundle
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import androidx.core.app.NotificationCompat
+import android.view.accessibility.AccessibilityWindowInfo
 import com.example.offlineai.AppConstants
 import com.example.offlineai.ChatHistoryManager
 import com.example.offlineai.ConfigManager
@@ -25,6 +21,7 @@ import com.example.offlineai.LogManager
 import com.example.offlineai.MainActivity
 import com.example.offlineai.R
 import com.example.offlineai.RagQaFragment
+import com.example.offlineai.UnifiedForegroundService
 import com.example.offlineai.RagQueryManager
 import com.example.offlineai.RuntimeConfigUtil
 import com.example.offlineai.agent.ActionFormatRegistry
@@ -53,8 +50,6 @@ class AgentAccessibilityService : AccessibilityService() {
     
     companion object {
         private const val TAG = "AgentAccessibilityService"
-        private const val NOTIFICATION_CHANNEL_ID = "agent_execution_channel"
-        private const val NOTIFICATION_ID = 1001
         private const val AGENT_KB_NAME = "AgentKB"
         private const val AGENT_KB_TOP_K = 3
         
@@ -80,13 +75,14 @@ class AgentAccessibilityService : AccessibilityService() {
     private var cachedAppList: List<String>? = null  // Cache app list to avoid repeated queries
     private var savedTemperature: Float? = null  // Save original temperature before Agent starts
     private var agentTts: AgentTtsHelper? = null  // System TTS for Terminate/AskUser announcements
+    private var isScheduledTask: Boolean = false  // Whether current task is triggered by schedule
     
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         initializeFloatingWindow()
         agentWebView = AgentWebView(applicationContext)
-        createNotificationChannel()
+        // Notification channel is managed by UnifiedForegroundService
         LogManager.logI(TAG, "[AGENT_LOG_HINT] Ignore external system noise tags (e.g. AccessibilityManagerService readInstalledAccessibilityServiceLocked) unless Agent callbacks are missing")
         LogManager.logI(TAG, "Accessibility service connected")
     }
@@ -208,9 +204,10 @@ class AgentAccessibilityService : AccessibilityService() {
                 override fun onStepCompleted(stepIndex: Int, action: AgentAction, result: ExecutionResult) {
                     LogManager.logI(TAG, "[AGENT] Step $stepIndex: ${action.javaClass.simpleName} - ${if (result.success) "OK" else "FAIL"}")
                     saveStepToConversationMd(stepIndex, action, result)
-                    // On terminate: show full expanded text in output area and lock it
+                    // On terminate: show full expanded text in output area and lock it.
+                    // size follows the same semantics as show_output (small/medium/large).
                     if (action is AgentAction.Terminate) {
-                        floatingWindow?.showTerminateResult(action.text)
+                        floatingWindow?.showTerminateResult(action.text, action.size)
                     }
                     // NOTE: lastStepResult is now assembled by AgentEngine after all actions are executed.
                     // This callback no longer writes lastStepResult to avoid partial overwrite issues.
@@ -267,7 +264,9 @@ class AgentAccessibilityService : AccessibilityService() {
     /**
      * Start Agent autonomous loop execution
      */
-    fun startAgentLoop(taskGoal: String) {
+    @JvmOverloads
+    fun startAgentLoop(taskGoal: String, isScheduledTask: Boolean = false) {
+        this.isScheduledTask = isScheduledTask
         if (ragQueryManager == null) {
             LogManager.logE(TAG, "Cannot start Agent loop: RagQueryManager is null")
             return
@@ -327,7 +326,9 @@ class AgentAccessibilityService : AccessibilityService() {
         } catch (e: Exception) {
             LogManager.logE(TAG, "Failed to show floating window, but Agent will continue", e)
         }
-        showNotification("Agent Executing", "Task: $taskGoal")
+        // Notify UnifiedForegroundService that Agent is executing (unified notification)
+        UnifiedForegroundService.getInstance()?.startTask(
+            UnifiedForegroundService.TaskType.AGENT_EXECUTING, "Agent: $taskGoal")
         
         agentLoopJob = serviceScope.launch {
             try {
@@ -362,15 +363,21 @@ class AgentAccessibilityService : AccessibilityService() {
                 }
                 
                 LogManager.logI(TAG, "Agent loop completed")
-                showNotification("Agent Completed", "Task finished")
                 
                 // Check if waiting for experience save
                 // Keep floating window visible - user closes manually after reading the result
                 if (isWaitingForExperienceSave) {
                     LogManager.logI(TAG, "[AGENT_EXP] Waiting for user to save experience, keeping floating window visible")
                 } else {
-                    LogManager.logI(TAG, "[AGENT] Task completed, floating window stays open for user to review")
-                    floatingWindow?.updateStatus("Task completed")
+                    if (isScheduledTask) {
+                        LogManager.logI(TAG, "[SCHEDULE] Scheduled task completed, auto-hiding floating window")
+                        floatingWindow?.updateStatus("Scheduled task completed")
+                        delay(2000)
+                        floatingWindow?.hide()
+                    } else {
+                        LogManager.logI(TAG, "[AGENT] Task completed, floating window stays open for user to review")
+                        floatingWindow?.updateStatus("Task completed")
+                    }
                 }
                 
             } catch (e: Exception) {
@@ -381,12 +388,18 @@ class AgentAccessibilityService : AccessibilityService() {
                 } catch (ex: Exception) {
                     LogManager.logW(TAG, "Failed to update floating window on error")
                 }
-                showNotification("Agent Error", "Error: ${e.message}")
-                delay(3000)
-                try {
-                    floatingWindow?.hide()
-                } catch (ex: Exception) {
-                    LogManager.logW(TAG, "Failed to hide floating window on error")
+                // Error notification handled by UnifiedForegroundService via endTask()
+                if (isScheduledTask) {
+                    LogManager.logI(TAG, "[SCHEDULE] Scheduled task failed, auto-hiding floating window")
+                    delay(2000)
+                    try { floatingWindow?.hide() } catch (_: Exception) {}
+                } else {
+                    delay(3000)
+                    try {
+                        floatingWindow?.hide()
+                    } catch (ex: Exception) {
+                        LogManager.logW(TAG, "Failed to hide floating window on error")
+                    }
                 }
             } finally {
                 // Window stays visible regardless - user closes it manually via Stop button.
@@ -405,9 +418,12 @@ class AgentAccessibilityService : AccessibilityService() {
                     savedTemperature = null
                 }
                 isAgentActive = false
+                this@AgentAccessibilityService.isScheduledTask = false
                 agentTts?.shutdown()
                 agentTts = null
                 agentEngine?.setAgentTts(null)
+                // End task in UnifiedForegroundService for ALL exit paths (success/error/cancel)
+                UnifiedForegroundService.getInstance()?.endTask()
             }
         }
     }
@@ -468,7 +484,7 @@ class AgentAccessibilityService : AccessibilityService() {
         }
         
         floatingWindow?.hide()
-        hideNotification()
+        // endTask() is called in the coroutine's finally block, covering all exit paths.
     }
     
     /**
@@ -668,12 +684,22 @@ class AgentAccessibilityService : AccessibilityService() {
                 
                 // Fully reuse RagQueryManager pipeline: RAG retrieval + prompt building + LLM call
                 // All steps (including experience summary) are recorded to conversation.md inside <agent> block
-                val result = ragMgr.querySync(request)
+                // Retry once on timeout/empty response
+                var result: String? = null
+                for (attempt in 1..2) {
+                    if (attempt > 1) {
+                        LogManager.logW(TAG, "[AGENT_RETRY] Attempt $attempt after timeout/empty response")
+                        floatingWindow?.updateStatus("Retrying model call...")
+                    }
+                    result = ragMgr.querySync(request)
+                    if (!result.isNullOrEmpty()) break
+                    LogManager.logW(TAG, "[AGENT_RETRY] Attempt $attempt returned null/empty")
+                }
                 
                 if (result.isNullOrEmpty()) {
-                    LogManager.logE(TAG, "RagQueryManager returned null or empty result")
+                    LogManager.logE(TAG, "RagQueryManager returned null or empty after retries")
                     floatingWindow?.updateStatus("Error: No response")
-                    return@withContext "<tool_call>{\"action\":\"terminate\",\"text\":\"Error: Model returned no response\"}</tool_call>"
+                    return@withContext "<tool_call>{\"action\":\"terminate\",\"text\":\"Error: Model returned no response after retry\"}</tool_call>"
                 }
                 
                 LogManager.logI(TAG, "[AGENT][STEP_$currentStep] Model response length: ${result.length}")
@@ -711,55 +737,7 @@ class AgentAccessibilityService : AccessibilityService() {
     }
     
 
-    /**
-     * Create notification channel for Agent execution status
-     */
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "Agent Execution",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Shows Agent execution status"
-                setShowBadge(false)
-            }
-            
-            val notificationManager = getSystemService(NotificationManager::class.java)
-            notificationManager?.createNotificationChannel(channel)
-        }
-    }
-    
-    /**
-     * Show notification with Agent status
-     */
-    private fun showNotification(title: String, content: String) {
-        val intent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(content)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
-        
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager?.notify(NOTIFICATION_ID, notification)
-    }
-    
-    /**
-     * Hide notification
-     */
-    private fun hideNotification() {
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager?.cancel(NOTIFICATION_ID)
-    }
+    // Notification is now managed by UnifiedForegroundService (unified notification bar)
     
     /**
      * Initialize floating window
@@ -842,12 +820,17 @@ class AgentAccessibilityService : AccessibilityService() {
      * @return null on success, or a detailed error message on failure
      */
     fun inputTextWithReason(text: String): String? {
-        var focusedNode = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        // [B4] On Huawei/Honor, rootInActiveWindow can stay null when a GONE
+        // overlay window is still registered as the active window. Wait up
+        // to 600ms for any usable root (active window or any application
+        // window via getWindows()) before giving up.
+        val initialRoot = waitForRootReady(600L)
+        var focusedNode = initialRoot?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         
         // Auto-focus: if no focused input field, try to find one and focus it
         if (focusedNode == null) {
             LogManager.logW(TAG, "No focused input field, attempting auto-focus...")
-            val root = rootInActiveWindow
+            val root = initialRoot ?: getEffectiveRoot()
             if (root != null) {
                 val editableNode = findEditableNode(root)
                 if (editableNode != null) {
@@ -857,7 +840,7 @@ class AgentAccessibilityService : AccessibilityService() {
                     if (focused || clicked) {
                         // Brief wait for focus to take effect
                         Thread.sleep(300)
-                        focusedNode = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                        focusedNode = getEffectiveRoot()?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
                     }
                     if (focusedNode == null) {
                         @Suppress("DEPRECATION")
@@ -874,7 +857,7 @@ class AgentAccessibilityService : AccessibilityService() {
             LogManager.logW(TAG, "No focused input field found, retrying with longer wait...")
             for (retry in 1..3) {
                 Thread.sleep(500) // Wait longer for browser input to gain focus
-                focusedNode = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                focusedNode = getEffectiveRoot()?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
                 if (focusedNode != null) {
                     LogManager.logI(TAG, "Found focused input field after retry $retry")
                     break
@@ -893,7 +876,7 @@ class AgentAccessibilityService : AccessibilityService() {
                 val selectOk = performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_ACCESSIBILITY_ALL_APPS).let {
                     // Use key injection instead - performGlobalAction for select-all isn't reliable
                     // Try ACTION_PASTE on any accessible node with paste support
-                    val rootNode = rootInActiveWindow
+                    val rootNode = getEffectiveRoot()
                     var pasted = false
                     if (rootNode != null) {
                         // Try select-all + paste via accessibility actions on focused/editable nodes
@@ -944,7 +927,375 @@ class AgentAccessibilityService : AccessibilityService() {
     fun inputText(text: String): Boolean {
         return inputTextWithReason(text) == null
     }
-    
+
+    /**
+     * Fetch a usable root node for scanning / FOCUS_INPUT queries.
+     *
+     * Why not just use [rootInActiveWindow]?
+     *   On Huawei / Honor devices, an overlay window (type=2038
+     *   TYPE_APPLICATION_OVERLAY) with visibility=GONE still stays registered
+     *   in the WindowManager hierarchy. The a11y framework then reports this
+     *   GONE overlay as the "active" window and returns null for its root,
+     *   even though the real foreground app window is perfectly alive. This
+     *   bricked every Type action (see log2.txt 11:04:17 - 11:05:42, five
+     *   consecutive Type failures, all with "rootInActiveWindow is null"
+     *   before AND after the click, plus 10x200ms = 2s of null polling).
+     *
+     * This helper falls back to iterating [getWindows] and returning the root
+     * of the first APPLICATION window (or any window with a non-null root).
+     * Combined with the 600ms post-hide polling in UnifiedActionExecutor,
+     * this gives us a stable root whenever at least one real app window is
+     * attached to the display.
+     *
+     * Caller must NOT recycle the returned node -- the a11y framework owns
+     * the lifecycle of roots obtained via rootInActiveWindow / window.root.
+     */
+    fun getEffectiveRoot(): AccessibilityNodeInfo? {
+        // Fast path: active window is fine.
+        val active = rootInActiveWindow
+        if (active != null) return active
+        // Slow path: iterate all windows. Requires
+        // AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS (we set
+        // this in the config XML).
+        return try {
+            val wins = windows ?: return null
+            // Prefer APPLICATION windows (the real app). Fall back to any
+            // window with a root if no APPLICATION window is present (e.g.
+            // while IME is animating in).
+            val appWin = wins.firstOrNull {
+                it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.root != null
+            }
+            if (appWin != null) {
+                LogManager.logD(TAG, "[ROOT_FALLBACK] active null, using APPLICATION window " +
+                    "(layer=${appWin.layer}, id=${appWin.id})")
+                return appWin.root
+            }
+            val anyWin = wins.firstOrNull { it.root != null }
+            if (anyWin != null) {
+                LogManager.logD(TAG, "[ROOT_FALLBACK] active null, using ${anyWin.type} window")
+            }
+            anyWin?.root
+        } catch (e: Exception) {
+            LogManager.logW(TAG, "[ROOT_FALLBACK] getWindows threw: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Poll [getEffectiveRoot] until it returns non-null or [timeoutMs] elapses.
+     * Returns the root (or null on timeout).
+     *
+     * Empirically on Honor, after a floating overlay visibility=GONE the
+     * accessibility tree takes 100-600ms to re-attribute the "active" window.
+     * Callers should invoke this at the start of any type-like operation that
+     * needs to scan the tree.
+     */
+    fun waitForRootReady(timeoutMs: Long = 600L, pollMs: Long = 50L): AccessibilityNodeInfo? {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var attempts = 0
+        while (true) {
+            val r = getEffectiveRoot()
+            if (r != null) {
+                if (attempts > 0) {
+                    LogManager.logI(TAG, "[ROOT_WAIT] root became non-null after " +
+                        "${attempts * pollMs}ms (attempts=$attempts)")
+                }
+                return r
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                LogManager.logW(TAG, "[ROOT_WAIT] timeout after ${timeoutMs}ms " +
+                    "(attempts=$attempts); getEffectiveRoot still null")
+                return null
+            }
+            Thread.sleep(pollMs)
+            attempts++
+        }
+    }
+
+    /**
+     * Targeted text input at (px, py) with layered fallbacks.
+     *
+     * Why this function is complex: naked inputTextWithReason() reads the
+     * CURRENT focused node and writes to it. It is rock-solid when the
+     * target is already focused (e.g. LLM just clicked the URL bar last
+     * step). The old inputTextAtCoordinate() unconditionally dispatched
+     * ANOTHER click first -- which on an already-focused URL bar triggers
+     * autocomplete dropdown dismissal + IME animation + window migration,
+     * leaving rootInActiveWindow null for >1.2 s. The 5-attempt poll
+     * wasn't enough and the whole call returned "no_active_window",
+     * breaking every type-with-coordinate.
+     *
+     * New two-stage strategy:
+     *   FAST_PATH (no click, no window transition):
+     *     A) If the OS ALREADY reports a focused input whose bounds cover
+     *        (px,py) ±60px, write directly (setText -> paste). Done.
+     *     B) Else, locate node-at-point on the pre-click tree, walk up to
+     *        an editable ancestor, write directly. Done.
+     *   CLICK_PATH (only if FAST_PATH exhausted -- needed for self-drawn
+     *               inputs like THS quantity field that do not expose
+     *               FOCUS_INPUT until clicked):
+     *     1) dispatchGesture click at (px,py), 100ms duration.
+     *     2) Poll up to 2.0s (10 * 200ms) for root + focus; cache pre-click
+     *        root as a backup so a post-click null never fails the call.
+     *     3) If focused input appears, setText -> paste.
+     *     4) Else, node-at-point on whichever root we have, walk up to
+     *        editable, setText -> paste.
+     *     5) Else fall back to inputTextWithReason (legacy whole-tree scan).
+     *
+     * @return null on success, or a detailed error message on failure
+     */
+    fun inputTextAtCoordinate(px: Int, py: Int, text: String): String? {
+        // ============================================================
+        // FAST_PATH: write without any click. Prevents spurious window
+        // transitions when the target input is already focused by the
+        // previous step's click.
+        //
+        // [B2] Use waitForRootReady() instead of raw rootInActiveWindow so
+        // that the Huawei/Honor overlay-null case (where rootInActiveWindow
+        // returns null for >2s after a GONE overlay toggle) does not force
+        // us to skip FAST_PATH and fall into the slow CLICK_PATH. If the
+        // APPLICATION window has a root, getEffectiveRoot() surfaces it
+        // even when the a11y framework marks no window as "active".
+        // ============================================================
+        val rootBefore = waitForRootReady(600L)
+        if (rootBefore != null) {
+            // Attempt A: existing focused input whose bounds cover (px,py)
+            val focusedBefore = rootBefore.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            if (focusedBefore != null) {
+                val fb = Rect()
+                focusedBefore.getBoundsInScreen(fb)
+                // 60px slack per side absorbs LLM coordinate imprecision
+                // (the URL bar "looks like" y=75 normalized but the focus
+                // rect on a 1224x2776 screen might start a few dp lower).
+                val slack = 60
+                val covers = px in (fb.left - slack)..(fb.right + slack) &&
+                             py in (fb.top - slack)..(fb.bottom + slack)
+                if (covers) {
+                    LogManager.logI(TAG, "[TYPE_AT][FAST_A] pre-click focused node " +
+                        "covers ($px,$py) bounds=$fb class=${focusedBefore.className}")
+                    val ok = writeTextToNode(focusedBefore, text)
+                    @Suppress("DEPRECATION")
+                    focusedBefore.recycle()
+                    if (ok) return null
+                    LogManager.logW(TAG, "[TYPE_AT][FAST_A] direct write rejected, trying FAST_B")
+                } else {
+                    LogManager.logI(TAG, "[TYPE_AT][FAST_A] focused bounds=$fb does not cover " +
+                        "($px,$py), skip and try FAST_B")
+                    @Suppress("DEPRECATION")
+                    focusedBefore.recycle()
+                }
+            }
+
+            // Attempt B: node-at-point on pre-click tree
+            val hitBefore = findNodeAtPoint(rootBefore, px, py)
+            if (hitBefore != null) {
+                val editableBefore = walkUpToEditable(hitBefore, 4)
+                if (editableBefore != null) {
+                    LogManager.logI(TAG, "[TYPE_AT][FAST_B] pre-click editable at ($px,$py) " +
+                        "class=${editableBefore.className} editable=${editableBefore.isEditable}")
+                    val ok = writeTextToNode(editableBefore, text)
+                    @Suppress("DEPRECATION")
+                    editableBefore.recycle()
+                    if (ok) return null
+                    LogManager.logW(TAG, "[TYPE_AT][FAST_B] direct write rejected, falling to CLICK_PATH")
+                } else {
+                    LogManager.logI(TAG, "[TYPE_AT][FAST_B] no editable at ($px,$py) pre-click, falling to CLICK_PATH")
+                }
+            }
+        } else {
+            LogManager.logI(TAG, "[TYPE_AT] pre-click root still null after 600ms wait; skipping FAST_PATH")
+        }
+
+        // ============================================================
+        // CLICK_PATH: traditional click + wait + write. Only reached when
+        // FAST_PATH did not succeed, typically because the target was not
+        // focused yet (first interaction with a self-drawn input).
+        // ============================================================
+        val path = Path().apply { moveTo(px.toFloat(), py.toFloat()) }
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, 100))
+            .build()
+        val clickOk = dispatchGesture(gesture, null, null)
+        LogManager.logI(TAG, "[TYPE_AT] click($px,$py) dispatched=$clickOk")
+        // Baseline wait for IME slide-in / window focus migration.
+        Thread.sleep(200)
+
+        // Poll up to 10 * 200ms = 2.0 s for root + focus to settle.
+        // [B3] Use getEffectiveRoot() (walks getWindows() if active is null)
+        // so we do not get stuck when the a11y framework refuses to mark
+        // any window as active. Seed rootForFallback with pre-click root
+        // so a post-click transient null does not brick the whole call.
+        var focused: AccessibilityNodeInfo? = null
+        var rootForFallback: AccessibilityNodeInfo? = rootBefore
+        var pollAttempt = 0
+        while (pollAttempt < 10) {
+            val curRoot = getEffectiveRoot()
+            if (curRoot != null) {
+                rootForFallback = curRoot
+                focused = curRoot.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                if (focused != null) break
+            }
+            Thread.sleep(200)
+            pollAttempt++
+        }
+        if (pollAttempt > 0) {
+            LogManager.logI(TAG, "[TYPE_AT] window/focus poll attempts=$pollAttempt, " +
+                "rootReady=${rootForFallback != null}, focusReady=${focused != null}, " +
+                "usingPreClickRoot=${rootForFallback === rootBefore}")
+        }
+        if (focused != null) {
+            LogManager.logI(TAG, "[TYPE_AT] CLICK_PATH focused node class=${focused.className}")
+            val ok = writeTextToNode(focused, text)
+            @Suppress("DEPRECATION")
+            focused.recycle()
+            if (ok) return null
+            LogManager.logW(TAG, "[TYPE_AT] CLICK_PATH focused write rejected, try node-at-point")
+        }
+
+        // No focused input surfaced. Use whatever root we have -- prefer
+        // post-click, fall back to pre-click, finally legacy whole-tree.
+        // DEFENSIVE FALLBACK: if BOTH pre-click and post-click roots were null
+        // (window manager mid-transition, e.g. floating overlay just toggled),
+        // do NOT bail out with "no_active_window". The legacy
+        // inputTextWithReason() has a 1.5s retry loop + clipboard+paste rescue
+        // which often recovers; degrading to that path is strictly better than
+        // failing the whole step. This is the same path naked `type` (without
+        // coordinates) takes, so worst case we behave as well as no-coord type.
+        val root = rootForFallback
+        if (root == null) {
+            LogManager.logW(TAG, "[TYPE_AT] both pre-click and post-click roots stayed null; " +
+                "delegating to inputTextWithReason (legacy retry + clipboard rescue)")
+            return inputTextWithReason(text)
+        }
+
+        val hit = findNodeAtPoint(root, px, py)
+        if (hit == null) {
+            LogManager.logW(TAG, "[TYPE_AT] CLICK_PATH no node covers ($px,$py); falling back to legacy")
+            return inputTextWithReason(text)
+        }
+
+        val target = walkUpToEditable(hit, 4)
+        if (target == null) {
+            LogManager.logW(TAG, "[TYPE_AT] CLICK_PATH no editable ancestor within 4 levels; falling back to legacy")
+            return inputTextWithReason(text)
+        }
+        LogManager.logI(TAG, "[TYPE_AT] CLICK_PATH target class=${target.className}, " +
+            "editable=${target.isEditable}")
+
+        // Focus/click the target before writing so the app updates any
+        // internal "active field" state (harmless if already focused).
+        target.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+
+        val writeOk = writeTextToNode(target, text)
+        @Suppress("DEPRECATION")
+        target.recycle()
+        return if (writeOk) null
+        else "type_at failed: both ACTION_SET_TEXT and ACTION_PASTE were rejected by the node at ($px,$py); " +
+             "verify the coordinate actually points at the input box"
+    }
+
+    /**
+     * Write [text] to [node] using ACTION_SET_TEXT first, then clipboard +
+     * SELECT_ALL + ACTION_PASTE as a second attempt. Safe to call on any
+     * editable/paste-capable node. Does NOT recycle [node] (caller owns).
+     */
+    private fun writeTextToNode(node: AccessibilityNodeInfo, text: String): Boolean {
+        // Attempt 1: ACTION_SET_TEXT (cheapest, works on standard EditText).
+        val setTextArgs = Bundle().apply {
+            putCharSequence(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        }
+        val setTextOk = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, setTextArgs)
+        LogManager.logI(TAG, "[TYPE_AT][WRITE] ACTION_SET_TEXT=$setTextOk class=${node.className}")
+        if (setTextOk) return true
+
+        // Attempt 2: clipboard + SELECT_ALL + PASTE (self-drawn input boxes
+        // that accept ACTION_PASTE even without FOCUS_INPUT).
+        return try {
+            val clipboard = getSystemService(
+                android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val clip = android.content.ClipData.newPlainText("agent_input", text)
+            clipboard.setPrimaryClip(clip)
+            Thread.sleep(80)
+            // 0x00020000 = ACTION_SELECT_ALL. Clear first so new text does
+            // not append to any existing content.
+            node.performAction(0x00020000)
+            val pasteOk = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+            LogManager.logI(TAG, "[TYPE_AT][WRITE] ACTION_PASTE=$pasteOk class=${node.className}")
+            pasteOk
+        } catch (e: Exception) {
+            LogManager.logE(TAG, "[TYPE_AT][WRITE] clipboard+paste threw", e)
+            false
+        }
+    }
+
+    /**
+     * Walk up from [startNode] until an editable / paste-capable ancestor
+     * is found, up to [maxLevels] levels.
+     *
+     * Ownership: this helper TAKES OWNERSHIP of [startNode]. It will
+     * recycle [startNode] (and any intermediate parents) internally.
+     * - Returns the matching node (caller MUST recycle it).
+     * - Returns null if nothing matched within [maxLevels] (nothing to
+     *   recycle on the caller side).
+     */
+    private fun walkUpToEditable(
+        startNode: AccessibilityNodeInfo,
+        maxLevels: Int
+    ): AccessibilityNodeInfo? {
+        var target: AccessibilityNodeInfo? = startNode
+        var walkedUp = 0
+        while (target != null && walkedUp < maxLevels) {
+            val acceptable = target.isEditable ||
+                target.actionList.any {
+                    it.id == AccessibilityNodeInfo.ACTION_SET_TEXT ||
+                    it.id == AccessibilityNodeInfo.ACTION_PASTE
+                } ||
+                (target.className?.toString()?.let {
+                    it.contains("EditText", ignoreCase = true) ||
+                    it.contains("TextField", ignoreCase = true) ||
+                    it.contains("WebView", ignoreCase = true)
+                } ?: false)
+            if (acceptable) return target
+            val parent = target.parent
+            @Suppress("DEPRECATION")
+            target.recycle()
+            target = parent
+            walkedUp++
+        }
+        // Nothing matched; recycle whatever we are holding before returning.
+        @Suppress("DEPRECATION")
+        target?.recycle()
+        return null
+    }
+
+    /**
+     * Recursively find the deepest node whose bounds contain (px, py).
+     * Prefers deeper (more specific) nodes and editable/clickable ones.
+     * Returns a cloned node handle (caller must recycle).
+     */
+    private fun findNodeAtPoint(
+        node: AccessibilityNodeInfo,
+        px: Int, py: Int
+    ): AccessibilityNodeInfo? {
+        val bounds = Rect()
+        node.getBoundsInScreen(bounds)
+        if (!bounds.contains(px, py)) return null
+
+        // Recurse into children first: deepest match wins. If a child
+        // matches, return that; otherwise the current node is the leaf.
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val deeper = findNodeAtPoint(child, px, py)
+            @Suppress("DEPRECATION")
+            child.recycle()
+            if (deeper != null) return deeper
+        }
+        @Suppress("DEPRECATION")
+        return AccessibilityNodeInfo.obtain(node)
+    }
+
     /**
      * Recursively find the first editable (text input) node in the accessibility tree
      * Enhanced to support WebView input fields
@@ -1128,8 +1479,11 @@ class AgentAccessibilityService : AccessibilityService() {
         
         val prompt = StringBuilder()
         
-        // Step number (1-based for user readability)
-        prompt.append("Step ${stepIndex + 1}\n\n")
+        // TaskBrief at the very top of user message for KV cache prefix hit:
+        // system_prompt (fixed) + taskBrief (fixed from Step 1) = longest cacheable prefix
+        if (taskBrief.isNotEmpty()) {
+            prompt.append("任务简报（执行基线）:\n$taskBrief\n\n")
+        }
         
         // Task goal: full instruction at Step 0, omit after taskBrief is generated (it already captures the goal)
         if (stepIndex == 0 || taskBrief.isEmpty()) {
@@ -1137,39 +1491,50 @@ class AgentAccessibilityService : AccessibilityService() {
         }
 
         if (stepIndex == 0) {
-            // Inject skill catalog (only at Step 0)
-            if (skillCatalog.isNotEmpty()) {
-                prompt.append("\n## 可用技能\n以下是已安装的技能，如任务需要用到，必须先 read_file 对应 SKILL.md 学习用法后再编写脚本：\n")
-                prompt.append(skillCatalog)
-                prompt.append("\n⚠️ 如果 `## 用户要求` 中未有必选的技能，但是任务涉及以上技能，首轮 context.fact 必须记录：所需 SKILL.md 全路径 + 默认工作目录，供后续 step 参考。不涉及则忽略。\n\n")
-            }
-            // Inject workspace path (only at Step 0)
-            if (agentWorkspacePath.isNotEmpty()) {
-                prompt.append("默认工作目录: $agentWorkspacePath （脚本和生成文件默认保存到此目录，除非用户指定其他路径）\n\n")
-            }
-            prompt.append("""
-##首轮规划要求（只执行一次）
- -这是任务开始。先输出任务简报 JSON，并使用 data_memory 保存为 key=taskBrief；同一轮继续输出首个可执行 action。
- -任务简报 JSON 必须包含字段：任务、目标、里程碑(3-5个)、执行约束（强制）。
- -如果用户提供了附件（[Attached files]），必须在简报中原样记录所有附件路径，供后续步骤引用。
- -固定模板（原样复制）：{"name":"data_memory","parameters":{"operation":"set","key":"taskBrief","value":"任务:<任务>\n目标:<目标>\n用户附件:\n<原样列出所有附件路径，无则写'无'>\n里程碑:\nM1 <内容>\nM2 <内容>\nM3 <内容>\n...\n执行约束:\n<约束1>\n<约束2>\n...\n"}}""");
+            // All first-round prompts (skills, workspace, @once user hints, planning requirements)
+            prompt.append(AgentPrompts.buildFirstRoundPrompt(this, skillCatalog, agentWorkspacePath))
         }
         
+        // [PROGRESS] Engine-maintained cumulative artifact summary, injected at highest priority.
+        // Replaces the model's unreliable self-managed fact-as-progress-notebook pattern.
+        // Without this, weak ReAct models loop re-reading the same files because they cannot
+        // recall what they've already produced.
+        // KV-cache layout: this block has a monotonically growing prefix (artifacts only added,
+        // never removed/reordered), so placing it BEFORE the per-step varying "Step N | Time"
+        // line lets the gateway's prefix cache reuse most of the previous step's prompt.
+        val progressBlock = buildProgressBlock()
+        if (progressBlock.isNotEmpty()) {
+            prompt.append("$progressBlock\n\n")
+        }
+        
+        // Step number (1-based for user readability) with current wall-clock time
+        // so the model knows "now" (useful for scheduling, time-based decisions, etc.).
+        // Placed AFTER taskBrief / firstRoundPrompt / [PROGRESS] because this line varies
+        // every step (N and timestamp both change), which would otherwise invalidate the
+        // gateway's prefix KV cache for everything that follows.
+        val now = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+            .format(java.util.Date())
+        prompt.append("Step ${stepIndex + 1}  |  Time: $now\n\n")
+
         // Inject last step hardcoded fact BEFORE context (highest priority, cannot be forgotten)
         // This is the "ground truth" the model must acknowledge regardless of its context memory
         if (lastStepResult.isNotEmpty()) {
             prompt.append("$lastStepResult\n\n")
         }
+
+        // NOTE: "Recent steps" line removed. Its signal is fully covered by:
+        //   (a) [PROGRESS] above — cumulative deduped success artifacts
+        //   (b) "Previous step executed" — last step full payload
+        //   (c) Reactive warnings (sameFailureCount / [STUCK_LOOP] / [FATAL_NO_ACTION])
+        //       that only fire when the engine actually detects a loop.
+        // The old summary ("S27:ReadLines->OK | S28:Grep->OK | ...") was too coarse to guide
+        // decisions and became redundant noise once [PROGRESS] was added.
         
         // Inject data memory keys index (lightweight, no values)
         if (dataMemoryKeys.isNotEmpty()) {
             prompt.append("Data Memory: ${dataMemoryKeys.joinToString(", ")}\n\n")
         }
 
-        if (taskBrief.isNotEmpty()) {
-            prompt.append("任务简报（执行基线）:\n$taskBrief\n\n")
-        }
-        
         // Add current context (Agent's memory)
         if (currentContext.isNotEmpty()) {
             prompt.append("上下文记忆:\n$currentContext\n\n")
@@ -1183,6 +1548,118 @@ class AgentAccessibilityService : AccessibilityService() {
         }
         
         return prompt.toString()
+    }
+    
+    /**
+     * Build cumulative [PROGRESS] block from full trajectory.
+     * This is the engine-maintained "task progress notebook" that does NOT depend on the model
+     * remembering to update fact. It surfaces:
+     *   - READ_FILES: every successfully read file (path-set)
+     *   - WROTE_FILES: created/edited files with last touch step
+     *   - WEB_FETCHED: URLs opened in WebView with success step
+     *   - PYTHON_RUNS: helper invocations (last 5 with abbreviated argv)
+     *   - GENERATED_ARTIFACTS: outputs detected from python --out / create_file (.pptx/.docx/.xlsx/.pdf/...)
+     * Injected at the top of the per-step prompt so the model can answer "where am I" without re-reading.
+     */
+    private fun buildProgressBlock(): String {
+        val steps = agentEngine?.getHistory() ?: return ""
+        if (steps.isEmpty()) return ""
+
+        val readFiles = LinkedHashSet<String>()
+        val wroteFiles = LinkedHashMap<String, Int>()      // path -> last step
+        val webFetched = LinkedHashMap<String, Int>()      // url -> step
+        val pythonRuns = mutableListOf<Pair<Int, String>>() // step -> argv summary
+        val artifacts = LinkedHashMap<String, Int>()       // generated path -> step
+        val artifactExts = setOf("pptx", "docx", "xlsx", "pdf", "md", "json", "txt", "csv", "html", "png", "jpg", "jpeg", "mp3", "wav")
+
+        fun shortPath(p: String): String =
+            if (p.length <= 70) p else "..." + p.takeLast(67)
+
+        for (step in steps) {
+            if (!step.executionResult.success) continue
+            val s = step.stepIndex + 1
+            when (val a = step.action) {
+                is AgentAction.ReadFile -> readFiles.add(a.path)
+                is AgentAction.ReadLines -> readFiles.add(a.path)
+                is AgentAction.Grep -> readFiles.add(a.path)
+                is AgentAction.CreateFile -> {
+                    wroteFiles[a.path] = s
+                    val ext = a.path.substringAfterLast('.', "").lowercase()
+                    // Only record as artifact if the file actually exists on disk.
+                    // Defends against false positives when create_file partially
+                    // succeeded (truncated content) or when the engine recorded
+                    // success for a partially-completed action.
+                    if (ext in artifactExts && java.io.File(a.path).exists()) {
+                        artifacts[a.path] = s
+                    }
+                }
+                is AgentAction.WriteFile -> wroteFiles[a.path] = s
+                is AgentAction.EditLines -> wroteFiles[a.path] = s
+                is AgentAction.WebOpen -> webFetched[a.url] = s
+                is AgentAction.Python -> {
+                    val argv = a.argv.joinToString(" ")
+                    val abbrev = if (argv.length > 100) argv.take(97) + "..." else argv
+                    pythonRuns.add(s to abbrev)
+                    // Detect output file from --out / --output / -o flag.
+                    // CRITICAL: only register as GENERATED_ARTIFACT if the file
+                    // truly exists on disk. The mere presence of `--out path` in
+                    // argv does NOT mean the script produced the file: a script
+                    // can sys.exit(1) before writing, or fail mid-write. Recording
+                    // a non-existent path lies to the LLM and induces stuck loops
+                    // ("Reuse this artifact" → tries to read a file that's not
+                    // there → re-tries the same step). Verifying existence costs
+                    // one stat() per python step and prevents this whole class
+                    // of agent confusion.
+                    val outFlagIdx = a.argv.indexOfFirst { it == "--out" || it == "--output" || it == "-o" }
+                    if (outFlagIdx >= 0 && outFlagIdx + 1 < a.argv.size) {
+                        val outPath = a.argv[outFlagIdx + 1]
+                        val ext = outPath.substringAfterLast('.', "").lowercase()
+                        if (ext in artifactExts && java.io.File(outPath).exists()) {
+                            artifacts[outPath] = s
+                        }
+                    }
+                }
+                else -> {}
+            }
+        }
+
+        if (readFiles.isEmpty() && wroteFiles.isEmpty() && webFetched.isEmpty() &&
+            pythonRuns.isEmpty() && artifacts.isEmpty()) {
+            return ""
+        }
+
+        val sb = StringBuilder("[PROGRESS] Task artifacts produced so far (engine-maintained, do NOT re-do):\n")
+        if (readFiles.isNotEmpty()) {
+            sb.append("- READ_FILES (${readFiles.size}): ")
+                .append(readFiles.joinToString(", ") { shortPath(it) })
+                .append('\n')
+        }
+        if (wroteFiles.isNotEmpty()) {
+            sb.append("- WROTE_FILES (${wroteFiles.size}): ")
+                .append(wroteFiles.entries.joinToString(", ") { "${shortPath(it.key)}@S${it.value}" })
+                .append('\n')
+        }
+        if (webFetched.isNotEmpty()) {
+            sb.append("- WEB_FETCHED (${webFetched.size}): ")
+                .append(webFetched.entries.joinToString(", ") {
+                    val u = if (it.key.length <= 80) it.key else it.key.take(77) + "..."
+                    "$u@S${it.value}"
+                })
+                .append('\n')
+        }
+        if (pythonRuns.isNotEmpty()) {
+            val recent = if (pythonRuns.size > 5) pythonRuns.takeLast(5) else pythonRuns
+            sb.append("- PYTHON_RUNS (${pythonRuns.size}, last ${recent.size}): ")
+                .append(recent.joinToString(" | ") { "S${it.first}: ${it.second}" })
+                .append('\n')
+        }
+        if (artifacts.isNotEmpty()) {
+            sb.append("- GENERATED_ARTIFACTS (${artifacts.size}): ")
+                .append(artifacts.entries.joinToString(", ") { "${shortPath(it.key)}@S${it.value}" })
+                .append('\n')
+        }
+        sb.append("→ Reuse these artifacts. Do NOT re-read or re-execute the same actions. Move to the next phase or terminate.")
+        return sb.toString()
     }
     
     /**
@@ -1318,7 +1795,10 @@ class AgentAccessibilityService : AccessibilityService() {
                 is AgentAction.ListDir -> "list_dir(${action.path})"
                 is AgentAction.Mkdir -> "mkdir(${action.path})"
                 is AgentAction.SearchFiles -> "search_files(${action.path})"
-                is AgentAction.PythonRun -> "python_run(${if (action.code != null) "code" else "file"})"
+                is AgentAction.Python -> {
+                    val kind = if (action.timeoutSec == 0) "python[async]" else "python"
+                    "$kind(argv[${action.argv.size}])"
+                }
                 is AgentAction.PythonStatus -> "python_status"
                 is AgentAction.PythonKill -> "python_kill"
                 else -> action.javaClass.simpleName
@@ -1492,7 +1972,7 @@ $kbActionDesc
                         result.append(" (script length: ${action.script.length} chars)")
                     }
                     is AgentAction.Wait -> {
-                        // No extra info needed
+                        result.append(" (${action.seconds}s)")
                     }
                     is AgentAction.DataMemory -> {
                         result.append(" (op=${action.operation}, key=${action.key})")
@@ -1533,17 +2013,25 @@ $kbActionDesc
                     is AgentAction.SearchFiles -> {
                         result.append(" (search '${action.keyword}' in ${action.path})")
                     }
-                    is AgentAction.PythonRun -> {
-                        result.append(" (${if (action.code != null) "code" else "file"}: ${action.code?.take(30) ?: action.file})")
+                    is AgentAction.Python -> {
+                        val preview = action.argv.joinToString(" ")
+                        val tag = if (action.timeoutSec == 0) " async" else if (action.timeoutSec != 30) " t=${action.timeoutSec}s" else ""
+                        result.append(" (${preview.take(40)}${if (preview.length > 40) "..." else ""}$tag)")
                     }
                     is AgentAction.PythonStatus -> {
-                        result.append(" (list all sessions)")
+                        result.append(" (query current python state)")
                     }
                     is AgentAction.PythonKill -> {
                         result.append(" (kill active python instance)")
                     }
                     is AgentAction.ShowOutput -> {
                         result.append(" (size=${action.size}, text=${action.text.length} chars)")
+                    }
+                    is AgentAction.ScheduleGet -> {
+                        // No extra info needed
+                    }
+                    is AgentAction.ScheduleSet -> {
+                        result.append(" (task_id=${action.taskId})")
                     }
                 }
                 result.append("\n")

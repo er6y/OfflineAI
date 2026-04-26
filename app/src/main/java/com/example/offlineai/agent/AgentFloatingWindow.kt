@@ -395,23 +395,34 @@ class AgentFloatingWindow(private val context: Context) {
     }
 
     /**
-     * Show final terminate/finish result in the output area.
-     * Clears previous step output and displays the full expanded text so the user
-     * can read and scroll through the entire task summary.
+     * Show final terminate/finish result in the output area, with optional size control.
+     * size follows the same semantics as show_output: "small" / "medium" / "large".
+     * When size == "small" we keep the legacy fixed terminate height so the text is
+     * still comfortably scrollable; medium/large reuse applyWindowSize to expand the
+     * whole floating window width + scroll area.
      * Subsequent experience-summary model outputs will NOT overwrite this.
      */
-    fun showTerminateResult(text: String) {
+    @JvmOverloads
+    fun showTerminateResult(text: String, size: String = "small") {
         val display = text.trim().ifEmpty { "Task completed." }
+        val validSize = if (size in listOf("small", "medium", "large")) size else "small"
         runOnMainThread {
+            if (validSize == "small") {
+                // Legacy compact layout: keep current window width, just enlarge scroll area
+                setScrollViewHeight(SCROLL_HEIGHT_TERMINATE_DP)
+            } else {
+                // medium / large: expand window width + scrollable height via shared preset
+                applyWindowSize(validSize)
+            }
+            currentOutputSize = validSize
             textViewOutput?.let { tv ->
                 getMarkwon().setMarkdown(tv, display)
                 tv.setTextColor(0xFFFFFFFF.toInt())
                 tv.textSize = 11f
             }
-            // Expand ScrollView to 200dp so long terminate text is scrollable without overflowing screen
-            setScrollViewHeight(SCROLL_HEIGHT_TERMINATE_DP)
             // Scroll to top so user reads from beginning
             scrollViewOutput?.scrollTo(0, 0)
+            LogManager.logD(TAG, "[TERMINATE] size=$validSize, text=${display.length} chars")
         }
     }
 

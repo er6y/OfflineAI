@@ -141,3 +141,21 @@ app/release/
 /allinone
 
 /.env
+
+# Stockquant skill runtime data (per-user; do not commit)
+app/src/main/assets/skills/stockquant/cache/
+app/src/main/assets/skills/stockquant/logs/
+
+# Python bytecode cache left behind when running .py scripts locally
+# (conda/venv). Not needed in VCS and already excluded from APK builds
+# via `androidResources.ignoreAssetsPattern` in app/build.gradle.
+**/__pycache__/
+*.pyc
+/MAI-UI
+/Open-AutoGLM
+/_inspect
+/skill_example
+/tonghuashuntupian
+/tests
+/stockquant_log
+

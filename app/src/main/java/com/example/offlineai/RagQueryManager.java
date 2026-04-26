@@ -559,12 +559,13 @@ public class RagQueryManager {
 
         // Emit basic debug info via unified method (writes buffer + notifies UI)
         // For local model: debug info will be emitted by LocalLlmAdapter with Loading/Reusing status
+        // NOTE: Do NOT pre-close <debug> here. The [TEXT:] marker emitted by
+        // StreamingApiClient (before first content token) will trigger the close.
+        // This keeps reasoning_content (thinking) tokens INSIDE <debug>...</debug>
+        // so they can be stripped by the Agent parser.
         if (!isLocalModel) {
             String debugInfo = "[LLM] Using online API: " + model + "\n";
             emitStreamingChunkFromManager(debugInfo);
-            // Close debug section for online API (no [TEXT:] marker)
-            String closeDebug = "</debug>\n\n";
-            emitStreamingChunkFromManager(closeDebug);
         }
 
         int systemLen = (systemPrompt != null) ? systemPrompt.length() : 0;
@@ -657,7 +658,11 @@ public class RagQueryManager {
                     notifyQueryComplete(true, null);
                 }
 
-                private boolean debugClosed = !isLocalModel;
+                // debugClosed starts false for BOTH local and online models.
+                // StreamingApiClient always emits [TEXT:] before the first content token,
+                // which triggers </debug> close. This ensures thinking (reasoning_content)
+                // tokens emitted BEFORE [TEXT:] stay inside <debug>...</debug>.
+                private boolean debugClosed = false;
                 private final boolean[] streamingProgressReported = {false};
 
                 @Override
@@ -758,12 +763,13 @@ public class RagQueryManager {
 
         // Emit basic debug info via unified method (writes buffer + notifies UI)
         // For local model: debug info will be emitted by LocalLlmAdapter with Loading/Reusing status
+        // NOTE: Do NOT pre-close <debug> here. The [TEXT:] marker emitted by
+        // StreamingApiClient (before first content token) will trigger the close.
+        // This keeps reasoning_content (thinking) tokens INSIDE <debug>...</debug>
+        // so they can be stripped by the Agent parser.
         if (!isLocalModel) {
             String debugInfo = "[LLM] Using online API: " + model + "\n";
             emitStreamingChunkFromManager(debugInfo);
-            // Close debug section for online API (no [TEXT:] marker)
-            String closeDebug = "</debug>\n\n";
-            emitStreamingChunkFromManager(closeDebug);
         }
 
         LogManager.logD(TAG, "[MGR][LLM] Starting LLM API: " + apiUrl);
@@ -856,7 +862,11 @@ public class RagQueryManager {
                     notifyQueryComplete(true, null);
                 }
 
-                private boolean debugClosed = !isLocalModel;
+                // debugClosed starts false for BOTH local and online models.
+                // StreamingApiClient always emits [TEXT:] before the first content token,
+                // which triggers </debug> close. This ensures thinking (reasoning_content)
+                // tokens emitted BEFORE [TEXT:] stay inside <debug>...</debug>.
+                private boolean debugClosed = false;
                 private final boolean[] streamingProgressReported = {false};
 
                 @Override
@@ -997,12 +1007,6 @@ public class RagQueryManager {
         LogManager.logD(TAG, "[MGR][RAG] " + promptInfo);
         emitProgressFromManager(promptInfo);
 
-        if (totalLength > 4000) {
-            String warnMsg = "Warning: Prompt length exceeds 4000 characters, may be truncated by model";
-            LogManager.logW(TAG, "[MGR][RAG] " + warnMsg);
-            emitProgressFromManager(warnMsg);
-        }
-
         LogManager.logD(TAG, "[MGR][RAG] Calling LLM API directly without knowledge base");
         // Use currentLlmTaskId (if any) so that LLM progress/finalization is
         // reflected in BackgroundTaskManager via manager-side helpers.
@@ -1069,12 +1073,6 @@ public class RagQueryManager {
         String promptInfo = "Built prompt length: " + promptLength + " characters";
         LogManager.logD(TAG, "[MGR][RAG] " + promptInfo);
         emitProgressFromManager(promptInfo);
-
-        if (promptLength > 4000) {
-            String warnMsg = "Warning: Prompt length exceeds 4000 characters, may be truncated by model";
-            LogManager.logW(TAG, "[MGR][RAG] " + warnMsg);
-            emitProgressFromManager(warnMsg);
-        }
 
         String timeMsg = appContext.getString(R.string.kb_query_time, queryTimeMs);
         LogManager.logD(TAG, "[MGR][RAG] " + timeMsg);
@@ -3218,9 +3216,14 @@ public class RagQueryManager {
             // Start query
             startQuery(request);
             
-            // Wait for completion (no timeout - caller decides timeout strategy)
-            LogManager.logI(TAG, "[SYNC] Waiting for query to complete...");
-            latch.await();
+            // Wait for completion with timeout to prevent infinite hang
+            LogManager.logI(TAG, "[SYNC] Waiting for query to complete (timeout=120s)...");
+            boolean completed = latch.await(120, java.util.concurrent.TimeUnit.SECONDS);
+            if (!completed) {
+                LogManager.logE(TAG, "[SYNC] Query timed out after 120s");
+                updateCallback(originalCallback);
+                return null;
+            }
             
             // Restore original callback
             updateCallback(originalCallback);

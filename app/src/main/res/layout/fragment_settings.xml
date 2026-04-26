@@ -1500,6 +1500,229 @@
                 android:layout_marginStart="0dp" />
         </LinearLayout>
 
+        <!-- 定时任务设置 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/settings_category_schedule"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp"
+            android:layout_marginBottom="8dp" />
+
+        <!-- Schedule Enable Switch -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginBottom="12dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="@string/label_schedule_enabled"
+                    android:textSize="16sp" />
+
+                <Switch
+                    android:id="@+id/switchScheduleEnabled"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/schedule_enabled_hint"
+                android:textSize="12sp"
+                android:textColor="?android:attr/textColorSecondary"
+                android:layout_marginTop="4dp" />
+        </LinearLayout>
+
+        <!-- Schedule detail container (visibility toggled by master switch) -->
+        <LinearLayout
+            android:id="@+id/layoutScheduleDetails"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <!-- Task tab buttons -->
+            <LinearLayout
+                android:id="@+id/layoutScheduleTaskTabs"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginBottom="8dp">
+
+                <Button android:id="@+id/btnScheduleTask0" android:layout_width="0dp" android:layout_height="36dp" android:layout_weight="1" android:textSize="13sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btnScheduleTask1" android:layout_width="0dp" android:layout_height="36dp" android:layout_weight="1" android:textSize="13sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btnScheduleTask2" android:layout_width="0dp" android:layout_height="36dp" android:layout_weight="1" android:textSize="13sp" android:layout_marginEnd="4dp" />
+                <Button android:id="@+id/btnScheduleTask3" android:layout_width="0dp" android:layout_height="36dp" android:layout_weight="1" android:textSize="13sp" />
+            </LinearLayout>
+
+            <!-- Per-task detail panel (shared, content changes by selected task tab) -->
+            <LinearLayout
+                android:id="@+id/layoutScheduleTaskDetail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <!-- Enable + One-shot row -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="8dp">
+
+                    <CheckBox
+                        android:id="@+id/cbScheduleTaskEnabled"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/label_schedule_task_enabled"
+                        android:textSize="14sp" />
+
+                    <CheckBox
+                        android:id="@+id/cbScheduleTaskOneShot"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/label_schedule_one_shot"
+                        android:textSize="14sp"
+                        android:layout_marginStart="16dp" />
+                </LinearLayout>
+
+                <!-- Weekday Checkboxes -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/label_schedule_weekdays"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="4dp" />
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:layout_marginBottom="8dp">
+
+                    <CheckBox android:id="@+id/cbWeekday1" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="@string/schedule_weekday_mon" android:textSize="13sp" />
+                    <CheckBox android:id="@+id/cbWeekday2" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="@string/schedule_weekday_tue" android:textSize="13sp" />
+                    <CheckBox android:id="@+id/cbWeekday3" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="@string/schedule_weekday_wed" android:textSize="13sp" />
+                    <CheckBox android:id="@+id/cbWeekday4" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="@string/schedule_weekday_thu" android:textSize="13sp" />
+                    <CheckBox android:id="@+id/cbWeekday5" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="@string/schedule_weekday_fri" android:textSize="13sp" />
+                    <CheckBox android:id="@+id/cbWeekday6" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="@string/schedule_weekday_sat" android:textSize="13sp" />
+                    <CheckBox android:id="@+id/cbWeekday7" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="@string/schedule_weekday_sun" android:textSize="13sp" />
+                </LinearLayout>
+
+                <!-- Start / End time row -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="8dp">
+
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/label_schedule_start_time" android:textSize="14sp" />
+                    <Spinner android:id="@+id/spinnerScheduleStartHour" android:layout_width="60dp" android:layout_height="wrap_content" android:layout_marginStart="4dp" />
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/schedule_time_hour" android:textSize="12sp" />
+                    <Spinner android:id="@+id/spinnerScheduleStartMin" android:layout_width="60dp" android:layout_height="wrap_content" android:layout_marginStart="2dp" />
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/schedule_time_min" android:textSize="12sp" />
+
+                    <View android:layout_width="16dp" android:layout_height="1dp" />
+
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/label_schedule_end_time" android:textSize="14sp" />
+                    <Spinner android:id="@+id/spinnerScheduleEndHour" android:layout_width="60dp" android:layout_height="wrap_content" android:layout_marginStart="4dp" />
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/schedule_time_hour" android:textSize="12sp" />
+                    <Spinner android:id="@+id/spinnerScheduleEndMin" android:layout_width="60dp" android:layout_height="wrap_content" android:layout_marginStart="2dp" />
+                    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="@string/schedule_time_min" android:textSize="12sp" />
+                </LinearLayout>
+
+                <!-- Interval SeekBar -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="8dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/label_schedule_interval"
+                        android:textSize="14sp" />
+
+                    <SeekBar
+                        android:id="@+id/seekBarScheduleInterval"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp"
+                        android:layout_marginEnd="8dp"
+                        android:max="59"
+                        android:progress="0" />
+
+                    <TextView
+                        android:id="@+id/textViewScheduleIntervalValue"
+                        android:layout_width="40dp"
+                        android:layout_height="wrap_content"
+                        android:text="1"
+                        android:textSize="14sp"
+                        android:gravity="center" />
+                </LinearLayout>
+
+                <!-- Prompt file dropdown -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="8dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/label_schedule_prompt_file"
+                        android:textSize="14sp" />
+
+                    <Spinner
+                        android:id="@+id/spinnerSchedulePromptFile"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:layout_marginStart="8dp" />
+                </LinearLayout>
+
+                <!-- Prompt EditText -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/label_schedule_prompt"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="4dp" />
+
+                <EditText
+                    android:id="@+id/editTextSchedulePrompt"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/schedule_prompt_hint"
+                    android:inputType="textMultiLine"
+                    android:minLines="2"
+                    android:maxLines="5"
+                    android:gravity="top"
+                    android:textSize="14sp"
+                    android:layout_marginBottom="12dp"
+                    android:padding="8dp"
+                    android:background="@android:drawable/edit_text" />
+            </LinearLayout>
+        </LinearLayout>
+
         <!-- 全局设置 -->
         <TextView
             android:layout_width="match_parent"

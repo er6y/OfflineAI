@@ -46,6 +46,26 @@ android {
 namespace = 'com.example.offlineai'
     compileSdk = 34 // Use an appropriate SDK version
 
+    // Strip dev-machine artifacts from assets BEFORE they enter the APK.
+    // Motivation: running stockquant.py (or any python skill) locally via
+    // conda/venv on Windows leaves behind:
+    //   - __pycache__/                    : Python bytecode cache
+    //   - skills/<s>/cache/YYYYMMDD/      : daily JSON snapshots
+    //   - skills/<s>/logs/<kind>/*.jsonl  : local run logs
+    // None of these are needed on-device (Chaquopy regenerates caches under
+    // private storage); previously they bloated every APK and users had to
+    // `rm -rf` them before each build.
+    //
+    // Implementation note: `sourceSets.main.assets.exclude` is silently
+    // ignored by AGP's MergeAssets task, so we use aapt's own
+    // `ignoreAssetsPattern` (basename-matched). The default pattern is
+    // preserved and we append `!__pycache__:!cache:!logs`. These three
+    // names are Python/dev-only in this project; if a future skill needs
+    // a legit `cache/` dir in assets, switch to per-path filtering.
+    androidResources {
+        ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:<dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~:!__pycache__:!cache:!logs'
+    }
+
     signingConfigs {
         release {
             storeFile file('../key.jks')

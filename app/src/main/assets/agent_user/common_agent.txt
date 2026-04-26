@@ -1,0 +1,29 @@
+# ============================================================
+# Agent User Prompt Configuration
+# ============================================================
+# Format:
+#   Lines starting with '#' are comments (never injected to agent).
+#   @once  - Injected only at Step 0 (first round planning).
+#   @step  - Injected at every step (ongoing requirements).
+#   @once { ... }  - Multi-line block for Step 0.
+#   @step { ... }  - Multi-line block for every step.
+#   Lines without prefix default to @step (backward compatible).
+# ============================================================
+
+# ------ Step 0 only: first-round planning hints ------
+
+@once {
+- 如果任务涉及已安装技能（见可用技能列表），首轮 context.fact 必须记录：所需 SKILL.md 全路径 + 默认工作目录。
+}
+
+# ------ Every step: ongoing requirements ------
+
+@step {
+- 输出动作前请思考：
+  - 输出action是否正确恰当，能否符合任务要求
+  - context需要包含哪些内容，哪些属于fact，哪些是text，才能确保后续步骤有足够信息，不迷惑或者造成步骤断片死循环
+  - 是否通过data_memory记录足够业务信息
+  - 是否需要读取业务信息给下一步综合
+  - 当前屏幕关键元素、任务进展和下一步计划
+  - 拆解任务时考虑效率：能用脚本批量完成的不要逐步手动操作
+}

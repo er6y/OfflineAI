@@ -29,6 +29,9 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     
+    <!-- Schedule: exact alarm for Doze-proof heartbeat -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    
     <!-- 声明使用的硬件特性（可选，但有助于GPU加速） -->
     <uses-feature android:name="android.hardware.vulkan.level" android:required="false" />
     <uses-feature android:name="android.hardware.vulkan.version" android:required="false" />

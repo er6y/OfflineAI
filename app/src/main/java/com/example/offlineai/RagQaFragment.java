@@ -602,7 +602,11 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         // Add touch listener for knowledge base dropdown
         spinnerKnowledgeBase.setOnTouchListener((v, event) -> {
             if (event.getAction() == MotionEvent.ACTION_UP) {
-                loadKnowledgeBases();
+                if (isAgentMode()) {
+                    loadAgentUserPresets();
+                } else {
+                    loadKnowledgeBases();
+                }
             }
             return false;
         });
@@ -612,6 +616,11 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 if (isAgentMode()) {
+                    // In Agent mode, spinner shows agent_user preset files
+                    String displayName = parent.getItemAtPosition(position).toString();
+                    String fileName = displayName + ".txt";
+                    ConfigManager.setString(requireContext(), ConfigManager.KEY_AGENT_USER_PROMPT_FILE, fileName);
+                    LogManager.logD(TAG, "[AGENT_USER] Selected preset: " + fileName);
                     return;
                 }
                 String selectedKnowledgeBase = parent.getItemAtPosition(position).toString();
@@ -1453,12 +1462,22 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
 
     private void applyModeUiVisibility() {
         int ragVisibility = isAgentMode() ? View.GONE : View.VISIBLE;
+        // Knowledge base label+spinner: always visible, repurposed in Agent mode
         if (textViewKnowledgeBaseLabel != null) {
-            textViewKnowledgeBaseLabel.setVisibility(ragVisibility);
+            textViewKnowledgeBaseLabel.setVisibility(View.VISIBLE);
+            textViewKnowledgeBaseLabel.setText(isAgentMode()
+                    ? getString(R.string.label_agent_user_preset)
+                    : getString(R.string.label_knowledge_base));
         }
         if (spinnerKnowledgeBase != null) {
-            spinnerKnowledgeBase.setVisibility(ragVisibility);
+            spinnerKnowledgeBase.setVisibility(View.VISIBLE);
+            if (isAgentMode()) {
+                loadAgentUserPresets();
+            } else {
+                loadKnowledgeBases();
+            }
         }
+        // RAG-only controls hidden in Agent mode
         if (textViewSearchDepthLabel != null) {
             textViewSearchDepthLabel.setVisibility(ragVisibility);
         }
@@ -1488,6 +1507,40 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
         }
         if (checkBoxAgentMode != null) {
             checkBoxAgentMode.setVisibility(View.GONE);
+        }
+    }
+
+    /**
+     * Load agent_user/*.txt files into knowledge base spinner (Agent mode).
+     */
+    private void loadAgentUserPresets() {
+        if (spinnerKnowledgeBase == null) return;
+        try {
+            java.util.List<String> files = ConfigManager.listAgentUserFiles(requireContext());
+            if (files.isEmpty()) {
+                files = new java.util.ArrayList<>();
+                files.add("common_agent.txt");
+            }
+            // Display without .txt extension
+            java.util.List<String> displayNames = new java.util.ArrayList<>();
+            for (String f : files) {
+                displayNames.add(f.endsWith(".txt") ? f.substring(0, f.length() - 4) : f);
+            }
+            ArrayAdapter<String> adapter = new ArrayAdapter<>(requireContext(),
+                    android.R.layout.simple_spinner_item, displayNames);
+            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+            spinnerKnowledgeBase.setAdapter(adapter);
+
+            // Select previously saved file
+            String savedFile = ConfigManager.getString(requireContext(),
+                    ConfigManager.KEY_AGENT_USER_PROMPT_FILE, "common_agent.txt");
+            String savedDisplay = savedFile.endsWith(".txt") ? savedFile.substring(0, savedFile.length() - 4) : savedFile;
+            int pos = displayNames.indexOf(savedDisplay);
+            if (pos >= 0) {
+                spinnerKnowledgeBase.setSelection(pos);
+            }
+        } catch (Exception e) {
+            LogManager.logE(TAG, "[AGENT_USER] Failed to load presets: " + e.getMessage());
         }
     }
 

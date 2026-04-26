@@ -100,6 +100,47 @@ public class UnifiedForegroundService extends Service {
     // Current inference task ID for log routing
     private volatile String currentInferenceTaskId = null;
     
+    // Schedule heartbeat - AlarmManager only (Doze-proof, 1min interval)
+    // lastScheduledRunTime: updated ONLY when Agent is actually triggered. Used for
+    //   - interval check (range mode)
+    //   - same-local-day check (once-per-day mode, start==end)
+    // lastReminderTime: updated when reminder notification is sent (screen off / locked).
+    //   Used to throttle reminders to every REMINDER_THROTTLE_MS, independent of lastScheduledRunTime.
+    private volatile long[] lastScheduledRunTime = new long[ConfigManager.SCHEDULE_TASK_COUNT];
+    private volatile long[] lastReminderTime = new long[ConfigManager.SCHEDULE_TASK_COUNT];
+    private static final long REMINDER_THROTTLE_MS = 30L * 60L * 1000L; // 30 minutes
+    private android.app.AlarmManager alarmManager;
+    private PendingIntent alarmPendingIntent;
+    // Whether startForeground() has been called for this service instance.
+    // Needed because AlarmManager may start a freshly-restarted process where
+    // the alarm-action branch becomes the FIRST onStartCommand invocation.
+    private boolean foregroundStarted = false;
+    
+    // Schedule action and notification constants
+    private static final String ACTION_SCHEDULE_ALARM = "com.example.offlineai.SCHEDULE_ALARM";
+    private static final String SCHEDULE_REMINDER_CHANNEL_ID = "schedule_reminder_channel";
+    private static final int SCHEDULE_REMINDER_NOTIFICATION_ID = 1002;
+
+    // MediaProjection upgrade ready-callback (Android 14+)
+    // Because startForegroundService() is asynchronous, callers that depend on the
+    // service having been promoted to FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+    // (e.g. MediaProjectionManager.getMediaProjection()) must wait until
+    // onStartCommand finished the upgrade. We expose a one-shot callback:
+    // caller registers via setMediaProjectionReadyCallback(), then starts the
+    // service with extra "media_projection"=true. The callback fires on the main
+    // thread once upgrade succeeds (or fails).
+    private static volatile Runnable sMediaProjectionReadyCallback = null;
+    private static volatile boolean sMediaProjectionUpgraded = false;
+
+    public static void setMediaProjectionReadyCallback(Runnable cb) {
+        sMediaProjectionReadyCallback = cb;
+        sMediaProjectionUpgraded = false;
+    }
+
+    public static boolean isMediaProjectionReady() {
+        return sMediaProjectionUpgraded;
+    }
+    
     // 进度回调接口
     public interface ProgressCallback {
         void onProgressUpdate(int progress, String status);
@@ -150,6 +191,10 @@ public class UnifiedForegroundService extends Service {
         
         // 创建通知渠道（Android 8.0及以上需要）
         createNotificationChannel();
+        createScheduleReminderChannel();
+        
+        // Init AlarmManager for Doze-proof heartbeat
+        alarmManager = (android.app.AlarmManager) getSystemService(Context.ALARM_SERVICE);
         
         // 获取唤醒锁
         PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE);
@@ -165,6 +210,34 @@ public class UnifiedForegroundService extends Service {
     
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // Handle AlarmManager heartbeat wakeup (fires every 1 minute; keep logs at DEBUG to avoid flooding).
+        if (intent != null && ACTION_SCHEDULE_ALARM.equals(intent.getAction())) {
+            // If the process was killed and AlarmManager just revived us, this is the
+            // FIRST onStartCommand of a new service instance and we MUST call
+            // startForeground() within 5 seconds to avoid system-kill / crash.
+            if (!foregroundStarted) {
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0),
+                            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+                    } else {
+                        startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0));
+                    }
+                    foregroundStarted = true;
+                    LogManager.logI(TAG, "[SCHEDULE] Foreground started from alarm wakeup (process restart)");
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[SCHEDULE] startForeground in alarm branch failed: " + e.getMessage());
+                }
+            }
+            LogManager.logD(TAG, "[SCHEDULE] AlarmManager heartbeat wakeup");
+            handleAlarmHeartbeat();
+            // Re-schedule next alarm
+            boolean se = ConfigManager.getBoolean(getApplicationContext(), ConfigManager.KEY_SCHEDULE_ENABLED, false);
+            if (se) scheduleNextAlarm();
+            return se ? START_STICKY : START_NOT_STICKY;
+        }
+
+        // Normal startup path (not from heartbeat)
         LogManager.logI(TAG, "统一前台服务启动");
         
         // Check if this is for MediaProjection (Agent screenshot)
@@ -173,22 +246,75 @@ public class UnifiedForegroundService extends Service {
             isMediaProjection = intent.getBooleanExtra("media_projection", false);
         }
         
-        // 立即启动前台服务以避免ANR错误
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && isMediaProjection) {
-            // Android 10+ with MediaProjection type
-            startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0), 
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC | 
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
-            LogManager.logD(TAG, "前台服务已启动（mediaProjection模式），保持进程存活");
-        } else {
-            // Normal mode (dataSync only)
-            startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0));
-            LogManager.logD(TAG, "前台服务已启动，保持进程存活");
+        // Must call startForeground ASAP to avoid ANR.
+        // IMPORTANT (Android 14 / targetSdk=34): since manifest declares
+        // foregroundServiceType="dataSync|mediaProjection", calling the 2-arg
+        // startForeground(id, notification) would validate BOTH types and crash
+        // with SecurityException because mediaProjection requires user's runtime
+        // MediaProjection grant. So we MUST pass an explicit type here.
+        boolean mediaProjectionUpgradedNow = false;
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                if (isMediaProjection) {
+                    // Upgrade path: caller has obtained MediaProjection consent
+                    startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0),
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC |
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+                    LogManager.logD(TAG, "前台服务已启动（mediaProjection模式），保持进程存活");
+                    mediaProjectionUpgradedNow = true;
+                } else {
+                    // Default path at app startup: dataSync only, no user grant required
+                    startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0),
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+                    LogManager.logD(TAG, "前台服务已启动（dataSync模式），保持进程存活");
+                }
+            } else {
+                // Android < 10: no foregroundServiceType concept
+                startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0));
+                LogManager.logD(TAG, "前台服务已启动（legacy），保持进程存活");
+                if (isMediaProjection) {
+                    mediaProjectionUpgradedNow = true;
+                }
+            }
+            foregroundStarted = true;
+        } catch (SecurityException se) {
+            // Defensive fallback: if mediaProjection upgrade fails (e.g. user revoked grant),
+            // degrade to dataSync so the service still runs and app doesn't crash.
+            LogManager.logE(TAG, "启动前台服务失败，降级为 dataSync: " + se.getMessage());
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+            } else {
+                startForeground(NOTIFICATION_ID, createNotification("应用正在运行", 0));
+            }
+            foregroundStarted = true;
+        }
+
+        // Fire the one-shot MediaProjection-ready callback on the main thread.
+        // This guarantees AgentManager calls getMediaProjection() AFTER the FGS
+        // has actually been promoted to FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION.
+        if (mediaProjectionUpgradedNow) {
+            sMediaProjectionUpgraded = true;
+            final Runnable cb = sMediaProjectionReadyCallback;
+            sMediaProjectionReadyCallback = null;
+            if (cb != null) {
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    try {
+                        cb.run();
+                    } catch (Throwable t) {
+                        LogManager.logE(TAG, "MediaProjection ready callback threw: " + t.getMessage());
+                    }
+                });
+            }
         }
         
-        // 不使用START_STICKY，用户主动关闭app时应该清除服务
-        // 只在有活动任务时保持运行，空闲时允许被清理
-        return START_NOT_STICKY;
+        // Use START_STICKY when scheduled task is enabled so service restarts if killed
+        boolean scheduleEnabled = ConfigManager.getBoolean(getApplicationContext(),
+                ConfigManager.KEY_SCHEDULE_ENABLED, false);
+        if (scheduleEnabled && alarmPendingIntent == null) {
+            startScheduleHeartbeat();
+        }
+        return scheduleEnabled ? START_STICKY : START_NOT_STICKY;
     }
     
     @Override
@@ -209,6 +335,9 @@ public class UnifiedForegroundService extends Service {
             LogManager.logD(TAG, "唤醒锁已释放");
         }
         
+        // Stop schedule heartbeat
+        stopScheduleHeartbeat();
+        
         // 关闭执行器
         executor.shutdownNow();
         
@@ -222,13 +351,19 @@ public class UnifiedForegroundService extends Service {
     @Override
     public void onTaskRemoved(Intent rootIntent) {
         super.onTaskRemoved(rootIntent);
-        LogManager.logI(TAG, "用户从最近任务清除app，停止服务");
+        LogManager.logI(TAG, "用户从最近任务清除app");
         
-        // 如果没有活动任务，直接停止服务
-        if (!hasActiveTask) {
+        boolean scheduleEnabled = ConfigManager.getBoolean(getApplicationContext(),
+                ConfigManager.KEY_SCHEDULE_ENABLED, false);
+        
+        if (scheduleEnabled) {
+            // Schedule enabled: keep service alive for heartbeat
+            LogManager.logI(TAG, "定时任务已开启，保持服务运行");
+        } else if (!hasActiveTask) {
+            // No schedule, no active task: stop service
             stopSelf();
         } else {
-            // 有活动任务时，等任务完成后再停止
+            // Has active task: wait for it to finish
             LogManager.logI(TAG, "有活动任务运行中，等待任务完成后停止");
         }
     }
@@ -606,24 +741,300 @@ public class UnifiedForegroundService extends Service {
         
         if (hasTtsTask) {
             LogManager.logI(TAG, "任务完成，但检测到 TTS 任务正在运行，保持服务运行");
-            // Update notification to show TTS is running
             updateNotification("生成语音中", 0);
-            return; // Don't stop service yet
+            return;
         }
         
-        // 任务完成后，延迟停止服务，避免通知驻留
-        LogManager.logI(TAG, "任务完成，1秒后停止服务并清除通知");
-        new android.os.Handler(getMainLooper()).postDelayed(() -> {
-            // Double-check TTS tasks before actually stopping
-            boolean stillHasTtsTask = taskManager.hasActiveTasksOfType(BackgroundTask.TaskType.TTS_GENERATION);
-            if (stillHasTtsTask) {
-                LogManager.logI(TAG, "检测到 TTS 任务仍在运行，取消停止服务");
+        boolean scheduleEnabled = ConfigManager.getBoolean(getApplicationContext(),
+                ConfigManager.KEY_SCHEDULE_ENABLED, false);
+        
+        if (scheduleEnabled) {
+            // Schedule enabled: keep service alive, update notification to standby
+            LogManager.logI(TAG, "任务完成，定时任务已开启，保持服务待命");
+            updateNotification("定时任务待命中", 0);
+        } else {
+            // No schedule: stop service after delay
+            LogManager.logI(TAG, "任务完成，1秒后停止服务并清除通知");
+            new android.os.Handler(getMainLooper()).postDelayed(() -> {
+                boolean stillHasTtsTask = taskManager.hasActiveTasksOfType(BackgroundTask.TaskType.TTS_GENERATION);
+                if (stillHasTtsTask) {
+                    LogManager.logI(TAG, "检测到 TTS 任务仍在运行，取消停止服务");
+                    return;
+                }
+                if (hasActiveTask) {
+                    LogManager.logI(TAG, "检测到新任务已启动，取消停止服务");
+                    return;
+                }
+                stopSelf();
+                LogManager.logI(TAG, "服务已停止，通知已清除");
+            }, 1000);
+        }
+    }
+    
+    /**
+     * Check if the app is idle (no active tasks running).
+     * Used by schedule heartbeat to determine if a scheduled Agent task can be triggered.
+     */
+    public boolean isAppIdle() {
+        return !hasActiveTask;
+    }
+    
+    // ==================== Schedule Heartbeat Engine (AlarmManager only) ====================
+    // Uses AlarmManager.setExactAndAllowWhileIdle for Doze-proof 1-minute heartbeat.
+    // Screen on: precise 1min. Doze: ~9min max delay (Android system limit).
+    // Each wakeup checks conditions; screen on -> trigger Agent; screen off -> send reminder.
+    
+    /**
+     * Start schedule heartbeat (called when schedule is enabled).
+     */
+    public void startScheduleHeartbeat() {
+        cancelAlarm(); // Ensure no duplicate
+        scheduleNextAlarm();
+        LogManager.logI(TAG, "[SCHEDULE] Heartbeat started (AlarmManager, 1min)");
+        if (!hasActiveTask) {
+            updateNotification("定时任务待命中", 0);
+        }
+    }
+    
+    /**
+     * Stop schedule heartbeat (called when schedule is disabled).
+     */
+    public void stopScheduleHeartbeat() {
+        cancelAlarm();
+        // Dismiss any pending reminder notification
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        nm.cancel(SCHEDULE_REMINDER_NOTIFICATION_ID);
+        LogManager.logI(TAG, "[SCHEDULE] Heartbeat stopped");
+    }
+    
+    /**
+     * Schedule next alarm 1 minute from now.
+     * In Doze mode, system may delay up to ~9 minutes (Android limit for all apps).
+     */
+    private void scheduleNextAlarm() {
+        if (alarmManager == null) return;
+        Intent intent = new Intent(this, UnifiedForegroundService.class);
+        intent.setAction(ACTION_SCHEDULE_ALARM);
+        alarmPendingIntent = PendingIntent.getService(this, 0, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        long triggerAt = System.currentTimeMillis() + 60 * 1000L; // 1 minute
+        try {
+            alarmManager.setExactAndAllowWhileIdle(
+                    android.app.AlarmManager.RTC_WAKEUP, triggerAt, alarmPendingIntent);
+        } catch (SecurityException e) {
+            // SCHEDULE_EXACT_ALARM permission not granted on Android 12+
+            LogManager.logW(TAG, "[SCHEDULE] Cannot set exact alarm: " + e.getMessage());
+        }
+    }
+    
+    private void cancelAlarm() {
+        if (alarmManager != null && alarmPendingIntent != null) {
+            alarmManager.cancel(alarmPendingIntent);
+            alarmPendingIntent = null;
+        }
+    }
+    
+    /**
+     * Handle AlarmManager heartbeat wakeup.
+     * Iterates 4 task groups. First due task that meets all conditions wins.
+     */
+    private void handleAlarmHeartbeat() {
+        boolean masterEnabled = ConfigManager.getBoolean(getApplicationContext(),
+                ConfigManager.KEY_SCHEDULE_ENABLED, false);
+        if (!masterEnabled) return;
+
+        // Find the first due task group
+        int dueTaskIndex = findDueTaskIndex();
+        if (dueTaskIndex < 0) return;
+
+        android.content.Context ctx = getApplicationContext();
+
+        // 2. Check screen on AND unlocked
+        PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+        android.app.KeyguardManager km = (android.app.KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+        boolean screenOn = pm.isInteractive();
+        boolean unlocked = (km != null) && !km.isKeyguardLocked();
+
+        if (!screenOn || !unlocked) {
+            // IMPORTANT: do NOT update lastScheduledRunTime here, otherwise once-per-day
+            // tasks (start==end) would be marked as "fired today" and never retry after
+            // the user unlocks. Use a separate reminder throttle instead.
+            long nowMs = System.currentTimeMillis();
+            if (nowMs - lastReminderTime[dueTaskIndex] < REMINDER_THROTTLE_MS) {
+                LogManager.logD(TAG, "[SCHEDULE] Task " + (dueTaskIndex + 1) + " reminder throttled (screenOn=" + screenOn + ", unlocked=" + unlocked + ")");
                 return;
             }
-            stopSelf();
-            LogManager.logI(TAG, "服务已停止，通知已清除");
-        }, 1000); // 延迟1秒，确保回调完成
+            lastReminderTime[dueTaskIndex] = nowMs;
+            LogManager.logI(TAG, "[SCHEDULE] Task " + (dueTaskIndex + 1) + " due but not ready (screenOn=" + screenOn + ", unlocked=" + unlocked + "), sending reminder");
+            sendScheduleReminderNotification(dueTaskIndex);
+            return;
+        }
+
+        // 3. Screen on + unlocked: check runtime conditions and trigger Agent
+        if (!isAppIdle()) {
+            LogManager.logI(TAG, "[SCHEDULE] Heartbeat: app busy (" + currentTaskType.getDisplayName() + "), skip");
+            return;
+        }
+
+        com.example.offlineai.agent.service.AgentAccessibilityService agentService =
+                com.example.offlineai.agent.service.AgentAccessibilityService.Companion.getInstance();
+        if (agentService == null) {
+            LogManager.logW(TAG, "[SCHEDULE] Heartbeat: AgentAccessibilityService not available, skip");
+            return;
+        }
+
+        // Build prompt: explicit prompt text, or fallback to prompt_file content
+        String explicitPrompt = ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(dueTaskIndex, "prompt"), "");
+        final String prompt;
+        if (!explicitPrompt.isEmpty()) {
+            prompt = explicitPrompt;
+        } else {
+            String promptFile = ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(dueTaskIndex, "prompt_file"), "common_agent.txt");
+            prompt = com.example.offlineai.agent.AgentPrompts.loadAgentUserPromptFile(ctx, promptFile);
+        }
+        if (prompt.isEmpty()) {
+            LogManager.logW(TAG, "[SCHEDULE] Task " + (dueTaskIndex + 1) + ": prompt is empty, skip");
+            return;
+        }
+
+        // All conditions met - trigger Agent!
+        lastScheduledRunTime[dueTaskIndex] = System.currentTimeMillis();
+        LogManager.logI(TAG, "[SCHEDULE] === TRIGGERING SCHEDULED AGENT TASK " + (dueTaskIndex + 1) + " ===");
+        LogManager.logI(TAG, "[SCHEDULE] Prompt: " + prompt);
+
+        // One-shot: disable after trigger
+        boolean oneShot = ConfigManager.getBoolean(ctx, ConfigManager.scheduleTaskKey(dueTaskIndex, "one_shot"), false);
+        if (oneShot) {
+            ConfigManager.setBoolean(ctx, ConfigManager.scheduleTaskKey(dueTaskIndex, "enabled"), false);
+            LogManager.logI(TAG, "[SCHEDULE] Task " + (dueTaskIndex + 1) + " is one-shot, disabled after trigger");
+        }
+
+        // Dismiss any previous reminder
+        NotificationManager nmDismiss = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        nmDismiss.cancel(SCHEDULE_REMINDER_NOTIFICATION_ID);
+
+        new android.os.Handler(getMainLooper()).post(() -> {
+            try {
+                agentService.startAgentLoop(prompt, true);
+                LogManager.logI(TAG, "[SCHEDULE] Agent loop started for task " + (dueTaskIndex + 1));
+            } catch (Exception e) {
+                LogManager.logE(TAG, "[SCHEDULE] Failed to start Agent loop: " + e.getMessage());
+            }
+        });
     }
+
+    /**
+     * Find the first task group that is due. Returns -1 if none.
+     */
+    private int findDueTaskIndex() {
+        android.content.Context ctx = getApplicationContext();
+        java.util.Calendar cal = java.util.Calendar.getInstance();
+        int dayOfWeek = cal.get(java.util.Calendar.DAY_OF_WEEK);
+        int ourDay = (dayOfWeek == java.util.Calendar.SUNDAY) ? 7 : (dayOfWeek - 1);
+        int currentHour = cal.get(java.util.Calendar.HOUR_OF_DAY);
+        int currentMin = cal.get(java.util.Calendar.MINUTE);
+        int nowMinutes = currentHour * 60 + currentMin;
+        long now = System.currentTimeMillis();
+
+        for (int i = 0; i < ConfigManager.SCHEDULE_TASK_COUNT; i++) {
+            // Task enabled?
+            if (!ConfigManager.getBoolean(ctx, ConfigManager.scheduleTaskKey(i, "enabled"), false)) continue;
+
+            // Weekday match?
+            String weekdays = ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(i, "weekdays"), "1,2,3,4,5");
+            if (!("," + weekdays + ",").contains("," + ourDay + ",")) continue;
+
+            // Time range check: startHH:MM ~ endHH:MM
+            int startH = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "start_hour"), 9);
+            int startM = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "start_min"), 0);
+            int endH = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "end_hour"), 17);
+            int endM = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "end_min"), 0);
+            int startMinutes = startH * 60 + startM;
+            int endMinutes = endH * 60 + endM;
+
+            if (endMinutes <= startMinutes) {
+                // Same start/end (or inverted range): "fire once a day after start time".
+                // Trigger on the first heartbeat at or after startMinutes when today has
+                // not fired yet. Doze / screen-off / busy are tolerated: we will keep
+                // trying on every subsequent heartbeat until today successfully fires.
+                if (nowMinutes < startMinutes) continue;
+                if (isSameLocalDay(lastScheduledRunTime[i], now)) continue;
+            } else {
+                if (nowMinutes < startMinutes || nowMinutes > endMinutes) continue;
+                // Interval check (only applies to range mode; once-per-day mode uses day-boundary guard)
+                int intervalMin = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "interval"), 30);
+                long intervalMs = intervalMin * 60L * 1000L;
+                if (now - lastScheduledRunTime[i] < intervalMs) continue;
+            }
+
+            return i;
+        }
+        return -1;
+    }
+
+    /**
+     * Return true when both timestamps fall on the same local calendar day.
+     * Special case: if {@code prevMs} is 0 (never fired), returns false so the first trigger is allowed.
+     */
+    private static boolean isSameLocalDay(long prevMs, long nowMs) {
+        if (prevMs <= 0L) return false;
+        java.util.Calendar a = java.util.Calendar.getInstance();
+        a.setTimeInMillis(prevMs);
+        java.util.Calendar b = java.util.Calendar.getInstance();
+        b.setTimeInMillis(nowMs);
+        return a.get(java.util.Calendar.YEAR) == b.get(java.util.Calendar.YEAR)
+                && a.get(java.util.Calendar.DAY_OF_YEAR) == b.get(java.util.Calendar.DAY_OF_YEAR);
+    }
+
+    // --- Reminder notification ---
+
+    private void createScheduleReminderChannel() {
+        NotificationChannel channel = new NotificationChannel(
+                SCHEDULE_REMINDER_CHANNEL_ID,
+                getString(R.string.schedule_notification_channel),
+                NotificationManager.IMPORTANCE_HIGH
+        );
+        channel.setDescription("Reminder to unlock screen for scheduled Agent tasks");
+        channel.enableVibration(true);
+        NotificationManager nm = getSystemService(NotificationManager.class);
+        nm.createNotificationChannel(channel);
+    }
+
+    private void sendScheduleReminderNotification(int taskIndex) {
+        Intent notifIntent = new Intent(this, MainActivity.class);
+        notifIntent.setAction(Intent.ACTION_MAIN);
+        notifIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+        notifIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PendingIntent pi = PendingIntent.getActivity(this, 1, notifIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+
+        String prompt = ConfigManager.getString(getApplicationContext(), ConfigManager.scheduleTaskKey(taskIndex, "prompt"), "");
+        String taskLabel = String.format(getString(R.string.schedule_task_label), taskIndex + 1);
+        String title = getString(R.string.schedule_reminder_title) + " - " + taskLabel;
+        String text = getString(R.string.schedule_reminder_text);
+        if (!prompt.isEmpty()) {
+            String snippet = prompt.substring(0, Math.min(prompt.length(), 30));
+            text += "\n" + taskLabel + ": " + snippet + "...";
+        }
+
+        Notification notification = new NotificationCompat.Builder(this, SCHEDULE_REMINDER_CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(new NotificationCompat.BigTextStyle().bigText(text))
+                .setContentIntent(pi)
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                .setVibrate(new long[]{0, 300, 200, 300})
+                .build();
+
+        NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        nm.notify(SCHEDULE_REMINDER_NOTIFICATION_ID, notification);
+        LogManager.logI(TAG, "[SCHEDULE] Reminder notification sent for task " + (taskIndex + 1));
+    }
+    
+    // ==================== End Schedule Heartbeat Engine ====================
     
     /**
      * 获取唤醒锁

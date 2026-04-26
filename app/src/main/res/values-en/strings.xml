@@ -1306,4 +1306,36 @@
     <string name="agent_save_experience">Save Experience</string>
     <string name="agent_experience_saved">Experience saved to AgentKB</string>
     <string name="agent_experience_save_failed">Failed to save experience</string>
+
+    <!-- Agent user preset label (RAG Agent mode spinner) -->
+    <string name="label_agent_user_preset">User Preset</string>
+
+    <!-- Scheduled Task Settings -->
+    <string name="settings_category_schedule">Scheduled Tasks</string>
+    <string name="label_schedule_enabled">Enable Scheduled Tasks</string>
+    <string name="schedule_enabled_hint">Automatically trigger Agent tasks on schedule</string>
+    <string name="label_schedule_task_enabled">Enable</string>
+    <string name="label_schedule_one_shot">One-shot</string>
+    <string name="label_schedule_weekdays">Days</string>
+    <string name="label_schedule_start_time">Start</string>
+    <string name="label_schedule_end_time">End</string>
+    <string name="label_schedule_interval">Interval (min)</string>
+    <string name="label_schedule_prompt_file">Prompt File</string>
+    <string name="label_schedule_prompt">Task Prompt</string>
+    <string name="schedule_prompt_hint">Agent will execute with this prompt</string>
+    <string name="schedule_weekday_mon">Mon</string>
+    <string name="schedule_weekday_tue">Tue</string>
+    <string name="schedule_weekday_wed">Wed</string>
+    <string name="schedule_weekday_thu">Thu</string>
+    <string name="schedule_weekday_fri">Fri</string>
+    <string name="schedule_weekday_sat">Sat</string>
+    <string name="schedule_weekday_sun">Sun</string>
+    <string name="schedule_reminder_title">Scheduled task pending</string>
+    <string name="schedule_reminder_text">Please unlock screen to execute Agent scheduled task</string>
+    <string name="schedule_notification_channel">Schedule Reminders</string>
+    <string name="schedule_task_label">Task %d</string>
+    <string name="schedule_time_hour">h</string>
+    <string name="schedule_time_min">m</string>
+
+    <!-- ... -->
 </resources>

@@ -28,6 +28,19 @@ class AgentEngine(private val context: Context) {
         private const val DEFAULT_MAX_STEPS = 50 // Default maximum steps
         private const val STEP_DELAY_MS = 1500L // Delay between steps for UI stabilization
         private const val MAX_PARSE_RETRIES = 3 // Maximum retries for parse failures
+        // Hard-stop when the model emits this many consecutive context/data_memory-only steps
+        // (no real tool call). Empirical: 10/50 empty steps in one ark-code-latest task → cap at 5.
+        private const val PURE_STEP_TERMINATE_THRESHOLD = 5
+        // After this many cache hits on the same path, escalate from soft-OK hint to a hard FAIL
+        // so the model can no longer interpret the response as a successful read. Empirical:
+        // ark-code-latest re-issued the same ReadFile 19 consecutive times when given success=true.
+        private const val CACHE_HIT_HARD_FAIL_THRESHOLD = 3
+        // Hard-terminate when the same UI/IO action class fails with the same error category
+        // this many consecutive times. Prevents the "micro-tweak coordinates" loop that escapes
+        // the previous fine-grained signature (which compared full action JSON + raw error text).
+        // Empirical: browser address bar type loop in offline-ai run, 10+ retries with shifting
+        // (x,y) and identical "No active window" error.
+        private const val SAME_FAILURE_TERMINATE_THRESHOLD = 3
     }
     
     private val executor = UnifiedActionExecutor(context)
@@ -53,6 +66,17 @@ class AgentEngine(private val context: Context) {
     // Data Memory: task-scoped KV store for accumulated business data (e.g., extracted email content)
     // Cleared at task start; only keys injected into prompt each step; values retrieved on demand
     private val dataMemory = mutableMapOf<String, String>()
+
+    // Read cache (per-task): path -> step_index. Suppresses repeated ReadFile/ListDir on the same path
+    // (root cause of "model loops re-reading SKILL.md 13 times" pattern observed in long ReAct).
+    // Invalidated when CreateFile/WriteFile/EditLines/DeleteFile/RenameFile touches the same path.
+    private val readFileHistory = mutableMapOf<String, Int>()
+    private val listDirHistory = mutableMapOf<String, Int>()
+    // Read cache hit counter: path -> hit_count. After CACHE_HIT_HARD_FAIL_THRESHOLD hits the cache
+    // returns success=false (instead of OK with hint) so the model is forced to switch strategy.
+    // Observed: model ignored success=true [ALREADY_READ_AT_STEP_N] hints and re-issued the same
+    // ReadFile/ReadLines 19 consecutive times.
+    private val readCacheHitCount = mutableMapOf<String, Int>()
     
     private var currentJob: Job? = null
     
@@ -219,6 +243,13 @@ class AgentEngine(private val context: Context) {
         memory.clear()
         memory.setTaskGoal(taskGoal)
         dataMemory.clear()  // Clear task-scoped data memory for every new task
+        readFileHistory.clear()  // Reset per-task read cache
+        listDirHistory.clear()
+        readCacheHitCount.clear()
+        // [IMPROVEMENT 4+5+6] Clear executor-side per-task caches (web_open
+        // dedup, web_get_content TTL cache). Without this the next task could
+        // observe a [WEB_GET_REUSED_CACHE] hit from the previous task's URL.
+        executor.resetTaskCaches()
         AgentAccessibilityService.getInstance()?.updateDataMemoryKeys(emptyList())
         AgentAccessibilityService.getInstance()?.updateTaskBrief("")
 
@@ -335,7 +366,7 @@ class AgentEngine(private val context: Context) {
                         val step = TrajectoryStep(
                             stepIndex = memory.getStepCount(),
                             screenshot = screenshot,
-                            action = AgentAction.Wait,
+                            action = AgentAction.Wait(),
                             executionResult = ExecutionResult(
                                 success = false,
                                 message = parseFeedback,
@@ -547,18 +578,21 @@ class AgentEngine(private val context: Context) {
                             else -> {
                                 lastAction = action
 
-                                val result = executor.execute(action)
-                                // After python_status succeeds, sync stdout to data_memory so subsequent dm get can find it
-                                if (action is AgentAction.PythonStatus && result.success) {
-                                    val pythonOutputs = executor.getPythonOutputSnapshot()
-                                    if (pythonOutputs.isNotEmpty()) {
-                                        for ((key, value) in pythonOutputs) {
-                                            dataMemory[key] = value
-                                        }
-                                        AgentAccessibilityService.getInstance()?.updateDataMemoryKeys(dataMemory.keys.toList())
-                                        LogManager.logI(TAG, "[PYTHON_STATUS] Synced ${pythonOutputs.size} stdout entries to data_memory")
-                                    }
+                                // [READ_CACHE] Intercept repeated ReadFile/ListDir on the same path.
+                                // The model very often re-reads SKILL.md / re-lists scripts dir even though
+                                // the content is unchanged in this task. Returning a synthetic OK result with
+                                // an [ALREADY_DONE_AT_STEP_N] hint forces the model to reuse prior content.
+                                val cachedResult = checkReadCacheHit(action)
+                                val result = cachedResult ?: executor.execute(action)
+                                if (cachedResult != null) {
+                                    LogManager.logI(TAG, "[READ_CACHE] Suppressed duplicate ${formatActionDesc(action)}")
+                                } else if (result.success) {
+                                    recordReadCache(action, stepIndex)
                                 }
+                                // Any write/edit/delete/rename invalidates relevant cache entries.
+                                invalidateReadCacheOnWrite(action)
+                                // Note: python output is now returned directly via python_status returnData.
+                                // No data_memory coupling (removed with python action refactor).
                                 val coordError = ActionParser.getLastCoordinateError()
                                 ActionParser.clearCoordinateError()
 
@@ -592,9 +626,45 @@ class AgentEngine(private val context: Context) {
                                         stepResultLines.add("⚠️ $correctionHint")
                                         LogManager.logW(TAG, "[AGENT][REALTIME_CORRECTION] $correctionHint")
                                     }
+                                    // Hard-terminate after N consecutive same-category failures.
+                                    // The signature is now error-category based (not coordinate-sensitive),
+                                    // so micro-tweaking x,y will no longer reset the counter.
+                                    if (sameFailureCount >= SAME_FAILURE_TERMINATE_THRESHOLD) {
+                                        LogManager.logW(TAG, "[AGENT][SAME_FAILURE_LOOP] Auto-terminating after $sameFailureCount consecutive same-category failures (signature=$failureSignature)")
+                                        pendingTerminateText = "[AUTO_TERMINATE] Task forcibly stopped after $sameFailureCount consecutive failures of the same action category. " +
+                                            "Last action: ${formatActionDesc(action)}. Last error: ${result.error?.message ?: result.message}. " +
+                                            "The model kept retrying the same action class with only superficial parameter changes (e.g. ±20 px coordinate shifts) instead of switching strategy. " +
+                                            "Please review the failure cause and retry with a different approach (different action, ask_user, or refined task)."
+                                        pendingTerminateSuccess = false
+                                        hasPendingTerminate = true
+                                        terminateTriggered = true
+                                        break
+                                    }
                                 } else {
                                     lastFailureSignature = null
                                     sameFailureCount = 0
+
+                                    // [IMPROVEMENT 6] Auto-stash web_get_content payload into
+                                    // dataMemory so the LLM can reference it via
+                                    // `data_memory get web_content_last` 3+ steps later, instead
+                                    // of re-running web_get_content (observed: 6 redundant fetches
+                                    // of the same 7089-char page in flash_dram log). The value is
+                                    // truncated to 6000 chars for prompt budget; the full content
+                                    // remains accessible via the immediately-next step's
+                                    // returnData injection.
+                                    if (action is AgentAction.WebGetContent &&
+                                        !result.returnData.isNullOrEmpty()) {
+                                        val capped = if (result.returnData.length > 6000)
+                                            result.returnData.take(6000) +
+                                                "\n[TRUNCATED: ${result.returnData.length - 6000} more chars in web_get_content returnData]"
+                                        else result.returnData
+                                        dataMemory["web_content_last"] = capped
+                                        AgentAccessibilityService.getInstance()
+                                            ?.updateDataMemoryKeys(dataMemory.keys.toList())
+                                        LogManager.logI(TAG,
+                                            "[AUTO_DATAMEMORY] web_content_last set " +
+                                            "(${capped.length} chars from web_get_content)")
+                                    }
                                 }
 
                                 if (actionIndex < dedupedActions.lastIndex) {
@@ -617,15 +687,34 @@ class AgentEngine(private val context: Context) {
                         }
                     }
 
+                    // [PURE_LOOP] Auto-terminate after too many consecutive context/data_memory-only steps.
+                    // The previous soft-warning was being ignored by some models (observed: 10/50 empty steps
+                    // in one task). Now we hard-stop at PURE_STEP_TERMINATE_THRESHOLD.
+                    if (!terminateTriggered && !askUserTriggered && consecutivePureSteps >= PURE_STEP_TERMINATE_THRESHOLD) {
+                        val realKeys = dataMemory.keys.joinToString(", ").ifEmpty { "(empty)" }
+                        LogManager.logW(TAG, "[AGENT][PURE_LOOP] Auto-terminating after $consecutivePureSteps consecutive pure steps")
+                        pendingTerminateText = "[AUTO_TERMINATE] Task forcibly stopped after $consecutivePureSteps consecutive steps " +
+                            "with only context/data_memory and no real tool call. " +
+                            "Stored data_memory keys: [$realKeys]. " +
+                            "The model is stuck self-reflecting; please review the task and retry with a clearer goal or a different model."
+                        pendingTerminateSuccess = false
+                        hasPendingTerminate = true
+                        terminateTriggered = true
+                    }
+
                     // Assemble lastStepResult from all collected results
                     if (!terminateTriggered && !askUserTriggered && stepResultLines.isNotEmpty()) {
                         val header = "Previous step executed:"
                         val body = stepResultLines.joinToString("\n")
                         val warningMsg = if (consecutivePureSteps >= 2) {
                             val realKeys = dataMemory.keys.joinToString(", ").ifEmpty { "(empty)" }
-                            LogManager.logW(TAG, "[AGENT][PURE_LOOP] Consecutive pure steps=$consecutivePureSteps")
-                            "\n⚠️ WARNING: ${consecutivePureSteps} consecutive steps with only data_memory/context, no UI action. " +
-                            "Data Memory keys: [$realKeys]. Execute a real action or terminate now."
+                            val remaining = (PURE_STEP_TERMINATE_THRESHOLD - consecutivePureSteps).coerceAtLeast(1)
+                            LogManager.logW(TAG, "[AGENT][PURE_LOOP] Consecutive pure steps=$consecutivePureSteps (terminate in $remaining)")
+                            "\n[FATAL_NO_ACTION] You produced $consecutivePureSteps consecutive steps with ONLY context/data_memory " +
+                            "and NO real tool call (python / read_file / create_file / web_get_content / etc.). " +
+                            "Your fact and data_memory entries are already saved—stop accumulating notes. " +
+                            "Stored data_memory keys: [$realKeys]. " +
+                            "Emit a real tool call NOW. Task will auto-terminate in $remaining more empty step(s)."
                         } else ""
                         AgentAccessibilityService.getInstance()?.lastStepResult = "$header\n$body$warningMsg"
                         LogManager.logI(TAG, "[LAST_STEP] ${stepResultLines.size} action result(s) injected")
@@ -637,12 +726,12 @@ class AgentEngine(private val context: Context) {
                         val pureStep = TrajectoryStep(
                             stepIndex = memory.getStepCount(),
                             screenshot = screenshot,
-                            action = AgentAction.Wait,
+                            action = AgentAction.Wait(),
                             executionResult = ExecutionResult(true, "context+data_memory step: $dmSummary"),
                             rawModelOutput = modelOutput.trim()
                         )
                         memory.addStep(pureStep)
-                        callback?.onStepCompleted(stepIndex, AgentAction.Wait, pureStep.executionResult)
+                        callback?.onStepCompleted(stepIndex, AgentAction.Wait(), pureStep.executionResult)
                     }
 
                     if (terminateTriggered) {
@@ -755,6 +844,9 @@ class AgentEngine(private val context: Context) {
                 currentContext = ""
                 contextFactHistory.clear()
                 currentContextText = ""
+                readFileHistory.clear()
+                listDirHistory.clear()
+                readCacheHitCount.clear()
                 AgentAccessibilityService.getInstance()?.currentContext = ""
                 // Deactivate accessibility service
                 AgentAccessibilityService.getInstance()?.setAgentActive(false)
@@ -925,14 +1017,33 @@ class AgentEngine(private val context: Context) {
         return sections.joinToString("\n\n")
     }
 
+    /**
+     * Build a coarse failure signature so that "same action type + same error category" collapses
+     * into one bucket regardless of cosmetic parameter changes (coordinates, timestamps, etc.).
+     *
+     * Earlier version used full action JSON + raw error text, which let the model escape the
+     * loop counter by nudging x/y by a few pixels. We now key on:
+     *   - action class name (e.g. Type, Click, ReadFile)
+     *   - error category extracted from the error message (e.g. no_active_window,
+     *     no_editable_node, file_not_found, type_failed, click_failed, generic)
+     */
     private fun buildFailureSignature(action: AgentAction, result: ExecutionResult): String {
-        val actionJson = try {
-            action.toJson().toString()
-        } catch (_: Exception) {
-            action.javaClass.simpleName ?: "UnknownAction"
+        val errorText = (result.error?.message ?: result.message).lowercase()
+        val category = when {
+            errorText.contains("no_active_window") || errorText.contains("no active window") -> "no_active_window"
+            errorText.contains("action_set_text failed") -> "set_text_failed"
+            errorText.contains("no editable") || errorText.contains("no node covers") -> "no_editable_node"
+            errorText.contains("failed to type") -> "type_failed"
+            errorText.contains("failed to click") -> "click_failed"
+            errorText.contains("failed to long press") -> "long_press_failed"
+            errorText.contains("failed to swipe") -> "swipe_failed"
+            errorText.contains("file not found") || errorText.contains("not found") -> "file_not_found"
+            errorText.contains("permission") -> "permission_denied"
+            errorText.contains("timeout") -> "timeout"
+            errorText.contains("parse") -> "parse_error"
+            else -> "generic"
         }
-        val errorText = result.error?.message ?: result.message
-        return "${action.javaClass.simpleName}|$actionJson|$errorText"
+        return "${action.javaClass.simpleName}|$category"
     }
 
     private fun buildRealtimeCorrectionHint(action: AgentAction, result: ExecutionResult, repeatCount: Int): String {
@@ -974,6 +1085,103 @@ class AgentEngine(private val context: Context) {
     }
 
     /**
+     * [READ_CACHE] If this action is a ReadFile / ReadLines / ListDir on a path that already
+     * succeeded in this same task, return a synthetic result instead of re-reading. Otherwise null.
+     *
+     * Escalation: first 1-2 hits return success=true with [ALREADY_READ_AT_STEP_N] hint;
+     * from the 3rd hit (CACHE_HIT_HARD_FAIL_THRESHOLD) onward we return success=false with
+     * [STUCK_LOOP] so the model treats it as an error and is forced to switch strategy.
+     */
+    private fun checkReadCacheHit(action: AgentAction): ExecutionResult? {
+        val (path, kind, prev) = when (action) {
+            is AgentAction.ReadFile -> Triple(action.path, "read_file", readFileHistory[action.path])
+            is AgentAction.ReadLines -> Triple(action.path, "read_lines", readFileHistory[action.path])
+            is AgentAction.ListDir -> Triple(action.path, "list_dir", listDirHistory[action.path])
+            else -> return null
+        }
+        if (prev == null) return null
+        val hits = (readCacheHitCount[path] ?: 0) + 1
+        readCacheHitCount[path] = hits
+        val safePath = path.replace("\"", "\\\"")
+        return if (hits >= CACHE_HIT_HARD_FAIL_THRESHOLD) {
+            // Hard fail: model must change strategy (use grep / different path / proceed to next phase).
+            ExecutionResult(
+                success = false,
+                message = "[STUCK_LOOP] You have re-issued $kind('$path') $hits times in this task with no change. " +
+                    "The content was already returned at step $prev. " +
+                    "STOP re-reading. Required next action: either (a) act on the prior content (e.g., python helper, create_file with new content), " +
+                    "(b) use grep to extract specific lines, or (c) emit terminate if the task is done. " +
+                    "Re-issuing this read will keep failing.",
+                returnData = "{\"status\":\"FAIL\",\"reason\":\"stuck_loop\",\"path\":\"$safePath\",\"prev_step\":$prev,\"hits\":$hits}"
+            )
+        } else {
+            ExecutionResult(
+                success = true,
+                message = "[ALREADY_READ_AT_STEP_${prev}] $kind('$path') was successfully done earlier in this task. " +
+                    "Reuse the content from step $prev's RESULT instead of re-reading. " +
+                    "If the file may have changed since then, perform a write/edit action to invalidate this cache. " +
+                    "(cache_hits=$hits; ${CACHE_HIT_HARD_FAIL_THRESHOLD - hits} more hits will be reported as FAIL)",
+                returnData = "{\"status\":\"OK\",\"cached\":true,\"prev_step\":$prev,\"hits\":$hits,\"path\":\"$safePath\"}"
+            )
+        }
+    }
+
+    /**
+     * [READ_CACHE] Record a successful ReadFile / ReadLines / ListDir into the per-task cache.
+     */
+    private fun recordReadCache(action: AgentAction, stepIndex: Int) {
+        when (action) {
+            is AgentAction.ReadFile -> readFileHistory[action.path] = stepIndex
+            is AgentAction.ReadLines -> readFileHistory[action.path] = stepIndex
+            is AgentAction.ListDir -> listDirHistory[action.path] = stepIndex
+            else -> {}
+        }
+    }
+
+    /**
+     * [READ_CACHE] Invalidate cached entries when a write / delete / rename touches the same path.
+     * Also clear the parent directory's list cache (since contents changed).
+     */
+    private fun invalidateReadCacheOnWrite(action: AgentAction) {
+        fun parentOf(p: String): String? = try { java.io.File(p).parent } catch (_: Throwable) { null }
+        fun removeBoth(p: String) {
+            readFileHistory.remove(p)
+            readCacheHitCount.remove(p)
+        }
+        fun removeListBoth(p: String) {
+            listDirHistory.remove(p)
+            readCacheHitCount.remove(p)
+        }
+        when (action) {
+            is AgentAction.CreateFile -> {
+                removeBoth(action.path)
+                parentOf(action.path)?.let { removeListBoth(it) }
+            }
+            is AgentAction.WriteFile -> {
+                removeBoth(action.path)
+                parentOf(action.path)?.let { removeListBoth(it) }
+            }
+            is AgentAction.EditLines -> removeBoth(action.path)
+            is AgentAction.DeleteFile -> {
+                removeBoth(action.path)
+                parentOf(action.path)?.let { removeListBoth(it) }
+            }
+            is AgentAction.RenameFile -> {
+                removeBoth(action.oldPath)
+                removeBoth(action.newPath)
+                parentOf(action.oldPath)?.let { removeListBoth(it) }
+                parentOf(action.newPath)?.let { removeListBoth(it) }
+            }
+            is AgentAction.CopyFile -> {
+                removeBoth(action.dst)
+                parentOf(action.dst)?.let { removeListBoth(it) }
+            }
+            is AgentAction.Mkdir -> parentOf(action.path)?.let { removeListBoth(it) }
+            else -> {}
+        }
+    }
+
+    /**
      * Format action description for result injection (compact, with key params).
      * Long params (>50 chars) are truncated with "...".
      */
@@ -987,7 +1195,7 @@ class AgentEngine(private val context: Context) {
         is AgentAction.Drag -> "drag([${action.startX},${action.startY}]->[${action.endX},${action.endY}])"
         is AgentAction.Open -> "open(\"${action.appName}\")"
         is AgentAction.SystemButton -> "system_button(${action.button})"
-        is AgentAction.Wait -> "wait"
+        is AgentAction.Wait -> "wait(${action.seconds}s)"
         is AgentAction.GetAppList -> "get_app_list"
         is AgentAction.WebOpen -> "web_open(\"${action.url.ellipsis(80)}\")"
         is AgentAction.WebGetContent -> "web_get_content"
@@ -1010,10 +1218,27 @@ class AgentEngine(private val context: Context) {
         is AgentAction.ListDir -> "list_dir(${action.path})"
         is AgentAction.Mkdir -> "mkdir(${action.path})"
         is AgentAction.SearchFiles -> "search_files(${action.path}, \"${action.keyword.ellipsis(30)}\")"
-        is AgentAction.PythonRun -> "python_run(\"${(action.code ?: action.file ?: "").ellipsis(50)}\")"
+        is AgentAction.Python -> {
+            val preview = action.argv.joinToString(" ")
+            val tag = if (action.timeoutSec == 0) " [async]" else if (action.timeoutSec != 30) " [t=${action.timeoutSec}s]" else ""
+            "python(\"${preview.ellipsis(50)}\"$tag)"
+        }
         is AgentAction.PythonStatus -> "python_status"
         is AgentAction.PythonKill -> "python_kill"
         is AgentAction.ShowOutput -> "show_output(size=${action.size}, text=\"${action.text.ellipsis(40)}\")"
+        is AgentAction.ScheduleGet -> "schedule_get"
+        is AgentAction.ScheduleSet -> {
+            val fields = mutableListOf<String>()
+            action.enabled?.let { fields.add("enabled=$it") }
+            action.oneShot?.let { fields.add("one_shot=$it") }
+            action.weekdays?.let { fields.add("weekdays=$it") }
+            action.start?.let { fields.add("start=$it") }
+            action.end?.let { fields.add("end=$it") }
+            action.intervalMin?.let { fields.add("interval_min=$it") }
+            action.agentPreset?.let { fields.add("agent_preset=$it") }
+            action.prompt?.let { fields.add("prompt=(${it.length} chars)") }
+            "schedule_set(task_id=${action.taskId}${if (fields.isNotEmpty()) ", " + fields.joinToString(", ") else ""})"
+        }
     }
 
     /**
@@ -1023,13 +1248,26 @@ class AgentEngine(private val context: Context) {
      * This ensures the model always sees consistent JSON after "->".
      */
     private fun formatResultStr(result: ExecutionResult, action: AgentAction? = null): String {
-        // read_file / read_lines / web_get_content carry large payloads; allow up to 20000 chars
+        // Large-payload actions (file IO / web / python output) need a higher cap so that
+        // critical trailing content (e.g. NEXT_STEP / TASK instructions from skills) is preserved.
+        // NOTE: python_status/python_kill historically fell into the default 2000 bucket,
+        // which silently truncated the tail of Python stdout (e.g. stockpicker's NEXT_STEP block)
+        // and caused the model to hallucinate follow-up actions. Keep them aligned with read_file.
         val maxReturnData = when (action) {
-            is AgentAction.ReadFile, is AgentAction.ReadLines, is AgentAction.WebGetContent -> 20000
+            is AgentAction.ReadFile, is AgentAction.ReadLines, is AgentAction.WebGetContent,
+            is AgentAction.Python, is AgentAction.PythonStatus, is AgentAction.PythonKill -> 20000
             else -> 2000
         }
         return if (!result.returnData.isNullOrEmpty()) {
-            result.returnData.take(maxReturnData)
+            val total = result.returnData.length
+            if (total > maxReturnData) {
+                // Explicit truncation marker so the model can detect the cut and fetch the full
+                // payload via read_file(log_file) (for python) or read_lines (for files).
+                result.returnData.take(maxReturnData) +
+                    "\n[TRUNCATED: shown $maxReturnData of $total chars; use read_file(log_file) for full output]"
+            } else {
+                result.returnData
+            }
         } else {
             val status = if (result.success) "OK" else "FAIL"
             val msg = result.message.take(200).replace("\"", "\\\"").replace("\n", "\\n")
