@@ -29,16 +29,18 @@ OfflineAI is an Android offline-first AI application that allows users to build 
 - **灵活配置 / Flexible Configuration**：支持自定义嵌入模型、分块大小、API设置等 / Supports custom embedding models, chunk sizes, API settings, etc.
 - **性能优化 / Performance Optimization**：优化内存使用和处理速度，支持大文件处理 / Optimized memory usage and processing speed, supports large file processing
 - **知识图谱RAG / Knowledge Graph RAG**：结合向量检索和知识图谱，提供更精准的知识问答能力 / Combines vector retrieval and knowledge graph for more accurate knowledge Q&A
+- **Claw 智能体 / Claw Agent**：在设备本地自主驱动手机完成任务（点击/输入/Python/网页/文件/知识库/定时任务），可通过技能（Skill）和用户提示词（agent_user）扩展，详见第7章 / On-device autonomous agent that can drive the phone itself (click/type/Python/web/files/KB/scheduling), extensible via Skills and agent_user prompts, see Chapter 7
 
 ### 1.2 主界面导航 / Main Interface Navigation
 
-OfflineAI 应用包含三个主要页面，通过底部导航栏进行切换：
+OfflineAI 应用包含四个主要页面，通过底部导航栏进行切换：
 
-The OfflineAI app contains three main pages, accessible through the bottom navigation bar:
+The OfflineAI app contains four main pages, accessible through the bottom navigation bar:
 
-- **RAG问答 / RAG Q&A**：进行基于知识库的问答交互 / Conduct knowledge base-based Q&A interactions
+- **AI问答 / AI Q&A**：进行基于知识库的问答交互 / Conduct knowledge base-based Q&A interactions
 - **构建知识库 / Build Knowledge Base**：创建和更新知识库 / Create and update knowledge bases
 - **知识笔记 / Knowledge Notes**：创建和管理知识笔记 / Create and manage knowledge notes
+- **Claw智能体 / Claw Agent**：发起智能体任务，管理 agent_user 预设、技能（Skill）与定时任务 / Launch agent tasks, manage agent_user presets, skills and scheduled tasks
 
 ---
 
@@ -1391,9 +1393,289 @@ The final output MUST be a valid JSON file content; you may wrap it in a ```json
 
 ---
 
-## 7. 故障排除 / Troubleshooting
+## 7. Claw 智能体 / Claw Agent
 
-### 7.1 常见问题 / Common Issues
+Claw 是 OfflineAI 的"智能体模式"：它复用本地（或在线）LLM，在设备上以 ReAct 循环的方式自主完成点击、输入、滑动、读写文件、执行 Python、浏览网页、操作知识库、定时任务等操作，全过程在本机完成，不依赖云端 Agent 服务。
+
+Claw is OfflineAI's "agent mode": it reuses the same local (or online) LLM and runs a ReAct loop on-device to autonomously tap, type, swipe, read/write files, run Python, browse the web, manipulate the knowledge base and schedule recurring jobs — entirely on-device, without relying on any cloud agent service.
+
+### 7.1 基本原理 / Basic Principles
+
+**ReAct 循环 / ReAct Loop**
+
+每一步 Claw 收到：必要时的屏幕截图 + 上一步执行结果 + 当前记忆 + 已安装技能目录。模型输出一到多个 JSON 格式的 action，执行器按顺序执行；循环到模型显式发出 `terminate`，或用户在悬浮窗点"停止"，或达到最大步数上限为止。
+
+On each step Claw receives: a screenshot (when needed), the previous step's result, the current memory, and the catalog of installed skills. The model emits one or more JSON-formatted actions; the executor runs them in order. The loop ends when the model explicitly emits `terminate`, when the user taps "Stop" on the floating window, or when the configured max-step limit is hit.
+
+**两层记忆 / Two-layer Memory**
+
+- **`context.fact` 追加型事实 / append-only facts**：任务级稳定事实（最终路径、坐标、业务ID、用户确认等）。只新增、不修改、不删除。/ Task-level stable facts (final paths, coordinates, business IDs, user confirmations). Append-only, never modified or removed.
+- **`context.text` 当前轮次总结 / per-step scratchpad**：当前屏幕状态、最近错误、下一步计划。每轮覆盖。/ Current screen state, last error, next step plan. Overwritten each round.
+- **`data_memory` 业务数据 KV / business data KV**：用于跨步骤持久化较大的业务数据。每步只展示 key 列表，value 按需通过 `get` 取回，也可在 `terminate.text` 里用 `{{key}}` 占位引用，避免上下文膨胀。/ Persists larger business payloads across steps. Only keys are listed each step; values are fetched on demand via `get`, or referenced with `{{key}}` placeholder inside `terminate.text` to avoid context bloat.
+
+**权限 / Permissions**
+
+- **无障碍服务 / Accessibility Service**：点击、滑动、输入、读取UI节点的基础 / Required for tap/swipe/type and for reading UI node tree
+- **MediaProjection 截图权限 / MediaProjection Screenshot permission**：UI 模式下每步截图给模型看 / Per-step screenshots in UI mode
+- **悬浮窗 / SYSTEM_ALERT_WINDOW**：显示执行状态、`show_output` Markdown、`ask_user` 弹框 / Floating window for status, `show_output` Markdown, `ask_user` dialogs
+- **存储 / Storage**：读写数据根目录下的 `skills/`、`agent_user/`、`agent_workspace/` 等 / Read/write `skills/`, `agent_user/`, `agent_workspace/` under data root
+
+首次进入 Claw 智能体页面会引导用户依次开启，未授予无障碍权限时 Agent 无法执行任何 UI 动作。
+
+On first entry into the Claw Agent page, the app walks the user through granting these permissions; without the Accessibility permission Claw cannot perform any UI actions.
+
+### 7.2 支持的 Action（简介）/ Supported Actions (Overview)
+
+Claw 支持的 action 分几大类，模型按需组合；完整参数参见代码 `ActionTypes.kt`：
+
+Claw's actions fall into a few groups (full parameter specs live in `ActionTypes.kt`):
+
+- **UI 自动化 / UI Automation**：`click`、`long_press`、`double_click`、`type`、`swipe`、`drag`、`system_button`（back/home/menu/enter）、`open`（按名启动 App）、`get_app_list`（列出可用 App）。点击坐标使用 **[0,999] 归一化坐标**，与屏幕尺寸解耦。/ Coordinates use **normalized [0,999] grid**, decoupled from physical screen size.
+- **文件与文本 / File & Text**：`create_file`、`read_file`、`write_file`、`read_lines`、`edit_lines`、`grep`、`rename_file`、`copy_file`、`delete_file`、`list_dir`、`mkdir`、`search_files`。优先使用文件工具而不是用文件管理器 App 的 UI 点来点去。/ Prefer file tools over navigating the file-manager app UI step by step.
+- **Python**：`python`（argv-only，语义 = `subprocess.run([...])`）、`python_status`、`python_kill`。单实例运行，默认 60s 同步；超时自动转后台；详见 7.5。/ Single-instance, sync 60s by default; auto-downgrade to background on timeout. See 7.5.
+- **网页 / Web**：`web_open` 在内嵌 WebView 中打开 URL、`web_get_content` 返回 DOM+text 结构化结果、`web_execute_js` 注入 JS。Cookie/Session 持久化，可配合 `ask_user(url=...)` 让用户手动登录后继续。/ Persistent cookies/session; combine with `ask_user(url=...)` to let user log in manually.
+- **知识库 / Knowledge Base**：`kb_insert`（写入 AgentKB，用于经验总结）、`kb_delete`（按 ID 删除）。普通 RAG 查询在任务开始时自动做一次，查询结果注入首轮。/ RAG query runs automatically at task start; results injected into Step 0.
+- **用户交互 / User Interaction**：`ask_user`（提问或请求人工介入，可选 `url` 参数弹 WebView 让用户登录/验证）、`show_output`（在悬浮窗显示 Markdown，`size=small/medium/large`）、`terminate`（结束任务，`text` 为 Markdown 结果本体，`files` 可附图片/音频/文件路径）。/ `ask_user` (optional `url` pops WebView), `show_output` (Markdown with size small/medium/large), `terminate` (Markdown result + optional `files`).
+- **上下文与记忆 / Context & Memory**：`context`（每步必须首先输出，更新 fact/text）、`data_memory`（set/get/list/delete/clear）。/ `context` (required first output every step), `data_memory` (set/get/list/delete/clear).
+- **定时任务 / Scheduling**：`schedule_get`（查看 4 个任务槽当前配置）、`schedule_set`（按 patch 语义更新某槽）。主开关只能用户在设置里开关。/ `schedule_get` / `schedule_set` with patch semantics; master switch stays user-controlled.
+- **等待 / Wait**：`wait`（1 秒到 24 小时，用于长时间轮询/监控型任务，悬浮窗会显示倒计时）/ `wait` (1s–24h, with live countdown in the floating window).
+
+**防膨胀与错误保护 / Anti-bloat and Error Safety**：系统提示词与执行器会自动约束模型：同一文件不重复读、连续空步骤（只有 context/data_memory）自动终止、同一 action 连续失败会触发强制终止或要求换策略、涉及"下单/支付/发送/删除"等副作用操作同一事务只允许点击一次最终确认按钮。/ The system prompt and executor enforce: no re-reading the same file, auto-terminate on consecutive empty steps, forced termination on repeated identical failures, and single-shot semantics for irreversible actions (buy/pay/send/delete) within the same transaction.
+
+### 7.3 上下文与经验库（AgentKB）/ Context & Experience Library
+
+**AgentKB 经验库机制 / AgentKB Experience Library**
+
+除普通用户知识库外，OfflineAI 保留一个名为 **AgentKB** 的知识库专供 Claw 自身使用：
+
+In addition to user-built knowledge bases, OfflineAI reserves a dedicated KB named **AgentKB** just for Claw:
+
+1. **任务开始时召回 / Recall at task start**：以当前任务目标为 query，对 AgentKB 做一次 RAG 检索，命中的历史经验作为背景注入首轮提示词。/ At task start, a RAG query is issued against AgentKB with the task goal; top-K hits are injected as background in Step 0.
+2. **任务成功后总结 / Summarize after success**：如果"经验总结"开关开启，任务成功 `terminate` 后会再跑一轮，让模型输出 `kb_insert` / `kb_delete` 等 KB action，把这次任务学到的关键经验（踩过的坑、有效的做法、必要的参数）写入 AgentKB。/ If "Experience Summary" is enabled, after a successful `terminate` an extra round asks the model to emit `kb_insert`/`kb_delete` so that distilled lessons are persisted into AgentKB.
+3. **用户审阅 / User review**：经验总结生成后悬浮窗会显示"保存经验"按钮，用户确认后才真正落盘；可随时在常规"构建知识库/知识笔记"页面里查看、编辑、删除 AgentKB 条目。/ After the summary is generated, a "Save Experience" button appears in the floating window; nothing is persisted until the user confirms. AgentKB can be browsed/edited/deleted like any other KB.
+
+这种"不训练、只增改知识库"的方式，能让 Claw 在高频工作流（固定公司系统、固定操作手册）上随着使用次数增加而逐步熟练，而所有经验都以明文 Markdown 存在本地。
+
+This "no training, only KB updates" approach lets Claw get progressively better at recurring workflows (internal company systems, recurring SOPs) with no offline training — all experience is stored locally as plain Markdown.
+
+**开启位置 / Where to enable**：设置 → 智能体设置 → "总结经验" 开关。/ Settings → Agent Settings → "Experience Summary" toggle.
+
+### 7.4 agent_user 提示词机制 / agent_user Prompt Mechanism
+
+Claw 的系统提示词由两部分组成：**内置的通用 Agent 指令**（action 说明、规则、坐标系统等）和**用户可编辑的 agent_user 提示词**（用户对当前场景/任务的具体要求）。
+
+Claw's system prompt is composed of two layers: **the built-in general agent spec** (action specs, rules, coordinate system) and **user-editable agent_user prompts** (your scenario-specific instructions).
+
+**文件放置位置 / File Location**
+
+- Assets 预装 / Bundled assets：`app/src/main/assets/agent_user/*.txt`（随 APK 发布）/ shipped with the APK
+- 运行时目录 / Runtime directory：`{数据根目录}/agent_user/*.txt`（实际加载位置）/ actually loaded from here
+- **同步策略 / Sync policy**：APP 启动时只复制运行时目录中不存在的文件，已存在的**不会被覆盖**，用户在运行时目录的修改会被保留。删除 `.txt` 文件并重启可重新从 assets 同步一次。/ On app launch, only files missing from the runtime dir are copied over; existing ones are preserved. Delete the `.txt` and restart to force a fresh copy from assets.
+- **预设切换 / Preset switching**：AI问答页面 / Claw 智能体页面 / 设置页面都有"用户提示词文件"下拉框（默认 `common_agent.txt`），选择哪个就用哪个。/ The AI Q&A page, the Claw Agent page and the Settings page all have a "User Preset" dropdown (default `common_agent.txt`). Whatever is selected takes effect immediately.
+
+**文件格式 / File Format**
+
+```
+# 以 # 开头是注释，不会注入
+@once  单行 - 只在任务第一轮（Step 0）注入
+@step  单行 - 每轮都注入
+@once { 多行块，只在第一轮注入 }
+@step { 多行块，每轮都注入 }
+无前缀的行 → 默认当作 @step（向后兼容）
+```
+
+**引导逻辑 / How It Guides the Agent**
+
+- **`@once` 首轮注入**：放"任务目标 / 执行前提 / 必选技能 / 数据源 / 特殊约束"之类只需说一次的信息。模型会据此生成 taskBrief（任务简报）并存入 `data_memory.taskBrief`，后续每轮都以它为基线。/ Put one-shot info here (task goal, prerequisites, required skills, data sources, hard constraints). The model turns it into a `taskBrief` saved to `data_memory.taskBrief`, which serves as the baseline for all subsequent rounds.
+- **`@step` 每轮注入**：放"每一步都要想清楚的通用要求"，比如"输出 action 前先想清楚 fact 与 text 的内容"、"能用脚本批量完成的不要逐步点击"等。/ Put "think about this every round" reminders here, e.g. "verify fact vs text before emitting an action", "prefer batch scripts over repeated clicks".
+
+**示例 / Examples**
+
+内置 `common_agent.txt` 只放通用思考要求；`同花顺交易-模拟.txt` 在 `@once` 里说明账号/模拟盘规则/禁止真实下单等硬约束；`点咖啡.txt` 约束偏好的咖啡品牌、配送地址与付款方式。你也可以复制模板，写自己的 `myjob.txt` 放进运行时 `agent_user/` 目录，下拉选中即可启用。
+
+The bundled `common_agent.txt` is a minimal template with general thinking guidance; `同花顺交易-模拟.txt` uses `@once` to state account/simulation-only rules and forbid real trades; `点咖啡.txt` encodes preferred coffee brand, delivery address and payment method. Copy the template, write your own `myjob.txt`, drop it into the runtime `agent_user/` directory, and it appears in the dropdown.
+
+### 7.5 Python 支持 / Python Support
+
+Claw 通过 [Chaquopy](https://chaquo.com/chaquopy/) 在 APK 内嵌了一个 Python 3.10 运行时，所有 `python` action 都在同一个进程内执行（无 shell、无子进程、无 subprocess 开销）。
+
+Claw embeds a **Python 3.10** runtime via [Chaquopy](https://chaquo.com/chaquopy/). All `python` actions execute in-process (no shell, no subprocess overhead).
+
+**执行语义 / Execution semantics**
+
+- **argv-only**：语义等价于 PC 上的 `subprocess.run([...])`，不支持 shell 展开/管道/重定向。多个参数必须拆成 argv 列表中的独立字符串。/ argv-only, equivalent to `subprocess.run([...])`. No shell expansion/pipes/redirects; each arg must be its own list element.
+- **同步/异步 / Sync vs Async**：`timeout_sec` 一个参数控制——不填默认 60s 同步；`>0` 按 N 秒同步，超时自动转后台继续跑；`=0` 立即返回 RUNNING（适合长驻任务/轮询）。可用 `python_status` 查状态、`python_kill` 终止。/ Single knob `timeout_sec`: unset=60s sync, `>0`=sync N seconds with auto-background on timeout, `=0`=fire-and-forget.
+- **单实例 / Single instance**：同一时刻只允许一个 `python` 实例运行，新 `python` 在上一个未结束前会直接报错，防止手机资源被打爆。/ Only one Python job at a time; new `python` fails fast while the previous one is still RUNNING to avoid resource exhaustion.
+- **输出截取 / Output truncation**：`python_status` 返回的 output 会从头截断到 20000 字符，超限设 `truncated=true`；完整日志可通过 `read_file(log_file)` 读取。/ `python_status` head-truncates output at 20,000 chars; full log available via `read_file(log_file)`.
+
+**内置依赖包 / Pre-installed packages**
+
+Claw 预装了常用第三方库，脚本可直接 `import` 无需任何 pip 安装：
+
+Claw ships with these third-party packages preinstalled; skills can `import` them directly, no pip install needed:
+
+| 类别 / Category | 依赖包 / Packages | 典型用途 / Typical use |
+|---|---|---|
+| Office 文档 | `python-docx`、`python-pptx`、`openpyxl` | 生成/编辑 Word / PPT / Excel |
+| PDF | `pypdf`、`pdfplumber`、`fpdf2` | PDF 读取、表格抽取、PDF 生成 |
+| 数据 / 图像 | `pandas`、`numpy`、`pillow`、`chardet` | 表格分析、数值计算、图像处理 |
+| 网络 | `requests`、`beautifulsoup4` | HTTP 请求、HTML 解析 |
+| 工具 | `zipfile36`、`python-dotenv` | 压缩包、环境变量 |
+
+需要额外的 Python 包只能通过修改 `app/build.gradle` 的 `chaquopy.pip` 列表并重新编译 APK 来添加。运行时无法在线 `pip install`。
+
+Adding more Python packages requires editing `app/build.gradle`'s `chaquopy.pip` list and rebuilding the APK. Runtime `pip install` is **not** supported.
+
+**路径变量 / Path Variables**
+
+为了避免在 prompt 里硬编码绝对路径，action 字段中可以直接用两个变量，执行器会在校验前替换成真实路径：
+
+Two placeholders are auto-resolved in any action's string fields before execution, avoiding hard-coded absolute paths in prompts:
+
+- `${SKILL_DIR}` → `{数据根目录}/skills` （技能安装目录 / installed skills root）
+- `${WORKSPACE}` → `{数据根目录}/agent_workspace` （Agent 默认工作目录：脚本产出的 .docx/.xlsx/.pptx/.pdf/临时图片等默认放这里 / default workspace: generated docx/xlsx/pptx/pdf/temp images land here）
+
+例如 `{"argv":["${SKILL_DIR}/stockquant/scripts/stock.py","quote","600519"]}` 会在执行前被展开为真实绝对路径。/ e.g. the placeholder above is expanded to a real absolute path before execution.
+
+### 7.6 Skill 机制（技能）/ Skill Mechanism
+
+**什么是 Skill / What is a Skill**
+
+Skill 是 Claw 的扩展包：一个 `{数据根目录}/skills/<技能名>/` 目录，至少包含一个 `SKILL.md`（带 YAML frontmatter 的说明文档），可选 `scripts/` 存放 Python 脚本、`templates/` 存放模板，以及任何技能需要的配置/资源。
+
+A skill is a Claw extension pack: a directory `{dataRoot}/skills/<skill-name>/` containing at least `SKILL.md` (with YAML frontmatter), and optionally `scripts/`, `templates/` and any other config/assets the skill needs.
+
+**SKILL.md 格式 / SKILL.md Format**
+
+```markdown
+---
+name: docx-editor
+description: "用 python-docx 创建和编辑 Word 文档（标题/段落/表格/图片/页眉页脚/样式格式）"
+---
+
+# 具体用法... (scripts 路径、函数签名、示例)
+```
+
+**工作原理 / How it works**
+
+1. 任务开始时 `SkillCatalog` 扫描所有 `SKILL.md`，把 `name` + `description` 拼成紧凑目录注入首轮提示词。/ At task start, `SkillCatalog` scans all `SKILL.md` files and injects a compact `name + description` catalog into Step 0.
+2. 模型判断任务涉及哪个技能，按要求**必须先 `read_file` 对应 `SKILL.md`** 学习 API 后再调用脚本，避免盲调。/ The model identifies which skills are relevant and is **required to `read_file` the corresponding `SKILL.md` before calling any script**.
+3. 脚本里用 `${SKILL_DIR}/<技能>/scripts/xx.py` 引用路径，不需要知道真实绝对路径。/ Scripts reference themselves via `${SKILL_DIR}/<skill>/scripts/xx.py` — no absolute paths needed.
+
+**内置技能 / Bundled skills**
+
+随 APK 发布的原生技能 (`app/src/main/assets/skills/`)：
+
+Native skills bundled with the APK (`app/src/main/assets/skills/`):
+
+| 技能 / Skill | 功能 / Purpose |
+|---|---|
+| `docx-editor` | Word 文档生成与编辑（python-docx） |
+| `xlsx-editor` | Excel 表格生成与公式（openpyxl） |
+| `pptx-editor` | PPT 生成、模板套用（python-pptx） |
+| `pdf` | PDF 读取/表格抽取/合并拆分/生成（pypdf + pdfplumber + fpdf2） |
+| `stockquant` | A 股行情/财务/新闻/技术指标批量分析 |
+| `slack-gif-creator` | 生成 Slack 风格动图 |
+| `ths-trade` | 同花顺模拟盘交易辅助 |
+| `skill-install` | **元技能 / meta-skill**：让 Claw 自己下载、校验并安装新 skill 包 |
+
+**如何安装自定义 Skill / Installing Custom Skills**
+
+*方式 A：让 Claw 自己安装（推荐）/ Option A: Let Claw install it (recommended)*
+
+给 Claw 一个任务，比如"把 https://example.com/my-skill.zip 这个技能包装上"，或者"从 ModelScope 上的 XX 页面下载对应 skill 并安装"。Claw 会触发内置的 `skill-install` 元技能：自动下载 → 校验 `SKILL.md` 存在 → 解压到 `{数据根目录}/skills/<技能名>/` → 报告结果。本地 `.zip` 路径、直链 URL、页面 URL 都支持。
+
+Give Claw a task like "install the skill at https://example.com/my-skill.zip" or "download and install the skill on that ModelScope page". Claw invokes the built-in `skill-install` meta-skill which downloads → validates `SKILL.md` → unzips into `{dataRoot}/skills/<skill-name>/` → reports back. Local zip paths, direct URLs and landing-page URLs all work.
+
+*方式 B：手动安装 / Option B: Manual install*
+
+解压 zip 包到 `{数据根目录}/skills/<技能名>/`，确认 `SKILL.md` 直接位于该目录下（不要多一层嵌套目录）。下次发起 Claw 任务即可在技能目录中看到。
+
+Unzip into `{dataRoot}/skills/<skill-name>/`, making sure `SKILL.md` is directly under it (no extra nested folder). The skill shows up on the next Claw task.
+
+*方式 C：让 Claw 帮你写新 Skill / Option C: Ask Claw to author a new skill*
+
+提供领域需求与示例数据/模板，让 Claw 通过 `create_file`/`write_file` 直接在 `${SKILL_DIR}/<新技能名>/` 下建 `SKILL.md` + `scripts/xxx.py`。写完后当场 `python` 跑一把验证，失败再 `edit_lines` 微调。
+
+Describe the domain and give sample data/templates; Claw will `create_file`/`write_file` a new `${SKILL_DIR}/<new-skill>/SKILL.md` + `scripts/xxx.py`, then smoke-test via `python` and `edit_lines` any fixes.
+
+### 7.7 定时任务机制 / Scheduled Task Mechanism
+
+Claw 支持最多 **4 个独立的定时任务槽**，每个槽可独立配置时间窗口、提示词和是否一次性。设计目标：电量友好、锁屏能感知、绝不在用户忙的时候强插。
+
+Claw supports up to **4 independent scheduled task slots**, each with its own time window, prompt preset, and one-shot flag. Design goals: battery-friendly, lockscreen-aware, and never interrupt the user during other active tasks.
+
+**核心组件 / Core Components**
+
+- **心跳引擎 / Heartbeat engine**：`UnifiedForegroundService` 里用 `AlarmManager.setExactAndAllowWhileIdle()` 每 1 分钟触发一次。屏幕亮时精确到 1 分钟；Doze 深度睡眠下 Android 系统最多延迟约 9 分钟（系统限制，所有 App 一致）。/ `UnifiedForegroundService` uses `AlarmManager.setExactAndAllowWhileIdle()` with a 1-minute interval. Precise 1-minute when screen is on; under Doze the system delays up to ~9 min (Android-wide limit).
+- **主开关 / Master switch**：设置页"定时任务 → 启用定时任务"是唯一的总闸，**只有用户能开关**；Claw 自己的 `schedule_set` action 不允许改它。关闭后所有 4 个槽都不会触发。/ Settings → Scheduled Tasks → master toggle is the only kill switch, **user-controlled only**; Claw's `schedule_set` cannot change it. When off, no slot fires.
+- **互斥锁 / Mutex**：心跳检查到"App 处于忙碌状态"（RAG 推理 / 模型下载 / 知识库构建 / Agent 正在跑 / 笔记处理中）时自动跳过本次触发，等下次心跳。/ Heartbeat skips when the app is busy (RAG inference / model download / KB build / Agent running / note processing), retries on next tick.
+
+**每个任务槽的配置 / Per-slot Configuration**
+
+每个槽独立持久化以下字段 / Each slot persists independently：
+
+- **enabled / one_shot**：是否启用；是否一次性（触发后自动关闭 enabled）/ enabled flag; one-shot mode auto-disables after firing.
+- **weekdays**：逗号分隔 1..7（1=周一、7=周日），如 `"1,2,3,4,5"` 表示工作日 / comma-separated 1..7 (1=Mon..7=Sun).
+- **start / end**：`HH:MM` 格式时间窗口。**支持跨夜**：`end < start` 表示从 start 到次日 end 这段窗口（此时 weekdays 必须覆盖起始日和次日）/ `HH:MM` time window. **Cross-midnight supported**: `end < start` means start → next-day end; weekdays must cover both dates.
+- **interval_min**：连续两次触发的最短间隔分钟数（防连发）/ minimum minutes between triggers (dedup).
+- **agent_preset**：要使用的 `agent_user` 预设文件名（不带扩展名），例如 `stock_agent`，必须是 `agent_user/` 目录下存在的 `.txt` 文件 / `agent_user` preset name (without `.txt`), must exist under `agent_user/`.
+- **prompt**：可覆盖 agent_preset 的显式提示词（留空则用 agent_preset 的 `@once`+`@step`）/ explicit prompt text that overrides `agent_preset` if set.
+
+**触发行为 / Trigger Behavior**
+
+满足所有条件（主开关 ON + 本槽 enabled + 当天 weekday + 时间在窗口内 + 距离上次触发 ≥ interval_min + App 空闲）后：
+
+When all conditions pass (master ON + slot enabled + today's weekday + within window + ≥ interval_min since last trigger + app idle):
+
+- **屏幕亮 / Screen ON**：直接在悬浮窗中启动 Agent，使用该槽配置的 preset/prompt 执行任务，任务完成后悬浮窗**自动隐藏**（与手动任务不同，避免定时打扰）。/ Agent launches directly in the floating window using the slot's preset/prompt. Once finished, the floating window **auto-hides** (unlike manual tasks, to avoid pestering the user).
+- **屏幕灭 / Screen OFF**：推送一条高优先级通知（IMPORTANCE_HIGH + 振动），点通知进入 App 后由用户决定继续。截图类操作在锁屏下受限，实践中建议定时任务走"不需要 MediaProjection"的流程（纯 Python/网页/文件/知识库）。/ A high-priority notification (IMPORTANCE_HIGH + vibrate) is posted; user unlocks to continue. Screenshots are restricted on the lock screen, so scheduled tasks are better designed around screenshot-free paths (pure Python / web / files / KB).
+
+**历史记录 / History**
+
+每次定时任务的对话/截图/经验和普通任务一样写入 `{数据根目录}/chathistory/` 对应目录，可在聊天历史页面回看。/ Each scheduled run writes its conversation/screenshots/experience to `{dataRoot}/chathistory/` exactly like manual tasks, and is visible from the Chat History page.
+
+**配置方法 / How to configure**
+
+- **UI**：设置页 → 定时任务 → 主开关 + 4 个 Task 配置块（每个块可独立展开设置） / Settings → Scheduled Tasks → master toggle + 4 Task blocks (each independently expandable).
+- **Claw 自己配置 / Claw self-configuration**：和 Claw 对话让它用 `schedule_get`/`schedule_set` 动态修改槽位。典型指令："帮我把 Task 1 设置成工作日 9:30–15:30 每 30 分钟跑一次，用 stock_agent 预设"。注意 Claw 只能改槽位字段，不能打开/关闭主开关。/ Tell Claw to use `schedule_get`/`schedule_set` to dynamically reconfigure slots, e.g. "Set Task 1 to weekdays 09:30–15:30 every 30 min with stock_agent preset". Claw can only patch slot fields; it cannot toggle the master switch.
+
+### 7.8 Claw 智能体相关设置 / Agent-related Settings
+
+与 Claw 相关的配置集中在**设置 → 智能体设置**和**设置 → 定时任务**两块：
+
+Claw-related settings live under **Settings → Agent Settings** and **Settings → Scheduled Tasks**:
+
+**智能体设置 / Agent Settings**
+
+- **Agent API URL / 模型 / 模型**：独立于 AI问答的 API URL 和模型名，用于选择"跑 Agent"专用的大模型。空表示复用问答页面的本地模型。/ Separate API URL and model for Claw (independent of the Q&A page). Empty = reuse the local model from Q&A.
+- **最大轮数 / Max Steps**：默认 50。调大适合开放式长任务，调小避免模型跑飞。设 0 表示无限制（⚠️慎用）。/ Default 50. Raise for open-ended long tasks, lower to guard against runaway loops. `0` = unlimited (use with care).
+- **禁用思考模式 / Disable Thinking**：仅对支持 thinking 的模型生效，关闭后模型不输出 `<think>` 段，Agent 响应更快但推理质量可能下降。Agent 和 AI问答各自有独立开关。/ Only effective on thinking-capable models; disabling skips the `<think>` block — faster but potentially less accurate. Agent has its own toggle separate from Q&A.
+- **总结经验 / Experience Summary**：见 7.3。/ See 7.3.
+- **Agent 语音 (Agent TTS) / Agent TTS**：任务完成、失败、需要用户确认时用本地 TTS 语音播报（需配置 TTS 模型）。/ Local TTS announces task-done / task-failed / ask-user moments (requires a TTS model to be configured).
+- **Agent 历史轮数 / History Rounds**：在模型上下文里携带的历史任务轮数，默认 0（不携带）。设为 N 时会把最近 N 步的 action + 结果塞进 prompt，便于长任务纠错，但消耗更多 token。/ How many prior rounds to carry in the prompt (default 0). With N>0 the last N `action+result` pairs are injected; helpful for long tasks but burns more tokens.
+- **用户提示词文件 / User Preset File**：即 agent_user 预设下拉，见 7.4。/ The agent_user preset dropdown, see 7.4.
+
+**定时任务 / Scheduled Tasks**：见 7.7。/ See 7.7.
+
+**其他相关设置 / Other Related Settings**
+
+- **数据根目录 / Data Root**：改了之后 `skills/` / `agent_user/` / `agent_workspace/` / `chathistory/` 等都迁到新根；首次进入 Claw 会自动创建缺失的子目录并从 assets 同步一次预装 skill 和 agent_user。/ Changing the data root relocates all Claw subdirs; on first entry the app creates missing ones and re-syncs bundled skills and agent_user from assets.
+- **悬浮窗 / Floating Window**：`show_output(size=...)` 可动态调整大小；`ask_user(url=...)` 会临时把悬浮窗放大到约 85% 屏幕接管 WebView。拖动标题栏可移动位置。点停止按钮随时终止任务。/ `show_output(size=...)` resizes the window on the fly; `ask_user(url=...)` temporarily expands the window to ~85% of the screen to host a WebView. Drag the title bar to move; tap Stop to abort anytime.
+
+### 7.9 使用建议 / Usage Tips
+
+- **先用 AI问答验证 LLM 能听懂任务 / Validate the LLM in Q&A first**：Agent 模式对模型 JSON 输出质量敏感，在线大模型（deepseek/通义千问/GLM-4.5/Kimi K2 等）和 4B 以上本地模型效果更好；0.6B 模型仅建议跑简单的 Python/文件类任务。/ Agent mode is sensitive to JSON-output quality; prefer strong online LLMs (deepseek / Qwen / GLM-4.5 / Kimi K2) or local ≥4B; sub-1B models only for simple Python/file chores.
+- **关键任务先写 agent_user 预设 / Write a preset for critical tasks**：把硬约束（账号、禁止动作、默认值、必须的技能名）放进 `@once`，可显著降低模型"问一堆反问"和"跑偏"的概率。/ Put hard constraints (accounts, forbidden actions, defaults, required skills) into `@once`; it dramatically reduces "what did you mean?" questions and detours.
+- **让 Claw 善用 Python/文件工具 / Prefer scripts and file tools**：能一行 `python` 批量完成的操作，不要让它一步一步点。既快又稳又省 token。/ Batch everything you can in a single `python` call; don't let it click 50 times.
+- **副作用操作反复确认 / Double-check side-effect actions**：涉及下单/支付/发送消息/删除文件时，务必在 `agent_user` 里写明额度、白名单、需先 `ask_user` 等硬约束。/ For buy/pay/send/delete, encode limits, whitelists and "ask first" constraints in `agent_user`.
+- **定时任务先 one-shot 试跑 / Dry-run scheduled tasks with one-shot**：用一次性开关跑一次看日志，确认逻辑正确再改成周期性，避免一出问题一整天反复打扰。/ Use the one-shot flag for an initial test run before enabling periodic triggers, so bugs don't pester you all day.
+
+---
+
+## 8. 故障排除 / Troubleshooting
+
+### 8.1 常见问题 / Common Issues
 
 **问题：无法连接到API服务 / Issue: Cannot connect to API service**
 - 检查网络连接是否正常 / Check if network connection is normal
@@ -1486,7 +1768,7 @@ The final output MUST be a valid JSON file content; you may wrap it in a ```json
     - 确认模型文件完整（text_encoder.mnn、unet.mnn、vae_decoder.mnn）/ Confirm model files are complete
     - 重新下载损坏的模型文件 / Re-download corrupted model files
 
-### 7.2 日志分析 / Log Analysis
+### 8.2 日志分析 / Log Analysis
 
 当遇到问题时，可以通过查看日志来诊断：
 
@@ -1510,9 +1792,9 @@ The application provides detailed logging, which can be viewed through the "View
 
 Viewing logs can help locate the cause of problems, especially when processing large files or complex documents.
 
-## 8. 最佳实践 / Best Practices
+## 9. 最佳实践 / Best Practices
 
-### 8.1 文档处理最佳实践 / Document Processing Best Practices
+### 9.1 文档处理最佳实践 / Document Processing Best Practices
 
 **文档准备 / Document Preparation**：
 - 确保文档内容清晰、结构化 / Ensure document content is clear and structured
@@ -1529,7 +1811,7 @@ Viewing logs can help locate the cause of problems, especially when processing l
 - 定期更新和维护知识库内容 / Regularly update and maintain knowledge base content
 - 删除过时或不相关的文档 / Remove outdated or irrelevant documents
 
-### 8.2 本地LLM使用建议 / Local LLM Usage Recommendations
+### 9.2 本地LLM使用建议 / Local LLM Usage Recommendations
 
 #### 模型选择原则 / Model Selection Principles
 - **手机设备限制 / Mobile Device Limitations**：由于手机内存和计算能力限制，建议使用2B参数以下的小模型 / Due to mobile memory and computational limitations, recommend using small models under 2B parameters
@@ -1676,7 +1958,7 @@ Viewing logs can help locate the cause of problems, especially when processing l
 - 图片越清晰、提示词越具体，越能提升答案质量 / Clearer images and more specific prompts improve answer quality
 - 首次加载多模态模型可能耗时较长，属于正常现象 / First-time loading of multimodal models may take longer, this is normal
 
-### 8.3 聊天历史管理最佳实践 / Chat History Management Best Practices
+### 9.3 聊天历史管理最佳实践 / Chat History Management Best Practices
 
 OfflineAI 支持多会话管理，合理使用可以提高工作效率：
 
@@ -1697,7 +1979,7 @@ OfflineAI supports multi-session management, proper use can improve work efficie
 - 切换会话时会自动保存当前对话 / Automatically saves current conversation when switching sessions
 - 长时间对话建议适当分割为多个会话，避免上下文过长 / Recommend splitting long conversations into multiple sessions to avoid excessive context
 
-### 8.4 Diffusion图像生成最佳实践 / Diffusion Image Generation Best Practices
+### 9.4 Diffusion图像生成最佳实践 / Diffusion Image Generation Best Practices
 
 AI绘图需要技巧和经验积累，以下是一些实用建议：
 
@@ -1780,7 +2062,7 @@ AI art requires skills and experience, here are some practical recommendations:
 - **建筑 / Architecture**：
   "modern architecture, glass building, minimalist design, blue sky, geometric, professional photography, high detail"
 
-### 8.5 GPU后端选择最佳实践 / GPU Backend Selection Best Practices
+### 9.5 GPU后端选择最佳实践 / GPU Backend Selection Best Practices
 
 合理选择计算后端可以显著提升性能：
 
@@ -1852,7 +2134,7 @@ If GPU backend crashes, follow these steps to recover:
   - 最大序列长度建议1024-2048 / Max sequence length recommend 1024-2048
   - 避免同时运行多个应用 / Avoid running multiple apps simultaneously
 
-### 8.6 重排模型使用建议 / Rerank Model Usage Recommendations
+### 9.6 重排模型使用建议 / Rerank Model Usage Recommendations
 
 重排模型是提升检索质量的重要工具，但需要合理配置和使用：
 

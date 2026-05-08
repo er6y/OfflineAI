@@ -53,9 +53,83 @@ Key goals:
 - **Model & parameter control UI**  
   A settings area exposes key parameters (model selection, RAG depth, backend choice, max tokens, temperature, etc.) to balance quality, latency, and resource usage on different devices.
 
+- **Claw Agent (on-device autonomous agent)**
+  An on-device ReAct-style agent that can drive the phone itself: tap/swipe/type, read/write files, run Python scripts, browse web pages, query/insert the knowledge base, show results in a floating window, and schedule recurring jobs. Extended via installable **skills** (each with a `SKILL.md`), guided by user-written **agent_user** prompts, and can persist task experience into a dedicated **AgentKB** knowledge base. See Section 3 and the User Guide for details.
+
 ---
 
-## 3. System Architecture (High Level)
+## 3. Claw Agent (On-Device Autonomous Agent)
+
+Claw is OfflineAI's agent mode. It runs the same local (or optional remote) LLM in a tool-calling loop against the phone itself — no cloud agent service, no data egress.
+
+### 3.1 How It Works (ReAct Loop)
+
+Each step the agent receives a screenshot (when needed), the last action result, a compact memory, and a catalog of currently available skills. It emits one or more actions in JSON, the executor runs them, and the loop continues until the model emits `terminate`. Two-layer memory:
+
+- **`context.fact`** — append-only, long-term facts (resolved paths, user confirmations, key coordinates, business IDs). Survives the whole task.
+- **`context.text`** — per-step scratchpad (current screen, last error, next plan). Overwritten each step.
+- **`data_memory`** — KV store for larger business payloads; only keys are shown every step, values fetched on demand or referenced via `{{key}}` in `terminate`.
+
+### 3.2 Action Space (High Level)
+
+Grouped roughly into:
+
+- **UI automation** — click / long_press / double_click / type / swipe / drag / system_button / open (launch app) / get_app_list.
+- **File / text** — create_file / read_file / write_file / read_lines / edit_lines / grep / rename_file / copy_file / delete_file / list_dir / mkdir / search_files.
+- **Python** — `python` (argv-only, like `subprocess.run`), `python_status`, `python_kill`. Single instance, sync by default with background fallback on timeout.
+- **Web** — web_open / web_get_content (DOM + text) / web_execute_js. All share cookies and session with a persistent WebView.
+- **Knowledge base** — kb_insert / kb_delete against AgentKB; the task itself can also query RAG at task start.
+- **Scheduling** — schedule_get / schedule_set against the 4 scheduled-task slots (master switch stays user-controlled).
+- **User interaction** — ask_user (optionally with a `url` to pop a WebView for login/verification), show_output (Markdown + size: small/medium/large in floating window), terminate (final Markdown result + optional file attachments).
+
+### 3.3 Experience Library (AgentKB)
+
+When "Experience Summary" is enabled, after a successful task the model is asked to summarize what worked and emit KB actions that write the distilled experience into a reserved knowledge base called **AgentKB**. At the start of the next task, AgentKB is queried once and its top-K hits are injected as background, so the agent progressively gets better at recurring workflows without any offline training.
+
+### 3.4 agent_user Prompts (per-scenario user briefs)
+
+Under `{dataRoot}/agent_user/` each `.txt` file is a user-written prompt preset. Format:
+
+```
+# comment
+@once  one-shot line injected only at Step 0
+@step  line injected every step
+@once { multi-line block for Step 0 only }
+@step { multi-line block for every step }
+bare line -> treated as @step
+```
+
+You can switch preset from the UI dropdown. Scheduled tasks pick a preset per slot. The app ships `common_agent.txt` and a few examples (e.g. THS trading, coffee ordering). Built-in assets in `app/src/main/assets/agent_user/` are only copied when the file doesn't exist yet, so edits on device are preserved.
+
+### 3.5 Python Support (Chaquopy)
+
+Python 3.10 is embedded via Chaquopy. Scripts run in-process with argv semantics — no shell, no pipes. Pre-installed third-party packages cover the common skill needs:
+
+- Office: `python-docx`, `python-pptx`, `openpyxl`
+- PDF: `pypdf`, `pdfplumber`, `fpdf2`
+- Data / imaging: `pandas`, `numpy`, `pillow`, `chardet`
+- Network: `requests`, `beautifulsoup4`
+- Utils: `zipfile36`, `python-dotenv`
+
+`${SKILL_DIR}` and `${WORKSPACE}` placeholders in any action's string fields are auto-resolved to the real skills dir and the default agent workspace.
+
+### 3.6 Skills (pluggable, SKILL.md-driven)
+
+A skill is a folder under `{dataRoot}/skills/<name>/` with at least a `SKILL.md` (YAML frontmatter: `name`, `description`) plus optional `scripts/`, templates and assets. On task start the app scans all installed skills and injects a compact catalog into Step 0. The agent is required to `read_file` the relevant `SKILL.md` before calling its scripts.
+
+Built-in skills shipped with the app include: `docx-editor`, `xlsx-editor`, `pptx-editor`, `pdf`, `stockquant`, `slack-gif-creator`, `ths-trade`, and a meta-skill **`skill-install`** that teaches the agent itself how to download + validate + unpack a new skill zip into the skills directory.
+
+To install a new skill, put the `.zip` on the device (or give the agent a URL) and ask `Claw Agent` to install it — the `skill-install` skill handles the rest. Manual install is equally simple: unzip into `{dataRoot}/skills/<skill-name>/`, making sure `SKILL.md` sits at the top.
+
+### 3.7 Scheduled Tasks (4 slots + master switch)
+
+`UnifiedForegroundService` runs an `AlarmManager`-driven 1-minute heartbeat. There are 4 independent task slots; each slot has its own enabled flag, weekdays (1..7), time window (`HH:MM`–`HH:MM`, cross-midnight supported), interval, and an `agent_user` preset (or explicit prompt). A single **master switch** on the Settings page gates the whole system; the agent itself can only touch per-slot config via `schedule_set`, never the master switch.
+
+When a slot fires with the screen ON, the agent is launched directly into the floating window; with the screen OFF, a high-priority reminder notification is posted so the user can unlock and continue. After a scheduled task completes, the floating window auto-hides.
+
+---
+
+## 4. System Architecture (High Level)
 
 At a high level, OfflineAI consists of:
 
@@ -78,7 +152,7 @@ At a high level, OfflineAI consists of:
 
 ---
 
-## 4. Repository Layout
+## 5. Repository Layout
 
 The repository is organized roughly as follows:
 
@@ -104,7 +178,7 @@ Other Gradle, wrapper, and configuration files support building the Android proj
 
 ---
 
-## 5. On-Device Models & Modalities
+## 6. On-Device Models & Modalities
 
 OfflineAI is designed to work with a set of local models, typically stored under a user-configurable data root (for example, `/sdcard/Download/OfflineAIData` on Android).  
 Typical model categories include:
@@ -121,7 +195,7 @@ The app provides a **model download & configuration** experience so that default
 
 ---
 
-## 6. RAG Workflow (Vector + Graph)
+## 7. RAG Workflow (Vector + Graph)
 
 The RAG pipeline in OfflineAI combines vector retrieval with graph-based expansion to improve recall and interpretability:
 
@@ -145,7 +219,7 @@ The RAG pipeline in OfflineAI combines vector retrieval with graph-based expansi
 
 ---
 
-## 7. Privacy & Data Handling
+## 8. Privacy & Data Handling
 
 OfflineAI is designed with a **local-only** mindset:
 
@@ -157,14 +231,14 @@ Remote models may optionally be configured via API keys and endpoints, but the c
 
 ---
 
-## 8. Getting Started (Build & Run)
+## 9. Getting Started (Build & Run)
 
-### 8.1 Prerequisites
+### 9.1 Prerequisites
 
 - Android development environment (Android Studio / Gradle).
 - A device or emulator with sufficient memory and GPU/NNAPI support for your chosen models.
 
-### 8.2 Build the App
+### 9.2 Build the App
 
 From the project root:
 
@@ -175,7 +249,7 @@ From the project root:
 
 The resulting APK can be found under `app/build/outputs/apk/` and installed on a device.
 
-### 8.3 Prepare Data Root & Models
+### 9.3 Prepare Data Root & Models
 
 1. Choose a data root directory on the device, for example:
 
@@ -191,7 +265,7 @@ The resulting APK can be found under `app/build/outputs/apk/` and installed on a
 
 3. Create one or more knowledge bases and add documents via the UI.
 
-### 8.4 Use the App
+### 9.4 Use the App
 
 - Start the app and open the **RAG QA** screen to ask questions against a chosen knowledge base.
 - Use the **Knowledge Base Builder** to ingest more documents.
@@ -201,7 +275,7 @@ The resulting APK can be found under `app/build/outputs/apk/` and installed on a
 
 ---
 
-## 9. Local Inference Engine
+## 10. Local Inference Engine
 
 The on-device LLM/VLM engine is implemented via the MNN runtime and exposed through the `libs/mnn-jni` module.
 
@@ -211,7 +285,7 @@ For details on configuration options, supported backends, and performance tuning
 
 ---
 
-## 10. Status & Roadmap
+## 11. Status & Roadmap
 
 OfflineAI is an evolving project. Planned directions include (non-exhaustive):
 
@@ -221,7 +295,7 @@ OfflineAI is an evolving project. Planned directions include (non-exhaustive):
 
 ---
 
-## 11. License & Acknowledgements
+## 12. License & Acknowledgements
 
 This project uses and builds upon several open-source components, including but not limited to:
 

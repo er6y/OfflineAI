@@ -434,9 +434,19 @@ Note: ids is a comma-separated list of document IDs (from the [ID:xxx] tags abov
                         lastParseError = "python argv array cannot be empty"
                         return null
                     }
+                    val rawTimeout = params.optInt("timeout_sec", 60)
+                    // Guardrail: some long-running skills (e.g. stockquant) need a
+                    // realistic sync budget. If the caller picks a too-small value
+                    // (>0 and <240s), raise it to 300s so we don't downgrade to
+                    // background prematurely. 0 (fire-and-forget async) is kept as-is.
+                    val needsBiggerBudget = argvList.any { arg ->
+                        val lower = arg.lowercase()
+                        lower.endsWith("stockquant.py") || lower.contains("/stockquant/scripts/")
+                    }
+                    val effectiveTimeout = if (needsBiggerBudget && rawTimeout in 1..239) 300 else rawTimeout
                     AgentAction.Python(
                         argv = argvList,
-                        timeoutSec = params.optInt("timeout_sec", 60)
+                        timeoutSec = effectiveTimeout
                     )
                 }
                 "python_status" -> AgentAction.PythonStatus()

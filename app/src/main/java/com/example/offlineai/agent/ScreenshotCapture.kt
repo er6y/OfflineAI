@@ -92,8 +92,17 @@ class ScreenshotCapture(private val context: Context) {
         // We need MediaProjection to stay alive for Agent loop
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
-                LogManager.logI(TAG, "MediaProjection stopped by system")
-                // Do NOT release here - will be released manually when Agent stops
+                // Triggered when user taps "禁止" on the system screen-recording notification,
+                // or when the system revokes the projection token (e.g. screen lock policy).
+                // We must clear our cached references so isInitialized() returns false and the
+                // next Agent run automatically re-requests permission instead of silently failing.
+                LogManager.logW(TAG, "MediaProjection stopped (likely user revoked via notification). Clearing cached refs for auto re-request on next Agent run.")
+                try { virtualDisplay?.release() } catch (_: Throwable) {}
+                virtualDisplay = null
+                isVirtualDisplayReady = false
+                try { imageReader?.close() } catch (_: Throwable) {}
+                imageReader = null
+                mediaProjection = null
             }
         }, Handler(Looper.getMainLooper()))
         

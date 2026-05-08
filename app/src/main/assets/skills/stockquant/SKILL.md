@@ -8,6 +8,7 @@ description: "A股量化一站式：选股 + 持仓策略 + 个股分析（代�
 A 股一站式：**选股 / 持仓策略 / 个股分析**。Python 只出**数据 + 对象化 hint 矩阵**，LLM 按 `[TASK]` 过程化推导决策。
 
 > ⛔ **严禁 read_file 本脚本源码 / README**（6000+ 行，浪费 context）；下面子命令复制即可。
+> ⏱️ **所有 stockquant 命令必须带 `timeout_sec=300`**（全流程含网络重试约 60~200s，默认 60s 会超时）。若引擎检测到你漏填仍会自动钳到 300s，建议显式写明。
 
 ## 三大策略引擎
 
@@ -57,3 +58,12 @@ python ${SKILL_DIR}/stockquant/scripts/stockquant.py analyze <query> [<query>...
 输出：大盘背景 + 每只个股的多维原始数据（基本/行情/日K/15分K/资金/板块/公告），末尾一段 `═══ ANALYSIS_HINT ═══` 给出解读框架。LLM 照着 hint 结合用户 prompt 分析即可；Python 不给买卖结论。
 
 > **数据维度 / 解读框架 / 常见用户意图回答套路** 见 `README.md` §个股分析（ANALYZE）。
+
+### 4. Tushare Token 管理（按需调用，见 HINT 指令）
+
+```sh
+python ${SKILL_DIR}/stockquant/scripts/stockquant.py tushare-token --set <TOKEN>
+python ${SKILL_DIR}/stockquant/scripts/stockquant.py tushare-token --skip
+python ${SKILL_DIR}/stockquant/scripts/stockquant.py tushare-token --status
+python ${SKILL_DIR}/stockquant/scripts/stockquant.py tushare-token --clear
+```

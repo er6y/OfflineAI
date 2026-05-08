@@ -84,7 +84,47 @@ class AgentAccessibilityService : AccessibilityService() {
         agentWebView = AgentWebView(applicationContext)
         // Notification channel is managed by UnifiedForegroundService
         LogManager.logI(TAG, "[AGENT_LOG_HINT] Ignore external system noise tags (e.g. AccessibilityManagerService readInstalledAccessibilityServiceLocked) unless Agent callbacks are missing")
-        LogManager.logI(TAG, "Accessibility service connected")
+        // Apply idle (zero-subscription) service info to avoid system-side overhead when Agent not running
+        applyIdleServiceInfo()
+        LogManager.logI(TAG, "Accessibility service connected (idle, zero-subscription)")
+    }
+
+    /**
+     * Apply idle ServiceInfo: zero event types + minimal flags.
+     * System will not dispatch any events nor maintain interactive-window list.
+     * This drastically reduces system-side overhead while keeping the service "enabled".
+     */
+    private fun applyIdleServiceInfo() {
+        try {
+            val info = serviceInfo ?: android.accessibilityservice.AccessibilityServiceInfo()
+            info.eventTypes = 0  // Subscribe to nothing
+            info.flags = android.accessibilityservice.AccessibilityServiceInfo.DEFAULT  // Drop flagRetrieveInteractiveWindows
+            info.notificationTimeout = 1000
+            info.packageNames = null
+            serviceInfo = info
+            LogManager.logI(TAG, "[A11Y] Idle ServiceInfo applied: eventTypes=0, flags=DEFAULT")
+        } catch (e: Exception) {
+            LogManager.logW(TAG, "[A11Y] Failed to apply idle ServiceInfo: ${e.message}")
+        }
+    }
+
+    /**
+     * Apply active ServiceInfo: subscribe to window state changes + retrieve interactive windows.
+     * Called when Agent starts; restores the original config from XML at runtime.
+     */
+    private fun applyActiveServiceInfo() {
+        try {
+            val info = serviceInfo ?: android.accessibilityservice.AccessibilityServiceInfo()
+            info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+            info.flags = android.accessibilityservice.AccessibilityServiceInfo.DEFAULT or
+                    android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+            info.notificationTimeout = 1000
+            info.packageNames = null
+            serviceInfo = info
+            LogManager.logI(TAG, "[A11Y] Active ServiceInfo applied: eventTypes=WINDOW_STATE_CHANGED, flags=DEFAULT|RETRIEVE_INTERACTIVE_WINDOWS")
+        } catch (e: Exception) {
+            LogManager.logW(TAG, "[A11Y] Failed to apply active ServiceInfo: ${e.message}")
+        }
     }
     
     private var isAgentActive = false
@@ -133,6 +173,12 @@ class AgentAccessibilityService : AccessibilityService() {
     
     fun setAgentActive(active: Boolean) {
         isAgentActive = active
+        // Toggle a11y subscription: zero overhead when idle, full subscription when running
+        if (active) {
+            applyActiveServiceInfo()
+        } else {
+            applyIdleServiceInfo()
+        }
         LogManager.logI(TAG, "Agent active state changed: $active")
     }
     
@@ -154,7 +200,7 @@ class AgentAccessibilityService : AccessibilityService() {
     
     override fun onDestroy() {
         super.onDestroy()
-        isAgentActive = false
+        setAgentActive(false)
         stopAgentLoop()
         floatingWindow?.hide()
         floatingWindow = null
@@ -417,7 +463,7 @@ class AgentAccessibilityService : AccessibilityService() {
                     LogManager.logI(TAG, "Agent temperature restored to $temp in finally")
                     savedTemperature = null
                 }
-                isAgentActive = false
+                setAgentActive(false)
                 this@AgentAccessibilityService.isScheduledTask = false
                 agentTts?.shutdown()
                 agentTts = null
@@ -458,7 +504,7 @@ class AgentAccessibilityService : AccessibilityService() {
         // NOTE: </agent> tag writing is handled exclusively by AgentEngine.finally block.
         // It runs unconditionally for all termination reasons (normal-terminate, user-stop, error-abort).
         // Do NOT write it here to avoid race conditions with AgentEngine.finally.
-        isAgentActive = false
+        setAgentActive(false)
         cachedAppList = null  // Clear cache when agent stops
         agentTts?.shutdown()
         agentTts = null

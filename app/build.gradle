@@ -52,6 +52,11 @@ namespace = 'com.example.offlineai'
     //   - __pycache__/                    : Python bytecode cache
     //   - skills/<s>/cache/YYYYMMDD/      : daily JSON snapshots
     //   - skills/<s>/logs/<kind>/*.jsonl  : local run logs
+    //   - skills/<s>/config/              : runtime state (tushare token,
+    //                                       user-specific secrets); MUST NOT
+    //                                       ship to end users - on-device the
+    //                                       skill writes its own fresh config
+    //                                       after user setup.
     // None of these are needed on-device (Chaquopy regenerates caches under
     // private storage); previously they bloated every APK and users had to
     // `rm -rf` them before each build.
@@ -59,11 +64,12 @@ namespace = 'com.example.offlineai'
     // Implementation note: `sourceSets.main.assets.exclude` is silently
     // ignored by AGP's MergeAssets task, so we use aapt's own
     // `ignoreAssetsPattern` (basename-matched). The default pattern is
-    // preserved and we append `!__pycache__:!cache:!logs`. These three
-    // names are Python/dev-only in this project; if a future skill needs
-    // a legit `cache/` dir in assets, switch to per-path filtering.
+    // preserved and we append `!__pycache__:!cache:!logs:!config`. These
+    // four names are dev-only/runtime-state in this project; if a future
+    // skill needs a legit `config/` dir in assets, rename it (e.g.
+    // `default_config/`) or switch to per-path filtering.
     androidResources {
-        ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:<dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~:!__pycache__:!cache:!logs'
+        ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:<dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~:!__pycache__:!cache:!logs:!config'
     }
 
     signingConfigs {

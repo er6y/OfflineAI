@@ -1765,6 +1765,21 @@ public class ConfigManager {
     }
 
     /**
+     * Basenames that must NEVER be copied from assets into user-visible skill
+     * directories, even if they somehow slipped into the APK. Defense-in-depth
+     * on top of the aapt `ignoreAssetsPattern` in build.gradle.
+     *
+     * These names represent runtime state owned by the end user / device:
+     *   - config:        user secrets (tushare token, api keys)
+     *   - cache:         per-day market snapshots regenerated on demand
+     *   - logs:          per-run audit trails
+     *   - __pycache__:   python bytecode compiled on host machine
+     */
+    private static final java.util.Set<String> SKILL_SKIP_BASENAMES =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "config", "cache", "logs", "__pycache__"));
+
+    /**
      * Recursively copy an asset folder to a target directory on the filesystem.
      */
     private static boolean copyAssetFolder(AssetManager assetManager, String assetPath, File targetDir) {
@@ -1782,6 +1797,13 @@ public class ConfigManager {
 
             boolean allOk = true;
             for (String child : children) {
+                // Defense-in-depth: skip runtime-state basenames so they can
+                // never leak from APK to device (see SKILL_SKIP_BASENAMES).
+                if (SKILL_SKIP_BASENAMES.contains(child)) {
+                    LogManager.logI(TAG, "[SKILLS_SYNC] Skip runtime-state dir from assets: "
+                            + assetPath + "/" + child);
+                    continue;
+                }
                 boolean ok = copyAssetFolder(assetManager, assetPath + "/" + child, new File(targetDir, child));
                 if (!ok) allOk = false;
             }

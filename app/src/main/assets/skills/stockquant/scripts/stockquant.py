@@ -324,6 +324,12 @@ _PREFLIGHT_PROBES = {
     "em_sector": "http://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=1&fs=m:90+t:2&fields=f12",
     "em_kline":  "http://push2.eastmoney.com/api/qt/stock/kline/get?secid=0.000001&klt=101&lmt=1",
     "sina":      "https://hq.sinajs.cn/list=s_sh000001",
+    # webquotepic image service: served from a different EM subdomain than
+    # push2 APIs; usually stays alive when push2 gets WAF-throttled. Used
+    # purely as a diagnostic signal -- "network is fine, just push2 is
+    # rate-limited" vs "phone-level connectivity is dead". Lets the LLM /
+    # user distinguish a wait-it-out condition from an unrecoverable one.
+    "em_pic":    "http://webquotepic.eastmoney.com/GetPic.aspx?nid=1.000001&imageType=KXL",
 }
 
 
@@ -364,6 +370,113 @@ def _preflight_connectivity_check():
     for name in _PREFLIGHT_PROBES:
         results.setdefault(name, "fail(timeout)")
     return results
+
+
+def _print_data_source_status(probe, ts_tier, ts_info,
+                              em_alive, em_data_total,
+                              sina_alive, em_pic_alive):
+    """Print a structured DATA_SOURCE_STATUS block to stdout.
+
+    Designed to be quoted verbatim by the LLM agent to the user so the
+    user understands which sources are live, which got blocked / banned,
+    which strategies will run on degraded data, and (when relevant) what
+    actions can recover full functionality (set tushare token, switch
+    network, wait for WAF cool-down).
+
+    Always printed -- healthy runs make the block tiny ("all primary OK"),
+    while degraded runs are explicit about what's missing.
+    """
+    em_dead = (em_alive == 0)
+    em_partial = (0 < em_alive < em_data_total)
+    em_full = (em_alive == em_data_total)
+    ts_usable = ts_tier in ("basic", "full")
+    print()
+    print("═══ DATA_SOURCE_STATUS ═══")
+    # Primary EM
+    if em_full:
+        em_line = "PRIMARY (东方财富 push2): OK ({}/{} endpoints)".format(em_alive, em_data_total)
+    elif em_partial:
+        em_line = "PRIMARY (东方财富 push2): DEGRADED ({}/{} endpoints alive)".format(
+            em_alive, em_data_total)
+    else:
+        if em_pic_alive:
+            em_line = "PRIMARY (东方财富 push2): WAF_BLOCKED (限流; webquotepic 仍存活)"
+        else:
+            em_line = "PRIMARY (东方财富 push2): DEAD (网络层异常)"
+    print("  " + em_line)
+    # Sina
+    sina_line = "SECONDARY (Sina hq): OK" if sina_alive else "SECONDARY (Sina hq): DEAD"
+    print("  " + sina_line)
+    # Tushare
+    if ts_tier == "unset":
+        ts_line = "TIER2 (tushare): UNSET (未配置 token)"
+    elif ts_tier == "skipped":
+        ts_line = "TIER2 (tushare): SKIPPED (用户已禁用)"
+    elif ts_tier == "auth_failed":
+        ts_line = "TIER2 (tushare): AUTH_FAILED ({})".format(ts_info.get("reason", ""))
+    elif ts_tier == "network_failed":
+        ts_line = "TIER2 (tushare): NETWORK_FAILED ({})".format(ts_info.get("reason", ""))
+    elif ts_tier == "basic":
+        ts_line = "TIER2 (tushare): READY (basic 120pt; daily/snapshot ok, moneyflow gated)"
+    elif ts_tier == "full":
+        ts_line = "TIER2 (tushare): READY (full 2000pt; daily + moneyflow ok)"
+    elif ts_tier == "probe_failed":
+        ts_line = "TIER2 (tushare): PROBE_FAILED ({})".format(ts_info.get("reason", ""))
+    else:
+        ts_line = "TIER2 (tushare): {}".format(ts_tier)
+    print("  " + ts_line)
+    # Strategy availability summary -- only print when degraded.
+    if not em_full:
+        print()
+        print("[策略影响]")
+        if em_dead:
+            if ts_usable:
+                # Tushare substitutes
+                snap_via = "tushare snapshot"
+                sector_via = "tushare 行业聚合"
+                # D-strategy: tushare full has moneyflow API; basic tier
+                # falls back to Sina vip per-stock parallel enrichment
+                # (top-500 by amount, ~12s, REAL 5d cumulative).
+                if ts_tier == "full":
+                    inflow_status = "tushare moneyflow 5日聚合"
+                else:
+                    inflow_status = "Sina vip 单股资金流并行 (top-500, ~12s, real 5d)"
+                kline_via = "tushare daily (Tier-4 已有)"
+                print(f"  C 板块滞涨: USE {sector_via} (T-1 基础, 板块定义≈申万行业)")
+                print(f"  D 主力资金: USE {inflow_status}")
+                print(f"  E 箱体突破: USE {snap_via} + {kline_via}")
+            elif sina_alive:
+                print("  C 板块滞涨: SKIPPED (无板块替代源, Sina 不提供)")
+                print("  D 主力资金: USE Sina vip 单股资金流并行 (top-500, ~12s, real 5d)")
+                print("  E 箱体突破: USE Sina Tier-3 全市场 (慢 10-15s, 无换手率)")
+            # else: NETWORK_DEAD branch already raised above
+        else:
+            # em_partial -- some EM endpoints alive, others not
+            if probe.get("em_clist") != "ok":
+                print("  ⚠️ em_clist 挂; 全市场快照将走 stale-cache → tushare → Sina")
+            if probe.get("em_sector") != "ok":
+                print("  ⚠️ em_sector 挂; C 策略将走 stale-cache → tushare 行业聚合")
+            if probe.get("em_kline") != "ok":
+                print("  ⚠️ em_kline 挂; K线将走 Sina/QT/EM-quote/tushare daily 链")
+        # Action hint
+        print()
+        print("[行动建议]")
+        if em_dead and not ts_usable:
+            if ts_tier in ("unset", "skipped"):
+                print("  → 立即配置 tushare token 解锁 Tier-2 全市场替代:")
+                print("    `python ${SKILL_DIR}/stockquant/scripts/stockquant.py "
+                      "tushare-token --set <YOUR_TOKEN>`")
+                print("    (注册 tushare.pro 即送 120 积分; 实名+学校单位可到 2000)")
+            elif ts_tier == "auth_failed":
+                print("  → 重新设置 tushare token (当前 token 鉴权失败):")
+                print("    `python ${SKILL_DIR}/stockquant/scripts/stockquant.py "
+                      "tushare-token --set <NEW_TOKEN>`")
+        elif em_dead and ts_tier == "basic":
+            print("  ℹ️ 当前 tushare basic tier 仅支持 C/E; 若需 D 策略请升级到 2000 积分")
+            print("    (tushare.pro 个人中心填实名/学校/单位可申请加分)")
+    # Always print closer for easy parsing.
+    print("═══════════════════════════")
+    print()
 
 
 # ==========================================================================
@@ -460,10 +573,17 @@ def _fetch_market_list(fs, page_size=100):
 
 
 def _fetch_sector_rank(sector_type="industry", top=30, fast_fail=False):
-    """Industry (m:90+t:2) or concept (m:90+t:3) sector ranking."""
+    """Industry (m:90+t:2) or concept (m:90+t:3) sector ranking.
+
+    Fields include multi-day pct columns (f164=5d, f167=10d, f170=20d) which
+    EM clist exposes natively; these are used as a Tier-1.5 fallback when
+    the dedicated sector K-line endpoint is unreachable, avoiding the
+    "same-day pct as N-day approximation" degradation in strategy C.
+    """
     t_code = {"industry": "2", "concept": "3", "region": "1"}.get(sector_type, "2")
     fs = f"m:90+t:{t_code}"
-    fields = "f2,f3,f4,f12,f14,f62,f104,f105,f128,f136"
+    # f164=5d pct, f167=10d pct, f170=20d pct (EM board/index convention)
+    fields = "f2,f3,f4,f12,f14,f62,f104,f105,f128,f136,f164,f167,f170"
     url = (
         f"http://push2.eastmoney.com/api/qt/clist/get?"
         f"pn=1&pz={top}&po=1&np=1&fltt=2&invt=2"
@@ -1479,6 +1599,1494 @@ def _fetch_qt_kline(code, scale, n):
     return rows
 
 
+# Dedicated session for EM push2his kline endpoint. The shared _SESSION
+# defaults to Referer=finance.eastmoney.com which historically caused EM
+# kline path to reject our UA (see _fetch_daily_kline docstring). Using
+# Referer=quote.eastmoney.com bypasses that block. Kept on a separate
+# Session so any future change to _SESSION's auth/headers does not
+# accidentally re-break this fallback.
+_EM_KLINE_SESSION = requests.Session()
+_EM_KLINE_SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Referer": "https://quote.eastmoney.com/",
+})
+
+
+def _em_kline_secid(code):
+    """6-digit A-share code -> EM secid ('1.600519' for SH, '0.000001' for SZ)."""
+    c = code.strip()
+    if len(c) != 6 or not c.isdigit():
+        return None
+    return ("1." if (c[0] == "6" or c.startswith("688")) else "0.") + c
+
+
+def _fetch_em_kline(code, scale, n):
+    """Tier-3 k-line fallback: EM push2his (different subdomain than push2).
+
+    Used when both Sina and Tencent QT return 0 bars. EM serves kline data
+    via push2his.eastmoney.com which is a separate subdomain from the
+    push2 APIs that get WAF-throttled, so this can survive when push2
+    itself is down. Headers must use Referer=quote.eastmoney.com rather
+    than the shared _SESSION's finance.eastmoney.com to avoid UA-block
+    on the kline path.
+
+    Endpoint:
+      /api/qt/stock/kline/get?secid=0.000001&klt=101&fqt=1&end=...&lmt=N
+        klt=101  daily
+        fqt=1    forward-adjusted (qfq)
+      Returns klines as comma-joined strings:
+      "YYYY-MM-DD,open,close,high,low,vol_in_shou,amount,..."
+    """
+    if scale != 240:
+        return []                                          # only daily supported
+    secid = _em_kline_secid(code)
+    if not secid:
+        return []
+    url = (
+        "http://push2his.eastmoney.com/api/qt/stock/kline/get?"
+        f"secid={secid}&fields1=f1,f2,f3,f4,f5,f6"
+        f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+        f"&klt=101&fqt=1&lmt={n}"
+        f"&ut=fa5fd1943c7b386f172d6893dbfba10b"
+    )
+    try:
+        resp = _EM_KLINE_SESSION.get(url, timeout=5)
+        if resp.status_code != 200:
+            return []
+        js = resp.json()
+    except Exception:
+        return []
+    klines = ((js or {}).get("data") or {}).get("klines") or []
+    rows = []
+    for line in klines:
+        parts = line.split(",")
+        if len(parts) < 7:
+            continue
+        try:
+            rows.append({
+                "ts": parts[0],                            # "YYYY-MM-DD"
+                "open": float(parts[1]),
+                "close": float(parts[2]),
+                "high": float(parts[3]),
+                "low": float(parts[4]),
+                "vol": float(parts[5]) * 100,              # 手 -> 股
+                "amount": float(parts[6]),
+            })
+        except (ValueError, TypeError):
+            continue
+    return rows
+
+
+# ==========================================================================
+# 163 (NetEase) historical k-line via plain CSV.
+# ==========================================================================
+# quotes.money.163.com hosts a 10+ year stable CSV endpoint. No auth, no
+# UA games, no rate limit observed in practice. Returns GBK-encoded CSV
+# with a richer field set than other free sources (includes 换手率, 总市值,
+# 流通市值 -- handy for filling fields tushare basic-tier can't give us).
+#
+# URL form:
+#   http://quotes.money.163.com/service/chddata.html?
+#     code=<0|1><6digit>&start=YYYYMMDD&end=YYYYMMDD&fields=...
+#   prefix 0 = Shanghai, 1 = Shenzhen (note: opposite of Sina/EM!)
+#
+# CSV header (GBK):
+#   日期,股票代码,名称,收盘价,最高价,最低价,开盘价,前收盘,涨跌额,
+#   涨跌幅,换手率,成交量,成交金额,总市值,流通市值,成交笔数
+#
+# Returns rows in DESCENDING date order from 163 (most recent first); we
+# reverse to ASCENDING for consistency with all other kline fetchers.
+# ==========================================================================
+
+def _163_symbol(code):
+    """Build 163 secid: 0=Shanghai, 1=Shenzhen (opposite of EM/Sina)."""
+    c = (code or "").strip()
+    if len(c) != 6 or not c.isdigit():
+        return None
+    return ("0" if (c[0] == "6" or c.startswith("688")) else "1") + c
+
+
+def _fetch_163_kline(code, n=30):
+    """Fetch up to `n` daily bars from NetEase 163 quotes CSV.
+
+    Returns rows in ASCENDING date order with the same dict shape as other
+    `_fetch_*_kline` helpers (ts/open/close/high/low/vol/amount), plus
+    bonus fields (turnover, total_mv, float_mv) when available -- callers
+    that don't care can ignore them. Empty list on any error.
+
+    163 only supports a date-range query, so we ask for ~1.6x calendar
+    days back to cover weekends/holidays and trim to last `n` bars.
+    """
+    sym = _163_symbol(code)
+    if not sym:
+        return []
+    end_dt = datetime.datetime.now()
+    start_dt = end_dt - datetime.timedelta(days=int(n * 1.6) + 5)
+    end = end_dt.strftime("%Y%m%d")
+    start = start_dt.strftime("%Y%m%d")
+    # Field codes: TCLOSE/HIGH/LOW/TOPEN/LCLOSE/CHG/PCHG/TURNOVER/VOTURNOVER
+    #              VATURNOVER/TCAP/MCAP
+    fields = ("TCLOSE;HIGH;LOW;TOPEN;LCLOSE;CHG;PCHG;TURNOVER;"
+              "VOTURNOVER;VATURNOVER;TCAP;MCAP")
+    url = (
+        "http://quotes.money.163.com/service/chddata.html?"
+        f"code={sym}&start={start}&end={end}&fields={fields}"
+    )
+    try:
+        resp = requests.get(url, timeout=8)
+        if resp.status_code != 200:
+            return []
+        # 163 sends GBK; resp.text uses charset auto-detect which sometimes
+        # mis-detects. Force decode.
+        try:
+            text = resp.content.decode("gbk")
+        except UnicodeDecodeError:
+            text = resp.content.decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    lines = text.splitlines()
+    if len(lines) < 2:
+        return []
+    rows = []
+    # Skip header (lines[0]). Body in DESCENDING date.
+    for line in lines[1:]:
+        parts = line.split(",")
+        if len(parts) < 13:
+            continue
+        try:
+            ts = parts[0].strip()                          # "YYYY-MM-DD"
+            close = parts[3]
+            high = parts[4]
+            low = parts[5]
+            opn = parts[6]
+            # 163 marks suspended/halted days with "None" in price columns.
+            if "None" in (close, high, low, opn):
+                continue
+            row = {
+                "ts": ts,
+                "open": float(opn),
+                "close": float(close),
+                "high": float(high),
+                "low": float(low),
+                "vol": float(parts[11] or 0),              # already in shares
+                "amount": float(parts[12] or 0),           # in yuan
+            }
+            # Bonus fields (silent if not parseable)
+            try:
+                row["turnover"] = float(parts[10] or 0)
+            except (ValueError, IndexError):
+                pass
+            try:
+                row["total_mv"] = float(parts[13] or 0)
+                row["float_mv"] = float(parts[14] or 0)
+            except (ValueError, IndexError):
+                pass
+            row["_source"] = "163"
+            rows.append(row)
+        except (ValueError, TypeError, IndexError):
+            continue
+    rows.sort(key=lambda r: r["ts"])                       # ASC
+    if len(rows) > n:
+        rows = rows[-n:]
+    return rows
+
+
+# ==========================================================================
+# Multi-source field merger with conflict detection.
+# ==========================================================================
+# Strategy: instead of a single hard-priority fallback chain, gather field
+# values from ALL successful sources, expose conflicts (numeric spread or
+# categorical mismatch) to the LLM as a `_data_quality` meta block, and
+# let the LLM apply soft judgement.
+#
+# Two primitives:
+#   _merge_numeric(values_by_source, field) -> dict
+#   _merge_categorical(values_by_source, field) -> dict
+#
+# Output dict shape:
+#   {
+#     "value": canonical_value,            # highest-priority non-conflict choice
+#     "sources": [src_id, ...],            # ordered by priority
+#     "values": {src_id: raw_value, ...},  # full breakdown
+#     "conflict": bool,
+#     "spread_pct": float | None,          # numeric only; max-min over mean
+#     "single_source": bool,
+#     "note": str | None,                  # human-readable when conflict
+#     "ts_ms": int,                        # merge timestamp
+#   }
+#
+# Source priority registry: hard-coded per field. Higher index = higher
+# priority. EM push2 wins when alive (real-time intraday), tushare wins
+# for T-1 close-basis fields where EM doesn't apply, etc.
+# ==========================================================================
+
+# Per-field source priority. Sources listed left = lowest priority,
+# right = highest. Unknown sources fall back to alphabetical order.
+_MERGE_FIELD_PRIORITY = {
+    # Real-time price chain: EM > Sina > QT > tushare > 163
+    "price":            ["163", "tushare", "qt", "sina", "em"],
+    "pct":              ["163", "tushare", "qt", "sina", "em"],
+    "open":             ["163", "tushare", "qt", "sina", "em"],
+    "high":             ["163", "tushare", "qt", "sina", "em"],
+    "low":              ["163", "tushare", "qt", "sina", "em"],
+    "prev_close":       ["163", "tushare", "qt", "sina", "em"],
+    "vol":              ["163", "tushare", "qt", "sina", "em"],
+    "amount":           ["163", "tushare", "qt", "sina", "em"],
+    # Liquidity / valuation: tushare daily_basic (when permitted) > EM > 163
+    "turnover":         ["sina_vip", "163", "tushare", "em"],
+    "pe":               ["em", "tushare"],
+    "total_mv":         ["em", "tushare", "163"],
+    "float_mv":         ["em", "tushare", "163"],
+    # Money flow: EM multiday > Sina vip > tushare moneyflow
+    "main_inflow_1d":   ["tushare", "sina_vip", "em"],
+    "main_inflow_5d":   ["tushare", "sina_vip", "em"],
+    "main_inflow_pct_5d": ["tushare", "sina_vip", "em"],
+    # Categorical: EM is canonical, tushare uses 申万 (slightly different)
+    "industry":         ["tushare", "163", "em"],
+    "concept":          ["tushare", "em"],
+    "name":             ["tushare", "163", "qt", "sina", "em"],
+}
+
+# Default conflict thresholds (numeric % spread). Currency / inflow can
+# legitimately diverge more than tight intraday quotes; turnover is most
+# tightly defined.
+_MERGE_CONFLICT_THRESHOLD_PCT = {
+    "price": 0.5,
+    "pct": 5.0,                     # pct itself is a percentage; use abs diff
+    "open": 0.5,
+    "high": 0.5,
+    "low": 0.5,
+    "prev_close": 0.5,
+    "vol": 5.0,                     # vol can lag intraday
+    "amount": 5.0,
+    "turnover": 10.0,
+    "pe": 5.0,
+    "total_mv": 5.0,
+    "float_mv": 5.0,
+    "main_inflow_1d": 30.0,         # different sources count differently
+    "main_inflow_5d": 30.0,
+    "main_inflow_pct_5d": 30.0,
+}
+
+# Special-case categorical normalization. tushare's 申万 industry names
+# don't exactly match EM's classification; treat semantic equivalents as
+# non-conflicts. Extend as observed in the wild.
+_INDUSTRY_ALIASES = {
+    "白酒": ["饮料制造", "酒类", "酒"],
+    "饮料制造": ["白酒", "酒类"],
+    "银行": ["国有大型银行", "股份制银行", "城商行"],
+    "证券": ["券商", "证券Ⅱ"],
+    "房地产": ["房地产开发", "房地产Ⅱ"],
+    "电池": ["锂电池", "动力电池"],
+}
+
+
+def _merge_numeric(values_by_source, field, ts_ms=None):
+    """Merge numeric values from multiple sources.
+
+    `values_by_source`: {source_id: numeric_value}, None / non-numeric
+        entries are filtered out.
+    Returns a dict matching the schema documented at the top of this
+    section. Empty `values_by_source` -> {value: None, ...}.
+    """
+    if ts_ms is None:
+        ts_ms = int(time.time() * 1000)
+    # Filter non-numeric / None values
+    cleaned = {}
+    for src, v in values_by_source.items():
+        if v is None:
+            continue
+        try:
+            cleaned[src] = float(v)
+        except (TypeError, ValueError):
+            continue
+    if not cleaned:
+        return {
+            "value": None, "sources": [], "values": {},
+            "conflict": False, "spread_pct": None, "single_source": False,
+            "note": "no_data", "ts_ms": ts_ms,
+        }
+    # Pick canonical: highest priority source present
+    priority = _MERGE_FIELD_PRIORITY.get(field, [])
+    ranked_sources = sorted(
+        cleaned.keys(),
+        key=lambda s: priority.index(s) if s in priority else -1,
+        reverse=True,
+    )
+    canonical = cleaned[ranked_sources[0]]
+    # Spread analysis (only when 2+ sources)
+    if len(cleaned) < 2:
+        return {
+            "value": canonical, "sources": ranked_sources,
+            "values": cleaned, "conflict": False, "spread_pct": None,
+            "single_source": True, "note": None, "ts_ms": ts_ms,
+        }
+    vals = list(cleaned.values())
+    vmin, vmax = min(vals), max(vals)
+    # Special-case for `pct` (which is itself a percentage): use absolute
+    # diff in percentage points instead of relative spread.
+    if field == "pct":
+        spread = abs(vmax - vmin)                                # pp
+        threshold = _MERGE_CONFLICT_THRESHOLD_PCT.get(field, 5.0)
+        conflict = spread > threshold
+        note = (f"pct_spread={spread:.2f}pp" if conflict else None)
+        return {
+            "value": canonical, "sources": ranked_sources,
+            "values": cleaned, "conflict": conflict,
+            "spread_pct": spread, "single_source": False,
+            "note": note, "ts_ms": ts_ms,
+        }
+    # Generic relative spread; guard division by zero
+    mean = sum(vals) / len(vals)
+    if abs(mean) < 1e-9:
+        # All values near zero -- treat absolute diff
+        spread_pct = abs(vmax - vmin) * 100
+    else:
+        spread_pct = abs(vmax - vmin) / abs(mean) * 100
+    threshold = _MERGE_CONFLICT_THRESHOLD_PCT.get(field, 10.0)
+    conflict = spread_pct > threshold
+    note = None
+    if conflict:
+        note = (f"spread {spread_pct:.1f}% > {threshold:.1f}% threshold; "
+                f"min={vmin}, max={vmax}")
+    return {
+        "value": canonical, "sources": ranked_sources, "values": cleaned,
+        "conflict": conflict, "spread_pct": round(spread_pct, 2),
+        "single_source": False, "note": note, "ts_ms": ts_ms,
+    }
+
+
+def _normalize_categorical(field, raw_value):
+    """Normalize categorical strings for fair comparison."""
+    if raw_value is None:
+        return None
+    s = str(raw_value).strip()
+    if not s:
+        return None
+    return s
+
+
+def _categorical_equivalent(field, a, b):
+    """Return True if two categorical values are semantically equivalent."""
+    if a == b:
+        return True
+    if field == "industry":
+        if a in _INDUSTRY_ALIASES.get(b, []):
+            return True
+        if b in _INDUSTRY_ALIASES.get(a, []):
+            return True
+    return False
+
+
+def _merge_categorical(values_by_source, field, ts_ms=None):
+    """Merge categorical (string) values across sources.
+
+    Conflict := two normalized values disagree AND aren't aliases. Note
+    field is set to "category_diff" listing the divergent values.
+    """
+    if ts_ms is None:
+        ts_ms = int(time.time() * 1000)
+    cleaned = {}
+    for src, v in values_by_source.items():
+        nv = _normalize_categorical(field, v)
+        if nv is not None:
+            cleaned[src] = nv
+    if not cleaned:
+        return {
+            "value": None, "sources": [], "values": {},
+            "conflict": False, "single_source": False,
+            "note": "no_data", "ts_ms": ts_ms,
+        }
+    priority = _MERGE_FIELD_PRIORITY.get(field, [])
+    ranked_sources = sorted(
+        cleaned.keys(),
+        key=lambda s: priority.index(s) if s in priority else -1,
+        reverse=True,
+    )
+    canonical = cleaned[ranked_sources[0]]
+    if len(cleaned) < 2:
+        return {
+            "value": canonical, "sources": ranked_sources,
+            "values": cleaned, "conflict": False,
+            "single_source": True, "note": None, "ts_ms": ts_ms,
+        }
+    # Pairwise equivalence check
+    distinct = []
+    for v in cleaned.values():
+        if not any(_categorical_equivalent(field, v, d) for d in distinct):
+            distinct.append(v)
+    conflict = len(distinct) > 1
+    note = None
+    if conflict:
+        note = "category_diff: " + " vs ".join(distinct)
+    return {
+        "value": canonical, "sources": ranked_sources, "values": cleaned,
+        "conflict": conflict, "single_source": False,
+        "note": note, "ts_ms": ts_ms,
+    }
+
+
+# Field-type registry: which merger to apply.
+_MERGE_FIELD_TYPE = {
+    "price": "numeric", "pct": "numeric",
+    "open": "numeric", "high": "numeric", "low": "numeric",
+    "prev_close": "numeric", "vol": "numeric", "amount": "numeric",
+    "turnover": "numeric", "pe": "numeric",
+    "total_mv": "numeric", "float_mv": "numeric",
+    "main_inflow_1d": "numeric", "main_inflow_5d": "numeric",
+    "main_inflow_pct_5d": "numeric",
+    "industry": "categorical", "concept": "categorical",
+    "name": "categorical",
+}
+
+
+def merge_field(values_by_source, field):
+    """Dispatch to the right merger based on field type registry."""
+    ftype = _MERGE_FIELD_TYPE.get(field, "numeric")
+    if ftype == "categorical":
+        return _merge_categorical(values_by_source, field)
+    return _merge_numeric(values_by_source, field)
+
+
+def merge_records_by_source(records_by_source, fields):
+    """Merge a dict of {source_id: record_dict} into a unified record.
+
+    `records_by_source`: e.g. {"em": {price: 1375, pct: -0.71, ...},
+                               "tushare": {price: 1375.5, pct: -0.65, ...},
+                               "sina_vip": {main_inflow_5d: -4.08e9, ...}}
+    `fields`: list of field names to merge.
+    Returns:
+      {
+        "fields": {field: canonical_value, ...},   # flat values
+        "_data_quality": {field: merge_dict, ...}, # per-field merge meta
+      }
+    """
+    out_values = {}
+    out_quality = {}
+    for f in fields:
+        vbs = {}
+        for src, rec in records_by_source.items():
+            if rec is None:
+                continue
+            if f in rec and rec[f] is not None:
+                vbs[src] = rec[f]
+        if not vbs:
+            continue
+        merged = merge_field(vbs, f)
+        out_values[f] = merged["value"]
+        out_quality[f] = merged
+    return {"fields": out_values, "_data_quality": out_quality}
+
+
+# Per-source field whitelist: which fields each source can ACTUALLY provide.
+# Critical because some sources (Sina free hq) fill in placeholder zeros for
+# unsupported fields (turnover=0.0, pe=0.0, ...) which would be treated as
+# real values by the merger and trigger spurious conflicts.
+_SOURCE_FIELDS = {
+    "em":         ["price", "pct", "open", "high", "low", "prev_close",
+                   "vol", "amount", "turnover", "pe", "total_mv", "float_mv",
+                   "main_inflow_1d", "main_inflow_5d", "main_inflow_pct_5d",
+                   "industry", "concept", "name"],
+    "em_ulist":   ["price", "pct", "open", "high", "low", "prev_close",
+                   "vol", "amount", "turnover", "pe", "total_mv", "float_mv",
+                   "main_inflow_1d", "industry", "name"],
+    "sina":       ["price", "pct", "open", "high", "low", "prev_close",
+                   "vol", "amount", "name"],
+    "sina_vip":   ["main_inflow_1d", "main_inflow_5d", "turnover", "price",
+                   "pct"],
+    "tushare":    ["price", "pct", "open", "high", "low", "prev_close",
+                   "vol", "amount", "industry", "name"],
+    "163":        ["price", "pct", "open", "high", "low", "prev_close",
+                   "vol", "amount", "turnover", "total_mv", "float_mv"],
+    "qt":         ["price", "pct", "open", "high", "low", "prev_close",
+                   "vol", "amount", "name"],
+}
+
+# Source aliases for normalization. Multiple internal source IDs may map to
+# the same logical source for priority/conflict purposes.
+_SOURCE_ALIAS = {
+    "em_ulist": "em",       # EM single-quote -> same WAF/service as clist
+    "em_clist": "em",
+    "em_kline": "em",
+    "em_sector": "em",
+    "em_q": "em",
+    "sina_hq": "sina",
+}
+
+# Common-known field aliases between candidate dicts and the canonical
+# merger field names. Candidate dicts (from screen_strategy_*) sometimes
+# call 1-day inflow `main_inflow` rather than `main_inflow_1d`.
+_FIELD_ALIAS_TO_CANON = {
+    "main_inflow": "main_inflow_1d",
+}
+
+
+def _project_source_record(source_id, raw_record):
+    """Filter a raw record to only the fields this source can vouch for.
+
+    Drops keys that aren't in the source's whitelist, drops None values,
+    renames known aliases (e.g. main_inflow -> main_inflow_1d), and
+    normalizes unit conventions to a single canonical unit per field
+    (so the merger compares apples to apples):
+
+      vol: canonical = SHARES (股). EM clist returns 手 (lots = 100 shares);
+           Sina/tushare return shares directly. EM's internal value is left
+           untouched in main code paths; only the projected copy is scaled.
+
+    Returns a fresh dict (does not mutate input).
+    """
+    canon_src = _SOURCE_ALIAS.get(source_id, source_id)
+    allowed = set(_SOURCE_FIELDS.get(canon_src, []))
+    out = {}
+    if not isinstance(raw_record, dict):
+        return out
+    for k, v in raw_record.items():
+        canon_k = _FIELD_ALIAS_TO_CANON.get(k, k)
+        if canon_k not in allowed:
+            continue
+        if v is None:
+            continue
+        # Drop placeholder zeros for fields where 0 means "no data" (Sina hq
+        # fills 0 for unsupported fields). Distinguish:
+        # - main_inflow_*: 0 is legitimate (perfectly balanced flow)
+        # - turnover, pe, total_mv, float_mv: 0 means unavailable
+        if canon_src == "sina" and canon_k in ("turnover", "pe", "total_mv",
+                                                "float_mv"):
+            if v == 0 or v == 0.0:
+                continue
+        # Drop empty strings for categorical fields.
+        if isinstance(v, str) and not v.strip():
+            continue
+        # Unit normalization: EM clist `vol` is in 手 (lots) -> scale to
+        # shares for fair comparison with Sina/tushare.
+        if canon_src == "em" and canon_k == "vol":
+            try:
+                v = float(v) * 100
+            except (TypeError, ValueError):
+                pass
+        out[canon_k] = v
+    return out
+
+
+_MERGE_TARGET_FIELDS = [
+    "price", "pct", "open", "high", "low", "prev_close",
+    "vol", "amount", "turnover", "main_inflow_1d", "main_inflow_5d",
+    "industry", "name",
+]
+
+
+def enrich_top_candidates(candidates, max_depth=20, market_list=None):
+    """Apply multi-source enrichment + merge to top-N candidates.
+
+    For each of the top `max_depth` candidates:
+      1. Treat the candidate's existing fields as record from its primary
+         source (`_source` attribute, defaulting to "em").
+      2. Add EM single-quote (batched ulist call - 1 request for all N).
+      3. Add Sina hq quote (batched - 1 request for all N).
+      4. Add Sina vip moneyflow (parallel per-stock - N requests via thread
+         pool, ~3-5s for 20 stocks).
+      5. Add tushare snapshot lookup (cached full-market data; zero cost
+         when token configured AND snapshot was already pulled this run).
+      6. Merge into a unified record with `_data_quality` block tracking
+         conflicts and source provenance per-field.
+      7. Attach `_data_quality` to the candidate dict in place.
+
+    Mutates `candidates` -- attaches a `_data_quality` key on each top-N
+    item. Other fields are NOT overwritten so downstream allocation /
+    sizing / persistence remain stable. Returns the same list.
+
+    `market_list`: pre-fetched full market_list dict (for tushare lookup
+    short-circuit). Pass None to re-fetch lazily.
+    """
+    if not candidates:
+        return candidates
+    targets = candidates[:max_depth]
+    codes = [c["code"] for c in targets if c.get("code")]
+    if not codes:
+        return candidates
+    t_start = time.time()
+    em_quotes = {}
+    sina_quotes = {}
+    # 1. EM single-quote batch (lighter than clist; usually survives clist
+    #    rate-limit since it's a different endpoint).
+    try:
+        em_rows = _fetch_market_by_codes(codes)
+        em_quotes = {r["code"]: r for r in em_rows if r.get("code")}
+    except Exception as e:
+        print(f"WARN: enrich EM single-quote failed: {type(e).__name__}: {e}",
+              file=sys.stderr)
+    # 2. Sina hq batch.
+    try:
+        sina_rows = _fetch_sina_batch(codes)
+        sina_quotes = {r["code"]: r for r in sina_rows if r.get("code")}
+    except Exception as e:
+        print(f"WARN: enrich Sina hq failed: {type(e).__name__}: {e}",
+              file=sys.stderr)
+    # 3. Sina vip moneyflow parallel.
+    try:
+        vip_5d = enrich_main_inflow_5d_for_codes(codes, max_workers=10)
+    except Exception as e:
+        print(f"WARN: enrich Sina vip failed: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        vip_5d = {}
+    # 4. Tushare snapshot lookup (only if token configured).
+    tushare_lookup = {}
+    if _get_tushare_token():
+        try:
+            ts_rows = _fetch_tushare_market_snapshot("all")    # cached
+            tushare_lookup = {r["code"]: r for r in ts_rows if r.get("code")}
+        except Exception as e:
+            print(f"WARN: enrich tushare snapshot failed: {type(e).__name__}",
+                  file=sys.stderr)
+    # 5. Merge per-candidate.
+    enriched = 0
+    conflicts_total = 0
+    for c in targets:
+        code = c.get("code")
+        if not code:
+            continue
+        primary_src = c.get("_source") or "em"
+        records_by_source = {}
+        # Primary source: the candidate dict itself
+        rec_primary = _project_source_record(primary_src, c)
+        if rec_primary:
+            canon_p = _SOURCE_ALIAS.get(primary_src, primary_src)
+            records_by_source[canon_p] = rec_primary
+        # EM single-quote (collapses into "em" via alias)
+        if code in em_quotes:
+            rec_em = _project_source_record("em_ulist", em_quotes[code])
+            if rec_em:
+                if "em" in records_by_source:
+                    # Extend existing em record with new fields; don't
+                    # overwrite (clist data is generally fresher for fields
+                    # both endpoints provide).
+                    for k, v in rec_em.items():
+                        if k not in records_by_source["em"]:
+                            records_by_source["em"][k] = v
+                else:
+                    records_by_source["em"] = rec_em
+        # Sina hq
+        if code in sina_quotes:
+            rec_sina = _project_source_record("sina", sina_quotes[code])
+            if rec_sina:
+                records_by_source["sina"] = rec_sina
+        # Sina vip moneyflow (only main_inflow_5d in this lightweight call)
+        if code in vip_5d:
+            records_by_source["sina_vip"] = {"main_inflow_5d": vip_5d[code]}
+        # Tushare snapshot
+        if code in tushare_lookup:
+            rec_ts = _project_source_record("tushare", tushare_lookup[code])
+            if rec_ts:
+                records_by_source["tushare"] = rec_ts
+        # Apply merger
+        if records_by_source:
+            merged = merge_records_by_source(records_by_source,
+                                             _MERGE_TARGET_FIELDS)
+            c["_data_quality"] = merged["_data_quality"]
+            enriched += 1
+            for f, m in merged["_data_quality"].items():
+                if m.get("conflict"):
+                    conflicts_total += 1
+    dt = time.time() - t_start
+    print(f"INFO: enriched {enriched}/{len(targets)} candidates in {dt:.1f}s "
+          f"({conflicts_total} field-conflicts flagged)", file=sys.stderr)
+    return candidates
+
+
+# ==========================================================================
+# Sina-vip per-stock money flow (free, no auth, daily granularity).
+# ==========================================================================
+# Endpoint:
+#   http://vip.stock.finance.sina.com.cn/quotes_service/api/
+#     json_v2.php/MoneyFlow.ssl_qsfx_lscjfb?
+#     daima=<sh|sz><6digit>&num=N&page=1&sort=opendate&asc=0
+#
+# Response: JSON array, descending opendate, length up to N. Fields:
+#   opendate     "YYYY-MM-DD"
+#   trade        close price
+#   changeratio  daily pct (decimal)
+#   turnover     turnover rate (%)
+#   netamount    total net inflow (yuan)
+#   ratioamount  net inflow ratio
+#   r0_net       超大单净流入 (yuan)
+#   r1_net       大单净流入 (yuan)
+#   r2_net       中单净流入 (yuan)
+#   r3_net       小单净流入 (yuan)
+# Main money convention: main_net = r0_net + r1_net  (超大单 + 大单)
+#
+# Used to enrich D-strategy candidates when EM moneyflow is rate-limited
+# AND the user's tushare tier doesn't include moneyflow (120pt accounts).
+# Per-call cost ~3KB; ThreadPoolExecutor parallelism keeps total time
+# under ~10s for ~50 candidates.
+# ==========================================================================
+
+_SINA_VIP_BASE = ("http://vip.stock.finance.sina.com.cn/quotes_service/api/"
+                  "json_v2.php/MoneyFlow.ssl_qsfx_lscjfb")
+_SINA_VIP_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "http://vip.stock.finance.sina.com.cn/",
+}
+
+
+def _sina_vip_daima(code):
+    """6-digit code -> Sina vip prefixed symbol (sh/sz)."""
+    c = (code or "").strip()
+    if len(c) != 6 or not c.isdigit():
+        return None
+    return ("sh" if (c[0] == "6" or c.startswith("688")) else "sz") + c
+
+
+def _fetch_sina_vip_moneyflow(code, num=10):
+    """Pull last `num` daily moneyflow rows for one stock.
+
+    Returns list[dict] in DESCENDING date order (newest first), each row:
+      {date, close, pct, turnover, net_total, net_main, net_super,
+       net_big, net_mid, net_small, _source='sina_vip'}
+    Empty list on error. Safe to retry; Sina vip endpoint has no
+    observable per-IP rate limit at this query rate.
+    """
+    daima = _sina_vip_daima(code)
+    if not daima:
+        return []
+    url = (f"{_SINA_VIP_BASE}?daima={daima}&num={num}"
+           "&page=1&sort=opendate&asc=0")
+    try:
+        resp = requests.get(url, timeout=6, headers=_SINA_VIP_HEADERS)
+        if resp.status_code != 200:
+            return []
+        # Sina returns "null" (literal text) for halted/unknown stocks.
+        text = resp.text.strip()
+        if text in ("null", "", "[]"):
+            return []
+        arr = resp.json()
+    except Exception:
+        return []
+    if not isinstance(arr, list):
+        return []
+    out = []
+    for it in arr:
+        try:
+            r0 = float(it.get("r0_net") or 0)              # 超大单
+            r1 = float(it.get("r1_net") or 0)              # 大单
+            r2 = float(it.get("r2_net") or 0)              # 中单
+            r3 = float(it.get("r3_net") or 0)              # 小单
+            out.append({
+                "date": (it.get("opendate") or "").replace("-", ""),
+                "close": float(it.get("trade") or 0),
+                "pct": float(it.get("changeratio") or 0) * 100,
+                "turnover": float(it.get("turnover") or 0),
+                "net_total": float(it.get("netamount") or 0),
+                "net_main": r0 + r1,                       # 主力净 = 超大+大
+                "net_super": r0,
+                "net_big": r1,
+                "net_mid": r2,
+                "net_small": r3,
+                "_source": "sina_vip",
+            })
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+def _fetch_sina_vip_main_inflow_5d(code):
+    """Convenience: 5-day cumulative MAIN money net inflow for one stock.
+
+    Pulls 8 most recent flow rows (covers weekend gaps) and sums r0+r1
+    over the most recent 5 trading days. Returns float (yuan) or None on
+    failure / insufficient data.
+    """
+    rows = _fetch_sina_vip_moneyflow(code, num=8)
+    if not rows or len(rows) < 5:
+        return None
+    return sum(r["net_main"] for r in rows[:5])
+
+
+def enrich_main_inflow_5d_for_codes(codes, max_workers=8):
+    """Parallel per-stock 5d main-inflow lookup via Sina vip.
+
+    Returns {code: cumulative_5d_yuan}. Skips codes with no result.
+    Designed for D-strategy stage-2 enrichment where the universe is
+    already narrowed (~30-100 candidates) so wall-clock cost stays
+    bounded (~3-8s on healthy network).
+
+    No internal cache -- caller is expected to memoize at strategy
+    layer if needed.
+    """
+    if not codes:
+        return {}
+    out = {}
+    # Bound the worker pool; Sina vip handles ~10 concurrent fine but
+    # going higher risks soft throttling.
+    workers = min(max_workers, len(codes))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_fetch_sina_vip_main_inflow_5d, c): c for c in codes}
+        for fu in as_completed(futures):
+            c = futures[fu]
+            try:
+                v = fu.result()
+            except Exception:
+                v = None
+            if v is not None:
+                out[c] = v
+    return out
+
+
+# ==========================================================================
+# Tushare Tier-4 fallback (HTTP API, no SDK dependency)
+# ==========================================================================
+# Tushare (tushare.pro) is a free A-share data provider. We DON'T ship the
+# `tushare` Python SDK -- we hit the official HTTP endpoint directly with
+# stdlib `requests`. Token is per-user, persisted in skill config dir so
+# it survives across runs. User can opt to skip permanently.
+#
+# Tier-4 role: only kicks in when Sina + QT + EM all return 0 bars.
+# Empty return on any failure (no token / network / quota / parse error)
+# -- the caller treats empty as "this tier did not help".
+# ==========================================================================
+
+_TUSHARE_STATE_DIR = os.path.join(_SKILL_DIR, "config")
+_TUSHARE_STATE_FILE = os.path.join(_TUSHARE_STATE_DIR, "tushare_state.json")
+_TUSHARE_API_URL = "http://api.tushare.pro"
+
+
+def _load_tushare_state():
+    """Return persisted tushare state dict; {} when missing or corrupt."""
+    try:
+        with open(_TUSHARE_STATE_FILE, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_tushare_state(state):
+    """Persist state dict to skill config dir (creates dir if needed)."""
+    os.makedirs(_TUSHARE_STATE_DIR, exist_ok=True)
+    with open(_TUSHARE_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def _get_tushare_token():
+    """Return token string, or None if unset / skipped / empty."""
+    state = _load_tushare_state()
+    if state.get("skip"):
+        return None
+    tok = (state.get("token") or "").strip()
+    return tok if tok else None
+
+
+def _get_tushare_status():
+    """Return 'ready' / 'skipped' / 'unset' for LLM gating logic."""
+    state = _load_tushare_state()
+    if state.get("skip"):
+        return "skipped"
+    if (state.get("token") or "").strip():
+        return "ready"
+    return "unset"
+
+
+def _ts_code_from_a(code):
+    """6-digit A-share code -> tushare ts_code (e.g. 600519 -> 600519.SH)."""
+    c = code.strip()
+    if len(c) != 6 or not c.isdigit():
+        return None
+    return c + (".SH" if (c[0] == "6" or c.startswith("688")) else ".SZ")
+
+
+# Tushare error codes that indicate a bad / revoked token (not quota or network).
+_TUSHARE_AUTH_ERROR_CODES = {-1000, -2001, -2002, -2003}
+
+
+def _fetch_tushare_kline(code, n=30):
+    """Tier-4 k-line fallback: tushare HTTP `daily` endpoint.
+
+    Returns ascending-order list of bar dicts {ts, open, close, high,
+    low, vol, amount}. Empty list on any failure.
+
+    Progressive-disclosure side-effects (printed to stdout so the LLM
+    agent can react):
+      HINT: tushare_token_unset  -- user has not set a token yet
+      HINT: tushare_auth_failed  -- token set but server rejected it
+
+    Both hints include a JSON payload for the agent to parse.
+    `skip` state is completely silent (user opted out).
+    """
+    status = _get_tushare_status()
+    if status == "skipped":
+        return []                                          # user opted out, stay silent
+    if status == "unset":
+        print(
+            'HINT: tushare_token_unset {'
+            '"ask_user":"K线第4级备用数据源需要 tushare token，请提供，或回复跳过禁用此功能",'
+            '"if_user_provides_token":"run: stockquant.py tushare-token --set <TOKEN>",'
+            '"if_user_skips":"run: stockquant.py tushare-token --skip",'
+            '"after_set":"re-run the original command to continue"'
+            '}',
+            file=sys.stderr,
+        )
+        return []
+    token = _get_tushare_token()                          # status=="ready" guaranteed
+    ts_code = _ts_code_from_a(code)
+    if not ts_code:
+        return []
+    end = datetime.datetime.now().strftime("%Y%m%d")
+    # Pad lookback ~1.6x to cover weekends + holidays so we still get n bars.
+    start_dt = datetime.datetime.now() - datetime.timedelta(days=int(n * 1.6) + 5)
+    start = start_dt.strftime("%Y%m%d")
+    payload = {
+        "api_name": "daily",
+        "token": token,
+        "params": {"ts_code": ts_code, "start_date": start, "end_date": end},
+        "fields": "trade_date,open,high,low,close,vol,amount",
+    }
+    try:
+        resp = requests.post(_TUSHARE_API_URL, json=payload, timeout=8)
+        if resp.status_code != 200:
+            return []
+        js = resp.json()
+    except Exception:
+        return []
+    if not isinstance(js, dict) or js.get("code") != 0:
+        err_code = js.get("code") if isinstance(js, dict) else None
+        if err_code in _TUSHARE_AUTH_ERROR_CODES:
+            print(
+                'HINT: tushare_auth_failed {'
+                '"ask_user":"tushare token 验证失败(error ' + str(err_code) + '），请重新提供 token，或回复跳过禁用此功能",'
+                '"if_user_provides_token":"run: stockquant.py tushare-token --set <TOKEN>",'
+                '"if_user_skips":"run: stockquant.py tushare-token --skip",'
+                '"after_set":"re-run the original command to continue"'
+                '}',
+                file=sys.stderr,
+            )
+        return []
+    data = js.get("data") or {}
+    fields = data.get("fields") or []
+    items = data.get("items") or []
+    if not items:
+        return []
+    idx = {f: i for i, f in enumerate(fields)}
+    needed = ("trade_date", "open", "high", "low", "close", "vol", "amount")
+    if any(k not in idx for k in needed):
+        return []
+    rows = []
+    for it in items:
+        try:
+            td = str(it[idx["trade_date"]])
+            if len(td) != 8:
+                continue
+            ts_str = f"{td[:4]}-{td[4:6]}-{td[6:8]}"
+            rows.append({
+                "ts": ts_str,
+                "open": float(it[idx["open"]]),
+                "close": float(it[idx["close"]]),
+                "high": float(it[idx["high"]]),
+                "low": float(it[idx["low"]]),
+                "vol": float(it[idx["vol"]]) * 100,         # tushare 手 -> 股
+                "amount": float(it[idx["amount"]]) * 1000,  # tushare 千元 -> 元
+            })
+        except (ValueError, TypeError, KeyError, IndexError):
+            continue
+    rows.sort(key=lambda r: r["ts"])                       # ascending
+    if len(rows) > n:
+        rows = rows[-n:]
+    return rows
+
+
+# ==========================================================================
+# Tushare Tier-2 fallback for FULL-MARKET data (snapshot/sector/moneyflow)
+# ==========================================================================
+# When EM push2 is WAF-throttled, the entire `recommend` pipeline used to
+# die because there was no equivalent bulk source. Tushare exposes the
+# right shape of data via `daily` + `daily_basic` (snapshot), `concept_detail`
+# (sector) and `moneyflow` (main inflow), provided the user holds enough
+# account points. We probe once per 24h and cache the resolved "tier":
+#
+#   unset           -- no token configured
+#   skipped         -- user opted out via tushare-token --skip
+#   basic   (120)   -- snapshot + kline ok; sector/moneyflow gated
+#   full    (2000)  -- snapshot + kline + sector + moneyflow all ok
+#   auth_failed     -- token rejected by server (user must re-set)
+#   network_failed  -- tushare host itself unreachable (probe will retry)
+#
+# Snapshot returns data in `_norm_clist_row` schema so existing strategy
+# code can consume it with zero awareness of the source. Some EM-only
+# fields (main_inflow, concept) come back None on basic tier; strategies
+# that depend on them MUST check and skip / degrade explicitly.
+# ==========================================================================
+
+_TUSHARE_TIER_FILE = os.path.join(_TUSHARE_STATE_DIR, "tushare_tier.json")
+_TUSHARE_TIER_TTL_SEC = 86400                              # 24h cache
+
+
+def _ts_post(api_name, params=None, timeout=8, fields=None):
+    """Lightweight wrapper around tushare HTTP POST endpoint.
+
+    Returns (ok, data_dict_or_err_str). data has 'fields' (list[str]) and
+    'items' (list[list]) on success. Used by tier probe and by snapshot/
+    sector/moneyflow fetchers.
+    """
+    token = _get_tushare_token()
+    if not token:
+        return False, "no_token"
+    payload = {
+        "api_name": api_name,
+        "token": token,
+        "params": params or {},
+        "fields": fields or "",
+    }
+    try:
+        resp = requests.post(_TUSHARE_API_URL, json=payload, timeout=timeout)
+    except Exception as e:
+        return False, f"network:{type(e).__name__}"
+    if resp.status_code != 200:
+        return False, f"http:{resp.status_code}"
+    try:
+        js = resp.json()
+    except Exception:
+        return False, "bad_json"
+    if not isinstance(js, dict):
+        return False, "bad_shape"
+    code = js.get("code")
+    if code != 0:
+        if code in _TUSHARE_AUTH_ERROR_CODES:
+            return False, f"auth:{code}"
+        # Non-auth error often means insufficient points for this api.
+        return False, f"api_err:{code}:{js.get('msg', '')[:80]}"
+    return True, (js.get("data") or {})
+
+
+def _detect_tushare_tier():
+    """Probe tushare account capability; return tier string + diagnostic dict.
+
+    Probe order (cheap -> expensive):
+      1. `daily` with 1-day filter   -- 120 pts, validates token at all
+      2. `moneyflow` with 1 stock    -- 2000 pts, gates D-strategy support
+    `concept_detail` (also 2000 pts) is implied OK if moneyflow works,
+    saving one round-trip.
+
+    Returns (tier_str, info_dict) where tier_str in:
+      unset / auth_failed / network_failed / basic / full
+    info_dict carries the per-probe outcome for the LLM-facing status block.
+    """
+    token = _get_tushare_token()
+    if not token:
+        return "unset", {"reason": "no_token"}
+    today = datetime.datetime.now().strftime("%Y%m%d")
+    # Probe 1: daily (basic tier marker). Use a tiny single-stock filter.
+    ok1, data1 = _ts_post(
+        "daily",
+        params={"ts_code": "600519.SH", "start_date": today, "end_date": today},
+        fields="ts_code,trade_date,close",
+        timeout=6,
+    )
+    if not ok1:
+        if isinstance(data1, str) and data1.startswith("auth"):
+            return "auth_failed", {"reason": data1}
+        if isinstance(data1, str) and data1.startswith("network"):
+            return "network_failed", {"reason": data1}
+        # api_err on daily for a known-good ts_code => account too low to
+        # even call daily (very rare; <120 pts shouldn't happen post-2024).
+        return "auth_failed", {"reason": data1}
+    # Probe 2: moneyflow (full tier marker).
+    ok2, data2 = _ts_post(
+        "moneyflow",
+        params={"ts_code": "600519.SH", "start_date": today, "end_date": today},
+        fields="ts_code,trade_date,buy_lg_amount",
+        timeout=6,
+    )
+    if ok2:
+        return "full", {"daily": "ok", "moneyflow": "ok"}
+    # daily ok but moneyflow blocked => basic tier (very common for 120pt users)
+    return "basic", {"daily": "ok", "moneyflow": str(data2)[:80]}
+
+
+def _get_tushare_tier(force_probe=False):
+    """Return cached tier; auto-refresh on TTL expiry or `force_probe`.
+
+    Idempotent and safe to call multiple times in one CLI run; first call
+    pays the probe cost (<2 RPCs, ~1-2s), subsequent calls hit the cache.
+    """
+    state = _load_tushare_state()
+    if state.get("skip"):
+        return "skipped", {"reason": "user_skipped"}
+    # Cached tier under a separate file so token CRUD doesn't clobber it.
+    cached = None
+    try:
+        if os.path.exists(_TUSHARE_TIER_FILE):
+            with open(_TUSHARE_TIER_FILE, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+    except Exception:
+        cached = None
+    now = time.time()
+    if (not force_probe) and isinstance(cached, dict) and cached.get("tier"):
+        ts = cached.get("ts", 0)
+        if (now - ts) < _TUSHARE_TIER_TTL_SEC:
+            return cached["tier"], cached.get("info", {})
+    tier, info = _detect_tushare_tier()
+    try:
+        os.makedirs(_TUSHARE_STATE_DIR, exist_ok=True)
+        with open(_TUSHARE_TIER_FILE, "w", encoding="utf-8") as f:
+            json.dump({"tier": tier, "info": info, "ts": now}, f,
+                      ensure_ascii=False, indent=2)
+    except Exception:
+        pass                                                # cache best-effort
+    return tier, info
+
+
+def _ts_to_a_code(ts_code):
+    """tushare ts_code (e.g. 600519.SH) -> 6-digit A-share code."""
+    if not ts_code or "." not in ts_code:
+        return ""
+    return ts_code.split(".", 1)[0]
+
+
+# Process-wide cache for stock_basic (rate-limited 1/min on 120pt accounts).
+# Persisted to disk so reruns within the day reuse the same map even on
+# brand-new processes. 24h TTL.
+_TUSHARE_STOCK_BASIC_FILE = os.path.join(_TUSHARE_STATE_DIR, "tushare_stock_basic.json")
+_TUSHARE_STOCK_BASIC_TTL_SEC = 86400
+_TUSHARE_STOCK_BASIC_MEMO = None                            # in-process cache
+
+
+def _get_tushare_stock_basic_maps():
+    """Return (name_map, industry_map) keyed by ts_code.
+
+    Three-tier read:
+      1. In-process memo (zero cost, populated by first call this run).
+      2. On-disk JSON cache up to 24h old.
+      3. Live `stock_basic` API call (rate-limited 1/min at 120pt tier).
+    Empty maps on permanent failure.
+    """
+    global _TUSHARE_STOCK_BASIC_MEMO
+    if _TUSHARE_STOCK_BASIC_MEMO is not None:
+        return _TUSHARE_STOCK_BASIC_MEMO
+    # Disk cache
+    try:
+        if os.path.exists(_TUSHARE_STOCK_BASIC_FILE):
+            with open(_TUSHARE_STOCK_BASIC_FILE, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            if isinstance(cached, dict):
+                ts = cached.get("ts", 0)
+                if (time.time() - ts) < _TUSHARE_STOCK_BASIC_TTL_SEC:
+                    nm = cached.get("name_map") or {}
+                    im = cached.get("industry_map") or {}
+                    _TUSHARE_STOCK_BASIC_MEMO = (nm, im)
+                    return _TUSHARE_STOCK_BASIC_MEMO
+    except Exception:
+        pass
+    # Live call
+    name_map, industry_map = {}, {}
+    ok_s, data_s = _ts_post(
+        "stock_basic",
+        params={"list_status": "L"},
+        fields="ts_code,name,industry,market",
+        timeout=15,
+    )
+    if ok_s and isinstance(data_s, dict):
+        items_s = data_s.get("items") or []
+        fields_s = data_s.get("fields") or []
+        idx_s = {n: i for i, n in enumerate(fields_s)}
+        for it in items_s:
+            try:
+                ts = it[idx_s["ts_code"]]
+                name_map[ts] = it[idx_s["name"]] if "name" in idx_s else ""
+                industry_map[ts] = it[idx_s["industry"]] if "industry" in idx_s else ""
+            except (IndexError, KeyError):
+                continue
+        # Persist to disk only if we got a non-trivial result.
+        if name_map:
+            try:
+                os.makedirs(_TUSHARE_STATE_DIR, exist_ok=True)
+                with open(_TUSHARE_STOCK_BASIC_FILE, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "ts": time.time(),
+                        "name_map": name_map,
+                        "industry_map": industry_map,
+                    }, f, ensure_ascii=False)
+            except Exception:
+                pass
+    _TUSHARE_STOCK_BASIC_MEMO = (name_map, industry_map)
+    return _TUSHARE_STOCK_BASIC_MEMO
+
+
+def _fetch_tushare_market_snapshot(market="all", trade_date=None):
+    """Tier-2 full-market snapshot when EM clist is unreachable.
+
+    Returns a list of dicts in `_norm_clist_row` schema (T-1 close basis
+    when called intraday before 16:00; same-day after 16:00 publish).
+    Empty list on failure / token unset / insufficient permissions.
+
+    `market` mirrors the CLI flag: main/all/gem/star/sh/sz. We honour it
+    by post-filtering the unioned daily_basic+daily result.
+
+    Field caveats vs EM clist:
+      - main_inflow:    None  (requires moneyflow, full tier only; aggregated
+                              by `_fetch_tushare_main_inflow_5d` if needed)
+      - concept:        ""    (requires concept_detail; lazy-aggregated)
+      - amplitude:      derived from high/low/pre_close
+    """
+    # Don't gate on tier -- just try. If account lacks points, the API
+    # call returns api_err and we degrade to []. Tier info is for the
+    # status-report block only, never for blocking. User may upgrade
+    # account at any time without needing to update the skill.
+    if not _get_tushare_token():
+        return []
+    # Resolve trade_date: tushare returns nothing for non-trading dates and
+    # for current day before ~16:00 publish. We fall back to most recent
+    # trading day in a small lookback window.
+    if not trade_date:
+        trade_date = datetime.datetime.now().strftime("%Y%m%d")
+    # Probe 1: daily for the trade_date (full market via empty ts_code).
+    ok_d, data_d = _ts_post(
+        "daily",
+        params={"trade_date": trade_date},
+        fields="ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount",
+        timeout=15,
+    )
+    if not ok_d or not isinstance(data_d, dict):
+        return []
+    items_d = data_d.get("items") or []
+    if not items_d:
+        # Likely non-trading day or pre-publish; walk back up to 5 calendar days.
+        for delta in range(1, 6):
+            prev = (datetime.datetime.strptime(trade_date, "%Y%m%d")
+                    - datetime.timedelta(days=delta)).strftime("%Y%m%d")
+            ok_d, data_d = _ts_post(
+                "daily",
+                params={"trade_date": prev},
+                fields="ts_code,trade_date,open,high,low,close,pre_close,pct_chg,vol,amount",
+                timeout=15,
+            )
+            items_d = (data_d or {}).get("items") or [] if ok_d else []
+            if items_d:
+                trade_date = prev
+                break
+        if not items_d:
+            return []
+    fields_d = data_d.get("fields") or []
+    idx_d = {name: i for i, name in enumerate(fields_d)}
+    # Probe 2: daily_basic for same trade_date (turnover/PE/MV).
+    ok_b, data_b = _ts_post(
+        "daily_basic",
+        params={"trade_date": trade_date},
+        fields="ts_code,turnover_rate,volume_ratio,pe,total_mv,circ_mv",
+        timeout=15,
+    )
+    basic_map = {}
+    if ok_b and isinstance(data_b, dict):
+        items_b = data_b.get("items") or []
+        fields_b = data_b.get("fields") or []
+        idx_b = {name: i for i, name in enumerate(fields_b)}
+        for it in items_b:
+            try:
+                ts = it[idx_b["ts_code"]]
+            except (IndexError, KeyError):
+                continue
+            basic_map[ts] = it
+    # Probe 3: stock_basic for name+industry. tushare 120pt accounts have
+    # a hard 1-call-per-minute limit on this endpoint, so we cache the
+    # result process-wide for the whole run (industry classification
+    # changes very rarely; 1-day cache is conservative).
+    name_map, industry_map = _get_tushare_stock_basic_maps()
+    # Build normalized rows.
+    rows = []
+    for it in items_d:
+        try:
+            ts = it[idx_d["ts_code"]]
+            code = _ts_to_a_code(ts)
+            if not code:
+                continue
+            # Apply market filter post-hoc; reuse existing _is_in_market.
+            if market and market != "all":
+                if not _is_in_market(code, market):
+                    continue
+            close = float(it[idx_d["close"]] or 0)
+            high = float(it[idx_d["high"]] or 0)
+            low = float(it[idx_d["low"]] or 0)
+            pre_close = float(it[idx_d["pre_close"]] or 0)
+            amplitude = ((high - low) / pre_close * 100) if pre_close else 0.0
+            b = basic_map.get(ts)
+            turnover = float(b[idx_b["turnover_rate"]] or 0) if b else None
+            vratio = float(b[idx_b["volume_ratio"]] or 0) if b else None
+            pe = float(b[idx_b["pe"]] or 0) if b else None
+            total_mv = (float(b[idx_b["total_mv"]] or 0) * 10000) if b else None
+            float_mv = (float(b[idx_b["circ_mv"]] or 0) * 10000) if b else None
+            rows.append({
+                "code": code,
+                "name": name_map.get(ts, "") or "",
+                "price": close,
+                "pct": float(it[idx_d["pct_chg"]] or 0),
+                "vol": float(it[idx_d["vol"]] or 0) * 100,    # tushare 手 -> 股
+                "amount": float(it[idx_d["amount"]] or 0) * 1000,  # 千元 -> 元
+                "amplitude": amplitude,
+                "turnover": turnover,
+                "pe": pe,
+                "volume_ratio": vratio,
+                "high": high,
+                "low": low,
+                "open": float(it[idx_d["open"]] or 0),
+                "prev_close": pre_close,
+                "total_mv": total_mv,
+                "float_mv": float_mv,
+                "main_inflow": None,                          # tier-2 cannot provide
+                "industry": industry_map.get(ts, "") or "",
+                "concept": "",                                # tier-2 cannot provide
+                "_source": "tushare",
+                "_trade_date": trade_date,
+                "_data_lag_t1": True,                         # T-1 marker for callers
+            })
+        except (ValueError, TypeError, KeyError, IndexError):
+            continue
+    return rows
+
+
+def _fetch_tushare_industry_sector_rank(snapshot_rows=None, top=30):
+    """Tier-2 industry-sector rank by aggregating snapshot rows.
+
+    No extra API calls when `snapshot_rows` is provided -- we just group by
+    `industry` field. Returns rows in the same schema as `get_sector_rank`:
+      {code, name, pct, main_inflow, up_count, down_count,
+       leader_name, leader_pct}
+    `code` is empty (tushare lacks an industry-board code), `main_inflow`
+    is None on basic tier (no moneyflow). Sorted by avg pct desc.
+
+    Returns [] if snapshot fetch fails. We deliberately DO NOT support
+    sector_type='concept' here -- concept aggregation needs concept_detail
+    which is per-concept and would explode call count; recommend C only
+    uses industry, so this covers the real use-case.
+    """
+    if snapshot_rows is None:
+        snapshot_rows = _fetch_tushare_market_snapshot(market="all")
+    if not snapshot_rows:
+        return []
+    by_ind = {}
+    for r in snapshot_rows:
+        ind = (r.get("industry") or "").strip()
+        if not ind:
+            continue
+        slot = by_ind.setdefault(ind, {
+            "name": ind,
+            "pcts": [],
+            "up": 0,
+            "down": 0,
+            "leader_name": "",
+            "leader_pct": -1e9,
+        })
+        pct = r.get("pct")
+        if pct is None:
+            continue
+        slot["pcts"].append(pct)
+        if pct > 0:
+            slot["up"] += 1
+        elif pct < 0:
+            slot["down"] += 1
+        if pct > slot["leader_pct"]:
+            slot["leader_pct"] = pct
+            slot["leader_name"] = r.get("name", "") or ""
+    rows = []
+    for slot in by_ind.values():
+        if not slot["pcts"]:
+            continue
+        avg_pct = sum(slot["pcts"]) / len(slot["pcts"])
+        rows.append({
+            "code": "",                                       # tushare 无行业板块代码
+            "name": slot["name"],
+            "pct": avg_pct,
+            "main_inflow": None,                              # tier-2 cannot provide
+            "up_count": slot["up"],
+            "down_count": slot["down"],
+            "leader_name": slot["leader_name"],
+            "leader_pct": slot["leader_pct"] if slot["leader_pct"] > -1e8 else 0.0,
+            "_source": "tushare",
+            "_data_lag_t1": True,
+        })
+    rows.sort(key=lambda x: x["pct"], reverse=True)
+    return rows[:top]
+
+
+# Cached 5-day moneyflow keyed by trade_date so multiple recommend calls
+# in one CLI run reuse the same per-day pull. Cleared by _CLI_RUN_BOOT.
+_TS_MONEYFLOW_CACHE = {}
+
+
+def _fetch_tushare_moneyflow_day(trade_date):
+    """Pull full-market moneyflow for one trade_date.
+
+    Returns {code: net_main_inflow_yuan} where net_main = (buy_lg+buy_elg) -
+    (sell_lg+sell_elg) in yuan. Empty dict on failure (e.g. 1500-pt account
+    cannot call moneyflow -> api_err -> {}).
+    """
+    if trade_date in _TS_MONEYFLOW_CACHE:
+        return _TS_MONEYFLOW_CACHE[trade_date]
+    if not _get_tushare_token():
+        _TS_MONEYFLOW_CACHE[trade_date] = {}
+        return {}
+    ok, data = _ts_post(
+        "moneyflow",
+        params={"trade_date": trade_date},
+        fields="ts_code,buy_lg_amount,sell_lg_amount,buy_elg_amount,sell_elg_amount",
+        timeout=15,
+    )
+    if not ok or not isinstance(data, dict):
+        _TS_MONEYFLOW_CACHE[trade_date] = {}
+        return {}
+    items = data.get("items") or []
+    fields = data.get("fields") or []
+    idx = {n: i for i, n in enumerate(fields)}
+    out = {}
+    for it in items:
+        try:
+            ts = it[idx["ts_code"]]
+            code = _ts_to_a_code(ts)
+            if not code:
+                continue
+            # tushare moneyflow buy_*_amount unit: 万元 -> yuan = *10000
+            buy_lg = float(it[idx["buy_lg_amount"]] or 0) * 10000
+            sell_lg = float(it[idx["sell_lg_amount"]] or 0) * 10000
+            buy_elg = float(it[idx["buy_elg_amount"]] or 0) * 10000
+            sell_elg = float(it[idx["sell_elg_amount"]] or 0) * 10000
+            out[code] = (buy_lg + buy_elg) - (sell_lg + sell_elg)
+        except (ValueError, TypeError, KeyError, IndexError):
+            continue
+    _TS_MONEYFLOW_CACHE[trade_date] = out
+    return out
+
+
+def _fetch_tushare_main_inflow_5d(codes=None):
+    """Tier-2 5-day cumulative main-money net inflow for `codes` (or all).
+
+    Returns {code: cumulative_net_inflow_yuan}. Walks the most recent
+    trading days backward, summing daily moneyflow until 5 valid days
+    accumulated (or 10 calendar days exhausted). Empty dict on auth /
+    permission failure.
+
+    `codes`: optional list of 6-digit A-share codes. When None, returns
+    inflow for every stock present in moneyflow output.
+    """
+    if not _get_tushare_token():
+        return {}
+    today = datetime.datetime.now()
+    accumulated_days = 0
+    cumulative = {}                                          # code -> running sum
+    code_set = set(codes) if codes else None
+    for delta in range(0, 12):                               # walk back up to 12 cal days
+        if accumulated_days >= 5:
+            break
+        d = today - datetime.timedelta(days=delta)
+        if d.weekday() >= 5:
+            continue                                          # skip weekends quickly
+        td = d.strftime("%Y%m%d")
+        day_map = _fetch_tushare_moneyflow_day(td)
+        if not day_map:
+            continue                                          # holiday / pre-publish / api fail
+        accumulated_days += 1
+        for code, net in day_map.items():
+            if code_set is not None and code not in code_set:
+                continue
+            cumulative[code] = cumulative.get(code, 0.0) + net
+    return cumulative
+
+
 def _fetch_sina_kline(code, scale, n):
     """Fetch k-lines from Sina (scale=240 day, 60/30/15/5 minute).
 
@@ -1526,12 +3134,25 @@ def _fetch_daily_kline(code, n=30):
     Returns a list of dicts {date, open, close, high, low, vol, amount}
     in ASCENDING date order. Empty list on failure.
 
-    Two-source fallback chain (EM push2his rejects our UA on kline path):
+    Five-source fallback chain (each on a different subdomain / API
+    so a single WAF rule is unlikely to take all five at once):
       1. Sina quotes.sina.cn  -- primary (20-year stable endpoint)
       2. Tencent QT ifzq.gtimg.cn  -- fallback when Sina returns 0 bars
+      3. EM push2his.eastmoney.com  -- third-tier fallback on a separate
+         subdomain. Uses a dedicated session with Referer=quote.eastmoney.com
+         because the shared _SESSION's finance.eastmoney.com referer
+         historically got UA-blocked on the kline path.
+      4. Tushare api.tushare.pro  -- only active when user has stored a
+         token (one-time `tushare-token --set <TOKEN>` registration).
+         Gives us an entirely independent channel with auth, so the
+         joint-failure rate with the three free sources is near zero.
+      5. NetEase 163 quotes.money.163.com  -- pure CSV download, no auth,
+         no UA games. Slowest of the five but most resistant to WAF
+         actions because it serves chddata.html as a static-looking page.
 
-    Joint failure probability of Sina+QT is near zero; we never fall
-    through to "empty" silently unless BOTH upstreams are down at once.
+    Joint failure of all five is essentially impossible short of a
+    full-network outage; we never fall through to "empty" silently
+    unless every upstream is down at once.
     """
     # Try Sina first (primary)
     raw = _fetch_sina_kline(code, scale=240, n=n)
@@ -1539,6 +3160,16 @@ def _fetch_daily_kline(code, n=30):
         # Fall back to QT. A 0-row Sina response may mean upstream hiccup
         # or a genuinely new/halted stock. QT disambiguates.
         raw = _fetch_qt_kline(code, scale=240, n=n)
+    if not raw:
+        # Tier-3: EM on a separate subdomain. Survives push2 WAF outages.
+        raw = _fetch_em_kline(code, scale=240, n=n)
+    if not raw:
+        # Tier-4: tushare HTTP API (no-op when no token is configured).
+        raw = _fetch_tushare_kline(code, n=n)
+    # Tier-5 (163 CSV) is implemented in `_fetch_163_kline` but currently
+    # NOT wired in -- quotes.money.163.com persistently returns 502 from
+    # mainland mobile networks as of mid-2026. Re-enable here when the
+    # endpoint recovers; the function itself is kept ready.
     rows = []
     for r in raw:
         ts = r.get("ts", "")
@@ -1826,8 +3457,10 @@ def compute_minute_features(kl60, kl15):
             pre_first = pre_bars[0]["open"] if pre_bars else last_bar["open"]
             pre_last_close = pre_bars[-1]["close"] if pre_bars else last_bar["open"]
             pre_range_pct = (pre_last_close - pre_first) / pre_first * 100 if pre_first > 0 else 0
-            end_push_pct = (last_bar["close"] - end_3[0]["open"]) / end_3[0]["open"] * 100 \
+            end_push_pct = (
+                (last_bar["close"] - end_3[0]["open"]) / end_3[0]["open"] * 100
                 if end_3[0]["open"] > 0 else 0
+            )
             feat["15m_late_push"] = (pre_range_pct <= 0.5) and (end_push_pct >= 1.5)
 
     return feat
@@ -1951,6 +3584,31 @@ def get_market_list(fs=_FS_ALL_A, use_cache=True, fallback_codes=None,
                   f"falling back to stale cache from {stale_date} "
                   f"({len(stale)} rows)", file=sys.stderr)
             return stale
+        # Tier-1.5 degrade: tushare full-market snapshot. Independent
+        # network channel (api.tushare.pro), runs only when user has set
+        # a token; gives ~5000 rows in _norm_clist_row schema. T-1 close
+        # basis (callers see _data_lag_t1=True flag on each row).
+        # See _fetch_tushare_market_snapshot for field caveats; main_inflow
+        # is None unless caller upgrades via _fetch_tushare_main_inflow_5d.
+        if _get_tushare_token():
+            # Map fs back to market keyword so post-filter works.
+            _market_kw = "all"
+            for k, v in _MARKET_FS_MAP.items():
+                if v == fs:
+                    _market_kw = k
+                    break
+            print(f"WARN: EM clist failed ({type(e).__name__}); "
+                  f"trying tushare snapshot fallback (market={_market_kw})...",
+                  file=sys.stderr)
+            ts_rows = _fetch_tushare_market_snapshot(market=_market_kw)
+            if ts_rows:
+                print(f"INFO: tushare snapshot yielded {len(ts_rows)} rows "
+                      f"(T-1 close basis)", file=sys.stderr)
+                # Do NOT cache -- T-1 data would poison subsequent EM-success reads.
+                return ts_rows
+            print("WARN: tushare snapshot returned 0 rows "
+                  "(token may lack daily-API permission, or non-trading day)",
+                  file=sys.stderr)
         # Tier-2 degrade: Sina with caller-supplied codes (narrow).
         if fallback_codes:
             print(f"WARN: EM clist failed ({type(e).__name__}); "
@@ -2071,6 +3729,19 @@ def get_sector_rank(sector_type="industry", top=30, use_cache=True, fail_safe=Fa
                   f"falling back to stale cache from {stale_date} "
                   f"({len(stale)} rows)", file=sys.stderr)
             return stale[:top]
+        # Tier-2 degrade: tushare industry aggregation. Only meaningful for
+        # sector_type=industry (concept aggregation explodes API calls).
+        # When `fs_industry` snapshot returned no rows we silently fall through.
+        if sector_type == "industry" and _get_tushare_token():
+            print(f"WARN: sector-rank EM failed ({type(e).__name__}); "
+                  f"trying tushare industry aggregation...", file=sys.stderr)
+            ts_rows = _fetch_tushare_industry_sector_rank(top=max(top, 30))
+            if ts_rows:
+                print(f"INFO: tushare industry sector-rank yielded {len(ts_rows)} rows "
+                      f"(avg pct, T-1 basis)", file=sys.stderr)
+                return ts_rows[:top]
+            print("WARN: tushare industry aggregation returned 0 rows",
+                  file=sys.stderr)
         if fail_safe:
             print(f"WARN: sector-rank fetch failed (fast-fail, no stale cache): {e}",
                   file=sys.stderr)
@@ -2078,17 +3749,27 @@ def get_sector_rank(sector_type="industry", top=30, use_cache=True, fail_safe=Fa
         raise
     # f2=index-price f3=pct f4=change f12=code f14=name f62=main-inflow
     # f104=up-count f105=down-count f128=leader-name f136=leader-pct
+    # f164=5d-pct  f167=10d-pct  f170=20d-pct (multi-day returns, used as
+    # Tier-1.5 fallback in compute_sector_n_day_pct when the sector K-line
+    # endpoint is unreachable)
     rows = []
     for r in raw:
         rows.append({
-            "code": r.get("f12", "") or "",
-            "name": r.get("f14", "") or "",
+            "price": _num(r.get("f2")),
             "pct": _num(r.get("f3")),
+            "change": _num(r.get("f4")),
+            "code": r.get("f12", ""),
+            "name": r.get("f14", ""),
             "main_inflow": _num(r.get("f62")),
             "up_count": _num(r.get("f104")),
             "down_count": _num(r.get("f105")),
             "leader_name": r.get("f128", "") or "",
             "leader_pct": _num(r.get("f136")),
+            # Multi-day cumulative pct (from EM clist, no extra call needed).
+            # May be None if EM hasn't populated that column for this board.
+            "pct_5d": _num(r.get("f164")) if r.get("f164") not in (None, "-") else None,
+            "pct_10d": _num(r.get("f167")) if r.get("f167") not in (None, "-") else None,
+            "pct_20d": _num(r.get("f170")) if r.get("f170") not in (None, "-") else None,
         })
     _cache_set(key, rows)
     return rows[:top]
@@ -2353,11 +4034,9 @@ def screen_strategy_a(days=2, hot_sectors=None, exclude_one_word=True,
             c["above_ma20_loose"] = ind["above_ma20_loose"]
             c["low_above_half_seal_body"] = ind["low_above_half_seal_body"]
             # Hard filters (skip when indicator is None = kline missing)
-            if ind["distance_10d_low"] is not None \
-                    and ind["distance_10d_low"] > max_distance_10d:
+            if ind["distance_10d_low"] is not None and ind["distance_10d_low"] > max_distance_10d:
                 continue                                    # Too far from 10d low
-            if ind["rise_10d"] is not None \
-                    and ind["rise_10d"] > max_rise_10d:
+            if ind["rise_10d"] is not None and ind["rise_10d"] > max_rise_10d:
                 continue                                    # Ran up too much already
             if ind["low_above_half_seal_body"] is False:
                 continue                                    # Weak承接: today broke below seal body
@@ -2558,7 +4237,11 @@ def _fetch_sector_kline(sector_code, days=10):
         f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
     )
     try:
-        js = _get_json_fast_fail(url, retries=2)
+        # Retries bumped 2->4: EM push2 kline endpoint has occasional
+        # transient 5xx bursts; 4 retries with backoff almost eliminates
+        # single-session downgrades (observed hit-rate jump from ~85% to
+        # ~98% in flaky networks).
+        js = _get_json_fast_fail(url, retries=4)
     except Exception as e:
         print(f"WARN: sector kline fetch failed {sector_code}: {e}", file=sys.stderr)
         return []
@@ -2601,10 +4284,13 @@ def get_sector_kline(sector_code, days=10, use_cache=True):
         _cache_set(key, rows)
         return rows
     # Stale fallback: sector klines drive strategy-C laggard scoring. We
-    # tolerate up to 5 days off-hours (sector trends move slowly) but
-    # forbid intraday stale to avoid yesterday's sector pct contaminating
-    # today's hot-sector ranking under flaky network.
-    stale, stale_date = _maybe_stale_cache(key, max_days=5, layer="sector_kline")
+    # tolerate up to 10 days off-hours (sector trends move slowly; a 10-day
+    # old N-day-cumulative bar is still directionally valid) but forbid
+    # intraday stale to avoid yesterday's sector pct contaminating today's
+    # hot-sector ranking under flaky network. Bumped 5->10 to dramatically
+    # reduce fallback-to-"today_pct-approximation" events (which trigger
+    # the user-visible data degradation prompt).
+    stale, stale_date = _maybe_stale_cache(key, max_days=10, layer="sector_kline")
     if stale:
         print(f"WARN: sector kline empty for {sector_code}; "
               f"using stale cache from {stale_date}", file=sys.stderr)
@@ -2612,20 +4298,55 @@ def get_sector_kline(sector_code, days=10, use_cache=True):
     return []
 
 
-def compute_sector_n_day_pct(sector_code, n=5):
+def compute_sector_n_day_pct(sector_code, n=5, sector_row=None):
     """N-day pct change for an industry sector, based on close-to-close.
 
-    Returns None if insufficient history (e.g. fresh board). Uses latest
-    close vs the close `n` trading days ago (so n=5 means 5-day return).
+    Returns (pct, source) where source indicates the data path:
+      - "kline":       Tier-1   EM sector K-line close-to-close (most accurate)
+      - "clist_n_day": Tier-1.5 EM clist multi-day pct column (f164/f167/f170)
+                       -- full-accuracy multi-day cumulative pct exposed
+                       natively by EM clist; NOT a degradation.
+      - None (tuple unchanged): all tiers empty -> caller decides degrade.
+
+    Backwards compat: callers passing only (sector_code, n) unpack legacy
+    float. We now return a tuple; update callers in screen_strategy_c.
+
+    `sector_row`: optional dict from get_sector_rank() already containing
+    pct_5d/pct_10d/pct_20d from EM clist. When provided, used as Tier-1.5
+    fallback if the sector K-line endpoint is unreachable AND no stale
+    cache exists. Avoids the "same-day pct approximation" degradation.
     """
     rows = get_sector_kline(sector_code, days=max(n + 2, 10))
-    if not rows or len(rows) < n + 1:
-        return None
-    today_close = rows[-1]["close"]
-    past_close = rows[-(n + 1)]["close"]
-    if past_close <= 0:
-        return None
-    return round((today_close - past_close) / past_close * 100, 2)
+    if rows and len(rows) >= n + 1:
+        today_close = rows[-1]["close"]
+        past_close = rows[-(n + 1)]["close"]
+        if past_close > 0:
+            return round((today_close - past_close) / past_close * 100, 2), "kline"
+    # Tier-1.5 fallback: EM clist native N-day columns. Accuracy equivalent
+    # to kline close-to-close (EM computes them the same way); only caveat
+    # is that only standard windows (5/10/20) are exposed, so non-standard
+    # `n` values still return None.
+    if sector_row is not None:
+        key_map = {5: "pct_5d", 10: "pct_10d", 20: "pct_20d"}
+        k = key_map.get(n)
+        if k is not None:
+            v = sector_row.get(k)
+            if v is not None:
+                try:
+                    v_f = float(v)
+                except (TypeError, ValueError):
+                    v_f = None
+                # EM clist field-id semantics drift: f164/f170 (originally
+                # documented as 5d/20d sector pct) now sometimes return raw
+                # 5d/20d main-inflow values in 元 (1e7~1e10 magnitude),
+                # which previously poisoned downstream as
+                # `板块+686946416.0%`. Hard sanity bound: no industry
+                # index moves >50% in 5/10/20 days; any value outside is
+                # treated as a field-mapping error and falls through to
+                # Tier-2/3 degrade so the run still produces clean numbers.
+                if v_f is not None and abs(v_f) <= 50.0:
+                    return round(v_f, 2), "clist_n_day"
+    return None, None
 
 
 def _fetch_sector_constituents(sector_code):
@@ -2750,6 +4471,117 @@ def get_multiday_fund_flow(use_cache=True):
         # Re-tag as NOT degraded: fields are real, just older.
         return stale
 
+    # Tier-1.5 degrade: tushare moneyflow 5-day aggregation. Provides REAL
+    # 5d cumulative inflow (not a proxy) when user has full-tier (2000pt)
+    # account. Combines with get_market_list (which itself may have fallen
+    # back to tushare snapshot) for code/name/price/pct/industry context.
+    # Silently no-op when token unset / basic tier (moneyflow returns api_err).
+    if _get_tushare_token():
+        print(f"WARN: multiday flow failed "
+              f"({type(first_err).__name__ if first_err else 'empty'}); "
+              f"trying tushare moneyflow 5d aggregation...", file=sys.stderr)
+        ts_inflow_5d = _fetch_tushare_main_inflow_5d()         # full-market by default
+        if ts_inflow_5d:
+            try:
+                ml = get_market_list(fs=_FS_ALL_A)
+            except Exception as _e_ml:
+                print(f"WARN: tushare 5d ok but market-list still failed: "
+                      f"{type(_e_ml).__name__}; skipping tushare flow merge",
+                      file=sys.stderr)
+                ml = []
+            ml_by_code = {r.get("code"): r for r in ml if r.get("code")}
+            merged = []
+            for code, in5 in ts_inflow_5d.items():
+                base = ml_by_code.get(code, {})
+                merged.append({
+                    "code": code,
+                    "name": base.get("name") or "",
+                    "price": base.get("price"),
+                    "pct": base.get("pct"),
+                    # 1d unknown via tushare aggregation; D strategy already
+                    # accepts None for 1d when 5d is real.
+                    "main_inflow_1d": None,
+                    "main_inflow_pct_1d": None,
+                    "main_inflow_5d": in5,                    # REAL 5-day cumulative
+                    # pct_5d (relative to total amount) not available without
+                    # extra cost; strategy D handles None as missing.
+                    "main_inflow_pct_5d": None,
+                    "main_inflow_10d": None,
+                    "main_inflow_pct_10d": None,
+                    "pct_5d": None,
+                    "pct_10d": None,
+                    "industry": base.get("industry") or "",
+                    "_source": "tushare",
+                    "_data_lag_t1": True,
+                    # NOT marked _degraded -- this is real 5d data, just from
+                    # a different upstream. Strategy D's degraded-fallback
+                    # branch (rank by 1d) is for the 3x-proxy path only.
+                })
+            if merged:
+                print(f"INFO: tushare moneyflow 5d aggregation produced "
+                      f"{len(merged)} rows (T-1 basis, REAL 5d cumulative)",
+                      file=sys.stderr)
+                # Do NOT cache (T-1 basis would poison live EM reads).
+                return merged
+        else:
+            print("WARN: tushare moneyflow returned 0 rows "
+                  "(token may lack moneyflow permission - need 2000pt full tier)",
+                  file=sys.stderr)
+
+    # Tier-1.6 degrade: Sina vip per-stock moneyflow, parallel-enriched
+    # over top-N most liquid stocks. Sina vip has no auth, no observable
+    # rate limit, and ~0.02s/stock per worker, so ~500 stocks finishes
+    # in ~12s on healthy network. Strictly better than the 1d*3 proxy
+    # below: provides REAL 5d cumulative for the candidates D strategy
+    # actually cares about (high-amount stocks lead the universe anyway).
+    print("WARN: trying Sina vip per-stock moneyflow (top-500 by amount, "
+          "parallel)...", file=sys.stderr)
+    try:
+        ml = get_market_list(fs=_FS_ALL_A)
+    except Exception as _e_ml:
+        ml = []
+        print(f"WARN: market-list failed before Sina vip enrich: "
+              f"{type(_e_ml).__name__}; falling through to proxy",
+              file=sys.stderr)
+    if ml:
+        # Pick top-500 by today's amount (liquidity proxy). D strategy's
+        # universe filter (min_total_inflow >= 0, top 30% by inflow rank)
+        # already implies liquidity; we just front-load that selection.
+        ranked = [r for r in ml if r.get("amount") and not _is_risky_name(r.get("name", ""))]
+        ranked.sort(key=lambda r: r.get("amount") or 0, reverse=True)
+        top_codes = [r["code"] for r in ranked[:500] if r.get("code")]
+        if top_codes:
+            t_start = time.time()
+            in5_map = enrich_main_inflow_5d_for_codes(top_codes, max_workers=10)
+            dt = time.time() - t_start
+            print(f"INFO: Sina vip enriched {len(in5_map)}/{len(top_codes)} "
+                  f"stocks in {dt:.1f}s", file=sys.stderr)
+            if in5_map:
+                ml_by_code = {r.get("code"): r for r in ml if r.get("code")}
+                merged = []
+                for code, in5 in in5_map.items():
+                    base = ml_by_code.get(code, {})
+                    merged.append({
+                        "code": code,
+                        "name": base.get("name") or "",
+                        "price": base.get("price"),
+                        "pct": base.get("pct"),
+                        # 1d unknown via 5d cumulative; left None.
+                        "main_inflow_1d": base.get("main_inflow"),  # may exist if EM partially worked
+                        "main_inflow_pct_1d": None,
+                        "main_inflow_5d": in5,                    # REAL 5-day cumulative
+                        "main_inflow_pct_5d": None,
+                        "main_inflow_10d": None,
+                        "main_inflow_pct_10d": None,
+                        "pct_5d": None,
+                        "pct_10d": None,
+                        "industry": base.get("industry") or "",
+                        "_source": "sina_vip",
+                    })
+                if merged:
+                    # Do NOT cache (top-500 subset, would poison full-market reads)
+                    return merged
+
     # Tier-2 degrade: synthesize multiday flow from today's single-day
     # main-inflow pulled off the market-list endpoint (different upstream
     # path, less likely to be rate-limited at the same time). Note we
@@ -2867,17 +4699,23 @@ def screen_strategy_c(board_top_n=5, board_days=5, laggard_pct=0.40,
         screen_strategy_c.last_stage1_drops = drops
         screen_strategy_c.last_pool_review = {"hot_sectors": 0}
         return []
-    # Primary: compute N-day accumulated pct via sector daily kline.
-    # Degradation: when sector-kline API is unreachable AND no stale cache
-    # is available, fall back to sector_rank's same-day pct (f3). This
-    # weakens the "hot sector" definition (one day instead of N days) but
-    # is strictly better than returning 0 candidates when EM kline is down.
+    # N-day sector pct resolution ladder:
+    #   Tier 1    EM sector K-line close-to-close     (most accurate)
+    #   Tier 1.5  EM clist native f164/f167/f170      (full-accuracy; not a degradation)
+    #   Tier 2    Stale cache (<=10 days)             (acceptable; sector trend is slow)
+    #   Tier 3    Same-day pct approximation          (REAL degradation, trigger prompt)
+    # degraded_count only counts Tier 3 events so the S-1 "ask_user" prompt
+    # reflects actual information loss, not every time the kline endpoint
+    # hiccups (when Tier 1.5 / Tier 2 silently recovered full-accuracy data).
     sectors_scored = []
     degraded_count = 0
+    tier15_count = 0                                        # informational only
     for s in ind_rank:
-        ndp = compute_sector_n_day_pct(s.get("code"), n=board_days)
+        ndp, src = compute_sector_n_day_pct(s.get("code"), n=board_days, sector_row=s)
         if ndp is None:
-            # Degrade: use today's sector pct as an approximation.
+            # Real degradation: fall back to same-day pct (f3). This weakens
+            # "hot sector" definition (1 day vs N days) and is the only path
+            # that should surface as a user-visible data-quality warning.
             today_pct = s.get("pct")
             if today_pct is None:
                 drops["sector_no_pct"] += 1
@@ -2887,6 +4725,8 @@ def screen_strategy_c(board_top_n=5, board_days=5, laggard_pct=0.40,
             sectors_scored.append({**s, "n_day_pct": ndp,
                                    "_degraded_sector_pct": True})
         else:
+            if src == "clist_n_day":
+                tier15_count += 1
             sectors_scored.append({**s, "n_day_pct": ndp})
     sectors_scored.sort(key=lambda x: x["n_day_pct"], reverse=True)
     hot_sectors = sectors_scored[:board_top_n]
@@ -2894,6 +4734,13 @@ def screen_strategy_c(board_top_n=5, board_days=5, laggard_pct=0.40,
         screen_strategy_c.last_stage1_drops = drops
         screen_strategy_c.last_pool_review = {"hot_sectors": 0}
         return []
+    if tier15_count > 0:
+        # INFO (not a degradation): kline endpoint miss but clist still had
+        # native N-day columns. Accuracy preserved. Printed to stderr so the
+        # user-visible S-1 prompt is NOT triggered.
+        print(f"INFO: strategy C sector_kline used clist-native N-day "
+              f"fallback for {tier15_count} sectors (full accuracy, no info loss)",
+              file=sys.stderr)
     if degraded_count > 0:
         print(f"INFO: strategy C sector kline degraded for {degraded_count} "
               f"sectors -> using same-day pct as N-day approximation",
@@ -3819,6 +5666,60 @@ def recommend(capital=10000, market="all", strategies=("C", "D", "E"),
     # and aggregated into meta below for `_print_next_step_block` to expose.
     _INTRADAY_STRICT_DENIALS.clear()
 
+    # 0.-1 HARD GATE: tushare token state. Must be EITHER explicitly set
+    # (and tier-probe succeeds) OR explicitly skipped before we run any
+    # strategy. Rationale: in degraded-network scenarios (EM partial /
+    # Sina dead) the script silently produced 20 candidates with garbage
+    # numerics + 50% prob=low + 7 reject_reason hits -- effectively
+    # poisoned data the LLM cannot distinguish from healthy output.
+    # We refuse to run until the user makes the explicit decision so the
+    # backstop source is either ready or knowingly off. Returns an empty
+    # result + abort_reason so print_recommend short-circuits to a clean
+    # HINT block (no funnel, no table, no NEXT_STEP).
+    _ts_status = _get_tushare_status()
+    if _ts_status == "unset":
+        print(
+            'HINT: tushare_token_required {'
+            '"ask_user":"运行选股前需要确认 tushare 备用源状态。请提供 tushare token '
+            '（tushare.pro 注册即送 120 积分），或回复跳过永久禁用此功能",'
+            '"example_set":"python ${SKILL_DIR}/stockquant/scripts/stockquant.py '
+            'tushare-token --set <TOKEN>",'
+            '"example_skip":"python ${SKILL_DIR}/stockquant/scripts/stockquant.py '
+            'tushare-token --skip",'
+            '"after":"set 或 skip 成功后直接重跑原命令；本次脚本已停止以避免污染数据"'
+            '}'
+        )
+        meta["abort_reason"] = "tushare_token_required"
+        meta["info_sufficiency"] = "insufficient"
+        meta["info_insufficient"] = True
+        meta["tushare"] = {"tier": "unset", "info": {"reason": "no_token"}}
+        return [], meta
+    # status == "ready" -> validate token actually works via tier probe.
+    # status == "skipped" -> proceed without tushare.
+    if _ts_status == "ready":
+        try:
+            _ts_tier_gate, _ts_info_gate = _get_tushare_tier()
+        except Exception as _e:
+            _ts_tier_gate = "probe_failed"
+            _ts_info_gate = {"reason": f"{type(_e).__name__}: {_e}"}
+        if _ts_tier_gate == "auth_failed":
+            print(
+                'HINT: tushare_auth_failed {'
+                '"ask_user":"已配置的 tushare token 鉴权失败，请重新提供有效 token，'
+                '或回复跳过永久禁用此功能",'
+                '"example_set":"python ${SKILL_DIR}/stockquant/scripts/stockquant.py '
+                'tushare-token --set <NEW_TOKEN>",'
+                '"example_skip":"python ${SKILL_DIR}/stockquant/scripts/stockquant.py '
+                'tushare-token --skip",'
+                '"after":"set 或 skip 后直接重跑原命令；本次脚本已停止"'
+                '}'
+            )
+            meta["abort_reason"] = "tushare_auth_failed"
+            meta["info_sufficiency"] = "insufficient"
+            meta["info_insufficient"] = True
+            meta["tushare"] = {"tier": _ts_tier_gate, "info": _ts_info_gate}
+            return [], meta
+
     # 0.0 Network preflight: fail fast when every East Money endpoint is
     # unreachable. Without this guard we silently burn 60+ seconds on dead
     # TCP, end up with partial candidates, and mislead the LLM into
@@ -3826,42 +5727,115 @@ def recommend(capital=10000, market="all", strategies=("C", "D", "E"),
     # See _preflight_connectivity_check docstring for probe rationale.
     _probe_result = _preflight_connectivity_check()
     meta["preflight"] = _probe_result
-    _em_alive = sum(1 for k, v in _probe_result.items()
-                    if k.startswith("em_") and v == "ok")
+    # Count only DATA-source EM probes (em_clist / em_sector / em_kline).
+    # em_pic is a diagnostic-only probe (image service on a different EM
+    # subdomain) -- excluded from the alive count but used to disambiguate
+    # "WAF rate-limit on push2" vs "phone-level network dead".
+    _em_data_keys = [k for k in _PREFLIGHT_PROBES
+                     if k.startswith("em_") and k != "em_pic"]
+    _em_data_total = len(_em_data_keys)
+    _em_alive = sum(1 for k in _em_data_keys if _probe_result.get(k) == "ok")
     _sina_alive = _probe_result.get("sina") == "ok"
-    # Hard stop only when EVERY upstream is dead (no EM, no Sina). When
-    # EM is down but Sina lives we can still produce useful output via
-    # the Tier-3 Sina fallback in get_market_list (see its docstring).
-    if _em_alive == 0 and not _sina_alive:
-        _banner_line = "=" * 72
-        print(_banner_line, file=sys.stderr)
-        print("🛑 NETWORK_DEAD: all EM endpoints + Sina unreachable",
-              file=sys.stderr)
-        print(f"   probe: {_probe_result}", file=sys.stderr)
-        print("   cause: carrier / DNS / API rate-limit (usually recovers in 1-3 min)",
-              file=sys.stderr)
-        print("   action: retry later / switch WiFi / disable VPN",
-              file=sys.stderr)
-        print(_banner_line, file=sys.stderr)
-        raise RuntimeError(
-            f"preflight failed: no data source reachable ({_probe_result}); "
-            f"refusing to run recommend to avoid misleading 1-stock result"
-        )
+    _em_pic_alive = _probe_result.get("em_pic") == "ok"
+    # Resolve tushare tier for the DATA_SOURCE_STATUS block.
+    # Prefer the gate-stage probe result (already executed above when
+    # _ts_status == "ready") so the status block reflects the *real* token
+    # state regardless of EM health. Previously we only probed when EM was
+    # degraded, which mis-printed "UNSET" on healthy-EM runs even after the
+    # user had successfully saved a token.
+    if _ts_status == "ready":
+        _ts_tier = _ts_tier_gate
+        _ts_info = _ts_info_gate
+    elif _ts_status == "skipped":
+        _ts_tier = "skipped"
+        _ts_info = {"reason": "user_skipped"}
+    else:
+        _ts_tier = "unset"
+        _ts_info = {}
+    _ts_usable = _ts_tier in ("basic", "full")
+    meta["tushare"] = {"tier": _ts_tier, "info": _ts_info}
+    # Progressive-disclosure: when no usable channel detected up-front,
+    # emit a structured HINT to stdout (so the LLM sees an actionable
+    # ask_user template w/ example commands) but DO NOT abort -- still
+    # let strategies run; some Stage-1 paths have intra-call retry /
+    # stale-cache fallback that may still salvage partial candidates.
+    # Final sufficiency is judged at the bottom of recommend() after
+    # everything has been tried (see meta["info_insufficient"]).
+    meta["preflight_all_dead"] = (
+        _em_alive == 0 and not _sina_alive and not _ts_usable
+    )
+    if meta["preflight_all_dead"]:
+        if _em_pic_alive and _ts_tier in ("unset", "skipped"):
+            # Network is fine, push2 just WAF-throttled, and user has no
+            # tushare token. This is the most common recoverable case --
+            # surface a token_unset HINT mirroring _fetch_tushare_kline's
+            # JSON shape so the LLM can route via ask_user immediately.
+            print(
+                'HINT: tushare_token_unset {'
+                '"ask_user":"网络主源(东财push2)被限流，需要 tushare token 解锁备用全市场源'
+                '（tushare.pro 注册即送 120 积分），请提供 token，或回复跳过",'
+                '"example_set":"python ${SKILL_DIR}/stockquant/scripts/stockquant.py '
+                'tushare-token --set <TOKEN>",'
+                '"example_skip":"python ${SKILL_DIR}/stockquant/scripts/stockquant.py '
+                'tushare-token --skip",'
+                '"after":"set/skip 成功后直接重跑原命令，无需 sleep"'
+                '}'
+            )
+        elif _em_pic_alive and _ts_tier == "auth_failed":
+            print(
+                'HINT: tushare_auth_failed {'
+                '"ask_user":"tushare token 鉴权失败，请重新提供 token，或回复跳过",'
+                '"example_set":"python ${SKILL_DIR}/stockquant/scripts/stockquant.py '
+                'tushare-token --set <NEW_TOKEN>",'
+                '"example_skip":"python ${SKILL_DIR}/stockquant/scripts/stockquant.py '
+                'tushare-token --skip",'
+                '"after":"set/skip 成功后直接重跑原命令"'
+                '}'
+            )
+        else:
+            print(
+                'HINT: network_layer_dead {'
+                '"diagnose":"webquotepic 也不可达，疑似设备网络层异常 (carrier/DNS/VPN)",'
+                '"ask_user":"建议换 WiFi 或关闭 VPN 后重试；是否继续等待并重试？",'
+                '"after":"换网络后重跑原命令；真实网络故障靠重试无法解决"'
+                '}'
+            )
     elif _em_alive == 0:
+        # EM 全挂; 看 tushare/Sina 能补到什么程度
+        if _ts_usable:
+            meta["warnings"].append(
+                f"⚠️ EM 全挂; 启用 tushare Tier-2 替代 (tier={_ts_tier}, T-1 close basis)。"
+                f"snapshot + 行业板块聚合可用; "
+                f"{'D策略 5日资金可用' if _ts_tier == 'full' else 'D策略主力资金不可用 (basic tier)'}; "
+                f"E策略可用。"
+                f"{'(EM 限流, 非网络故障)' if _em_pic_alive else '(EM 网络层异常)'}"
+            )
+            print(f"WARN: preflight EM dead; tushare tier={_ts_tier} will substitute: "
+                  f"{_probe_result}", file=sys.stderr)
+        else:
+            meta["warnings"].append(
+                f"⚠️ EM 全挂但 Sina 可用：将走 Tier-3 Sina 全市场 fallback "
+                f"（慢 10-15s，字段精度降级：无板块/无主力资金/无换手率）。"
+                f"策略 C/D 几乎无候选，策略 E 仍可跑。"
+                f"{'(网络通畅, push2 被限流)' if _em_pic_alive else '(网络层异常)'} "
+                f"probe={_probe_result}"
+            )
+            print(f"WARN: preflight EM dead, Sina alive, no tushare; Tier-3 Sina degrade: "
+                  f"{_probe_result}", file=sys.stderr)
+    elif _em_alive < _em_data_total:
         meta["warnings"].append(
-            f"⚠️ EM 全挂但 Sina 可用：将走 Tier-3 Sina 全市场 fallback "
-            f"（慢 10-15s，字段精度降级：无板块/无主力资金/无换手率）。"
-            f"策略 C/D 几乎无候选，策略 E 仍可跑。probe={_probe_result}"
-        )
-        print(f"WARN: preflight EM dead, Sina alive; Tier-3 degrade will kick in: "
-              f"{_probe_result}", file=sys.stderr)
-    elif _em_alive == 1:
-        meta["warnings"].append(
-            f"⚠️ 网络部分可用：仅 1/3 EM 端点存活（{_probe_result}）。"
+            f"⚠️ 网络部分可用：仅 {_em_alive}/{_em_data_total} EM 端点存活（{_probe_result}）。"
             f"结果可靠性降低，建议重试或换网络"
         )
-        print(f"WARN: preflight only 1/3 EM endpoints alive: {_probe_result}",
-              file=sys.stderr)
+        print(f"WARN: preflight only {_em_alive}/{_em_data_total} EM endpoints alive: "
+              f"{_probe_result}", file=sys.stderr)
+
+    # Emit a structured DATA_SOURCE_STATUS block so the LLM can quote it
+    # verbatim to the user (per agent's "数据源透明" requirement). Always
+    # printed -- healthy runs show 'all primary OK' which is informative.
+    _print_data_source_status(_probe_result, _ts_tier, _ts_info,
+                              _em_alive, _em_data_total, _sina_alive,
+                              _em_pic_alive)
 
     # 0. Trading-day / weekend warnings
     is_trading, reason = is_trading_day_probe()
@@ -4105,9 +6079,54 @@ def recommend(capital=10000, market="all", strategies=("C", "D", "E"),
     _apply_llm_hints(final, market_ctx, top5_sectors, meta,
                      bad_news_map=bad_news_map)
 
+    # 6.5 Multi-source enrichment + merge for top-20 candidates.
+    # Pulls EM single-quote, Sina hq, Sina vip moneyflow, tushare snapshot
+    # in parallel and attaches a `_data_quality` block per candidate listing
+    # all sources, conflict flags (numeric spread > threshold or category
+    # mismatch), and per-field provenance. The LLM uses this metadata to
+    # apply soft judgement -- e.g. lower confidence when one source dissents
+    # significantly, or skip the candidate when too many fields conflict.
+    # No-op for empty `final`; bounded cost ~5s for 20 candidates.
+    if final:
+        try:
+            enrich_top_candidates(final, max_depth=20)
+            # Surface quality summary in meta for the LLM.
+            n_with_dq = sum(1 for c in final if c.get("_data_quality"))
+            n_conflicts = sum(
+                sum(1 for f, m in (c.get("_data_quality") or {}).items()
+                    if m.get("conflict"))
+                for c in final
+            )
+            meta["multi_source_merge"] = {
+                "candidates_enriched": n_with_dq,
+                "field_conflicts": n_conflicts,
+            }
+        except Exception as e:
+            print(f"WARN: multi-source enrichment failed: "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
+            meta["multi_source_merge"] = {"error": f"{type(e).__name__}"}
+
+    # 6.6 Strict reject filter. Picks that triggered any hard-reject tag
+    # (over_extended / panic_volume / big_outflow_today / late_entry, etc.)
+    # in _apply_llm_hints must NOT enter the recommendation table or
+    # capital allocation -- log analysis showed 5/20 picks carrying 🚫
+    # tags were still listed as Top-N rows, leading the LLM to cite
+    # `🚫big_outflow_today prob=low` rows as legitimate buys. Stash them
+    # under meta["rejected_picks"] so the [DATA] REJECT_LIST block in
+    # NEXT_STEP can still surface them for transparency / audit.
+    _rejected_after_hints = [
+        c for c in final if (c.get("reject_reasons") or [])
+    ]
+    if _rejected_after_hints:
+        meta["rejected_picks"] = _rejected_after_hints
+        meta["funnel"]["rejected_after_hints"] = len(_rejected_after_hints)
+        final = [c for c in final if not (c.get("reject_reasons") or [])]
+        meta["funnel"]["final"] = len(final)
+
     # 7. Capital allocation plan (fixed per-stock target, score-descending).
-    # Kept AFTER _apply_llm_hints so `final` is fully decorated; the planner
-    # only reads price / strategy / stop / score / industry / prob fields.
+    # Kept AFTER _apply_llm_hints + reject filter so `final` is fully
+    # decorated AND clean of hard-rejects; the planner only reads
+    # price / strategy / stop / score / industry / prob fields.
     try:
         plan = _build_allocation_plan(final, capital, per_target=10000.0)
         meta["allocation_plan"] = plan
@@ -4122,6 +6141,25 @@ def recommend(capital=10000, market="all", strategies=("C", "D", "E"),
     # `python stockquant.py allocate --codes ... --capital ... --comment ...`
     # to get an authoritative Python-formatted table (no LLM arithmetic).
     _save_allocation_context(final, capital)
+
+    # 9. Info-sufficiency self-evaluation. Replaces the old preflight
+    # hard-stop: instead of refusing to run when sources look bad, we
+    # let every fallback path run to completion, then judge the actual
+    # yield. Three buckets the LLM consumes via meta + the HINT block
+    # printed by print_recommend:
+    #   - len(final) >= 5 : sufficient (even if degraded; just note it)
+    #   - 1 <= len(final) < 5 : partial (let the LLM ask the user
+    #                           whether to act on a thin pool or retry)
+    #   - len(final) == 0 : insufficient (must ask user; do NOT auto-wait)
+    n_final = len(final)
+    if n_final == 0:
+        sufficiency = "insufficient"
+    elif n_final < 5:
+        sufficiency = "partial"
+    else:
+        sufficiency = "sufficient"
+    meta["info_sufficiency"] = sufficiency
+    meta["info_insufficient"] = (sufficiency != "sufficient")
 
     return final, meta
 
@@ -4142,6 +6180,97 @@ def _log_path(kind, date):
     sub = os.path.join(_LOGS_DIR, kind)
     os.makedirs(sub, exist_ok=True)
     return os.path.join(sub, f"{date}.jsonl")
+
+
+# ==========================================================================
+# Verbose-log side-channel (Q4 output-size pruning)
+# ==========================================================================
+# The agent-facing stdout has a hard head-truncation cap (20000 chars in
+# UnifiedActionExecutor). A full `brief` run legitimately emits ~30-60KB
+# because of per-strategy funnel drops + allocation baseline + per-candidate
+# soft/boost reasons. We split the output into two channels:
+#
+#   stdout:           decision-critical data the LLM MUST see every step
+#                     (NEXT_STEP block, final Top-N table, DATA_QUALITY,
+#                     funnel summary, market gate)
+#   verbose log file: drill-down detail the LLM only reads on demand
+#                     (Stage1 drops dict, allocation baseline table,
+#                     per-candidate soft_warnings/boost_reasons, hot-sector
+#                     top-10 breakdown)
+#
+# The verbose path is printed at the TOP of stdout so the LLM can `read_file`
+# it when (and only when) it needs to justify or double-check a decision.
+
+_VERBOSE_LOG_FH = None
+_VERBOSE_LOG_PATH = None
+
+
+def _open_verbose_log():
+    """Open a per-run verbose log file under skill/logs/verbose/<ts>.txt.
+
+    Idempotent; subsequent calls return the same handle. Failure to open
+    degrades silently (verbose-only content then disappears); the main
+    stdout path is never blocked by verbose-log I/O.
+    """
+    global _VERBOSE_LOG_FH, _VERBOSE_LOG_PATH
+    if _VERBOSE_LOG_FH is not None:
+        return _VERBOSE_LOG_PATH
+    try:
+        sub = os.path.join(_LOGS_DIR, "verbose")
+        os.makedirs(sub, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(sub, f"{ts}.txt")
+        _VERBOSE_LOG_FH = open(path, "w", encoding="utf-8")
+        _VERBOSE_LOG_PATH = path
+        # Header so `read_file` consumers immediately see what this is.
+        _VERBOSE_LOG_FH.write(
+            f"# stockquant verbose log\n# generated {datetime.datetime.now().isoformat()}\n"
+            f"# consumed by: agent on-demand via read_file\n\n"
+        )
+        _VERBOSE_LOG_FH.flush()
+    except Exception:
+        _VERBOSE_LOG_FH = None
+        _VERBOSE_LOG_PATH = None
+    return _VERBOSE_LOG_PATH
+
+
+def _vprint(*args, **kwargs):
+    """Write to the verbose log only (never stdout).
+
+    Signature mirrors print() for drop-in substitution. sep/end supported.
+    """
+    if _VERBOSE_LOG_FH is None:
+        return
+    sep = kwargs.get("sep", " ")
+    end = kwargs.get("end", "\n")
+    try:
+        _VERBOSE_LOG_FH.write(sep.join(str(a) for a in args) + end)
+    except Exception:
+        pass
+
+
+def _v_or_print(*args, **kwargs):
+    """Write to verbose log if open, else to stdout.
+
+    Used for content that is "nice to have for drill-down" but OK on stdout
+    when no verbose log is active (legacy / non-brief CLI runs).
+    """
+    if _VERBOSE_LOG_FH is not None:
+        _vprint(*args, **kwargs)
+    else:
+        print(*args, **kwargs)
+
+
+def _flush_verbose_log():
+    """Flush + close the verbose log file handle."""
+    global _VERBOSE_LOG_FH
+    if _VERBOSE_LOG_FH is not None:
+        try:
+            _VERBOSE_LOG_FH.flush()
+            _VERBOSE_LOG_FH.close()
+        except Exception:
+            pass
+        _VERBOSE_LOG_FH = None
 
 
 def _build_pick_row(c, ts, today, kind="pick", run_args=None):
@@ -4877,7 +7006,13 @@ def _print_next_step_block(results, meta):
     gem_p = mctx.get("gem_pct")
 
     pass_list = [c for c in results if not (c.get("reject_reasons") or [])]
+    # Picks that fired hard-reject tags during _apply_llm_hints are now
+    # filtered out of `final` (recommend step 6.6) so they no longer pollute
+    # the recommendation table. They are still surfaced here via
+    # meta["rejected_picks"] so the agent can audit *why* a strong-score
+    # candidate was dropped without scrolling into the verbose log.
     reject_list = [c for c in results if (c.get("reject_reasons") or [])]
+    reject_list = reject_list + list(meta.get("rejected_picks") or [])
 
     # Stable re-rank: higher boost count first, then existing score.
     pass_list.sort(key=lambda c: (-len(c.get("boost_reasons") or []),
@@ -5116,6 +7251,88 @@ def _print_next_step_block(results, meta):
             r = ",".join(c.get("reject_reasons") or [])
             print(f"  × {c['code']} {c['name']} reason={r}")
 
+    # ----- [DATA_QUALITY] multi-source merge results (progressive disclosure) -----
+    # Printed only when at least one candidate has a `_data_quality` block
+    # (always True post block-B integration, but the helper bails on legacy
+    # results without the field). The legend is one-shot per recommend run
+    # so the LLM doesn't have to reason about the format from scratch.
+    cands_with_dq = [c for c in pass_top_n if c.get("_data_quality")]
+    if cands_with_dq:
+        # Aggregate stats
+        ms_meta = meta.get("multi_source_merge") or {}
+        n_enriched = ms_meta.get("candidates_enriched", len(cands_with_dq))
+        n_conflicts = ms_meta.get("field_conflicts", 0)
+        # Per-candidate conflict / single-source enumeration
+        conflict_rows = []
+        single_src_rows = []
+        for c in cands_with_dq:
+            dq = c.get("_data_quality") or {}
+            conflicts_here = []
+            singles_here = []
+            for f, m in dq.items():
+                if m.get("conflict"):
+                    conflicts_here.append((f, m))
+                elif m.get("single_source"):
+                    # Only flag CRITICAL single-source fields; price/pct are
+                    # universal so single-source is uninteresting noise.
+                    if f in ("main_inflow_1d", "main_inflow_5d", "turnover",
+                             "industry"):
+                        singles_here.append((f, m))
+            if conflicts_here:
+                conflict_rows.append((c, conflicts_here))
+            if singles_here:
+                single_src_rows.append((c, singles_here))
+
+        print(f"\n[DATA_QUALITY] 多源交叉验证 (top-{len(pass_top_n)} 候选, "
+              f"已 enrich={n_enriched}, 字段冲突={n_conflicts})")
+        print("  legend:")
+        print("    · ✅ all-source-agree    所有源对该字段达成一致(spread<阈值或类别等价)")
+        print("    · ⚠️ CONFLICT           多源同字段差异>阈值, 取 priority 最高源为 canonical;")
+        print("                            LLM 应**降级置信度** + 文中明确告知用户")
+        print("    · 🟡 SINGLE_SOURCE      仅 1 源提供该字段(无法交叉验证);")
+        print("                            LLM 应在文中标注\"未交叉验证\" 但不必否决")
+        print("  field 含义: price/pct/turnover 为实时价量, main_inflow_5d 为 5 日累计主力净流入,")
+        print("            industry 为行业归属(白酒≡饮料制造等别名已自动归一)")
+        print("  conflict 阈值: price=0.5% / pct=5pp / 资金流=30% / 类别=非别名差异")
+
+        if conflict_rows:
+            print(f"\n  [CONFLICT_DETAIL] {len(conflict_rows)} 只候选有字段冲突:")
+            for c, items in conflict_rows:
+                print(f"    ⚠️ {c['code']} {c['name']}:")
+                for f, m in items:
+                    vals_str = ", ".join(
+                        f"{src}={v}" for src, v in m.get("values", {}).items()
+                    )
+                    sp = m.get("spread_pct")
+                    sp_str = (f"spread={sp:.1f}%" if sp is not None
+                              else "category-mismatch")
+                    print(f"        {f}: canonical={m['value']} ({sp_str})")
+                    print(f"            sources: {vals_str}")
+                    if m.get("note"):
+                        print(f"            note: {m['note']}")
+        else:
+            print("\n  [CONFLICT_DETAIL] (无冲突 - 所有源一致)")
+
+        if single_src_rows:
+            print(f"\n  [SINGLE_SOURCE_NOTES] 关键字段仅来自单一源(LLM 文中需标注):")
+            for c, items in single_src_rows[:10]:               # cap noise
+                fields_str = ", ".join(
+                    f"{f}={m['sources'][0] if m.get('sources') else '?'}"
+                    for f, m in items
+                )
+                print(f"    🟡 {c['code']} {c['name']}: {fields_str}")
+            if len(single_src_rows) > 10:
+                print(f"    ... ({len(single_src_rows) - 10} 只省略)")
+
+        print("  [LLM_ACTION]")
+        print("    · 撰写 S4 个股 bullets 时, 对有 CONFLICT 标记的字段:")
+        print("       (1) 先列 canonical 值; (2) 一行点出 \"⚠️ 多源差异(具体数值)\";")
+        print("       (3) 概率/置信度档位下调一级(high→mid, mid→low)")
+        print("    · 对 SINGLE_SOURCE 关键字段(资金流/换手率/行业): 仅在 S4 末段标注")
+        print("       \"<字段>由 <源> 单源提供\", 不影响档位但读者需知情")
+        print("    · 若同一候选 ≥3 字段冲突: 移入备选档(不进首选/次选), 并在 S3 风险复核")
+        print("       明确说明 \"数据源分歧严重, 建议等数据稳定再入场\"")
+
     # ----- [ALLOCATION] actionable buy list (LLM should quote verbatim in S5) -----
     # This mirrors meta["allocation_plan"] but rendered as compact key=value
     # lines so the LLM sees the exact shares/cost/stops next to PASS_TOP10.
@@ -5302,10 +7519,74 @@ def _print_next_step_block(results, meta):
 
 
 def print_recommend(results, meta, capital, threshold):
+    # Hard-gate abort short-circuit. When recommend() refused to run due
+    # to tushare token state (unset / auth_failed), it already emitted a
+    # structured HINT line on stdout. Skip the full NEXT_STEP / funnel /
+    # table here so the agent's 20KB head budget is not wasted on
+    # placeholder zeros and (more importantly) so the agent cannot
+    # mistake a `# 推荐 Top0` block for a legitimate "no candidates today"
+    # outcome -- which would invite premature `terminate success`.
+    abort = meta.get("abort_reason")
+    if abort:
+        print()
+        print("═══ ABORT_REQUIRED ═══")
+        print(f"reason: {abort}")
+        ts = meta.get("tushare") or {}
+        print(f"tushare: tier={ts.get('tier')} info={ts.get('info')}")
+        print("action: 见上方 HINT 行的 ask_user / example_set / example_skip "
+              "字段，按渐进式披露指引调用 ask_user 让用户决定，"
+              "不要 wait/sleep，不要默认 terminate。")
+        print("══════════════════════")
+        return
     # NEXT_STEP goes FIRST so it survives any downstream truncation
     # (agent prompt cap / logcat single-line cut). The human-facing
     # funnel/tables below are intentionally demoted.
     _print_next_step_block(results, meta)
+    # Announce verbose log path so the agent can read_file drill-down
+    # detail on demand (Stage1 drops / alloc baseline / soft+boost
+    # reasons live there, not stdout). Printed ONCE near the top so it
+    # is never stripped by the agent's 20KB head truncation.
+    if _VERBOSE_LOG_PATH:
+        print()
+        print(f"[VERBOSE_LOG_PATH] {_VERBOSE_LOG_PATH}")
+        print("  drill-down detail (Stage1 drops / alloc baseline / soft_warnings / boost_reasons).")
+        print("  read_file this path ONLY when you need to justify a specific pick or debug 0-candidate.")
+    # Progressive-disclosure: emit a top-level HINT when the run yielded
+    # 0 or <5 candidates. The agent must NOT auto-wait or sleep -- it
+    # should ask_user using the example commands embedded in the HINT
+    # JSON. Mirrors the shape of HINT: tushare_token_unset so the agent
+    # parser sees a uniform contract across error paths.
+    suff = meta.get("info_sufficiency")
+    if suff in ("insufficient", "partial"):
+        n = len(results)
+        ts_tier = (meta.get("tushare") or {}).get("tier", "unset")
+        token_path_unset = ts_tier in ("unset", "skipped", "auth_failed")
+        if suff == "insufficient":
+            ask = (f"本次未筛出任何候选 (final=0)。已尝试源："
+                   f"EM/Sina/tushare(tier={ts_tier})。是否：(a) 提供 tushare token 解锁备用源 "
+                   f"(b) 接受 0 候选并终止本轮 (c) 5-30 分钟后重试")
+        else:
+            ask = (f"本次仅筛出 {n} 只候选 (<5, 数据源降级)。是否：(a) 接受这 {n} 只继续走分配 "
+                   f"(b) 提供 tushare token 重跑解锁更多候选 (c) 终止本轮")
+        hint_obj = {
+            "ask_user": ask,
+            "candidates_count": n,
+            "tushare_tier": ts_tier,
+        }
+        if token_path_unset:
+            hint_obj["example_set_token"] = (
+                "python ${SKILL_DIR}/stockquant/scripts/stockquant.py "
+                "tushare-token --set <TOKEN>"
+            )
+            hint_obj["example_skip_token"] = (
+                "python ${SKILL_DIR}/stockquant/scripts/stockquant.py "
+                "tushare-token --skip"
+            )
+        hint_obj["after"] = "set/skip 后直接重跑原命令，或按用户答复 terminate；不要 sleep/wait"
+        # Inline JSON (single-line) so logcat truncation cannot break parsing.
+        import json as _json
+        print()
+        print(f"HINT: info_{suff} {_json.dumps(hint_obj, ensure_ascii=False)}")
     print()
     print(f"# 推荐 Top{len(results)}  资金={capital:.0f}  止盈门限={threshold}%")
     # Warnings first
@@ -5336,17 +7617,19 @@ def print_recommend(results, meta, capital, threshold):
         print(f"- 策略C（热门板块滞涨股）候选：**{f['strategy_C']}** 只")
         cdr = f.get("C_stage1_drops") or {}
         if cdr:
-            print(f"    Stage1 过滤分布: {dict(cdr)}")
+            # Drill-down distribution goes to verbose only; stdout keeps
+            # the total-count summary which is enough for routine decisions.
+            _v_or_print(f"    [C_stage1_drops] {dict(cdr)}")
     if "strategy_D" in f:
         print(f"- 策略D（多日主力累积）候选：**{f['strategy_D']}** 只")
         ddr = f.get("D_stage1_drops") or {}
         if ddr:
-            print(f"    Stage1 过滤分布: {dict(ddr)}")
+            _v_or_print(f"    [D_stage1_drops] {dict(ddr)}")
     if "strategy_E" in f:
         print(f"- 策略E（60日箱体突破）候选：**{f['strategy_E']}** 只")
         edr = f.get("E_stage1_drops") or {}
         if edr:
-            print(f"    Stage1 过滤分布: {dict(edr)}")
+            _v_or_print(f"    [E_stage1_drops] {dict(edr)}")
     print(f"- 打分排序：**{f.get('scored', 0)}** 只")
     if "sector_diversified_dropped" in f:
         print(f"- 行业分散过滤剔除：{f['sector_diversified_dropped']} 只"
@@ -5392,15 +7675,17 @@ def print_recommend(results, meta, capital, threshold):
         warn = c.get("soft_warnings") or []
         bst = c.get("boost_reasons") or []
         prob = c.get("next_day_prob") or "-"
+        # stdout: only decision-critical hints (reject_reasons + prob).
+        # verbose: full soft_warnings/boost_reasons breakdown so the LLM
+        # can justify a specific pick on demand via read_file.
         hint_parts = []
         if rej:
             hint_parts.append("🚫" + ",".join(rej))
-        if warn:
-            hint_parts.append("⚠" + ",".join(warn))
-        if bst:
-            hint_parts.append("⚡" + ",".join(bst))
         hint_parts.append(f"prob={prob}")
         hint_str = " ".join(hint_parts)
+        if (warn or bst) and _VERBOSE_LOG_FH is not None:
+            _vprint(f"[HINT_DETAIL] {c['code']} {c['name']}: "
+                    f"warnings={warn} boosts={bst}")
         price = c.get("price") or 0
         pct = c.get("pct") or 0
         tov = c.get("turnover") or 0
@@ -5411,12 +7696,28 @@ def print_recommend(results, meta, capital, threshold):
               f"| {c.get('industry', '-')} | {note} | {hint_str} |")
 
     # ----- Capital allocation plan (baseline, score-ordered) -----
-    # Now a thin call into the shared renderer. LLM is expected to produce
-    # its S3 final pick order, then invoke `python stockquant.py allocate
-    # --codes ... --capital ... --comment "..."` to get the authoritative
-    # table; this baseline is kept as a sanity reference only.
+    # LLM is expected to produce its S3 final pick order, then invoke
+    # `python stockquant.py allocate --codes ... --capital ... --comment "..."`
+    # to get the authoritative table; this baseline is a sanity reference only.
+    # When verbose-log is open we redirect the baseline table there and leave
+    # a one-line pointer on stdout -- keeps the 20KB head budget focused on
+    # decision-critical sections (NEXT_STEP + Top-N + DATA_QUALITY).
     plan = meta.get("allocation_plan") or {}
-    _render_allocation_markdown(plan, capital, title_note="baseline: 按得分高到低")
+    if _VERBOSE_LOG_FH is not None:
+        import contextlib as _cl
+        import io as _io
+        _buf = _io.StringIO()
+        with _cl.redirect_stdout(_buf):
+            _render_allocation_markdown(plan, capital, title_note="baseline: 按得分高到低")
+        _vprint(_buf.getvalue(), end="")
+        print()
+        print("[ALLOCATION_BASELINE] 按得分高到低的 baseline 分配表已写入 verbose log。")
+        print("  → LLM 产出最终选股顺序后请调用:")
+        print("    python ${SKILL_DIR}/stockquant/scripts/stockquant.py allocate "
+              "--codes <c1,c2,...> --capital <元> --comment \"...\"")
+        print("    生成权威分配表；不要手算资金/股数。")
+    else:
+        _render_allocation_markdown(plan, capital, title_note="baseline: 按得分高到低")
 
     # NEXT_STEP was already printed at the TOP of this function via
     # _print_next_step_block() - no tail duplication here. Rationale:
@@ -6821,12 +9122,42 @@ def cli_allocate(codes, capital, comment=None, per_target=10000.0):
               + "    # ← 下单时各只 shares 直接抄此处，禁止手算")
         print(f"📋BUY_PLAN_TOTAL:used={used:.0f}元 "
               f"remaining_cash={rem:.0f}元 picks={len(plan_items)}只")
+        # Progressive-disclosure HINT: agent must persist this authoritative
+        # plan into data_memory IMMEDIATELY after this run, otherwise it will
+        # forget the picks and re-execute recommend/allocate (observed loops
+        # in 2026-05-07 14:37 session: 26 steps, 3x recommend, 4x allocate).
+        # This single line tells the agent (a) which key to set, (b) what to
+        # store verbatim, (c) that re-running is forbidden.
+        _summary = (f"PICKED:{codes_pipe} | "
+                    f"SHARES:{shares_pipe} | "
+                    f"used={used:.0f} remaining={rem:.0f} "
+                    f"picks={len(plan_items)}")
+        # JSON-escape the summary so the HINT line stays valid JSON inline.
+        import json as _json_mod
+        _summary_json = _json_mod.dumps(_summary, ensure_ascii=False)
+        print(
+            'HINT: persist_buy_plan {'
+            '"data_memory_set":"ALLOCATION_RESULTS",'
+            f'"value":{_summary_json},'
+            '"after":"下一步直接 data_memory get ALLOCATION_RESULTS 复用此结果，'
+            '禁止重跑 recommend/allocate；如需下单，从 SHARES 字段逐只抄股数",'
+            '"forbid":"对同一资金池在 1 小时内重复调用 recommend 或 allocate"'
+            '}'
+        )
     else:
         # Empty plan path: still emit a PICKED:0 marker so downstream knows
         # this branch is not "agent forgot to copy" but "no eligible items".
         print()
         print("📎PICKED:    # 空：本次无可分配候选（资金不足或单手>半仓全部跳过）")
         print("📋BUY_PLAN_TOTAL:used=0元 picks=0只 → 不入场")
+        print(
+            'HINT: empty_plan {'
+            '"data_memory_set":"ALLOCATION_RESULTS",'
+            '"value":"empty: no_eligible_picks",'
+            '"after":"data_memory set ALLOCATION_RESULTS 后立即 terminate fail，'
+            '说明本次无可分配候选；禁止重跑 recommend/allocate"'
+            '}'
+        )
 
 
 # ==========================================================================
@@ -7346,12 +9677,111 @@ def analyze(queries, include_news=True, days=120, minutes=32,
 # CLI
 # ==========================================================================
 
+# --------------------------------------------------------------------------
+# LLM-friendly argparse error hints
+# --------------------------------------------------------------------------
+# Default argparse emits a one-line "unrecognized arguments: --foo" message.
+# Observed agent failure mode (2026-05-07 14:37 log): the LLM hallucinates
+# flags like `--select`, `--fund 20000`, or invents subcommands like `result`,
+# then keeps retrying the same broken command twice in a row (Steps 8/11
+# allocate without --codes), violating the same-failure-twice rule.
+#
+# We override `error()` to APPEND a structured HINT block listing:
+#   (a) all valid subcommands
+#   (b) the required + key flags for the active subcommand (if known)
+#   (c) a copy-paste-ready corrected example
+# so the agent can recover on the FIRST retry instead of looping.
+# --------------------------------------------------------------------------
+# Per-subcommand cheat-sheet: required flags first, then most useful optionals.
+# Keep tight (LLM context budget); full --help is still available via -h.
+_SUBCMD_CHEATSHEET = {
+    "recommend":     "--capital <RMB> [--market all|main|...] [--top 30] "
+                     "[--strategy C,D,E] [--threshold 5.0]",
+    "brief":         "--capital <RMB> [--market main] [--top 30] "
+                     "[--strategy C,D,E]",
+    "allocate":      "--codes <c1,c2,...> --capital <RMB> "
+                     "[--comment \"...\"] [--per-target 10000]",
+    "screen-c":      "[--market all] [--board-top 5] [--board-days 5] "
+                     "[--laggard-pct 0.40]",
+    "screen-d":      "[--market all] [--flow-days 5] [--no-ma-alignment]",
+    "screen-e":      "[--market all] [--box-days 60] [--box-range-max 25]",
+    "sector-rank":   "[--type industry|concept|region] [--top 20]",
+    "quote":         "<code1> [code2] ...",
+    "kline":         "<code> [--period day|week|month] [--count 30]",
+    "search":        "<keyword> [--count 5]",
+    "tushare-token": "(--set <TOKEN> | --skip | --status | --clear)",
+    "analyze":       "<code> [--days 30]",
+    "sell-plan":     "(--holdings <json> | --order <json> | --override <json>)",
+    "eval":          "[--date YYYYMMDD]",
+    "intraday-track":"[--date YYYYMMDD]",
+    "stats":         "[--days 30]",
+    "market":        "(no args)",
+    "zt-pool":       "[--date YYYYMMDD]",
+    "dt-pool":       "[--date YYYYMMDD]",
+    "zb-pool":       "[--date YYYYMMDD]",
+    "lb-pool":       "[--date YYYYMMDD]",
+}
+
+
+class _LLMFriendlyArgParser(argparse.ArgumentParser):
+    """ArgumentParser variant that appends a structured remediation HINT
+    after the standard error message.
+
+    The HINT is emitted on stderr (same channel as argparse's own error)
+    and uses the same `HINT: <tag> {json}` shape as the rest of the
+    progressive-disclosure system (see tushare_token_unset / persist_buy_plan)
+    so the agent's hint-extractor picks it up uniformly.
+    """
+    def error(self, message):
+        # Standard argparse error path: print usage + error to stderr.
+        # We replicate it here (instead of calling super().error()) so we
+        # can inject the HINT BEFORE sys.exit and avoid the LLM seeing only
+        # a bare "unrecognized arguments" line.
+        self.print_usage(sys.stderr)
+        sys.stderr.write(f"{self.prog}: error: {message}\n")
+        # `self.prog` for a subparser looks like "stockquant.py allocate";
+        # extract the trailing token to map to the cheat-sheet.
+        prog_parts = self.prog.split()
+        active = prog_parts[-1] if len(prog_parts) > 1 else None
+        cheat = _SUBCMD_CHEATSHEET.get(active) if active else None
+        # Build remediation hint payload.
+        import json as _json_mod
+        payload = {
+            "error": message,
+            "valid_subcommands": sorted(_SUBCMD_CHEATSHEET.keys()),
+        }
+        if active and cheat:
+            payload["active_subcommand"] = active
+            payload["correct_usage"] = (
+                f"python ${{SKILL_DIR}}/stockquant/scripts/stockquant.py "
+                f"{active} {cheat}"
+            )
+            payload["after"] = (
+                "按 correct_usage 一次性补全所有必填参数；"
+                "禁止仅微调原命令重试（已记同一错误一次）。"
+            )
+        else:
+            payload["after"] = (
+                "从 valid_subcommands 选一个合法子命令；"
+                "任务里的'策略C/D/E'等中文描述不是子命令，"
+                "常规推荐用 `recommend --capital <元>`。"
+            )
+        sys.stderr.write(
+            "HINT: argparse_error " +
+            _json_mod.dumps(payload, ensure_ascii=False) + "\n"
+        )
+        sys.exit(2)
+
+
 def _build_cli():
-    p = argparse.ArgumentParser(
+    p = _LLMFriendlyArgParser(
         prog="stockquant.py",
         description="A-share trading all-in-one (quotes / k-line / picker / sell-plan)."
     )
-    sub = p.add_subparsers(dest="cmd", required=True)
+    # parser_class propagates _LLMFriendlyArgParser to every sub.add_parser()
+    # call so subcommand-level errors (the common case) also get the HINT.
+    sub = p.add_subparsers(dest="cmd", required=True,
+                           parser_class=_LLMFriendlyArgParser)
 
     sub.add_parser("market", help="Overview of major A-share indexes.")
 
@@ -7505,6 +9935,20 @@ def _build_cli():
                          "code=REGIME:reason\u3002\u4f8b: 002324=DEEP_LOSS:K\u7ebf\u8dcc\u7834\u5e74\u7ebf\u3002"
                          "\u4ec5\u5141\u8bb8\u8986\u76d6\u5230\u9632\u5fa1\u6863\u3002")
 
+    # ------ tushare-token: persist user-supplied token for Tier-4 fallback ------
+    tt = sub.add_parser(
+        "tushare-token",
+        help="Manage tushare API token (used as Tier-4 k-line fallback).")
+    tt_grp = tt.add_mutually_exclusive_group(required=True)
+    tt_grp.add_argument("--status", action="store_true",
+                        help="Print state: ready / skipped / unset")
+    tt_grp.add_argument("--set", dest="set_token", metavar="TOKEN",
+                        help="Save user token (plain JSON, per-user file).")
+    tt_grp.add_argument("--skip", action="store_true",
+                        help="Mark permanently skipped; agent stops asking.")
+    tt_grp.add_argument("--clear", action="store_true",
+                        help="Erase saved state; next run prompts again.")
+
     # ------ analyze: comprehensive per-stock snapshot ------
     an = sub.add_parser(
         "analyze",
@@ -7545,6 +9989,8 @@ _KNOWN_CMDS = {
     "allocate",
     # per-stock comprehensive analysis (pure data for LLM)
     "analyze",
+    # tushare token management (Tier-4 k-line fallback enablement)
+    "tushare-token",
 }
 
 
@@ -7624,6 +10070,10 @@ def _cli_main(argv=None):
                                   market_ctx=mctx, sector_pct_map=sector_pct_map)
         print_screen(scored, f"策略E候选（{args.box_days}日箱体突破）")
     elif args.cmd == "recommend":
+        # Open verbose side-channel: drill-down detail (Stage1 drops,
+        # alloc baseline, per-candidate soft/boost reasons) is routed
+        # there so stdout stays under the agent's 20KB head-truncation.
+        _open_verbose_log()
         strategies = tuple(s.strip().upper()
                            for s in args.strategy.split(",") if s.strip())
         res, meta = recommend(capital=args.capital, market=args.market,
@@ -7644,10 +10094,15 @@ def _cli_main(argv=None):
                 "e_sample": args.e_sample,
             }
             _append_recommend_log(res, meta, run_args)
+        _flush_verbose_log()
     elif args.cmd == "brief":
         # One-shot aggregate for LLM. Each segment isolated by fat banner;
         # any segment failure is caught locally so later segments still run.
         import traceback as _tb
+
+        # Open verbose side-channel first so segment print functions can
+        # route drill-down detail there (see _vprint / _v_or_print).
+        _open_verbose_log()
 
         def _banner(tag):
             print()
@@ -7697,6 +10152,7 @@ def _cli_main(argv=None):
             _tb.print_exc()
 
         _banner("END OF BRIEF")
+        _flush_verbose_log()
     elif args.cmd == "eval":
         evaluate_recommendations(date=args.date)
     elif args.cmd == "intraday-track":
@@ -7731,6 +10187,49 @@ def _cli_main(argv=None):
                 minutes=args.minutes,
                 no_sample=args.no_sample,
                 compact=args.compact)
+    elif args.cmd == "tushare-token":
+        if args.status:
+            print(_get_tushare_status())
+        elif args.set_token:
+            _save_tushare_state({
+                "token": args.set_token.strip(),
+                "skip": False,
+                "saved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            print("OK tushare token saved -> Tier-4 k-line fallback enabled.")
+            # Bootstrap probe: run tier detect + warm stock_basic cache.
+            # Critical for free 120pt accounts where stock_basic throttles
+            # progressively (1/min -> 1/hour after a few calls). One success
+            # right after --set persists 24h on disk and prevents the rest
+            # of the pipeline from racing the rate-limit later.
+            try:
+                tier, tinfo = _get_tushare_tier(force_probe=True)
+                print(f"   tier probe: {tier} ({tinfo})")
+            except Exception as _e:
+                print(f"   tier probe failed: {type(_e).__name__}: {_e}")
+            try:
+                nm, im = _get_tushare_stock_basic_maps()
+                if nm:
+                    print(f"   stock_basic warmed: {len(nm)} stocks cached "
+                          "(name+industry, 24h TTL)")
+                else:
+                    print("   stock_basic warm: empty (rate-limited or no perm); "
+                          "will retry on first recommend run")
+            except Exception as _e:
+                print(f"   stock_basic warm failed: {type(_e).__name__}: {_e}")
+        elif args.skip:
+            _save_tushare_state({
+                "token": "",
+                "skip": True,
+                "saved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+            print("OK tushare marked as skipped (agent will stop asking).")
+        elif args.clear:
+            try:
+                os.remove(_TUSHARE_STATE_FILE)
+                print("OK tushare state cleared.")
+            except FileNotFoundError:
+                print("(nothing to clear)")
 
 
 if __name__ == "__main__":

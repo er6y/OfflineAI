@@ -159,3 +159,4 @@ app/src/main/assets/skills/stockquant/logs/
 /tests
 /stockquant_log
 
+/app/src/main/assets/skills/stockquant/config/tushare_state.json
