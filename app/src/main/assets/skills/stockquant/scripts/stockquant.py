@@ -39,6 +39,7 @@ import json
 import time
 import math
 import random
+import re
 import shutil
 import argparse
 import datetime
@@ -1871,13 +1872,24 @@ _MERGE_CONFLICT_THRESHOLD_PCT = {
 # Special-case categorical normalization. tushare's 申万 industry names
 # don't exactly match EM's classification; treat semantic equivalents as
 # non-conflicts. Extend as observed in the wild.
+# EM 申万一级 vs tushare 申万 vs 163 三套行业分类经常出现"同物异名"，
+# 这里维护一份双向 alias 表。对于"罗马数字 Ⅰ/Ⅱ/Ⅲ 后缀"和"制造/原料/开发"
+# 这类常见同义后缀，在 _normalize_categorical 里统一剥离，不需在此重复列。
 _INDUSTRY_ALIASES = {
     "白酒": ["饮料制造", "酒类", "酒"],
     "饮料制造": ["白酒", "酒类"],
     "银行": ["国有大型银行", "股份制银行", "城商行"],
-    "证券": ["券商", "证券Ⅱ"],
-    "房地产": ["房地产开发", "房地产Ⅱ"],
+    "证券": ["券商", "证券公司"],
+    "房地产": ["房地产开发"],
     "电池": ["锂电池", "动力电池"],
+    # Real-world conflicts observed in 2026-05 phone log:
+    "电力": ["新型电力", "新能源发电", "电力供应"],
+    "新型电力": ["电力", "新能源发电"],
+    "化学原料": ["化工原料", "基础化工", "化工"],
+    "化工原料": ["化学原料", "基础化工"],
+    "通用设备": ["机械基件", "机械设备", "通用机械"],
+    "机械基件": ["通用设备", "机械设备"],
+    "地面兵装": ["运输设备", "兵器装备", "国防军工"],
 }
 
 
@@ -1956,13 +1968,26 @@ def _merge_numeric(values_by_source, field, ts_ms=None):
     }
 
 
+_ROMAN_SUFFIX_RE = re.compile(r"[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩIVX]+$")
+
+
 def _normalize_categorical(field, raw_value):
-    """Normalize categorical strings for fair comparison."""
+    """Normalize categorical strings for fair comparison.
+
+    For the `industry` field we strip trailing Roman-numeral level suffix
+    (申万 一/二/三级行业 like "证券Ⅱ" / "房地产Ⅱ" / "银行Ⅱ") so that the
+    base name matches across data sources. EM uses Ⅱ on the level-2 view
+    while tushare/163 typically drop it; without this stripping every
+    bank/securities/realestate pick falsely flags as a conflict.
+    """
     if raw_value is None:
         return None
     s = str(raw_value).strip()
     if not s:
         return None
+    if field == "industry":
+        # Strip trailing Roman-numeral suffix: "证券Ⅱ" -> "证券"
+        s = _ROMAN_SUFFIX_RE.sub("", s).strip() or s
     return s
 
 
@@ -4671,16 +4696,30 @@ def _count_positive_days_recent(code, days=5):
 def screen_strategy_c(board_top_n=5, board_days=5, laggard_pct=0.40,
                       min_volume_ratio=1.2, ma20_band_pct=5.0,
                       pct_min=-3.0, pct_max=5.0,
+                      max_5d_pct=6.0, laggard_rel_factor=0.5,
                       market="all"):
     """Strategy C: laggard in hot sectors.
 
     Returns list of candidate dicts (strategy='C'). Each has sector_name,
     sector_n_day_pct, stock_n_day_pct, sector_rel_rank (0.0=best laggard),
     distance_from_ma20 fields for downstream scoring.
+
+    Anti-chase gates (Fix A + Fix B, 2026-05-08):
+      max_5d_pct          absolute cap on the stock's own N-day gain
+                          (default 6%). Any stock already up more than this
+                          within the same lookback window is dropped as
+                          `overheated` -- by definition it is NOT a laggard.
+      laggard_rel_factor  stock's N-day gain must stay below sector N-day
+                          gain * this factor (default 0.5). Enforces "real"
+                          laggard: when the sector rose 20% but a member
+                          rose 10%, it is NOT a laggard even if it sits in
+                          the bottom 40% of the sector. Dropped as
+                          `not_true_laggard`.
     """
     drops = {"sector_no_pct": 0, "not_laggard": 0, "st_risky": 0,
              "wrong_market": 0, "weak_volume": 0, "broken_ma20": 0,
-             "extreme_pct": 0, "thin_liquidity": 0}
+             "extreme_pct": 0, "thin_liquidity": 0,
+             "overheated": 0, "not_true_laggard": 0}
 
     # Stage 1: pick hot sectors by board_days-day pct.
     # fail_safe=False because sector-rank is a HARD dependency for C:
@@ -4809,6 +4848,24 @@ def screen_strategy_c(board_top_n=5, board_days=5, laggard_pct=0.40,
             if pct < pct_min or pct > pct_max:
                 drops["extreme_pct"] += 1
                 continue
+            # Fix A: absolute N-day gain cap. A real laggard should NOT
+            # already be up more than max_5d_pct% -- otherwise we are
+            # selecting the top of the follow-through leg, not the base.
+            stock_npc = q.get("stock_n_day_pct")
+            if stock_npc is not None and stock_npc > max_5d_pct:
+                drops["overheated"] += 1
+                continue
+            # Fix B: true-laggard check. "Bottom 40% of the sector" is a
+            # RELATIVE rank only; when the sector rose 20% a bottom-40%
+            # member can still be up 10% and is not a laggard in any
+            # meaningful sense. Require stock_npc < sector_npc * factor
+            # (default 0.5) to enforce an ABSOLUTE gap vs. the sector.
+            sec_npc = sec.get("n_day_pct")
+            if (sec_npc is not None and sec_npc > 0
+                    and stock_npc is not None
+                    and stock_npc >= sec_npc * laggard_rel_factor):
+                drops["not_true_laggard"] += 1
+                continue
             seen_codes.add(code)
             out.append({
                 "code": code,
@@ -4863,17 +4920,26 @@ def screen_strategy_d(flow_days=5, min_total_inflow=0,
                       flow_pct_rank_top=0.30,
                       turnover_min=2.0, turnover_max=8.0,
                       pct_min=-2.0, pct_max=4.0,
+                      max_5d_pct=10.0,
                       require_ma_alignment=True,
                       market="all", min_amount=50_000_000):
     """Strategy D: multi-day main-capital accumulation.
 
     One clist call (multiday fund flow) gives us the whole universe; the
     per-candidate kline batch is only for surviving stocks.
+
+    Anti-chase gate (Fix A, 2026-05-08):
+      max_5d_pct  absolute cap on the stock's own 5-day gain (default 10%).
+                  D by design requires MA-aligned momentum confirmation
+                  which IS a lagging signal; the 10% cap keeps the pick at
+                  the START of a confirmed leg rather than mid-way through
+                  a +15~20% run. Rows with pct_5d == None (degraded data
+                  source) bypass this filter to stay lenient.
     """
     drops = {"negative_flow": 0, "low_flow_rank": 0, "st_risky": 0,
              "wrong_market": 0, "thin_liquidity": 0,
              "turnover_out_of_band": 0, "extreme_pct": 0,
-             "ma_not_aligned": 0, "no_kline": 0}
+             "ma_not_aligned": 0, "no_kline": 0, "overheated": 0}
 
     flow_rows = get_multiday_fund_flow()
     if not flow_rows:
@@ -4942,6 +5008,15 @@ def screen_strategy_d(flow_days=5, min_total_inflow=0,
         pct = r.get("pct") or 0
         if pct < pct_min or pct > pct_max:
             drops["extreme_pct"] += 1
+            continue
+        # Fix A: absolute 5-day gain cap. D's MA-alignment gate is already
+        # a trailing signal; without this cap it routinely selects stocks
+        # mid-way through a +15% leg. `pct_5d` comes from EM f109; Sina /
+        # degraded tushare paths leave it None -- skip the filter in that
+        # case to stay lenient on degraded data.
+        pct_5d_raw = r.get("pct_5d")
+        if pct_5d_raw is not None and pct_5d_raw > max_5d_pct:
+            drops["overheated"] += 1
             continue
         ma20 = ma40 = ma60 = None
         aligned = None
@@ -5029,6 +5104,7 @@ def screen_strategy_d(flow_days=5, min_total_inflow=0,
 def screen_strategy_e(box_days=60, box_range_max_pct=25.0,
                       breakout_percentile=0.90, min_volume_ratio=1.8,
                       require_main_inflow_10d=True,
+                      max_5d_pct=15.0,
                       market="all", min_amount=50_000_000,
                       max_universe=3000, sample=None):
     """Strategy E: 60-day narrow-box breakout.
@@ -5036,11 +5112,18 @@ def screen_strategy_e(box_days=60, box_range_max_pct=25.0,
     Args:
       sample: optional int -> only fetch klines for a random sample of
               `sample` codes (debug mode, avoids full-market hammer).
+
+    Anti-chase gate (Fix A, 2026-05-08):
+      max_5d_pct  absolute cap on 5-day gain (default 15%, more lenient
+                  than C/D since a valid breakout by definition lifts the
+                  close 5-10% off the box). Above 15% means the breakout
+                  is already 2+ bars old -- the "just-breakout" window is
+                  closed and entering now is chasing the follow-through.
     """
     drops = {"wrong_market": 0, "st_risky": 0, "thin_liquidity": 0,
              "no_kline": 0, "box_too_wide": 0, "not_near_top": 0,
              "weak_volume": 0, "below_ma20": 0, "no_inflow": 0,
-             "limit_day": 0}
+             "limit_day": 0, "overheated": 0}
 
     # Universe: use cached full-market clist (5-min TTL). This already
     # holds price/volume/turnover/main_inflow/industry for every code.
@@ -5160,6 +5243,17 @@ def screen_strategy_e(box_days=60, box_range_max_pct=25.0,
         if ma20 and price < ma20:
             drops["below_ma20"] += 1
             continue
+        # Fix A (2026-05-08): compute 5-day pct from the kline we already
+        # have (no extra API call). kl[-1] is today, kl[-6] is 5 trading
+        # days ago => (today_close - d5_close) / d5_close * 100.
+        # Drop if the box has already been breached by more than max_5d_pct.
+        pct_5d_e = None
+        if len(closes_all) >= 6 and closes_all[-6] > 0:
+            pct_5d_e = round(
+                (closes_all[-1] - closes_all[-6]) / closes_all[-6] * 100, 2)
+            if pct_5d_e > max_5d_pct:
+                drops["overheated"] += 1
+                continue
         if require_main_inflow_10d and (r.get("main_inflow") or 0) < 0:
             # Using today's inflow as a cheap proxy; multiday would need
             # an extra API call. If user sets require_main_inflow_10d=False
@@ -5185,6 +5279,7 @@ def screen_strategy_e(box_days=60, box_range_max_pct=25.0,
             "box_position_pct": round(box_position, 1),
             "ma20": round(ma20, 2) if ma20 else None,
             "distance_from_ma20": round((price - ma20) / ma20 * 100, 2) if ma20 else None,
+            "pct_5d": pct_5d_e,                        # for chase-penalty scoring
             "strategy": "E",
             "_source": r.get("_source", "em"),
         })
@@ -5197,6 +5292,521 @@ def screen_strategy_e(box_days=60, box_range_max_pct=25.0,
     }
     # Sort by how close to breakout (higher box_position first)
     out.sort(key=lambda x: x.get("box_position_pct") or 0, reverse=True)
+    return out
+
+
+# ==========================================================================
+# Strategy F1 -- Low-Vol Consolidation + First Breakout Day.
+# ==========================================================================
+#   Thesis: catch a stock on Day-1 of a new leg, NOT on Day-3/4 after the
+#   leg has already started. Pattern: price has been quietly consolidating
+#   for 10+ days (cumulative pct within +-3%) on shrinking volume; today
+#   prints a moderate breakout candle (vol_ratio 1.2-2.5, pct +1..+4%,
+#   close > MA20). The narrow band cap on today's pct is intentional --
+#   limit-up days (+10%) are NOT F1; those are already chase territory.
+# ==========================================================================
+
+def screen_strategy_f1(min_amount=50_000_000,
+                       max_10d_pct=3.0, min_10d_pct=-3.0,
+                       max_60d_amplitude_pct=25.0,
+                       today_pct_min=1.0, today_pct_max=4.0,
+                       today_vr_min=1.2, today_vr_max=2.5,
+                       require_above_ma20=True,
+                       market="all", sample=None):
+    """Strategy F1: low-vol consolidation + first breakout day.
+
+    Returns candidate dicts (strategy='F1').
+    """
+    drops = {"wrong_market": 0, "st_risky": 0, "thin_liquidity": 0,
+             "weak_pct_today": 0, "vol_out_of_band": 0,
+             "no_kline": 0, "10d_not_consolidating": 0,
+             "amplitude_too_wide": 0, "below_ma20": 0}
+
+    universe = get_market_list()
+    if not universe:
+        screen_strategy_f1.last_stage1_drops = drops
+        screen_strategy_f1.last_pool_review = {"universe": 0}
+        return []
+
+    # Stage 1: cheap filters using market quote fields directly.
+    stage1 = []
+    for r in universe:
+        code = r.get("code")
+        if not code or not _is_in_market(code, market):
+            drops["wrong_market"] += 1
+            continue
+        if _is_risky_name(r.get("name")):
+            drops["st_risky"] += 1
+            continue
+        amount = r.get("amount") or 0
+        if amount < min_amount:
+            drops["thin_liquidity"] += 1
+            continue
+        pct = r.get("pct")
+        if pct is None or pct < today_pct_min or pct > today_pct_max:
+            drops["weak_pct_today"] += 1
+            continue
+        vr = r.get("volume_ratio")
+        if vr is None or vr < today_vr_min or vr > today_vr_max:
+            drops["vol_out_of_band"] += 1
+            continue
+        stage1.append(r)
+
+    if not stage1:
+        screen_strategy_f1.last_stage1_drops = drops
+        screen_strategy_f1.last_pool_review = {
+            "universe": len(universe), "after_stage1": 0, "final": 0,
+        }
+        return []
+
+    # Optional debug-only sampling (rate-limit safety on F1 first run).
+    if sample and len(stage1) > sample:
+        stage1 = stage1[:sample]
+
+    # Stage 2: kline-based checks. F1 needs at least 25 days for the
+    # consolidation window + MA20.
+    codes = [r["code"] for r in stage1]
+    kl_map = get_daily_klines_batch(codes, n=30, workers=8)
+
+    out = []
+    for r in stage1:
+        code = r["code"]
+        kl = kl_map.get(code) or []
+        if len(kl) < 20:
+            drops["no_kline"] += 1
+            continue
+        closes = [k["close"] for k in kl]
+        highs = [k["high"] for k in kl]
+        lows = [k["low"] for k in kl]
+        # 10-day cumulative pct (today's close vs 10 days ago).
+        # Note: kl[-1] is today, kl[-11] is 10 days ago.
+        if len(closes) >= 11 and closes[-11] > 0:
+            cum10 = (closes[-1] - closes[-11]) / closes[-11] * 100
+        else:
+            cum10 = None
+        if cum10 is None or cum10 > max_10d_pct or cum10 < min_10d_pct:
+            drops["10d_not_consolidating"] += 1
+            continue
+        # 60-day price amplitude: (max - min) / min * 100, capped to
+        # screen out wide-swinging volatile names.
+        wnd = closes[-60:] if len(closes) >= 60 else closes
+        if wnd:
+            lo, hi = min(wnd), max(wnd)
+            amp = (hi - lo) / lo * 100 if lo > 0 else 0
+            if amp > max_60d_amplitude_pct:
+                drops["amplitude_too_wide"] += 1
+                continue
+        else:
+            amp = None
+        # MA20: today's close must be above MA20.
+        ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else None
+        if require_above_ma20:
+            if ma20 is None or closes[-1] < ma20:
+                drops["below_ma20"] += 1
+                continue
+        ma40 = sum(closes[-40:]) / 40 if len(closes) >= 40 else None
+        ma60 = sum(closes[-60:]) / 60 if len(closes) >= 60 else None
+        # 5-day pct from kline so evidence_card / pattern_match have it.
+        # Without this F1 evidence cards always print "缺 5日涨幅数据"
+        # because EM clist's f109 isn't merged into the F1 stage1 dict.
+        if len(closes) >= 6 and closes[-6] > 0:
+            cum5 = round((closes[-1] - closes[-6]) / closes[-6] * 100, 2)
+        else:
+            cum5 = None
+        out.append({
+            "code": code,
+            "name": r.get("name"),
+            "price": r.get("price") or closes[-1],
+            "pct": r.get("pct"),
+            "amount": r.get("amount"),
+            "turnover": r.get("turnover"),
+            "volume_ratio": r.get("volume_ratio"),
+            "float_mv": r.get("float_mv"),
+            "industry": r.get("industry"),
+            "main_inflow": r.get("main_inflow"),
+            "pct_5d": cum5,
+            "pct_10d": round(cum10, 2),
+            "amplitude_60d_pct": round(amp, 2) if amp is not None else None,
+            "ma20": round(ma20, 2) if ma20 else None,
+            "ma40": round(ma40, 2) if ma40 else None,
+            "ma60": round(ma60, 2) if ma60 else None,
+            "strategy": "F1",
+            "_source": r.get("_source", "em"),
+        })
+    screen_strategy_f1.last_stage1_drops = drops
+    screen_strategy_f1.last_pool_review = {
+        "universe": len(universe),
+        "after_stage1": len(stage1),
+        "final": len(out),
+    }
+    # Sort by today's pct descending (stronger breakout candle first).
+    out.sort(key=lambda x: x.get("pct") or 0, reverse=True)
+    return out
+
+
+# ==========================================================================
+# Strategy F2 -- Silent Accumulation (anti-pattern of D).
+# ==========================================================================
+#   Thesis: D's classical signal (MA-aligned + strong main inflow + volume
+#   confirm) catches stocks AFTER main capital has finished accumulating
+#   and is mid-distribution. F2 catches main capital DURING accumulation:
+#   money is quietly flowing in but the price hasn't lifted off yet. This
+#   is the T-3~T-5 entry zone, before the run.
+#
+#   Hard filters (all required):
+#     - 5-day cumulative main inflow > 20,000,000 (some money in, not huge)
+#     - 5-day cumulative pct < 3% AND > -3% (price NOT lifted yet)
+#     - Today's volume ratio in [0.8, 1.5] (NO breakout volume yet)
+#     - Today's pct in [-2%, +3%] (NO chase candle)
+#     - Price within MA20 +/- 5% (consolidation zone)
+#     - NOT MA-aligned (intentional negative of D)
+#     - Today's amount >= 50_000_000 (liquidity floor)
+#     - 5-day inflow / float_mv ratio >= 0.5% (meaningful for the cap)
+# ==========================================================================
+
+def screen_strategy_f2(min_inflow_5d=10_000_000,
+                       min_inflow_ratio_pct=0.3,
+                       max_5d_pct=4.0, min_5d_pct=-4.0,
+                       vol_ratio_lo=0.6, vol_ratio_hi=1.8,
+                       pct_min=-3.0, pct_max=4.0,
+                       ma20_band_pct=6.0,
+                       require_ma_not_aligned=True,
+                       market="all", min_amount=50_000_000):
+    """Strategy F2: silent accumulation (anti-D).
+
+    Aims to catch main capital BEFORE the price kicks off, not after. The
+    classical D signal (MA-aligned + strong inflow + volume) is by
+    construction a trailing signal -- it fires only AFTER 3-5 trading
+    days of price advance, when retail starts noticing. F2 inverts every
+    one of those dimensions: small but positive inflow, NO price kick,
+    NO volume spike, NOT MA-aligned, sitting around MA20.
+
+    Returns candidate dicts (strategy='F2').
+    """
+    drops = {"negative_flow": 0, "weak_flow": 0, "st_risky": 0,
+             "wrong_market": 0, "thin_liquidity": 0,
+             "already_running": 0, "vol_breakout": 0,
+             "chase_candle": 0, "no_kline": 0,
+             "out_of_ma20_band": 0, "already_aligned": 0,
+             "low_inflow_ratio": 0}
+
+    flow_rows = get_multiday_fund_flow()
+    if not flow_rows:
+        screen_strategy_f2.last_stage1_drops = drops
+        screen_strategy_f2.last_pool_review = {"universe": 0}
+        return []
+
+    degraded = bool(flow_rows and flow_rows[0].get("_degraded"))
+    # Stage 1: cheap filters (no extra API yet)
+    stage1 = []
+    for r in flow_rows:
+        code = r.get("code")
+        if not code:
+            continue
+        if not _is_in_market(code, market):
+            drops["wrong_market"] += 1
+            continue
+        if _is_risky_name(r.get("name")):
+            drops["st_risky"] += 1
+            continue
+        in5 = r.get("main_inflow_5d") or 0
+        if in5 < min_inflow_5d:
+            drops["weak_flow"] += 1
+            continue
+        # Price must NOT have lifted yet -- F2's key differentiator.
+        # Using EM-native pct_5d (f109) when available; fall back to None
+        # which lets the stock through to stage-2 kline computation.
+        p5 = r.get("pct_5d")
+        if p5 is not None and (p5 > max_5d_pct or p5 < min_5d_pct):
+            drops["already_running"] += 1
+            continue
+        stage1.append(r)
+
+    if not stage1:
+        screen_strategy_f2.last_stage1_drops = drops
+        screen_strategy_f2.last_pool_review = {
+            "universe": len(flow_rows),
+            "degraded_single_day": degraded,
+        }
+        return []
+
+    # Stage 2: fetch live quote (for volume_ratio, turnover, amount) and
+    # daily kline (for MA20 + actual 5d pct when EM f109 was unavailable).
+    codes = [r["code"] for r in stage1]
+    quote_map = {}
+    try:
+        for q in get_market_quotes(codes):
+            quote_map[q["code"]] = q
+    except Exception as e:
+        print(f"WARN: strategy F2 quote fetch failed: {e}", file=sys.stderr)
+    kl_map = get_daily_klines_batch(codes, n=25, workers=8)
+
+    out = []
+    for r in stage1:
+        code = r["code"]
+        q = quote_map.get(code, {})
+        amount = q.get("amount") or 0
+        if amount < min_amount:
+            drops["thin_liquidity"] += 1
+            continue
+        # No volume kick -- F2 explicitly avoids the breakout-day pattern
+        # because by the time vol_ratio > 1.5 main capital has already
+        # tipped its hand and the meat is gone.
+        vr = q.get("volume_ratio") or 0
+        if vr < vol_ratio_lo or vr > vol_ratio_hi:
+            drops["vol_breakout"] += 1
+            continue
+        # No chase candle today
+        pct_today = q.get("pct") if q.get("pct") is not None else (r.get("pct") or 0)
+        if pct_today < pct_min or pct_today > pct_max:
+            drops["chase_candle"] += 1
+            continue
+        # Kline-derived checks: 5d pct (verify EM stage1 cut) + MA20 band
+        # + MA-NOT-aligned (the deliberate negation of D's gate).
+        kl = kl_map.get(code) or []
+        if len(kl) < 20:
+            drops["no_kline"] += 1
+            continue
+        closes = [k["close"] for k in kl]
+        price = q.get("price") or kl[-1]["close"]
+        # Recompute 5d pct from kline for stage1 rows that had p5==None.
+        if r.get("pct_5d") is None and len(closes) >= 6 and closes[-6] > 0:
+            kl_p5 = (closes[-1] - closes[-6]) / closes[-6] * 100
+            if kl_p5 > max_5d_pct or kl_p5 < min_5d_pct:
+                drops["already_running"] += 1
+                continue
+            r["pct_5d"] = round(kl_p5, 2)
+        ma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else None
+        ma40 = sum(closes[-40:]) / 40 if len(closes) >= 40 else None
+        ma60 = sum(closes[-60:]) / 60 if len(closes) >= 60 else None
+        # MA20 band: price must be near MA20 (consolidation zone)
+        if ma20 and ma20 > 0:
+            dist_ma20 = (price - ma20) / ma20 * 100
+            if abs(dist_ma20) > ma20_band_pct:
+                drops["out_of_ma20_band"] += 1
+                continue
+        else:
+            dist_ma20 = None
+        # NOT MA-aligned: explicit negation of D. Strict bullish stack
+        # (close > MA20 > MA40 > MA60) means main capital already finished
+        # the prep work and is now in distribution.
+        if require_ma_not_aligned and ma20 and ma40 and ma60:
+            strict_aligned = (price > ma20 and ma20 > ma40 and ma40 > ma60)
+            if strict_aligned:
+                drops["already_aligned"] += 1
+                continue
+        # Inflow vs cap size: 50M into a 500B cap is a rounding error.
+        # Require inflow/float_mv >= min_inflow_ratio_pct (default 0.5%).
+        float_mv = q.get("float_mv") or r.get("float_mv") or 0
+        if float_mv > 0:
+            ratio_pct = (r.get("main_inflow_5d") or 0) / float_mv * 100
+            if ratio_pct < min_inflow_ratio_pct:
+                drops["low_inflow_ratio"] += 1
+                continue
+        else:
+            ratio_pct = None
+        out.append({
+            "code": code,
+            "name": r.get("name") or q.get("name"),
+            "price": price,
+            "pct": pct_today,
+            "amount": amount,
+            "turnover": q.get("turnover"),
+            "volume_ratio": vr,
+            "float_mv": float_mv if float_mv > 0 else None,
+            "industry": r.get("industry") or q.get("industry"),
+            "main_inflow": q.get("main_inflow") or r.get("main_inflow_1d"),
+            "main_inflow_5d": r.get("main_inflow_5d"),
+            "main_inflow_pct_5d": r.get("main_inflow_pct_5d"),
+            "main_inflow_ratio_pct": (round(ratio_pct, 2)
+                                      if ratio_pct is not None else None),
+            "pct_5d": r.get("pct_5d"),
+            "ma20": round(ma20, 2) if ma20 else None,
+            "ma40": round(ma40, 2) if ma40 else None,
+            "ma60": round(ma60, 2) if ma60 else None,
+            "distance_from_ma20": round(dist_ma20, 2) if dist_ma20 is not None else None,
+            "ma_aligned": False,                   # by construction
+            "strategy": "F2",
+            "_source": q.get("_source", "em"),
+        })
+    screen_strategy_f2.last_stage1_drops = drops
+    screen_strategy_f2.last_pool_review = {
+        "universe": len(flow_rows),
+        "after_stage1": len(stage1),
+        "final": len(out),
+        "degraded_single_day": degraded,
+    }
+    # Sort by inflow ratio (most concentrated accumulation first).
+    out.sort(key=lambda x: x.get("main_inflow_ratio_pct") or 0, reverse=True)
+    return out
+
+
+# ==========================================================================
+# Strategy F3 -- Sector Kickoff (a sector turning hot TODAY for the
+# first time in the past 5 days; pick its yet-to-move members).
+# ==========================================================================
+#   Thesis: by the time a sector has been in the top 10 by 5-day
+#   performance, the obvious leaders have already run +20-40% and the
+#   laggard rotation chase is over. F3 looks for a sector that is HOT
+#   today (top 5 by 1-day pct) but was COLD over the past 5 days
+#   (NOT in top 10 by 5-day pct). That is "first day of new rotation",
+#   when capital is just starting to move in. The picks are MEMBERS of
+#   that sector that themselves haven't moved yet (own 5d pct < 3%).
+# ==========================================================================
+
+def screen_strategy_f3(today_sector_top=5,
+                       sector_5d_excluded_top=10,
+                       require_leaders=2,
+                       leader_pct_threshold=5.0,
+                       member_5d_max=3.0,
+                       member_today_min=-1.0,
+                       member_today_max=4.0,
+                       min_amount=30_000_000,
+                       market="all"):
+    """Strategy F3: sector kickoff. Returns candidate dicts (strategy='F3').
+
+    Universe is constrained to members of "new-hot" sectors only. Note
+    that 5-day sector pct is provided directly by EM sector_rank as
+    `pct_5d`; if that field is missing (tushare aggregation fallback),
+    F3 degrades to "today's top sectors that have today_pct >= 3%".
+    """
+    drops = {"no_new_hot_sector": 0, "no_leaders": 0,
+             "wrong_market": 0, "st_risky": 0, "thin_liquidity": 0,
+             "member_already_running": 0, "weak_pct_today": 0,
+             "no_member_data": 0}
+
+    today_sectors = get_sector_rank("industry", top=20, fail_safe=True)
+    if not today_sectors:
+        screen_strategy_f3.last_stage1_drops = drops
+        screen_strategy_f3.last_pool_review = {"sectors": 0}
+        return []
+
+    # Sort today by `pct` descending (today's 1-day move) and by `pct_5d`
+    # descending (past 5-day move). Then form the "new hot" set.
+    by_today = sorted(today_sectors,
+                      key=lambda s: s.get("pct") or 0, reverse=True)
+    today_top = by_today[:today_sector_top]
+    # When pct_5d is missing (tushare degrade), `cold_5d_set` falls back
+    # to "all sectors except today's top 5 themselves" so F3 can still
+    # pick something instead of returning empty.
+    has_5d = any(s.get("pct_5d") is not None for s in today_sectors)
+    if has_5d:
+        by_5d = sorted([s for s in today_sectors
+                        if s.get("pct_5d") is not None],
+                       key=lambda s: s.get("pct_5d") or 0, reverse=True)
+        hot_5d_names = {s["name"] for s in by_5d[:sector_5d_excluded_top]
+                        if s.get("name")}
+    else:
+        hot_5d_names = set()                        # degrade: skip 5d cut
+
+    new_hot = [s for s in today_top
+               if s.get("name") and s["name"] not in hot_5d_names]
+    if not new_hot:
+        drops["no_new_hot_sector"] += 1
+        screen_strategy_f3.last_stage1_drops = drops
+        screen_strategy_f3.last_pool_review = {
+            "sectors": len(today_sectors),
+            "today_top": len(today_top),
+            "new_hot": 0,
+        }
+        return []
+
+    # For each new-hot sector, pull constituents and pick non-running
+    # members. Skip sectors lacking >=N leaders today (avoids selecting
+    # a "noise" sector with one freak +5% gainer).
+    sector_picks = []
+    for sec in new_hot:
+        sec_code = sec.get("code")
+        members = get_sector_constituents(sec_code) or []
+        if not members:
+            drops["no_member_data"] += 1
+            continue
+        # Count today leaders in this sector
+        leaders = [m for m in members
+                   if (m.get("pct") or 0) >= leader_pct_threshold]
+        if len(leaders) < require_leaders:
+            drops["no_leaders"] += 1
+            continue
+        for m in members:
+            code = m.get("code")
+            if not code or not _is_in_market(code, market):
+                drops["wrong_market"] += 1
+                continue
+            if _is_risky_name(m.get("name")):
+                drops["st_risky"] += 1
+                continue
+            amount = m.get("amount") or 0
+            if amount < min_amount:
+                drops["thin_liquidity"] += 1
+                continue
+            pct_today = m.get("pct")
+            if (pct_today is None or pct_today < member_today_min
+                    or pct_today > member_today_max):
+                drops["weak_pct_today"] += 1
+                continue
+            # Sector-member 5d pct check requires kline; defer to stage 2.
+            sector_picks.append((sec, m))
+
+    if not sector_picks:
+        screen_strategy_f3.last_stage1_drops = drops
+        screen_strategy_f3.last_pool_review = {
+            "sectors": len(today_sectors),
+            "new_hot": len(new_hot),
+            "after_member_filter": 0,
+        }
+        return []
+
+    # Stage 2: kline-based 5d pct. Only fetch for unique codes.
+    unique_codes = list({m["code"] for _, m in sector_picks})
+    kl_map = get_daily_klines_batch(unique_codes, n=15, workers=8)
+
+    out = []
+    seen = set()
+    for sec, m in sector_picks:
+        code = m["code"]
+        if code in seen:
+            continue
+        kl = kl_map.get(code) or []
+        if len(kl) >= 6 and kl[-6]["close"] > 0:
+            mp5 = (kl[-1]["close"] - kl[-6]["close"]) / kl[-6]["close"] * 100
+        else:
+            mp5 = None
+        if mp5 is not None and mp5 > member_5d_max:
+            drops["member_already_running"] += 1
+            continue
+        seen.add(code)
+        out.append({
+            "code": code,
+            "name": m.get("name"),
+            "price": m.get("price"),
+            "pct": m.get("pct"),
+            "amount": m.get("amount"),
+            "turnover": m.get("turnover"),
+            "volume_ratio": m.get("volume_ratio"),
+            "float_mv": m.get("float_mv"),
+            "industry": m.get("industry") or sec.get("name"),
+            "main_inflow": m.get("main_inflow"),
+            "pct_5d": round(mp5, 2) if mp5 is not None else None,
+            "sector_name": sec.get("name"),
+            "sector_pct_today": sec.get("pct"),
+            "sector_pct_5d": sec.get("pct_5d"),
+            "sector_leaders": len([
+                x for x in get_sector_constituents(sec.get("code")) or []
+                if (x.get("pct") or 0) >= leader_pct_threshold
+            ]),
+            "strategy": "F3",
+            "_source": m.get("_source", "em"),
+        })
+    screen_strategy_f3.last_stage1_drops = drops
+    screen_strategy_f3.last_pool_review = {
+        "sectors": len(today_sectors),
+        "new_hot": len(new_hot),
+        "new_hot_names": [s.get("name") for s in new_hot],
+        "after_member_filter": len(sector_picks),
+        "final": len(out),
+        "degraded_no_5d": not has_5d,
+    }
+    out.sort(key=lambda x: x.get("sector_pct_today") or 0, reverse=True)
     return out
 
 
@@ -5363,7 +5973,27 @@ def _unified_score(c, hot_sectors=None, market_ctx=None, sector_pct_map=None):
         elif bp >= 90:
             score_st += 5
 
-    total = (score_pos + score_cap + score_vol + score_sec + score_qlt + score_st)
+    # Fix D (2026-05-08): chase-penalty. Subtract points based on the
+    # stock's own 5-day gain so candidates already deep into a leg rank
+    # BELOW genuine catch-up / early-stage candidates with identical
+    # position/capital/volume/sector profiles. Formula:
+    #   penalty = max(0, (pct_5d - 3) * 0.5), capped at 8 points.
+    # Rationale: first 3% gain is free (normal volatility); each additional
+    # percent costs 0.5 points up to an 8-point ceiling so the penalty
+    # never dominates the full 100-point scale.
+    # Source field differs by strategy:
+    #   C uses `stock_n_day_pct` (already populated in Stage-2)
+    #   D uses `pct_5d` from EM f109 clist
+    #   E uses `pct_5d` we now compute in Stage-2 (2026-05-08 change)
+    _chase_pct = (c.get("pct_5d")
+                  if c.get("pct_5d") is not None
+                  else c.get("stock_n_day_pct"))
+    score_chase = 0.0
+    if _chase_pct is not None and _chase_pct > 3.0:
+        score_chase = min(8.0, (_chase_pct - 3.0) * 0.5)
+
+    total = (score_pos + score_cap + score_vol + score_sec + score_qlt + score_st
+             - score_chase)
     total = max(0.0, min(100.0, total))
     c["score_pos"] = round(score_pos, 1)
     c["score_cap"] = round(score_cap, 1)
@@ -5371,6 +6001,7 @@ def _unified_score(c, hot_sectors=None, market_ctx=None, sector_pct_map=None):
     c["score_sec"] = round(score_sec, 1)
     c["score_qlt"] = round(score_qlt, 1)
     c["score_st"] = round(score_st, 1)
+    c["score_chase_penalty"] = round(score_chase, 1)   # transparent on output
     return total
 
 
@@ -5637,20 +6268,441 @@ def _scan_bad_news_for_final(results, days=7, strategies=("C", "D", "E")):
 
 
 # ==========================================================================
+# Pattern matcher + Evidence card + Confidence voting.
+#
+# The LLM historically got a flat candidate dict and had to guess whether
+# the data support or contradict a "buy" decision. Two failure modes
+# observed in real trades:
+#   1. The LLM pattern-matched naively ("F2 hit, main capital in, BUY")
+#      and missed bearish co-signals in the same data (upper shadow,
+#      distance from 60-day high, overheated cluster).
+#   2. The LLM ignored that two strategies with conflicting signals
+#      actually reduces confidence, not increases it (e.g. F2 says
+#      "still quiet", F1 says "already breaking out" -- these aren't
+#      both right; something is staler than the other).
+#
+# The three helpers below address both. They are intentionally string-
+# based (not scores) so the LLM can read them in plain language:
+#   - _match_patterns(c, kl) -> list of pattern label strings
+#   - _build_evidence_card(c, kl, market_ctx) -> dict of bullish/
+#       bearish/uncertain signal lists
+#   - _vote_confidence(candidates_by_code) -> per-code confidence label
+#       based on cross-strategy agreement
+# ==========================================================================
+
+# Pattern labels (closed set; LLM trained to interpret these strings):
+#   bottom_first_rally  : 60d pullback >=15%, recent consolidation, today
+#                         moderate up candle with above-avg volume
+#   gravestone_after_run: 5d pct >=5%, today long upper shadow, close
+#                         flat/down -- distribution warning
+#   low_vol_consolidation: 10d pct in +-3%, 10d avg volume < 30d avg volume
+#   distribution_top    : 5d pct >=10%, today vol_ratio >=2, pct <2%
+#                         (heavy volume without price follow-through)
+#   breakout_initial    : 10d pct in +-3% consolidation, today pct 1-4%
+#                         with vol_ratio 1.2-2.5 (F1 archetype)
+#   silent_accumulation : 5d pct in +-3%, main_inflow_5d positive and
+#                         >=0.3% of float MV, not MA-aligned (F2 archetype)
+#   sector_initial_move : own 5d pct small AND sector today_rank in top5
+#                         AND sector 5d_rank outside top10 (F3 archetype)
+#   overheated_chase    : 5d pct >=10%, close within 5% of 60d high,
+#                         today pct >=3%
+_PATTERN_LABELS = (
+    "bottom_first_rally",
+    "gravestone_after_run",
+    "low_vol_consolidation",
+    "distribution_top",
+    "breakout_initial",
+    "silent_accumulation",
+    "sector_initial_move",
+    "overheated_chase",
+)
+
+
+def _match_patterns(c, kl=None):
+    """Return list of pattern labels that fit candidate `c`.
+
+    `c` is an enriched candidate dict (has pct, pct_5d, volume_ratio,
+    close, ma20, etc.). `kl` is an optional list of daily kline rows
+    (at least 60 days recommended for full pattern coverage).
+    """
+    out = []
+    pct = c.get("pct") or 0
+    p5 = c.get("pct_5d")
+    vr = c.get("volume_ratio") or 0
+    ma20 = c.get("ma20")
+    ma40 = c.get("ma40")
+    ma60 = c.get("ma60")
+    price = c.get("price") or 0
+    closes = [k["close"] for k in kl] if kl else []
+    highs = [k["high"] for k in kl] if kl else []
+    lows = [k["low"] for k in kl] if kl else []
+    opens = [k["open"] for k in kl] if kl else []
+    vols = [k.get("volume") or 0 for k in kl] if kl else []
+
+    # Distance to 60-day high / low
+    dist_high = dist_low = None
+    if closes:
+        wnd = closes[-60:] if len(closes) >= 60 else closes
+        hi60 = max(wnd)
+        lo60 = min(wnd)
+        if hi60 > 0:
+            dist_high = (hi60 - price) / hi60 * 100   # positive = below high
+        if lo60 > 0:
+            dist_low = (price - lo60) / lo60 * 100    # positive = above low
+
+    # 1. bottom_first_rally: deep pullback from 60d high + today's up candle
+    if (dist_high is not None and dist_high >= 15
+            and p5 is not None and -3 <= p5 <= 3
+            and 1 <= pct <= 6 and vr >= 1.2):
+        out.append("bottom_first_rally")
+
+    # 2. gravestone_after_run: runup + today's upper-shadow reversal
+    if p5 is not None and p5 >= 5 and kl:
+        t = kl[-1]
+        body = abs(t["close"] - t["open"])
+        upper = t["high"] - max(t["close"], t["open"])
+        rng = t["high"] - t["low"]
+        if rng > 0 and upper >= 2 * body and upper / rng >= 0.5 and pct <= 2:
+            out.append("gravestone_after_run")
+
+    # 3. low_vol_consolidation: 10d flat + recent volume below 30d avg
+    if (p5 is not None and -3 <= p5 <= 3 and len(vols) >= 30):
+        recent_avg = sum(vols[-10:]) / 10
+        base_avg = sum(vols[-30:]) / 30
+        if base_avg > 0 and recent_avg / base_avg < 0.8:
+            out.append("low_vol_consolidation")
+
+    # 4. distribution_top: high vr but price not following
+    if (p5 is not None and p5 >= 10 and vr >= 2.0 and pct < 2):
+        out.append("distribution_top")
+
+    # 5. breakout_initial (F1 archetype)
+    p10 = c.get("pct_10d")
+    if (p10 is not None and -3 <= p10 <= 3
+            and 1 <= pct <= 4 and 1.2 <= vr <= 2.5
+            and ma20 is not None and price >= ma20):
+        out.append("breakout_initial")
+
+    # 6. silent_accumulation (F2 archetype)
+    inflow_ratio = c.get("main_inflow_ratio_pct")
+    if (p5 is not None and -3 <= p5 <= 3
+            and inflow_ratio is not None and inflow_ratio >= 0.3
+            and not c.get("ma_aligned", False)):
+        out.append("silent_accumulation")
+
+    # 7. sector_initial_move (F3 archetype)
+    if (c.get("sector_pct_today") is not None
+            and c.get("sector_pct_today") >= 3
+            and (c.get("sector_pct_5d") is None
+                 or c.get("sector_pct_5d") < 3)
+            and p5 is not None and p5 < 5):
+        out.append("sector_initial_move")
+
+    # 8. overheated_chase
+    if (p5 is not None and p5 >= 10
+            and dist_high is not None and dist_high <= 5
+            and pct >= 3):
+        out.append("overheated_chase")
+
+    return out
+
+
+def _build_evidence_card(c, kl=None, market_ctx=None, hot_sectors=None):
+    """Return an evidence card dict with bullish/bearish/uncertain signals.
+
+    Each signal is a short Chinese string (human-readable to LLM), along
+    with the numeric value that triggered it so the LLM can quote it
+    back to the user.
+    """
+    bullish = []
+    bearish = []
+    uncertain = []
+
+    pct = c.get("pct")
+    p5 = c.get("pct_5d")
+    vr = c.get("volume_ratio")
+    price = c.get("price")
+    ma20 = c.get("ma20")
+    ma40 = c.get("ma40")
+    ma60 = c.get("ma60")
+    inflow = c.get("main_inflow")
+    inflow_5d = c.get("main_inflow_5d")
+    inflow_ratio = c.get("main_inflow_ratio_pct")
+    industry = c.get("industry")
+    sector_name = c.get("sector_name") or industry
+
+    # --- bullish signals ---
+    if inflow_ratio is not None and inflow_ratio >= 0.5:
+        bullish.append(f"主力5日净流入占流通市值 {inflow_ratio}% (≥0.5% 显著)")
+    if inflow is not None and inflow > 50_000_000:
+        bullish.append(f"今日主力净流入 {inflow/1e8:.2f} 亿 (≥5千万)")
+    if p5 is not None and -3 <= p5 <= 3 and inflow_5d is not None and inflow_5d > 0:
+        bullish.append(f"5日横盘 {p5}% + 资金净流入 {inflow_5d/1e8:.2f} 亿 = 吸筹形态")
+    if ma20 is not None and price is not None and 0 < (price - ma20) / ma20 * 100 <= 3:
+        bullish.append(f"刚站上MA20 (距MA20 +{(price-ma20)/ma20*100:.2f}%)")
+    if c.get("sector_pct_today") is not None and c["sector_pct_today"] >= 3:
+        bullish.append(f"所属板块「{sector_name}」今日 +{c['sector_pct_today']:.1f}% 领涨")
+    if hot_sectors and industry and industry in hot_sectors:
+        bullish.append(f"所属行业「{industry}」位于今日热门板块")
+    # MA multi-head (ma20>ma40>ma60) but NOT for F2 (F2 requires NOT aligned)
+    if (c.get("strategy") != "F2" and ma20 and ma40 and ma60
+            and ma20 > ma40 > ma60):
+        bullish.append("MA20>MA40>MA60 均线多头排列")
+
+    # --- bearish signals ---
+    if p5 is not None and p5 >= 10:
+        bearish.append(f"5日已涨 {p5}% (>10% 上方套牢盘沉重)")
+    if pct is not None and pct >= 7:
+        bearish.append(f"今日已涨 {pct}% (追涨风险高)")
+    if vr is not None and vr >= 3:
+        bearish.append(f"量比 {vr} 放到 3倍以上 (可能派发/诱多)")
+    # 60d high distance via kline
+    if kl:
+        closes = [k["close"] for k in kl]
+        wnd = closes[-60:] if len(closes) >= 60 else closes
+        if wnd and price is not None:
+            hi60 = max(wnd)
+            if hi60 > 0:
+                dh = (hi60 - price) / hi60 * 100
+                if dh <= 3:
+                    bearish.append(f"距60日高点仅 {dh:.1f}% (接近套牢盘密集区)")
+        # Upper shadow check
+        t = kl[-1]
+        body = abs(t["close"] - t["open"])
+        rng = t["high"] - t["low"]
+        upper = t["high"] - max(t["close"], t["open"])
+        if rng > 0 and upper >= 2 * body and upper / rng >= 0.5:
+            bearish.append(
+                f"今日长上影 (上影/实体={upper/max(body,1e-6):.1f}x); "
+                "高位冲高回落警示")
+    # Inflow contradiction
+    if inflow is not None and inflow < -30_000_000:
+        bearish.append(f"今日主力净流出 {abs(inflow)/1e8:.2f} 亿 (大额出货)")
+    # Market weakness context
+    if market_ctx:
+        sh = market_ctx.get("sh_pct")
+        gem = market_ctx.get("gem_pct")
+        if sh is not None and sh < -1.5:
+            bearish.append(f"上证今日 {sh}% (大盘弱势, 追涨胜率降低)")
+        if gem is not None and gem < -2.0:
+            bearish.append(f"创业板今日 {gem}% (小盘风险偏好低)")
+
+    # --- uncertain signals ---
+    if p5 is None:
+        uncertain.append("缺 5日涨幅数据 (可能是次新股/刚恢复交易)")
+    if vr is None:
+        uncertain.append("缺 量比数据")
+    if inflow is None and c.get("strategy") in ("F2", "D"):
+        uncertain.append("资金流数据缺失 (降级源/限流)")
+    # Contradictory signals detection
+    if p5 is not None and p5 < -2 and pct is not None and pct >= 3:
+        uncertain.append(f"5日跌 {p5}% 但今日大涨 {pct}% (V形反转? 或诱多?)")
+
+    return {
+        "bullish": bullish,
+        "bearish": bearish,
+        "uncertain": uncertain,
+    }
+
+
+_BULLISH_PATTERN_LABELS = frozenset({
+    "breakout_initial", "silent_accumulation", "sector_initial_move",
+    "bottom_first_rally", "low_vol_consolidation",
+})
+_BEARISH_PATTERN_LABELS = frozenset({
+    "gravestone_after_run", "distribution_top", "overheated_chase",
+})
+
+
+def _vote_confidence(code_candidates):
+    """Compute confidence label given all candidate rows sharing the
+    same code. Rules:
+      - CONFLICTED: F1 + F2 on the same bar (mutually exclusive)
+      - HIGH:   (a) >=2 strategies, no contradiction, bearish<=2; OR
+                (b) single strategy + pattern-resonance: bullish>=3,
+                    bearish<=1, AND >=2 bullish pattern_labels with no
+                    bearish pattern_labels (e.g. F2 picks that also
+                    qualify for silent_accumulation + low_vol_consolidation)
+      - MED:    single strategy, bullish>=2, bearish<=1
+      - LOW:    everything else
+    Returns (label, rationale_str).
+    """
+    strategies = sorted({c.get("strategy") for c in code_candidates
+                         if c.get("strategy")})
+    n_strat = len(strategies)
+
+    # Aggregate evidence + patterns across entries for this code
+    all_bull = []
+    all_bear = []
+    pattern_set = set()
+    for c in code_candidates:
+        ec = c.get("evidence_card") or {}
+        all_bull.extend(ec.get("bullish", []))
+        all_bear.extend(ec.get("bearish", []))
+        for p in (c.get("pattern_labels") or []):
+            pattern_set.add(p)
+
+    # Detect strategy-level contradiction: F1 (breakout day) vs F2 (still
+    # silent) on the same code is logically impossible in the same bar
+    # (one is wrong). Mark as contradiction.
+    strat_contradiction = ("F1" in strategies and "F2" in strategies)
+
+    if strat_contradiction:
+        return ("CONFLICTED",
+                f"策略冲突: {'+'.join(strategies)} "
+                "(F1说已突破/F2说仍沉默, 二者不可同时为真)")
+
+    if n_strat >= 2 and len(all_bear) <= 2:
+        return ("HIGH",
+                f"{n_strat}策略共振: {'+'.join(strategies)}; "
+                f"看多{len(all_bull)}项/看空{len(all_bear)}项")
+
+    # Pattern-resonance HIGH: single strategy is fine if multiple bullish
+    # pattern archetypes co-fire AND no bearish pattern is present. This
+    # catches the common "F2 silent_accumulation also tagged
+    # low_vol_consolidation" case which the strict 2-strategy gate misses
+    # when the default engine set (C/F1/F2/F3) makes co-hits structurally
+    # rare (F1+F2 are mutually exclusive by design; C/F3 are sector-driven
+    # and rarely overlap with bottom-up F1/F2).
+    bull_patterns = pattern_set & _BULLISH_PATTERN_LABELS
+    bear_patterns = pattern_set & _BEARISH_PATTERN_LABELS
+    if (n_strat == 1 and len(all_bull) >= 3 and len(all_bear) <= 1
+            and len(bull_patterns) >= 2 and not bear_patterns):
+        return ("HIGH",
+                f"单策略{strategies[0]}+形态共振({'+'.join(sorted(bull_patterns))}); "
+                f"看多{len(all_bull)}/看空{len(all_bear)}")
+
+    if n_strat == 1 and len(all_bull) >= 2 and len(all_bear) <= 1:
+        return ("MED",
+                f"单策略{strategies[0]}+看多{len(all_bull)}/看空{len(all_bear)}")
+    return ("LOW",
+            f"单策略{strategies[0] if strategies else '?'}; "
+            f"看多{len(all_bull)}/看空{len(all_bear)}")
+
+
+def _build_must_verify_hint(c, kl=None):
+    """Return a dict of specific verification steps the LLM MUST run
+    before confirming a BUY. This prevents the classic "too eager on
+    partial signal" failure mode.
+    """
+    strat = c.get("strategy", "?")
+    code = c.get("code")
+    checks = []
+
+    # Universal kill-switches
+    checks.append({
+        "check": "分时量价背离",
+        "how": "调用 fetch_minute_price_volume 看早盘量价是否配合；"
+               "若价格上涨但成交量持续萎缩 → 放弃",
+    })
+    checks.append({
+        "check": "大单异动",
+        "how": "调用 fetch_big_order_flow 检查近30分钟是否有大额抛单；"
+               "超过 500 万的卖单连续出现 → 放弃",
+    })
+
+    # Strategy-specific checks
+    if strat == "F1":
+        checks.append({
+            "check": "突破真实性",
+            "how": "需要午后收盘价仍站稳今日开盘价+1%以上；"
+                   "若尾盘回到开盘以下 → 放弃 (假突破)",
+        })
+    if strat == "F2":
+        checks.append({
+            "check": "吸筹连续性",
+            "how": f"明日需继续观察: 若资金回流 ≥50% 今日流入额 → 弃",
+        })
+        checks.append({
+            "check": "MA20 失守",
+            "how": "若次日收盘跌破 MA20 → 立即止损, 吸筹逻辑被证伪",
+        })
+    if strat == "F3":
+        checks.append({
+            "check": "板块持续性",
+            "how": "次日板块涨幅≥+1% 才可持股; 若板块回吐 → 板块轮动失败",
+        })
+    if strat == "C":
+        checks.append({
+            "check": "板块惯性",
+            "how": "热板滞涨股要求板块本身持续强势; "
+                   "若板块当日/次日跑输指数 → 放弃",
+        })
+
+    return {
+        "code": code,
+        "strategy": strat,
+        "must_verify": checks,
+    }
+
+
+def _build_devil_advocate(c, evidence_card):
+    """Return self-challenge questions the LLM should answer before buy.
+    Each question is designed to surface a hidden bearish case.
+    """
+    questions = []
+    p5 = c.get("pct_5d")
+    strat = c.get("strategy", "?")
+    bullish_n = len(evidence_card.get("bullish", []))
+    bearish_n = len(evidence_card.get("bearish", []))
+
+    # Strategy-agnostic challenges
+    questions.append(
+        "如果明日开盘即跌 3%, 我今天买入的理由是否还成立? "
+        "(若答案是否定 → 说明理由过于依赖今日强势, 不是真信号)")
+    questions.append(
+        "此股在过去 20 个交易日内, 有几次出现过相同的信号? "
+        "每次之后的 5 日走势如何? (若历史假信号率 >60% → 放弃)")
+
+    if bearish_n >= 2:
+        questions.append(
+            f"看空信号已有 {bearish_n} 项 (对看多 {bullish_n} 项); "
+            "是否有足够理由认为看多主导? 若不能说服自己 → 放弃")
+
+    if strat == "F2":
+        questions.append(
+            "主力资金净流入的『主力』是否只是 ETF 被动买盘? "
+            "若是 → 不构成吸筹, 只是指数权重股的跟随")
+    if strat == "F1":
+        questions.append(
+            "『首日突破』的 10 日盘整区间，是否只是前期暴跌后的反弹平台? "
+            "若是 → 实际是弱反弹不是新 leg")
+    if strat == "F3":
+        questions.append(
+            "这个板块的异动是消息面驱动吗? 若纯靠某个利好催化 "
+            "→ 利好消化后 1-2 日内回吐率很高, 不建议参与")
+    if p5 is not None and p5 >= 5:
+        questions.append(
+            f"5日已涨 {p5}%, 若主力在当前价位派发, 接盘者是否有足够利润预期? "
+            "若答案是否定 → 说明属于追涨接盘, 放弃")
+
+    return questions
+
+
+# ==========================================================================
 # Recommendation (position sizing + stop levels)
 # ==========================================================================
 
-def recommend(capital=10000, market="all", strategies=("C", "D", "E"),
-              threshold_pct=5.0, top=30, min_trade_value=5000,
+def recommend(capital=10000, market="all",
+              strategies=("C", "F1", "F2", "F3"),
+              threshold_pct=5.0, top=8, min_trade_value=5000,
               check_bad_news=True, max_per_sector=2,
               stop_loss_pct=3.5, max_position_pct=40.0,
-              e_sample=None):
+              e_sample=None,
+              max_5d_c=6.0, max_5d_d=10.0, max_5d_e=15.0,
+              laggard_rel_factor=0.5):
     """Orchestrate strategies C (laggard), D (accumulation), E (breakout).
 
     Args:
       strategies: tuple of strategy codes to run (subset of C/D/E)
       e_sample: optional int, pass-through to screen_strategy_e.sample
                 (debug-only; limits E's universe for rate-limit safety)
+      max_5d_c/d/e: absolute 5-day gain caps (Fix A, 2026-05-08). Drop
+                candidates already up more than this -- they are no
+                longer "laggard" (C) / "early leg" (D) / "just-breakout"
+                (E). Pass 999 to disable for a specific strategy.
+      laggard_rel_factor: Fix B true-laggard test -- stock 5d pct must
+                stay below sector 5d pct * this factor (default 0.5).
 
     Returns (results, meta) where meta has funnel info for transparency.
     """
@@ -5908,7 +6960,10 @@ def recommend(capital=10000, market="all", strategies=("C", "D", "E"),
     # 1. Hot sectors cache (reused by scoring + LLM hints)
     ind_rank = get_sector_rank("industry", top=15, fail_safe=True)
     hot_by_pct = {s["name"] for s in ind_rank[:10]}
-    hot_by_flow = {s["name"] for s in ind_rank if s["main_inflow"] > 0}
+    # `main_inflow` may be None when tushare industry-aggregation fallback
+    # is in use (Sina/EM-only fields missing) -> treat None as 0.
+    hot_by_flow = {s["name"] for s in ind_rank
+                   if (s.get("main_inflow") or 0) > 0}
     hot_sectors = hot_by_pct | hot_by_flow
     meta["funnel"]["hot_sectors"] = len(hot_sectors)
     # Snapshot sector rank so market log can persist today's hot boards.
@@ -5923,10 +6978,12 @@ def recommend(capital=10000, market="all", strategies=("C", "D", "E"),
     top5_sectors_cached = {s["name"] for s in ind_rank[:5] if s.get("name")}
 
     # 2. Screen -- run each requested engine independently
-    pool_c = pool_d = pool_e = []
+    pool_c = pool_d = pool_e = pool_f1 = pool_f2 = pool_f3 = []
     if "C" in strategies:
         try:
-            pool_c = screen_strategy_c(market=market)
+            pool_c = screen_strategy_c(market=market,
+                                       max_5d_pct=max_5d_c,
+                                       laggard_rel_factor=laggard_rel_factor)
             meta["funnel"]["strategy_C"] = len(pool_c)
             meta["funnel"]["C_stage1_drops"] = getattr(
                 screen_strategy_c, "last_stage1_drops", {})
@@ -5937,7 +6994,7 @@ def recommend(capital=10000, market="all", strategies=("C", "D", "E"),
             meta["warnings"].append(f"⚠️ 策略C异常：{e}")
     if "D" in strategies:
         try:
-            pool_d = screen_strategy_d(market=market)
+            pool_d = screen_strategy_d(market=market, max_5d_pct=max_5d_d)
             meta["funnel"]["strategy_D"] = len(pool_d)
             meta["funnel"]["D_stage1_drops"] = getattr(
                 screen_strategy_d, "last_stage1_drops", {})
@@ -5948,7 +7005,8 @@ def recommend(capital=10000, market="all", strategies=("C", "D", "E"),
             meta["warnings"].append(f"⚠️ 策略D异常：{e}")
     if "E" in strategies:
         try:
-            pool_e = screen_strategy_e(market=market, sample=e_sample)
+            pool_e = screen_strategy_e(market=market, sample=e_sample,
+                                       max_5d_pct=max_5d_e)
             meta["funnel"]["strategy_E"] = len(pool_e)
             meta["funnel"]["E_stage1_drops"] = getattr(
                 screen_strategy_e, "last_stage1_drops", {})
@@ -5957,7 +7015,40 @@ def recommend(capital=10000, market="all", strategies=("C", "D", "E"),
         except Exception as e:
             print(f"WARN: strategy E failed: {type(e).__name__}: {e}", file=sys.stderr)
             meta["warnings"].append(f"⚠️ 策略E异常：{e}")
-    pool = pool_c + pool_d + pool_e
+    if "F1" in strategies:
+        try:
+            pool_f1 = screen_strategy_f1(market=market)
+            meta["funnel"]["strategy_F1"] = len(pool_f1)
+            meta["funnel"]["F1_stage1_drops"] = getattr(
+                screen_strategy_f1, "last_stage1_drops", {})
+            meta["f1_pool_review"] = getattr(
+                screen_strategy_f1, "last_pool_review", None)
+        except Exception as e:
+            print(f"WARN: strategy F1 failed: {type(e).__name__}: {e}", file=sys.stderr)
+            meta["warnings"].append(f"⚠️ 策略F1异常：{e}")
+    if "F2" in strategies:
+        try:
+            pool_f2 = screen_strategy_f2(market=market)
+            meta["funnel"]["strategy_F2"] = len(pool_f2)
+            meta["funnel"]["F2_stage1_drops"] = getattr(
+                screen_strategy_f2, "last_stage1_drops", {})
+            meta["f2_pool_review"] = getattr(
+                screen_strategy_f2, "last_pool_review", None)
+        except Exception as e:
+            print(f"WARN: strategy F2 failed: {type(e).__name__}: {e}", file=sys.stderr)
+            meta["warnings"].append(f"⚠️ 策略F2异常：{e}")
+    if "F3" in strategies:
+        try:
+            pool_f3 = screen_strategy_f3(market=market)
+            meta["funnel"]["strategy_F3"] = len(pool_f3)
+            meta["funnel"]["F3_stage1_drops"] = getattr(
+                screen_strategy_f3, "last_stage1_drops", {})
+            meta["f3_pool_review"] = getattr(
+                screen_strategy_f3, "last_pool_review", None)
+        except Exception as e:
+            print(f"WARN: strategy F3 failed: {type(e).__name__}: {e}", file=sys.stderr)
+            meta["warnings"].append(f"⚠️ 策略F3异常：{e}")
+    pool = pool_c + pool_d + pool_e + pool_f1 + pool_f2 + pool_f3
 
     # Detect data source degradation
     sources = {c.get("_source", "em") for c in pool}
@@ -6122,6 +7213,58 @@ def recommend(capital=10000, market="all", strategies=("C", "D", "E"),
         meta["funnel"]["rejected_after_hints"] = len(_rejected_after_hints)
         final = [c for c in final if not (c.get("reject_reasons") or [])]
         meta["funnel"]["final"] = len(final)
+
+    # 6.7 Evidence card + pattern match + confidence + devil-advocate.
+    # Attached to each final pick to give the LLM structured bullish /
+    # bearish / uncertain signal lists, explicit pattern labels, and a
+    # confidence label (HIGH / MED / LOW / CONFLICTED) derived from
+    # cross-strategy agreement. These fields are consumed verbatim by
+    # the print_recommend layer and also by the NEXT_STEP prompt block;
+    # design intent is that the LLM stops pattern-matching from raw
+    # numbers and reads plain-language signals instead -- the core
+    # failure mode in recent loss analyses was "LLM cited 3 bullish
+    # numbers, ignored 2 bearish numbers in the same dict, confirmed
+    # BUY". Now the card forces the bearish list to be visible.
+    try:
+        # Fetch fresh kline for final picks (bounded cost, small N).
+        final_codes = [c["code"] for c in final]
+        kl_map_final = (get_daily_klines_batch(final_codes, n=60, workers=8)
+                        if final_codes else {})
+        # Cross-strategy aggregation: group duplicate-code entries first
+        by_code_all = {}
+        for c in ranked:                            # aggregate across all ranked
+            by_code_all.setdefault(c["code"], []).append(c)
+
+        for c in final:
+            kl = kl_map_final.get(c["code"]) or []
+            ec = _build_evidence_card(
+                c, kl=kl, market_ctx=market_ctx, hot_sectors=hot_sectors)
+            c["evidence_card"] = ec
+            c["pattern_labels"] = _match_patterns(c, kl=kl)
+            # Confidence voting reads ALL entries with this code across
+            # strategies (not just the one copy in `final`), since a
+            # stock may be hit by F2 AND F3 but only enter `final` once.
+            related = by_code_all.get(c["code"], [c])
+            # Ensure each related has evidence card (so vote can count)
+            for rc in related:
+                if "evidence_card" not in rc:
+                    rc["evidence_card"] = _build_evidence_card(
+                        rc, kl=kl, market_ctx=market_ctx,
+                        hot_sectors=hot_sectors)
+            label, why = _vote_confidence(related)
+            c["confidence_label"] = label
+            c["confidence_reason"] = why
+            c["must_verify_before_buy"] = _build_must_verify_hint(c, kl=kl)
+            c["devil_advocate_questions"] = _build_devil_advocate(c, ec)
+        meta["enrichment"] = {
+            "evidence_cards_built": len(final),
+            "patterns_detected": sum(
+                len(c.get("pattern_labels") or []) for c in final),
+        }
+    except Exception as e:
+        print(f"WARN: evidence/pattern enrichment failed: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        meta["enrichment"] = {"error": f"{type(e).__name__}: {e}"}
 
     # 7. Capital allocation plan (fixed per-stock target, score-descending).
     # Kept AFTER _apply_llm_hints + reject filter so `final` is fully
@@ -6928,9 +8071,11 @@ def _print_next_step_block(results, meta):
         c_cnt = f.get("strategy_C", 0)
         d_cnt = f.get("strategy_D", 0)
         e_cnt = f.get("strategy_E", 0)
+        f2_cnt = f.get("strategy_F2", 0)
         c_review = meta.get("c_pool_review") or {}
         d_review = meta.get("d_pool_review") or {}
         e_review = meta.get("e_pool_review") or {}
+        f2_review = meta.get("f2_pool_review") or {}
 
         sep_empty = "=" * 72
         print(sep_empty)
@@ -6970,6 +8115,43 @@ def _print_next_step_block(results, meta):
         e_drops = f.get("E_stage1_drops") or {}
         if e_drops:
             print(f"    Stage1 裁掉分布: {dict(e_drops)}")
+        # F1 funnel (low-vol consolidation + first breakout)
+        if "strategy_F1" in f:
+            f1_cnt = f.get("strategy_F1", 0)
+            f1_review = meta.get("f1_pool_review") or {}
+            print(f"  策略F1（缩量横盘+首日突破）: 通过 {f1_cnt} 只")
+            if f1_review:
+                uni = f1_review.get("universe", 0)
+                s1 = f1_review.get("after_stage1", 0)
+                print(f"    全市场 {uni} 只 → Stage1(量价+流动性) {s1} 只 → "
+                      f"盘整突破 {f1_cnt} 只")
+            f1_drops = f.get("F1_stage1_drops") or {}
+            if f1_drops:
+                print(f"    Stage1 裁掉分布: {dict(f1_drops)}")
+        # F3 funnel (sector kickoff)
+        if "strategy_F3" in f:
+            f3_cnt = f.get("strategy_F3", 0)
+            f3_review = meta.get("f3_pool_review") or {}
+            print(f"  策略F3（板块异动初动）: 通过 {f3_cnt} 只")
+            if f3_review:
+                new_hot = f3_review.get("new_hot", 0)
+                names = f3_review.get("new_hot_names") or []
+                print(f"    新热板块 {new_hot} 个 ({', '.join(names[:5])}) → "
+                      f"成员 {f3_cnt} 只")
+            f3_drops = f.get("F3_stage1_drops") or {}
+            if f3_drops:
+                print(f"    Stage1 裁掉分布: {dict(f3_drops)}")
+        # F2 funnel (silent accumulation -- anti-D pattern)
+        if "strategy_F2" in f:
+            print(f"  策略F2（主力悄悄吸筹）: 通过 {f2_cnt} 只")
+            if f2_review:
+                uni = f2_review.get("universe", 0)
+                s1 = f2_review.get("after_stage1", 0)
+                print(f"    池 {uni} 只 → Stage1(流入≥1000万+5d≤±4%) {s1} 只 → "
+                      f"全条件 {f2_cnt} 只")
+            f2_drops = f.get("F2_stage1_drops") or {}
+            if f2_drops:
+                print(f"    Stage1 裁掉分布: {dict(f2_drops)}")
         # Data-quality block: when one or more Stage1 sources ran on
         # fallback, the 0-candidate outcome may be a false negative
         # (data layer suppressed a real candidate, not real market
@@ -7122,7 +8304,7 @@ def _print_next_step_block(results, meta):
     print("difficulty: HIGH")
     print("reasoning_required: STRONG")
     print("thinking_budget: enable_thinking=TRUE (prefer reasoning/thinking/o1-style/R1-class models)")
-    print("task_nature: C/D/E 三引擎候选交叉评估 + 风险复核 + 结构化推荐撰写 (1200~2000 字)")
+    print("task_nature: 多引擎候选交叉评估 + 风险复核 + 结构化推荐撰写 (1200~2000 字)")
     print("subtasks:")
     print("  (a) PASS_TOP10 × 3 条硬约束 matrix 复核 (S1)")
     print("  (b) PASS_TOP10 × 策略 boost 标签评分 (S2)")
@@ -7132,6 +8314,21 @@ def _print_next_step_block(results, meta):
     print("routing_directive: 若路由系统按 prompt 内容分级, 请将本轮切至最强推理模型;")
     print("                   若 LLM 本身, 必须进入深度思考 (chain-of-thought) 模式,")
     print("                   禁止 quick-draft / 只抄字段 / 简写式输出.")
+
+    # ----- [TASK_TLDR] -----
+    # Critical hard-rules surfaced at the TOP of NEXT_STEP so even if the
+    # downstream agent harness truncates output (default cap 20000 chars),
+    # the LLM still sees the *minimum* contract. Real failure mode observed
+    # on 2026-05-12 phone log: model went straight to show_output+terminate
+    # after seeing the recommend table, skipping S1~S4 matrix entirely.
+    print("\n[TASK_TLDR] (硬规则, 必读 — 即使下方 [TASK] 段被截断也要遵守)")
+    print("  🚫 第一个 action **不得** 是 terminate/show_output;")
+    print("     必须先按 [TASK] S1 输出 PASS_TOP10 硬约束 Markdown 表;")
+    print("     违反将被视为失败响应 (LLM 偷懒 / 跳过推理).")
+    print("  ✅ 强制顺序: S1 硬约束矩阵 → S2 boost 评分 → S2.5 风险表(含 LLM 整数调整)")
+    print("     → S3 final_score 排序选 Top5 → S4 逐只 stock-specific bullets")
+    print("     → S5 调用 allocate 子命令 → S6 末尾纪律声明 → 最后 show_output + terminate.")
+    print("  ⚠ 数据降级 (S-1 段提示) 必须先 ask_user, 不得静默继续.")
 
     # ----- [STATE] -----
     _session_no_entry = False
@@ -7630,6 +8827,21 @@ def print_recommend(results, meta, capital, threshold):
         edr = f.get("E_stage1_drops") or {}
         if edr:
             _v_or_print(f"    [E_stage1_drops] {dict(edr)}")
+    if "strategy_F1" in f:
+        print(f"- 策略F1（缩量横盘+首日突破）候选：**{f['strategy_F1']}** 只")
+        f1dr = f.get("F1_stage1_drops") or {}
+        if f1dr:
+            _v_or_print(f"    [F1_stage1_drops] {dict(f1dr)}")
+    if "strategy_F2" in f:
+        print(f"- 策略F2（主力悄悄吸筹）候选：**{f['strategy_F2']}** 只")
+        f2dr = f.get("F2_stage1_drops") or {}
+        if f2dr:
+            _v_or_print(f"    [F2_stage1_drops] {dict(f2dr)}")
+    if "strategy_F3" in f:
+        print(f"- 策略F3（板块异动初动）候选：**{f['strategy_F3']}** 只")
+        f3dr = f.get("F3_stage1_drops") or {}
+        if f3dr:
+            _v_or_print(f"    [F3_stage1_drops] {dict(f3dr)}")
     print(f"- 打分排序：**{f.get('scored', 0)}** 只")
     if "sector_diversified_dropped" in f:
         print(f"- 行业分散过滤剔除：{f['sector_diversified_dropped']} 只"
@@ -7665,6 +8877,23 @@ def print_recommend(results, meta, capital, threshold):
             bp = c.get("box_position_pct")
             note = (f"箱幅{br}% 位置{bp}%"
                     if br is not None and bp is not None else "-")
+        elif strat == "F1":
+            p10 = c.get("pct_10d")
+            amp = c.get("amplitude_60d_pct")
+            note = (f"10日{p10:+.1f}% 60日振幅{amp}%"
+                    if p10 is not None and amp is not None else "-")
+        elif strat == "F2":
+            in5 = c.get("main_inflow_5d") or 0
+            rat = c.get("main_inflow_ratio_pct")
+            p5 = c.get("pct_5d")
+            note = (f"5d流入{in5/1e8:.2f}亿 占{rat}% 5d{p5:+.1f}%"
+                    if rat is not None else "-")
+        elif strat == "F3":
+            sec = c.get("sector_name", "-")
+            spt = c.get("sector_pct_today")
+            mp5 = c.get("pct_5d")
+            note = (f"板块{sec}今+{spt:.1f}% 自身5d{mp5:+.1f}%"
+                    if spt is not None and mp5 is not None else "-")
         else:
             note = "-"
         vr = c.get("volume_ratio")
@@ -7694,6 +8923,57 @@ def print_recommend(results, meta, capital, threshold):
               f"| {c.get('stop_profit', 0)} | {c.get('stop_loss', 0)} | {pct:+.2f} "
               f"| {tov:.1f} | {vr_s} | {dm_s} "
               f"| {c.get('industry', '-')} | {note} | {hint_str} |")
+
+    # ----- Evidence / Pattern / Confidence card per pick -----
+    # This section exists because a tabular Top-N is too dense for the
+    # LLM to weigh bullish vs bearish signals without missing one side.
+    # Prints per-pick:
+    #   - confidence label + reason (cross-strategy vote)
+    #   - pattern_labels (closed-set strings; LLM has interpretation guide)
+    #   - evidence_card.bullish / bearish / uncertain (plain-language)
+    #   - must_verify_before_buy (specific pre-trade checks)
+    #   - devil_advocate_questions (self-challenge prompts)
+    # The LLM MUST read this section before committing to any BUY.
+    has_card = any(c.get("evidence_card") for c in results)
+    if has_card:
+        print("\n## 证据卡 / 形态 / 置信度 (每只必读)")
+        for i, c in enumerate(results, 1):
+            ec = c.get("evidence_card") or {}
+            patt = c.get("pattern_labels") or []
+            conf = c.get("confidence_label") or "-"
+            creason = c.get("confidence_reason") or ""
+            print(f"\n### {i}. {c['code']} {c['name']} "
+                  f"[{c.get('strategy','?')}] 置信度={conf}")
+            if creason:
+                print(f"- **置信度理由**: {creason}")
+            if patt:
+                print(f"- **形态**: {', '.join(patt)}")
+            bull = ec.get("bullish") or []
+            bear = ec.get("bearish") or []
+            uncr = ec.get("uncertain") or []
+            if bull:
+                print("- **看多信号**:")
+                for s in bull:
+                    print(f"  - ✅ {s}")
+            if bear:
+                print("- **看空信号**:")
+                for s in bear:
+                    print(f"  - ❌ {s}")
+            if uncr:
+                print("- **存疑**:")
+                for s in uncr:
+                    print(f"  - ❓ {s}")
+            mv = c.get("must_verify_before_buy") or {}
+            checks = mv.get("must_verify") or []
+            if checks:
+                print("- **买入前必验**:")
+                for ch in checks:
+                    print(f"  - 🔍 **{ch['check']}**: {ch['how']}")
+            dev = c.get("devil_advocate_questions") or []
+            if dev:
+                print("- **魔鬼代言人 (每条回答后再决定)**:")
+                for q in dev:
+                    print(f"  - 🤔 {q}")
 
     # ----- Capital allocation plan (baseline, score-ordered) -----
     # LLM is expected to produce its S3 final pick order, then invoke
@@ -7928,6 +9208,12 @@ _REGIME_THRESHOLDS = {
     "TREND_DOWN_VOL_LO": 1.2,
     "OSC_LARGE_FEE_FLOOR": 0.8,
     "OSC_SMALL_FEE_FLOOR": 1.0,
+    # BREAKOUT_ADD: 回本/起涨小区间, MA5↑ + 量能配合 + 主力净流入≥0 → 单侧加仓
+    "BREAKOUT_PROFIT_LO": 0.0,
+    "BREAKOUT_PROFIT_HI": 2.0,
+    "BREAKOUT_VOL_LO": 1.2,
+    "BREAKOUT_BAND_MULT_LO": 0.4,
+    "BREAKOUT_BAND_MULT_HI": 0.8,
 }
 
 
@@ -8112,6 +9398,26 @@ def _classify_regime(profit_pct, ma5_trend, atr14_pct, span10_pct,
                     upper_pct_range=(1.0, 3.0),
                     max_sell_frac=0.2, sell_ladder_hint="single",
                     reason=f"profit {profit_pct:+.2f}% ∈ [+2%,+5%), 高点小幅减")
+
+    # 5b. BREAKOUT_ADD — 回本/起涨区单侧加仓 (盖在 HIGH_BAND 之下、TREND_DOWN/HOLD 之上)
+    # 触发: profit ∈ [0%, +2%) & MA5↑ & 量比≥1.2 & 主力净流入≥0 & 有 atr14
+    # 用 LOW_BUY_ONLY action_type 复用 default-order 生成器与 buy 校验白名单
+    if (profit_pct is not None
+            and T["BREAKOUT_PROFIT_LO"] <= profit_pct < T["BREAKOUT_PROFIT_HI"]
+            and ma5_trend == "up"
+            and vol_ratio is not None and vol_ratio >= T["BREAKOUT_VOL_LO"]
+            and (main_inflow is None or main_inflow >= 0)
+            and atr14_pct is not None and atr14_pct > 0):
+        lo_mult = T["BREAKOUT_BAND_MULT_LO"]
+        hi_mult = T["BREAKOUT_BAND_MULT_HI"]
+        lower = (round(-atr14_pct * hi_mult, 2),
+                 round(-atr14_pct * lo_mult, 2))
+        return dict(base, regime="BREAKOUT_ADD", action_type="LOW_BUY_ONLY",
+                    lower_pct_range=lower,
+                    max_buy_frac=0.3, sell_ladder_hint="none",
+                    reason=(f"profit {profit_pct:+.2f}% MA5↑ 量比{vol_ratio:.2f} "
+                            f"主力净流入{'≥0' if main_inflow is None else f'{main_inflow/10000:+.0f}万'}, "
+                            "回本/起涨区浅回踩加仓 (frac≤0.3)"))
 
     # 6. TREND_DOWN (MA5 down + still red + volume rising = real breakdown)
     if (ma5_trend == "down" and profit_pct is not None and profit_pct < 0
@@ -8480,6 +9786,11 @@ def _render_regime_rules():
     print(f"| LOW_DIP          | profit ∈ ({T['LOW_DIP_PROFIT_LO']}%, "
           f"{T['LOW_DIP_PROFIT_HI']}%) & MA5平/上 & 主力流入≥0 & cash>0  "
           f"| LOW_BUY_ONLY     | 单档买, lower ∈ -atr×[0.8,1.5], frac≤0.5 |")
+    print(f"| BREAKOUT_ADD     | profit ∈ [{T['BREAKOUT_PROFIT_LO']}%, "
+          f"{T['BREAKOUT_PROFIT_HI']}%) & MA5↑ & 量比≥{T['BREAKOUT_VOL_LO']} "
+          f"& 主力流入≥0  "
+          f"| LOW_BUY_ONLY     | 回本起涨加仓: lower ∈ -atr×[{T['BREAKOUT_BAND_MULT_LO']},"
+          f"{T['BREAKOUT_BAND_MULT_HI']}], frac≤0.3 |")
     print( "| HOLD             | 其他 (无明确档位)                                   "
            "| NO_OP            | 持有观察, 下一轮重评 |")
 
@@ -8575,7 +9886,7 @@ _SELL_OK_ATYPES = {
 }
 # Regimes where price_pct MUST be used (price_type forbidden) — they have a
 # soft pct range LLM has to soft-pick within.
-_RANGE_REGIMES = {"OSC_LARGE", "OSC_SMALL", "TREND_UP", "HIGH_BAND", "LOW_DIP"}
+_RANGE_REGIMES = {"OSC_LARGE", "OSC_SMALL", "TREND_UP", "HIGH_BAND", "LOW_DIP", "BREAKOUT_ADD"}
 # Regime override whitelist (B2): LLM may only force into these defensive
 # regimes. NO_OP-class means "give up" → orders MUST be []. Sell-class means
 # "escalate to full exit" → orders must be sell-only with price_type=current
@@ -8800,7 +10111,7 @@ def _validate_and_render_phase2(rows, orders_list, overrides_list, fee_floor_pct
             if side == "buy" and atype not in _BUY_OK_ATYPES:
                 print(f"| `{code}` | order#{idx} buy | ❌ | "
                       f"regime {regime_info['regime']} (action={atype}) "
-                      f"不允许 buy; buy 仅在 OSC_LARGE/OSC_SMALL/LOW_DIP 下合法 |")
+                      f"不允许 buy; buy 仅在 OSC_LARGE/OSC_SMALL/LOW_DIP/BREAKOUT_ADD 下合法 |")
                 has_error = True
                 per_code_error = True
                 continue
@@ -9122,42 +10433,12 @@ def cli_allocate(codes, capital, comment=None, per_target=10000.0):
               + "    # ← 下单时各只 shares 直接抄此处，禁止手算")
         print(f"📋BUY_PLAN_TOTAL:used={used:.0f}元 "
               f"remaining_cash={rem:.0f}元 picks={len(plan_items)}只")
-        # Progressive-disclosure HINT: agent must persist this authoritative
-        # plan into data_memory IMMEDIATELY after this run, otherwise it will
-        # forget the picks and re-execute recommend/allocate (observed loops
-        # in 2026-05-07 14:37 session: 26 steps, 3x recommend, 4x allocate).
-        # This single line tells the agent (a) which key to set, (b) what to
-        # store verbatim, (c) that re-running is forbidden.
-        _summary = (f"PICKED:{codes_pipe} | "
-                    f"SHARES:{shares_pipe} | "
-                    f"used={used:.0f} remaining={rem:.0f} "
-                    f"picks={len(plan_items)}")
-        # JSON-escape the summary so the HINT line stays valid JSON inline.
-        import json as _json_mod
-        _summary_json = _json_mod.dumps(_summary, ensure_ascii=False)
-        print(
-            'HINT: persist_buy_plan {'
-            '"data_memory_set":"ALLOCATION_RESULTS",'
-            f'"value":{_summary_json},'
-            '"after":"下一步直接 data_memory get ALLOCATION_RESULTS 复用此结果，'
-            '禁止重跑 recommend/allocate；如需下单，从 SHARES 字段逐只抄股数",'
-            '"forbid":"对同一资金池在 1 小时内重复调用 recommend 或 allocate"'
-            '}'
-        )
     else:
         # Empty plan path: still emit a PICKED:0 marker so downstream knows
         # this branch is not "agent forgot to copy" but "no eligible items".
         print()
         print("📎PICKED:    # 空：本次无可分配候选（资金不足或单手>半仓全部跳过）")
         print("📋BUY_PLAN_TOTAL:used=0元 picks=0只 → 不入场")
-        print(
-            'HINT: empty_plan {'
-            '"data_memory_set":"ALLOCATION_RESULTS",'
-            '"value":"empty: no_eligible_picks",'
-            '"after":"data_memory set ALLOCATION_RESULTS 后立即 terminate fail，'
-            '说明本次无可分配候选；禁止重跑 recommend/allocate"'
-            '}'
-        )
 
 
 # ==========================================================================
@@ -9677,111 +10958,12 @@ def analyze(queries, include_news=True, days=120, minutes=32,
 # CLI
 # ==========================================================================
 
-# --------------------------------------------------------------------------
-# LLM-friendly argparse error hints
-# --------------------------------------------------------------------------
-# Default argparse emits a one-line "unrecognized arguments: --foo" message.
-# Observed agent failure mode (2026-05-07 14:37 log): the LLM hallucinates
-# flags like `--select`, `--fund 20000`, or invents subcommands like `result`,
-# then keeps retrying the same broken command twice in a row (Steps 8/11
-# allocate without --codes), violating the same-failure-twice rule.
-#
-# We override `error()` to APPEND a structured HINT block listing:
-#   (a) all valid subcommands
-#   (b) the required + key flags for the active subcommand (if known)
-#   (c) a copy-paste-ready corrected example
-# so the agent can recover on the FIRST retry instead of looping.
-# --------------------------------------------------------------------------
-# Per-subcommand cheat-sheet: required flags first, then most useful optionals.
-# Keep tight (LLM context budget); full --help is still available via -h.
-_SUBCMD_CHEATSHEET = {
-    "recommend":     "--capital <RMB> [--market all|main|...] [--top 30] "
-                     "[--strategy C,D,E] [--threshold 5.0]",
-    "brief":         "--capital <RMB> [--market main] [--top 30] "
-                     "[--strategy C,D,E]",
-    "allocate":      "--codes <c1,c2,...> --capital <RMB> "
-                     "[--comment \"...\"] [--per-target 10000]",
-    "screen-c":      "[--market all] [--board-top 5] [--board-days 5] "
-                     "[--laggard-pct 0.40]",
-    "screen-d":      "[--market all] [--flow-days 5] [--no-ma-alignment]",
-    "screen-e":      "[--market all] [--box-days 60] [--box-range-max 25]",
-    "sector-rank":   "[--type industry|concept|region] [--top 20]",
-    "quote":         "<code1> [code2] ...",
-    "kline":         "<code> [--period day|week|month] [--count 30]",
-    "search":        "<keyword> [--count 5]",
-    "tushare-token": "(--set <TOKEN> | --skip | --status | --clear)",
-    "analyze":       "<code> [--days 30]",
-    "sell-plan":     "(--holdings <json> | --order <json> | --override <json>)",
-    "eval":          "[--date YYYYMMDD]",
-    "intraday-track":"[--date YYYYMMDD]",
-    "stats":         "[--days 30]",
-    "market":        "(no args)",
-    "zt-pool":       "[--date YYYYMMDD]",
-    "dt-pool":       "[--date YYYYMMDD]",
-    "zb-pool":       "[--date YYYYMMDD]",
-    "lb-pool":       "[--date YYYYMMDD]",
-}
-
-
-class _LLMFriendlyArgParser(argparse.ArgumentParser):
-    """ArgumentParser variant that appends a structured remediation HINT
-    after the standard error message.
-
-    The HINT is emitted on stderr (same channel as argparse's own error)
-    and uses the same `HINT: <tag> {json}` shape as the rest of the
-    progressive-disclosure system (see tushare_token_unset / persist_buy_plan)
-    so the agent's hint-extractor picks it up uniformly.
-    """
-    def error(self, message):
-        # Standard argparse error path: print usage + error to stderr.
-        # We replicate it here (instead of calling super().error()) so we
-        # can inject the HINT BEFORE sys.exit and avoid the LLM seeing only
-        # a bare "unrecognized arguments" line.
-        self.print_usage(sys.stderr)
-        sys.stderr.write(f"{self.prog}: error: {message}\n")
-        # `self.prog` for a subparser looks like "stockquant.py allocate";
-        # extract the trailing token to map to the cheat-sheet.
-        prog_parts = self.prog.split()
-        active = prog_parts[-1] if len(prog_parts) > 1 else None
-        cheat = _SUBCMD_CHEATSHEET.get(active) if active else None
-        # Build remediation hint payload.
-        import json as _json_mod
-        payload = {
-            "error": message,
-            "valid_subcommands": sorted(_SUBCMD_CHEATSHEET.keys()),
-        }
-        if active and cheat:
-            payload["active_subcommand"] = active
-            payload["correct_usage"] = (
-                f"python ${{SKILL_DIR}}/stockquant/scripts/stockquant.py "
-                f"{active} {cheat}"
-            )
-            payload["after"] = (
-                "按 correct_usage 一次性补全所有必填参数；"
-                "禁止仅微调原命令重试（已记同一错误一次）。"
-            )
-        else:
-            payload["after"] = (
-                "从 valid_subcommands 选一个合法子命令；"
-                "任务里的'策略C/D/E'等中文描述不是子命令，"
-                "常规推荐用 `recommend --capital <元>`。"
-            )
-        sys.stderr.write(
-            "HINT: argparse_error " +
-            _json_mod.dumps(payload, ensure_ascii=False) + "\n"
-        )
-        sys.exit(2)
-
-
 def _build_cli():
-    p = _LLMFriendlyArgParser(
+    p = argparse.ArgumentParser(
         prog="stockquant.py",
         description="A-share trading all-in-one (quotes / k-line / picker / sell-plan)."
     )
-    # parser_class propagates _LLMFriendlyArgParser to every sub.add_parser()
-    # call so subcommand-level errors (the common case) also get the HINT.
-    sub = p.add_subparsers(dest="cmd", required=True,
-                           parser_class=_LLMFriendlyArgParser)
+    sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("market", help="Overview of major A-share indexes.")
 
@@ -9827,11 +11009,14 @@ def _build_cli():
     r = sub.add_parser("recommend", help="One-shot: screen + score + sizing.")
     r.add_argument("--capital", type=float, default=10000)
     r.add_argument("--market", default="all", choices=list(_MARKET_FS_MAP.keys()))
-    r.add_argument("--strategy", default="C,D,E",
-                   help="Comma list: subset of C,D,E (default C,D,E)")
+    r.add_argument("--strategy", default="C,F1,F2,F3",
+                   help="Comma list: subset of C/E/F1/F2/F3 "
+                        "(default C,F1,F2,F3; D deprecated as trailing signal)")
     r.add_argument("--threshold", type=float, default=5.0,
                    help="Target profit %% (default 5)")
-    r.add_argument("--top", type=int, default=30)
+    r.add_argument("--top", type=int, default=8,
+                   help="Max candidates to return (default 8; kept small so "
+                        "LLM can cross-verify each pick in depth)")
     r.add_argument("--min-trade", type=float, default=5000,
                    help="Min trade value to avoid high fee ratio (default 5000)")
     r.add_argument("--no-check-news", action="store_true",
@@ -9858,10 +11043,11 @@ def _build_cli():
     br.add_argument("--market", default="main",
                     choices=list(_MARKET_FS_MAP.keys()),
                     help="Market scope (default main = Shanghai/Shenzhen main board)")
-    br.add_argument("--top", type=int, default=30,
-                    help="Number of recommend candidates to return (default 30)")
-    br.add_argument("--strategy", default="C,D,E",
-                    help="Comma list: subset of C,D,E (default C,D,E)")
+    br.add_argument("--top", type=int, default=8,
+                    help="Number of recommend candidates to return (default 8)")
+    br.add_argument("--strategy", default="C,F1,F2,F3",
+                    help="Comma list: subset of C/E/F1/F2/F3 "
+                         "(default C,F1,F2,F3)")
 
     # eval: post-hoc evaluation of previous day's recommendations
     e = sub.add_parser("eval",

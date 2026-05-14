@@ -84,17 +84,20 @@
 [STATE] + [DATA] PASS_TOP10 + [TASK] S1~S6 → LLM 决策
 ```
 
-## 1.2 三引擎设计（2026-04-22 架构重构）
+## 1.2 六引擎设计（2026-05 重构）
 
-旧策略 **A（涨停分歧低吸）/ B（跌停反弹）** 实盘验证为低期望值博傻链，已下线。当前 **C / D / E 三引擎独立 screen → 合池 → 统一打分 → sector dedup → 仓位计算**。
+旧策略 **A（涨停分歧低吸）/ B（跌停反弹）** 实盘验证为低期望值博傻链，已下线。当前 **六引擎独立 screen → 合池 → 统一打分 → sector dedup → 仓位计算**。
 
-| 引擎 | 思路 | 关键信号 | 期望盈亏特征 |
-|---|---|---|---|
-| **C 板块滞涨股** | 热板内涨幅排后 40% 的"跟随者" | `laggard_gap`（板块N日涨幅 - 个股N日涨幅）| **胜率高、收益小**；赌板块热度溢出补涨 |
-| **D 主力资金累积** | 多日资金流入 + 均线多头排列 | `main_inflow_5d / main_inflow_pct_5d / ma_aligned` | **收益大、假信号多**；赌趋势延续 |
-| **E 60 日箱体突破** | 长期窄箱 + 放量突破上沿 | `box_range_pct / box_position_pct / volume_ratio` | **大级别启动**；赌横盘后大波 |
+| 引擎 | 默认 | 思路 | 关键信号 | 期望盈亏特征 |
+|---|:---:|---|---|---|
+| **C 板块滞涨股** | ✅ | 热板内涨幅排后 40% 的"跟随者" | `laggard_gap` | **胜率高、收益小**；赌板块热度溢出补涨 |
+| **D 主力资金累积** ⚠️ | ❌ | 多日资金流入+均线多头（**实盘复盘为派发末期形态，默认关闭**） | `main_inflow_5d / ma_aligned` | 假信号集中在顶部；建议改用 F2 |
+| **E 60 日箱体突破** | 可选 | 长期窄箱+放量突破上沿 | `box_range_pct / box_position_pct` | **大级别启动**；赌横盘后大波 |
+| **F1 缩量横盘+首日突破** | ✅ | 10日盘整±3%，今日量比1.2~2.5、涨1~4%、站上MA20 | `pct_10d / volume_ratio / ma20` | 捕捉 Day-1；避开 Day-3 追涨 |
+| **F2 主力悄悄吸筹** | ✅ | 5d资金累积≥0.3%流通市值+价格**未**启动（不满足均线多头） | `main_inflow_ratio_pct / pct_5d` | D 的前置状态；T-3~T-5 建仓区 |
+| **F3 板块异动初动** | ✅ | 板块今日Top5且过去5d不在Top10 → 选板块内未启动成员 | `sector_pct_today / sector_pct_5d / pct_5d` | 板块轮动 Day-1；避开 Day-3 追 |
 
-**容错**：任一引擎失败（API 异常 / 限流 / 无候选）**不影响其他两个**（顶层 try/except 各自兜住），降级到剩余引擎继续。
+**容错**：任一引擎失败（API 异常 / 限流 / 无候选）**不影响其他引擎**（顶层 try/except 各自兜住），降级到剩余引擎继续。
 
 ## 1.3 统一打分 `_unified_score`（0~100）
 
@@ -110,9 +113,10 @@
 **市场延迟** `_market_context_delta`：根据 `sh_pct / gem_pct` 全局调分（大盘强势 +3 / 弱势 -6 / 重挫 -10）。
 
 **策略特化 bonus**（小范围加分）：
-- **C**：`laggard_gap` 越大 +bonus（滞涨多 → 补涨空间大）；板块 Top3 +3
-- **D**：`main_inflow_pct_5d` 高 +bonus；多头排列 +5
-- **E**：`box_range_pct` 越窄（接近 10~15%）+bonus；`volume_ratio > 2` +5
+- **C**：`laggard_gap` 越大 +bonus；板块 Top3 +3
+- **D**：`main_inflow_pct_5d` 高 +bonus；多头排列 +5（D 默认关闭）
+- **E**：`box_range_pct` 越窄 +bonus；`volume_ratio > 2` +5
+- **F1/F2/F3**：策略命中即附带独立 bonus；同一只股命中 ≥2 策略时置信度升为 `HIGH`
 
 最终 `score = clip(main_6dim + market_delta + strategy_bonus, 0, 100)`。
 
@@ -129,6 +133,20 @@
 
 LLM 在 `[TASK]` S2.5 风险复核必须**逐票**对 PASS_TOP10 输出风险表，🔴 直接 HIGH 不进 Top5；🟡 必须 elaborate 风险；只有 🟢 (boost≥2 + prob=high + 无 warn) 才能直接进 Top5。
 
+## 1.5 证据卡 + 形态 + 置信度（2026-05 新增）
+
+每个最终候选打印在 `## 证据卡 / 形态 / 置信度 (每只必读)` 章节：
+
+| 字段 | 说明 |
+|---|---|
+| `pattern_labels` | 8 种形态标签：`breakout_initial` / `silent_accumulation` / `sector_initial_move` / `bottom_first_rally` / `gravestone_after_run` / `low_vol_consolidation` / `distribution_top` / `overheated_chase` |
+| `evidence_card` | `bullish` / `bearish` / `uncertain` 三列中文信号，**禁止只读看多一边** |
+| `confidence_label` | `HIGH`（≥2策略共振）/ `MED`（单策略+多看多）/ `LOW`（看空≥看多）/ `CONFLICTED`（F1+F2互斥） |
+| `must_verify_before_buy` | 买入前必验项（分时量价背离、大单监控 + 策略特定检查） |
+| `devil_advocate_questions` | 自我挑战题，逐条回答后再决定 |
+
+**LLM 决策铁律**：`CONFLICTED` 放弃 → `LOW` 不入场 → `MED` 需 bullish ≥ 2×bearish → `HIGH` 完成 must_verify 才建仓。
+
 ---
 
 # § 2. 持仓策略（SELL）
@@ -143,8 +161,8 @@ LLM 在 `[TASK]` S2.5 风险复核必须**逐票**对 PASS_TOP10 输出风险表
  - cost  │          │ 浮亏 ≤ -4%?    │ → DEEP_LOSS     → bid1 全卖（止损）
          │          │ 14:30+ 浮亏<-1%│ → TAIL_EXIT     → 现价 全卖（尾盘止损）
 现价 ────┤ → 分类 → ├── 趋势闸门 ──┤
-振幅/ATR │          │ 浮盈≥5% & MA↑ │ → TREND_UP      → NO_OP（默认不动，避免T飞主升浪）
-量比     │          │ 浮盈≥2% & MA↑ │ → HIGH_BAND     → 高位 +1~+3% 单档轻减（≤20%仓）
+振幅/ATR │          │ 浮盈≥5% & MA↑ │ → TREND_UP      → 高位 +2~+5% 双档减半
+量比     │          │ 浮盈≥2% & MA↑ │ → HIGH_BAND     → 高位 +1~+3% 单档减1/3
 主力流入 │          │ MA↓ + 量比≥1.5│ → TREND_DOWN    → bid1 全卖（破位止损）
 MA趋势   │          ├── 震荡闸门 ──┤
          │          │ ATR≥1.5 振幅≥5│ → OSC_LARGE     → ±(1~2)% 双边对冲
@@ -165,8 +183,8 @@ MA趋势   │          ├── 震荡闸门 ──┤
 | `CLOSE_RUSH` | 14:55 ≤ now < 15:00 | 现价/bid1 全卖 | 赶尾盘流动性，免隔夜 |
 | `DEEP_LOSS` | profit_pct ≤ -4% | bid1 全卖 | 重亏止损，不在乎价位 |
 | `TAIL_EXIT` | now ≥ 14:30 且 profit_pct < -1% | 现价 全卖 | 尾盘小亏出清，不留过夜 |
-| `TREND_UP` | profit ≥ 5% & ma5 up | **NO_OP**（默认） | 主升浪默认持仓不动；想止盈→ LLM `--override CODE=HIGH_BAND:理由` 走减仓流程 |
-| `HIGH_BAND` | profit ≥ 2% & ma5 up | +1~+3% 单档减 ≤20% 仓 | 浮盈中等，小幅兑现保留主仓 |
+| `TREND_UP` | profit ≥ 5% & ma5 up | +2~+5% 双档减半 | 高位浮盈大，分两档兑现 |
+| `HIGH_BAND` | profit ≥ 2% & ma5 up | +1~+3% 单档减 1/3 | 浮盈中等，少量兑现保留主仓 |
 | `TREND_DOWN` | ma5 down & vol_ratio ≥ 1.5 | bid1 全卖 | 破位+放量，止损 |
 | `OSC_LARGE` | ATR ≥ 1.5% & 振幅 ≥ 5% | ±(1~2)% 双边对冲 | 大幅震荡，T+0 反复做差 |
 | `OSC_SMALL` | ATR ≥ 0.8% & 振幅 ≥ 2% | ±(0.3~0.5)% 单档对冲 | 小幅震荡，紧密价差 |
@@ -180,25 +198,14 @@ MA趋势   │          ├── 震荡闸门 ──┤
 
 直接挂 `bid1`（现价 × 0.995）或 `current` 保成交，**不在乎价位**，只求当天出清。`bid1` 比对手价低 0.5%，几乎瞬时成交；不挂跌停板是为了避开尾盘瞬时跌停撤单的风险。
 
-### 高位防御类（`TREND_UP` 默认 NO_OP / `HIGH_BAND` 单档轻减）
+### 趋势减仓类（`TREND_UP / HIGH_BAND`）
 
-**核心思想：主升浪宁可错过，不可卖飞**。`TREND_UP`（浮盈 ≥ 5% + MA5↑）默认 NO_OP，**Python 不出任何 sell 建议**，理由：
+高位浮挂卖单等更好价。Python 给 `upper_pct_range`（如 `(2.0, 5.0)`）软区间，LLM 二次微调：
 
-- 主升浪的特征是"冲高不回落"，T+0 减仓本质是赌"今天冲高回落"——和趋势相反
-- 减仓后想再接回来，又会触发"做T容易飞"的反向风险
-- 实盘上，主升浪卖飞 100 股可能少赚 10+ 个点，**期望损失 >> 减仓"防回撤"的收益**
-- 自动化场景下没有人肉拦截，策略一出 sell 单 → 直接成交 → 后悔莫及
+- **强势**（主力净流入 > 0 & 量比 ≥ 1.5）→ 偏区间 hi 端（+5%）等延续
+- **弱势**（流入<0 或 量比<1）→ 偏 lo 端（+2%）早成交
 
-**LLM 主动止盈路径**：如果 K 线/资金面强烈提示"已到主升浪末段"，LLM 可显式 `--override CODE=HIGH_BAND:具体理由`：
-
-- 进入 `HIGH_BAND` 软区间：`upper_pct_range=(1.0, 3.0)`，`max_sell_frac=0.2`（最多减 20% 仓位）
-- 单档（不双档），qty 不超过 200 股/万元仓位
-- 这是"显式声明意图"——必须给文字理由，不会被默认建议吞掉
-
-**`HIGH_BAND`（浮盈 2~5%）**：仍允许小幅减仓（≤20%），这一档浮盈不算大，**部分兑现 + 保留主仓**比纯持有的胜率/收益比更好。Python 给 `upper_pct_range=(1.0, 3.0)` 软区间，LLM 在区间内挑具体 pct：
-
-- **强势**（主力净流入 > 0 & 量比 ≥ 1.5）→ 偏区间 hi 端（+3%）等延续
-- **弱势**（流入<0 或 量比<1）→ 偏 lo 端（+1%）早成交
+不直接给固定值是因为同一档 regime 下，"强趋势" vs "震荡末端" 的合理报价能差 2~3%。
 
 ### 震荡对冲类（`OSC_LARGE / OSC_SMALL`） — T+0 核心
 
@@ -493,9 +500,6 @@ python stockquant.py --capital 10000 --market main --top 30
 - **C**：板块热度已确立后，找**板块内滞涨**跟随者 → T+1 赚溢出补涨
 - **D**：主力**多日持续**流入，均线已多头 → T+1 赌趋势延续
 - 前者赌轮动（短期），后者赌持续（中期）。C 胜率高但收益小，D 收益大但假信号多。
-
-**Q: TREND_UP 主升浪票为什么默认 NO_OP，不减仓？**
-实盘验证：主升浪票 +5% 减一半，后面再涨 10% 你少赚 5 个点；主升浪没卖完明天又涨 5%，回头一算"减仓防回撤"的期望值 < "持有等延续"。所以 Python 默认完全不出建议，宁可漏掉 1 次成功减仓，也不要一刀切误卖 10 次主升浪。如果 LLM 看 K 线/资金面**强烈提示**到顶（高位放量滞涨 / 资金净流出 / 公告利空），可以 `--override CODE=HIGH_BAND:具体理由` 走"显式小幅减仓"路径（≤20% 仓，单档 +1~+3%）。"显式"二字是关键——必须给文字理由，避免无脑默认采纳。
 
 **Q: SELL 的 OSC 对冲为什么 sell_qty 必须 = buy_qty？**
 保持净持仓不变 = T+0 的核心。卖出用昨天的 avail（T+1 可卖），买入今天不可卖（明天才能 sell）。一卖一买配对后明天 avail 恢复，仓位规模不变；只赚价差，不改变方向暴露。如果 sell_qty > buy_qty，本质就变成"减仓"了，应该走 TREND_UP / HIGH_BAND 不是 OSC。
