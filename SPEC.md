@@ -94,6 +94,7 @@ flowchart TB
 - **文本编辑器文件种子策略**：`agent_user.txt` 与 `ModelDownloadList.txt` 采用“用户文件优先”策略。应用启动时通过 `ConfigManager.ensureAssetFileInDataRoot()` 检查数据根目录同名文件，不存在则从 assets 复制，存在则沿用；文本编辑器页面初始化也会兜底检查，避免首次进入时缺文件。该策略保证用户可直接在数据目录编辑，不会被启动流程覆盖。
 - **配置接口一致性**：图谱停用词与外挂词典统一通过 `ConfigManager` 专用 getter/setter 访问（`getGraphStopwordsPath/setGraphStopwordsPath`、`getGraphCustomDictionaryPath/setGraphCustomDictionaryPath`），避免业务层直接读写底层 key，降低配置访问分叉带来的维护成本。
 - **Agent 系统提示词定制**：`AgentPrompts.getSystemPromptForApi()` 支持从数据根目录 `agent_user.txt` 动态加载“输出要求”片段，替代原硬编码内容。组装系统提示词时通过 `ConfigManager.getDataRootPath()` 定位文件，存在且非空则读取 UTF-8 内容嵌入，否则 fallback 到默认提示。该机制让用户可通过文本编辑器直接修改 `agent_user.txt`，即时调整 Agent 输出行为（如思考步骤、反思深度、格式约束等），无需改代码重编 App。
+- **Agent SOP 优化（2026-05-08）**：针对 `点饮品.txt` 模型的以下低效行为改进：① 新增品类边界提醒（分类栏名≠品类名，"柠檬茶"分类下不是冰茶，不靠侧边栏名推断包含关系）；② 新增矛盾指令处理（"热的冰X"→品类=冰X，温度覆盖，一次性ask_user澄清）；③ 新增搜索兜底策略（分类栏找不到→首页顶部1/10区域找搜索框，type CATEGORY原始词，2次同向swipe无果→换策略/ask_user）；④ KB经验匹配约束（App一致+品类一致才照抄步骤，品类不一致仅借鉴通用操作）；⑤ 红线追加swipe最多2次同向限制。
 - **Rag/Agent 模式切换生命周期保护**：`RagQaFragment.switchMode()` 在语言切换等触发 Activity/Fragment 重建阶段，先通过 UI 就绪检测（`isUiReadyForModeOps()`）判断控件是否可用；未就绪时仅更新模式与持久化标志，跳过 `saveConfig/loadConfig/fetchModelsForApi/loadChatHistory` 等依赖视图的操作，待 `onViewCreated()` 正常路径再完成加载。`saveConfig()`、`loadConfig()`、`fetchModelsForApi()` 也统一增加 UI 就绪短路，避免 `Spinner.getSelectedItem()`、`TextView.setText()` 空指针。
 
 ### 2.2 业务逻辑层（跨界面共享的核心服务）

@@ -24,3 +24,6 @@
 [submodule "offline-ai-apk"]
 	path = offline-ai-apk
 	url = git@gitee.com:er6y/offline-ai-apk.git
+[submodule "app/src/main/assets/skills/stockquant"]
+	path = app/src/main/assets/skills/stockquant
+	url = git@github.com:er6y/stockquant.git

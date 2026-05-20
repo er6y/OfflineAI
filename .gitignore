@@ -160,3 +160,6 @@ app/src/main/assets/skills/stockquant/logs/
 /stockquant_log
 
 /app/src/main/assets/skills/stockquant/config/tushare_state.json
+
+# KleidiAI junction created by mnn-lib CMakeLists.txt to fix CMAKE_SOURCE_DIR path mismatch
+libs/mnn-lib/src/main/cpp/source/
