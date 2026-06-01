@@ -1,6 +1,6 @@
 # Git LFS configuration for OfflineAI
-# APK files - large release builds
-*.apk filter=lfs diff=lfs merge=lfs -text
+# APK files - DO NOT track via LFS; use GitHub Releases for APK distribution
+# *.apk filter=lfs diff=lfs merge=lfs -text
 # JNI library files - native shared libraries
 *.so filter=lfs diff=lfs merge=lfs -text
 # Additional large binary files that might be added in the future
