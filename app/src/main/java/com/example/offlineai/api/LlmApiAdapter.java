@@ -133,6 +133,18 @@ public class LlmApiAdapter {
             return ApiType.OPENAI;
         }
     }
+
+    /**
+     * Returns true if the given MiniMax model requires the VLM bridge for image input.
+     * Text-only models: MiniMax-M2.5, MiniMax-M2.7 (and earlier M2/M2.1/M2.x series).
+     * Native multimodal models: MiniMax-M3 and later - pass images directly via image_url.
+     */
+    private boolean needsMinimaxVlmBridge(String model) {
+        if (model == null) return true; // Safe default: use bridge for unknown models
+        String lower = model.toLowerCase();
+        // M2.x series (M2, M2.1, M2.5, M2.7, m2-highspeed, etc.) are all text-only
+        return lower.contains("m2");
+    }
     
     
     /**
@@ -182,11 +194,12 @@ public class LlmApiAdapter {
         LogManager.logD(TAG, "检测到API类型: " + apiType.name());
         LogManager.logD(TAG, "[STREAM] onStart - source=api, model=" + model + ", thread=" + Thread.currentThread().getName());
         
-        // MiniMax: images must go through VLM first (/v1/coding_plan/vlm), then text to chat model
+        // MiniMax: M2.5/M2.7 are text-only, images must go through VLM bridge first.
+        // M3 and later support native multimodal input (image_url) directly.
         final List<String> finalImagePaths;
         final String finalUserPrompt;
-        if (apiType == ApiType.MINIMAX && imagePaths != null && !imagePaths.isEmpty()) {
-            LogManager.logI(TAG, "[MINIMAX_VLM] Detected " + imagePaths.size() + " image(s), calling VLM first...");
+        if (apiType == ApiType.MINIMAX && imagePaths != null && !imagePaths.isEmpty() && needsMinimaxVlmBridge(model)) {
+            LogManager.logI(TAG, "[MINIMAX_VLM] Model " + model + " is text-only, calling VLM bridge first...");
             String vlmDesc = streamingClient.callMinimaxVlmSync(apiKey, imagePaths, userPrompt);
             if (vlmDesc != null && !vlmDesc.isEmpty()) {
                 finalUserPrompt = "[图片内容分析]\n" + vlmDesc + "\n\n[用户指令]\n" + userPrompt;
@@ -199,6 +212,9 @@ public class LlmApiAdapter {
         } else {
             finalImagePaths = imagePaths;
             finalUserPrompt = userPrompt;
+            if (apiType == ApiType.MINIMAX && imagePaths != null && !imagePaths.isEmpty()) {
+                LogManager.logI(TAG, "[MINIMAX_NATIVE] Model " + model + " supports native multimodal, passing images directly");
+            }
         }
         
         try {
@@ -307,11 +323,12 @@ public class LlmApiAdapter {
                 + ", thread=" + Thread.currentThread().getName());
         
         try {
-            // MiniMax: images must go through VLM first (/v1/coding_plan/vlm), then text to chat model
+            // MiniMax: M2.5/M2.7 are text-only, images must go through VLM bridge first.
+            // M3 and later support native multimodal input (image_url) directly.
             final List<String> finalImagePaths;
             final String minimaxFinalPrompt;
-            if (apiType == ApiType.MINIMAX && imagePaths != null && !imagePaths.isEmpty()) {
-                LogManager.logI(TAG, "[MINIMAX_VLM] Detected " + imagePaths.size() + " image(s), calling VLM first...");
+            if (apiType == ApiType.MINIMAX && imagePaths != null && !imagePaths.isEmpty() && needsMinimaxVlmBridge(model)) {
+                LogManager.logI(TAG, "[MINIMAX_VLM] Model " + model + " is text-only, calling VLM bridge first...");
                 String vlmDesc = streamingClient.callMinimaxVlmSync(apiKey, imagePaths, prompt);
                 if (vlmDesc != null && !vlmDesc.isEmpty()) {
                     minimaxFinalPrompt = "[图片内容分析]\n" + vlmDesc + "\n\n[用户指令]\n" + prompt;
@@ -324,6 +341,9 @@ public class LlmApiAdapter {
             } else {
                 finalImagePaths = imagePaths;
                 minimaxFinalPrompt = prompt;
+                if (apiType == ApiType.MINIMAX && imagePaths != null && !imagePaths.isEmpty()) {
+                    LogManager.logI(TAG, "[MINIMAX_NATIVE] Model " + model + " supports native multimodal, passing images directly");
+                }
             }
             
             // 如果是本地模型，使用本地适配器

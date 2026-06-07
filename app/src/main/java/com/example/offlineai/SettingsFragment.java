@@ -119,7 +119,11 @@ public class SettingsFragment extends Fragment {
     private TextView textViewScheduleIntervalValue;
     private Spinner spinnerSchedulePromptFile;
     private EditText editTextSchedulePrompt;
-    private boolean isLoadingScheduleTask = false; // Guard to avoid save-during-load
+    private boolean isLoadingScheduleTask = false; // Guard for SYNCHRONOUS widgets (checkbox/seekbar/edittext)
+    // Spinner.onItemSelected is dispatched ASYNCHRONOUSLY (and deferred until layout on EMUI),
+    // so a boolean guard reset cannot reliably bracket it. Instead, only persist a spinner change
+    // when it originates from a real user touch. Programmatic setSelection() carries no touch.
+    private boolean scheduleSpinnerUserTouched = false;
     
     private EditText editTextDataRootPath;
     private Button buttonSelectDataRootPath;
@@ -2244,14 +2248,18 @@ public class SettingsFragment extends Fragment {
         for (int h = 0; h < 24; h++) hours.add(String.valueOf(h));
         java.util.List<String> mins = new java.util.ArrayList<>();
         for (int m = 0; m < 60; m++) mins.add(String.valueOf(m));
-        ArrayAdapter<String> hourAdapter = new ArrayAdapter<>(ctx, android.R.layout.simple_spinner_item, hours);
-        hourAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        ArrayAdapter<String> minAdapter = new ArrayAdapter<>(ctx, android.R.layout.simple_spinner_item, mins);
-        minAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinnerScheduleStartHour.setAdapter(hourAdapter);
-        spinnerScheduleEndHour.setAdapter(hourAdapter);
-        spinnerScheduleStartMin.setAdapter(minAdapter);
-        spinnerScheduleEndMin.setAdapter(minAdapter);
+        ArrayAdapter<String> startHourAdapter = new ArrayAdapter<>(ctx, android.R.layout.simple_spinner_item, hours);
+        startHourAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        ArrayAdapter<String> endHourAdapter = new ArrayAdapter<>(ctx, android.R.layout.simple_spinner_item, hours);
+        endHourAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        ArrayAdapter<String> startMinAdapter = new ArrayAdapter<>(ctx, android.R.layout.simple_spinner_item, mins);
+        startMinAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        ArrayAdapter<String> endMinAdapter = new ArrayAdapter<>(ctx, android.R.layout.simple_spinner_item, mins);
+        endMinAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinnerScheduleStartHour.setAdapter(startHourAdapter);
+        spinnerScheduleEndHour.setAdapter(endHourAdapter);
+        spinnerScheduleStartMin.setAdapter(startMinAdapter);
+        spinnerScheduleEndMin.setAdapter(endMinAdapter);
 
         // --- Prompt file spinner ---
         loadSchedulePromptFileSpinner(ctx);
@@ -2270,10 +2278,24 @@ public class SettingsFragment extends Fragment {
         }
         AdapterView.OnItemSelectedListener spinnerSaveListener = new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
-                if (!isLoadingScheduleTask) saveCurrentScheduleTask();
+                // Only save when the selection change came from a real user touch.
+                if (scheduleSpinnerUserTouched) {
+                    scheduleSpinnerUserTouched = false;
+                    saveCurrentScheduleTask();
+                }
             }
             @Override public void onNothingSelected(AdapterView<?> p) {}
         };
+        // Mark touch on user interaction; reset right before programmatic loads.
+        View.OnTouchListener spinnerTouchListener = (v, e) -> {
+            scheduleSpinnerUserTouched = true;
+            return false;
+        };
+        spinnerScheduleStartHour.setOnTouchListener(spinnerTouchListener);
+        spinnerScheduleStartMin.setOnTouchListener(spinnerTouchListener);
+        spinnerScheduleEndHour.setOnTouchListener(spinnerTouchListener);
+        spinnerScheduleEndMin.setOnTouchListener(spinnerTouchListener);
+        spinnerSchedulePromptFile.setOnTouchListener(spinnerTouchListener);
         spinnerScheduleStartHour.setOnItemSelectedListener(spinnerSaveListener);
         spinnerScheduleStartMin.setOnItemSelectedListener(spinnerSaveListener);
         spinnerScheduleEndHour.setOnItemSelectedListener(spinnerSaveListener);
@@ -2323,6 +2345,8 @@ public class SettingsFragment extends Fragment {
 
     private void loadScheduleTaskConfig(int index) {
         isLoadingScheduleTask = true;
+        // Clear any stale touch flag so a programmatic load never triggers a save.
+        scheduleSpinnerUserTouched = false;
         try {
             android.content.Context ctx = requireContext();
             cbScheduleTaskEnabled.setChecked(ConfigManager.getBoolean(ctx, ConfigManager.scheduleTaskKey(index, "enabled"), false));

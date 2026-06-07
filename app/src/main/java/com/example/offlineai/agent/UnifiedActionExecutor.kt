@@ -481,6 +481,10 @@ class UnifiedActionExecutor(private val context: Context) {
         if (a.taskId < 1 || a.taskId > ConfigManager.SCHEDULE_TASK_COUNT) {
             return "schedule_set.task_id must be 1..${ConfigManager.SCHEDULE_TASK_COUNT}, got ${a.taskId}"
         }
+        // weekdays is required when one_shot=true, otherwise task will never trigger
+        if (a.oneShot == true && (a.weekdays == null || a.weekdays!!.isEmpty())) {
+            return "schedule_set.weekdays is required when one_shot=true. Please provide weekdays (e.g. weekdays='5' for Friday, or '1,2,3,4,5' for Mon-Fri)."
+        }
         a.weekdays?.let { wd ->
             if (wd.isNotEmpty()) {
                 val parts = wd.split(",").map { it.trim() }

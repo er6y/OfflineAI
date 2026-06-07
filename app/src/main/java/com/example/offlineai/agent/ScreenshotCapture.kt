@@ -116,14 +116,16 @@ class ScreenshotCapture(private val context: Context) {
      */
     fun captureScreen(floatingWindow: AgentFloatingWindow? = null, retryOnFailure: Boolean = true): Bitmap? {
         if (mediaProjection == null) {
-            LogManager.logE(TAG, "MediaProjection not initialized, cannot capture screenshot")
-            
-            // If retry is enabled, request permission again
-            if (retryOnFailure) {
-                LogManager.logW(TAG, "Requesting MediaProjection permission for retry")
-                // Note: This will trigger a new permission request, Agent loop should handle this
-                // For now, just return null and let caller handle retry
+            // MediaProjection token is released when the app exits, so scheduled tasks that fire
+            // in the background have no projection. Fall back to AccessibilityService.takeScreenshot()
+            // which needs no permission dialog and works headless (Android 11 / API 30+).
+            LogManager.logW(TAG, "MediaProjection not initialized, trying AccessibilityService.takeScreenshot fallback")
+            val a11yBitmap = captureViaAccessibility(floatingWindow)
+            if (a11yBitmap != null) {
+                LogManager.logI(TAG, "Screenshot captured via AccessibilityService fallback: ${a11yBitmap.width}x${a11yBitmap.height}")
+                return a11yBitmap
             }
+            LogManager.logE(TAG, "MediaProjection not initialized and AccessibilityService fallback failed")
             return null
         }
         
@@ -293,6 +295,37 @@ class ScreenshotCapture(private val context: Context) {
         }
     }
     
+    /**
+     * Fallback capture path using AccessibilityService.takeScreenshot() when MediaProjection
+     * is not available (e.g. a scheduled task fired after the app was exited).
+     * Hides the floating window during capture so it does not appear in the screenshot.
+     */
+    private fun captureViaAccessibility(floatingWindow: AgentFloatingWindow?): Bitmap? {
+        val service = com.example.offlineai.agent.service.AgentAccessibilityService.getInstance()
+        if (service == null) {
+            LogManager.logW(TAG, "AccessibilityService instance null, cannot use takeScreenshot fallback")
+            return null
+        }
+
+        // Hide floating window so it does not appear in the captured screenshot.
+        val hideLatch = CountDownLatch(1)
+        floatingWindow?.temporaryHide { hideLatch.countDown() } ?: hideLatch.countDown()
+        if (!hideLatch.await(500, TimeUnit.MILLISECONDS)) {
+            LogManager.logW(TAG, "Timeout waiting for floating window to hide (a11y path)")
+        }
+
+        try {
+            return service.takeScreenshotBitmap()
+        } finally {
+            // Always restore the floating window, even if capture failed.
+            val showLatch = CountDownLatch(1)
+            floatingWindow?.temporaryShow { showLatch.countDown() } ?: showLatch.countDown()
+            if (!showLatch.await(500, TimeUnit.MILLISECONDS)) {
+                LogManager.logW(TAG, "Timeout waiting for floating window to show (a11y path)")
+            }
+        }
+    }
+
     /**
      * Convert Image to Bitmap
      */

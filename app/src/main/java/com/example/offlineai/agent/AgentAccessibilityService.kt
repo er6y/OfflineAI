@@ -6,7 +6,9 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.os.Build
 import android.os.Bundle
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
@@ -1416,6 +1418,68 @@ class AgentAccessibilityService : AccessibilityService() {
         val result = performGlobalAction(GLOBAL_ACTION_HOME)
         LogManager.logD(TAG, "Press home: ${if (result) "success" else "failed"}")
         return result
+    }
+
+    /**
+     * Capture a screenshot via the AccessibilityService.takeScreenshot() API (Android 11 / API 30+).
+     *
+     * Unlike MediaProjection, this requires NO runtime permission dialog and works while the app
+     * is in the background, so it is the fallback path for scheduled tasks that fire after the user
+     * has exited the app (MediaProjection token is released on app exit).
+     *
+     * The platform API is asynchronous; we bridge it to a blocking call via CountDownLatch since the
+     * Agent loop captures screenshots on a background thread. The returned hardware Bitmap is copied
+     * into a software ARGB_8888 Bitmap so callers can freely read pixels / compress it.
+     *
+     * @return a software Bitmap, or null if unavailable (API < 30) or the capture failed/timed out.
+     */
+    fun takeScreenshotBitmap(timeoutMs: Long = 3000L): Bitmap? {
+        // takeScreenshot() was added in API 30 (Android 11). Older devices fall back to null.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            LogManager.logW(TAG, "[A11Y_SHOT] takeScreenshot requires API 30+, current=${Build.VERSION.SDK_INT}")
+            return null
+        }
+
+        val latch = java.util.concurrent.CountDownLatch(1)
+        val resultHolder = arrayOfNulls<Bitmap>(1)
+        try {
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : AccessibilityService.TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
+                        try {
+                            val hardwareBuffer = screenshot.hardwareBuffer
+                            val colorSpace = screenshot.colorSpace
+                            val hwBitmap = Bitmap.wrapHardwareBuffer(hardwareBuffer, colorSpace)
+                            // Copy to a software bitmap so it is safe to read/recycle independently.
+                            resultHolder[0] = hwBitmap?.copy(Bitmap.Config.ARGB_8888, false)
+                            hwBitmap?.recycle()
+                            hardwareBuffer.close()
+                        } catch (t: Throwable) {
+                            LogManager.logE(TAG, "[A11Y_SHOT] convert hardware buffer failed: ${t.message}")
+                        } finally {
+                            latch.countDown()
+                        }
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        // Common errorCode: ERROR_TAKE_SCREENSHOT_INTERVAL_TIME_SHORT (rate limited)
+                        LogManager.logW(TAG, "[A11Y_SHOT] takeScreenshot failed, errorCode=$errorCode")
+                        latch.countDown()
+                    }
+                }
+            )
+        } catch (t: Throwable) {
+            LogManager.logE(TAG, "[A11Y_SHOT] takeScreenshot threw: ${t.message}")
+            return null
+        }
+
+        if (!latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            LogManager.logW(TAG, "[A11Y_SHOT] takeScreenshot timed out after ${timeoutMs}ms")
+            return null
+        }
+        return resultHolder[0]
     }
     
     /**

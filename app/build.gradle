@@ -110,18 +110,19 @@ namespace = 'com.example.offlineai'
         release {
             // 开源项目配置：启用代码压缩和资源压缩，但不混淆
             minifyEnabled true
+            shrinkResources true  // Enable resource shrinking to remove unused resources
 
             // 使用不混淆的ProGuard配置文件
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            
+
             // 保持JIT编译器开启以获得更好的性能
-            
+
             // 添加性能优化标志
             buildConfigField "boolean", "ENABLE_GPU_ACCELERATION", "true"
             buildConfigField "boolean", "ENABLE_NNAPI", "true"
             buildConfigField "int", "THREAD_COUNT", "4"
             signingConfig signingConfigs.release // 使用release签名配置
-            
+
             // 启用资源优化
             crunchPngs true
         }

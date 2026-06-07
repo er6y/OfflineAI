@@ -504,7 +504,18 @@ public class UnifiedForegroundService extends Service {
     public void onAppForegrounded() {
         LogManager.logD(TAG, "应用切换到前台");
         checkServiceStatus();
-        
+
+        // Re-arm the alarm in case it was silently cancelled by Huawei/EMUI when the
+        // process returned to foreground. alarmPendingIntent may still be non-null in
+        // Java while the actual system alarm was already cancelled, so we always
+        // reschedule here to keep the 1-min heartbeat chain intact.
+        boolean scheduleEnabled = ConfigManager.getBoolean(getApplicationContext(),
+                ConfigManager.KEY_SCHEDULE_ENABLED, false);
+        if (scheduleEnabled) {
+            scheduleNextAlarm();
+            LogManager.logD(TAG, "[SCHEDULE] Alarm re-armed on foreground transition");
+        }
+
         // 更新通知 - 已注释掉通知更新
         try {
             // updateNotification(currentStatus, currentProgress);
@@ -841,11 +852,19 @@ public class UnifiedForegroundService extends Service {
     private void handleAlarmHeartbeat() {
         boolean masterEnabled = ConfigManager.getBoolean(getApplicationContext(),
                 ConfigManager.KEY_SCHEDULE_ENABLED, false);
-        if (!masterEnabled) return;
+        if (!masterEnabled) {
+            // Diagnostic: master switch OFF -> nothing can fire
+            LogManager.logD(TAG, "[SCHEDULE] Heartbeat: master switch OFF, skip");
+            return;
+        }
 
         // Find the first due task group
         int dueTaskIndex = findDueTaskIndex();
-        if (dueTaskIndex < 0) return;
+        if (dueTaskIndex < 0) {
+            // Diagnostic: no task is due right now (findDueTaskIndex logs per-task reason)
+            LogManager.logD(TAG, "[SCHEDULE] Heartbeat: no due task, skip");
+            return;
+        }
 
         android.content.Context ctx = getApplicationContext();
 
@@ -938,11 +957,26 @@ public class UnifiedForegroundService extends Service {
 
         for (int i = 0; i < ConfigManager.SCHEDULE_TASK_COUNT; i++) {
             // Task enabled?
-            if (!ConfigManager.getBoolean(ctx, ConfigManager.scheduleTaskKey(i, "enabled"), false)) continue;
+            if (!ConfigManager.getBoolean(ctx, ConfigManager.scheduleTaskKey(i, "enabled"), false)) {
+                LogManager.logD(TAG, "[SCHEDULE] Task " + (i + 1) + " skip: disabled");
+                continue;
+            }
 
             // Weekday match?
             String weekdays = ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(i, "weekdays"), "1,2,3,4,5");
-            if (!("," + weekdays + ",").contains("," + ourDay + ",")) continue;
+            if (!("," + weekdays + ",").contains("," + ourDay + ",")) {
+                // Print full task config for debugging
+                boolean oneShot = ConfigManager.getBoolean(ctx, ConfigManager.scheduleTaskKey(i, "one_shot"), false);
+                int startH = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "start_hour"), 9);
+                int startM = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "start_min"), 0);
+                int endH = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "end_hour"), 17);
+                int endM = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "end_min"), 0);
+                int interval = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "interval"), 30);
+                String agentPreset = ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(i, "agent_preset"), "");
+                String prompt = ConfigManager.getString(ctx, ConfigManager.scheduleTaskKey(i, "prompt"), "");
+                LogManager.logD(TAG, "[SCHEDULE] Task " + (i + 1) + " skip: weekday mismatch (today=" + ourDay + ", set=" + weekdays + ") | FULL_CONFIG: enabled=true, one_shot=" + oneShot + ", weekdays=" + weekdays + ", start=" + startH + ":" + startM + ", end=" + endH + ":" + endM + ", interval=" + interval + ", agent_preset=" + agentPreset + ", prompt=" + prompt);
+                continue;
+            }
 
             // Time range check: startHH:MM ~ endHH:MM
             int startH = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "start_hour"), 9);
@@ -957,16 +991,29 @@ public class UnifiedForegroundService extends Service {
                 // Trigger on the first heartbeat at or after startMinutes when today has
                 // not fired yet. Doze / screen-off / busy are tolerated: we will keep
                 // trying on every subsequent heartbeat until today successfully fires.
-                if (nowMinutes < startMinutes) continue;
-                if (isSameLocalDay(lastScheduledRunTime[i], now)) continue;
+                if (nowMinutes < startMinutes) {
+                    LogManager.logD(TAG, "[SCHEDULE] Task " + (i + 1) + " skip: before start (now=" + nowMinutes + "min, start=" + startMinutes + "min, once-a-day mode)");
+                    continue;
+                }
+                if (isSameLocalDay(lastScheduledRunTime[i], now)) {
+                    LogManager.logD(TAG, "[SCHEDULE] Task " + (i + 1) + " skip: already fired today (once-a-day mode, lastRun=" + lastScheduledRunTime[i] + ")");
+                    continue;
+                }
             } else {
-                if (nowMinutes < startMinutes || nowMinutes > endMinutes) continue;
+                if (nowMinutes < startMinutes || nowMinutes > endMinutes) {
+                    LogManager.logD(TAG, "[SCHEDULE] Task " + (i + 1) + " skip: outside time range (now=" + nowMinutes + "min, range=" + startMinutes + "~" + endMinutes + "min)");
+                    continue;
+                }
                 // Interval check (only applies to range mode; once-per-day mode uses day-boundary guard)
                 int intervalMin = ConfigManager.getInt(ctx, ConfigManager.scheduleTaskKey(i, "interval"), 30);
                 long intervalMs = intervalMin * 60L * 1000L;
-                if (now - lastScheduledRunTime[i] < intervalMs) continue;
+                if (now - lastScheduledRunTime[i] < intervalMs) {
+                    LogManager.logD(TAG, "[SCHEDULE] Task " + (i + 1) + " skip: within interval (sinceLastRun=" + (now - lastScheduledRunTime[i]) + "ms, interval=" + intervalMs + "ms)");
+                    continue;
+                }
             }
 
+            LogManager.logI(TAG, "[SCHEDULE] Task " + (i + 1) + " is DUE (now=" + nowMinutes + "min, start=" + startMinutes + "min, end=" + endMinutes + "min)");
             return i;
         }
         return -1;

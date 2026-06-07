@@ -1275,10 +1275,18 @@ public class MainActivity extends AppCompatActivity implements SettingsFragment.
         LogManager.logD(TAG, "MainActivity destroyed, child process resources managed independently");
         
         // 如果是用户主动退出（isFinishing()为true），停止服务并清除通知
+        // But keep service alive when scheduled tasks are enabled so the heartbeat
+        // continues to run in the background after the user exits the app.
         if (isFinishing()) {
-            LogManager.logI(TAG, "用户主动退出app，停止前台服务并清除通知");
-            Intent serviceIntent = new Intent(this, UnifiedForegroundService.class);
-            stopService(serviceIntent);
+            boolean scheduleEnabled = ConfigManager.getBoolean(this,
+                    ConfigManager.KEY_SCHEDULE_ENABLED, false);
+            if (scheduleEnabled) {
+                LogManager.logI(TAG, "用户主动退出app，但定时任务已开启，保持服务后台心跳");
+            } else {
+                LogManager.logI(TAG, "用户主动退出app，停止前台服务并清除通知");
+                Intent serviceIntent = new Intent(this, UnifiedForegroundService.class);
+                stopService(serviceIntent);
+            }
         } else {
             LogManager.logD(TAG, "app被系统回收（非用户主动退出），保留服务");
         }

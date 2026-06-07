@@ -2945,6 +2945,11 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
      * Priority: Audio decoding > TTS generating > LLM inferring > Send
      */
     private void updateButtonText() {
+        // Check Fragment lifecycle to avoid crash when Fragment is detached (e.g., during scheduled task background execution)
+        if (getActivity() == null || !isAdded() || isDetached()) {
+            return;
+        }
+        
         if (buttonSendStop == null) return;
         
         if (isAudioDecoding.get()) {
@@ -4978,6 +4983,10 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
      * PUBLIC: Called by ChatHistoryFragment when switching conversations
      */
     public void loadChatHistory() {
+        if (!isAdded() || getContext() == null) {
+            LogManager.logW(TAG, "[CHAT_HISTORY] Fragment not attached, skipping loadChatHistory");
+            return;
+        }
         try {
             String currentFolder = getModeSpecificChatFolder();
             // Sync to KEY_CURRENT_CHAT_FOLDER for RagQueryManager
