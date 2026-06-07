@@ -23,9 +23,7 @@ Key goals:
 - **Explainable retrieval**: Vector RAG is enhanced with a knowledge graph to make context and entities visible and debuggable.
 - **Usable in the field**: Simple UI flows for building knowledge bases, asking questions, taking quick notes, and reviewing results.
 
-<img width="1440" height="2807" alt="ragQA" src="https://github.com/user-attachments/assets/733e4be9-dd8d-419d-832a-f8a8147f1df3" />
-<img width="846" height="1920" alt="t2i" src="https://github.com/user-attachments/assets/0254a3bb-de42-4ebd-b0df-deac06b19081" />
-<img width="846" height="1920" alt="i2i" src="https://github.com/user-attachments/assets/359f8f63-3dd1-41f8-b30b-c9578dd628cd" />
+<img width="2505" height="1721" alt="inferance" src="https://github.com/user-attachments/assets/6a5654a6-805d-4693-a33e-41b7851f9e94" />
 <img width="2487" height="1732" alt="agent_react" src="https://github.com/user-attachments/assets/e266f401-f315-4973-af6a-be154dfcd772" />
 
 
