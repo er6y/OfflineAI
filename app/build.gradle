@@ -366,9 +366,9 @@ afterEvaluate {
             def buildTime = project.ext.buildTimeStamp
             def releaseApk = file('build/outputs/apk/release/app-release.apk')
             if (releaseApk.exists()) {
-                // Copy release APK to project root with timestamp in filename
+                // Copy release APK to project root with fixed filename for git management
                 def rootDir = project.rootDir
-                def targetApkName = "OfflineAI_release_${buildTime}.apk"
+                def targetApkName = "OfflineAI_release.apk"
                 copy {
                     from releaseApk
                     into rootDir

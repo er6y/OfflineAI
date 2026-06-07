@@ -164,8 +164,8 @@ app/src/main/assets/skills/stockquant/logs/
 # KleidiAI junction created by mnn-lib CMakeLists.txt to fix CMAKE_SOURCE_DIR path mismatch
 libs/mnn-lib/src/main/cpp/source/
 
-# Root-level release APKs - use GitHub Releases instead, do NOT commit these
-/OfflineAI_release_*.apk
+# Root-level release APKs - track via Git LFS
+# StarLocalRAG_release*.apk - use GitHub Releases instead, do NOT commit these
 /StarLocalRAG_release*.apk
 
 # Root-level temp/debug/build scripts and artifacts (not part of source)
