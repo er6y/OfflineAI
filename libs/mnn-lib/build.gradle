@@ -27,6 +27,7 @@ android {
                           "-DMNN_SUPPORT_TRANSFORMER_FUSE=ON",
                           "-DMNN_LOW_MEMORY=ON",
                           "-DMNN_CPU_WEIGHT_DEQUANT_GEMM=ON",
+                          "-DMNN_SUPPORT_BF16=ON",
                           "-DMNN_USE_LOGCAT=ON",
                           "-DMNN_OPEN_TIME_TRACE=ON",
                           "-DMNN_BUILD_OPENCV=ON",
@@ -38,6 +39,7 @@ android {
                           // CRITICAL: MNN_SEP_BUILD=OFF merges all engines into libMNN.so
                           "-DMNN_SEP_BUILD=OFF",
                           "-DMNN_KLEIDIAI=ON",
+                          "-DMNN_KLEIDIAI_DEFAULT_ON=ON",
                           "-DMNN_QNN=OFF",
                           "-DMNN_BUILD_TOOLS=OFF",
                           "-DMNN_WITH_PLUGIN=ON",

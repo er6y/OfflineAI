@@ -29,6 +29,7 @@ android {
                           "-DMNN_CPU_WEIGHT_DEQUANT_GEMM=ON",
                           "-DMNN_SUPPORT_BF16=ON",  // BF16 support for Transformer models
                           "-DMNN_SME2=ON",  // SVE2+SME2 for high-end ARM64 (Cortex-A78+), auto-conditional
+                          "-DMNN_KLEIDIAI_DEFAULT_ON=ON",
                           "-DMNN_USE_LOGCAT=ON",
                           "-DMNN_OPEN_TIME_TRACE=ON",
                           "-DMNN_BUILD_OPENCV=ON",
@@ -43,6 +44,9 @@ android {
                           "-DMNN_BUILD_TOOLS=OFF",
                           "-DMNN_WITH_PLUGIN=ON",
                           "-DBUILD_PLUGIN=ON",
+                          // CRITICAL: Use c++_shared for std::regex support (like official TTS SDK)
+                          "-DANDROID_STL=c++_shared",
+                          "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
                           // Force native build to use Release for performance
                           "-DCMAKE_BUILD_TYPE=Release"
 

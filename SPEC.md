@@ -188,7 +188,10 @@ flowchart TB
       ├── ZImageDiffusion (custom, zimage_diffusion.hpp/cpp) — ZImage FlowMatch
       ├── LongCatDiffusion (custom, longcat_diffusion.hpp/cpp) — LongCat Image Edit/T2I
       └── Flux2KleinDiffusion (official, flux2_klein_diffusion.hpp/cpp) — FLUX.2-Klein-4B
-      
+      ```
+    - **工厂分发约束（2026-06 rebase 修正）**：`Diffusion::createDiffusion()` 的基础重载与全参数重载都必须覆盖已支持的 `DiffusionModelType`。尤其 `WAN2_1_T2V` 不能在全参数入口回退到 `StableDiffusion`，否则会把视频模型静默分发到文生图实现，造成上游 Wan 功能被误路由。
+    - **StableDiffusion warmup 约束（2026-06 rebase 修正）**：`StableDiffusion::load()` 中的 text encoder / UNet / VAE warmup 统一走 `forwardWithResizeCache()` 路径，先得到 `text_embeddings` 再给后续 UNet 预热，保证 `Session_Resize_Check -> onForward -> Session_Resize_Fix` 与 `mResizeCachePrepared` 状态一致，避免只做外部 fix 或遗漏局部输出引用导致的 warmup 不完整。
+
      - `isAgentEnabled`（RagQaFragment）：用户 UI 开关状态
    - **消息保存机制**（分工明确）：
      - `prepareAndSaveUserInput()`：保存初始任务目标（Step 0）

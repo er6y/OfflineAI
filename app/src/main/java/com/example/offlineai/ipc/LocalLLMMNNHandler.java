@@ -125,16 +125,11 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
 
 
     // Diffusion model type for native engine (must match MNN upstream DiffusionModelType)
-
-    // 0=SD1.5, 1=Taiyi, 2=Sana(official), 3=ZImage(custom), 4=LongCat(custom), 5=Flux2Klein
-
+    // 0=SD1.5, 1=Taiyi, 2=Sana, 3=Wan2.1-T2V, 4=ZImage(custom), 5=LongCat(custom), 6=Flux2Klein
     private static final int DIFFUSION_MODEL_SD15 = 0;
-
-    private static final int DIFFUSION_MODEL_ZIMAGE = 3;
-
-    private static final int DIFFUSION_MODEL_LONGCAT_IMAGE_EDIT = 4;
-
-    private static final int DIFFUSION_MODEL_FLUX2_KLEIN = 5;
+    private static final int DIFFUSION_MODEL_ZIMAGE = 4;
+    private static final int DIFFUSION_MODEL_LONGCAT_IMAGE_EDIT = 5;
+    private static final int DIFFUSION_MODEL_FLUX2_KLEIN = 6;
 
     
 
