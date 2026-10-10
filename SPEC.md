@@ -179,6 +179,13 @@ flowchart TB
     - TTS：`token2wav` 异步流程拆分为 DiT/Vocoder 三阶段并行管线，降低长文本语音生成尾延迟风险。
     - OpenCL/Metal/CPU：新增 TopKV2、OpenCL kernel 创建保护、NEON+fp16 LinearAttention 优化，提升移动端稳定性与吞吐。
     - Core/MNNChat：修复 Pipeline 编译问题、Android streaming 终止回归、本地模型添加崩溃，减少 App 集成层异常。
+  - **MNN upstream 同步（2026-10-10）**：`libs/mnn` 已 rebase 到 `upstream/master@9c178874`（自 9070bc73 起 217 个上游提交），release 构建验证通过。上游主要更新：LLM MobileMoE 导出与推理、Eagle draft RoPE 修复、混合采样 repetition penalty、KV cache 按后端/精度命名空间隔离、Tokenizer 后处理接口演进（`encode(str, with_post_processor)` + `post_process()`）；CPU 侧 RVV/SME2/KleidiAI 混合内核；OpenCL FlashAttention 优化与 C4 RMSNorm/GEMV 融合；Vulkan descriptor pool 共享修复、Metal 修复一批；Converter ONNX/tflite 健壮性与 NPU（QNN/HiAI/NeuroPilot）插件化重构。冲突解决要点（8 文件）：
+    - `OpenCLBackend.cpp`：保留本地定制（BufferPool/ExecutionBufferPool 构造去掉 `CL_MEM_ALLOC_HOST_PTR`、fp16 buffer 尺寸防 OOM 注释）。
+    - `StrassenMatmulOpenCLComputor.cpp`：采用上游 `shouldSplitStrassen()`/`getLeafGemmSize()` 新结构，本地"超大矩阵（`e*h > 128M` 元素）禁用 Strassen"的防 GPU kernel 失败 cap 移植进新函数。
+    - `binary_buf.cl` / `binary_buf_mnn_cl.cpp`：保留本地 NVIDIA PACK_LEAVE 场景 `fmax(float4)` NaN workaround（循环式逐元素激活）；融合上游 `in1` 初始化为 1 的整型取模除零保护；INT 段输出采用上游展开式（本地从未改动该段）；`*_mnn_cl.cpp` 用 `opencl_codegen.py` 从 `.cl` 重新生成以保持同步，注意该脚本会重写目录内全部生成文件，重新生成后需恢复无关文件。
+    - `omni.hpp` / `omni.cpp`：`currentIdx()` 采用上游四维 `max(T,H,W,X)+1` 版本（覆盖并超越本地 mrope 修复意图）；Qwen VL 图像预处理采用上游 `qwenVlSmartResize()`（min/max pixels 可配置 + INTER_CUBIC，覆盖本地 floor 对齐修复意图）；`visionProcess()` 融合上游空图日志与本地 `mVisionModule` 空指针防护；多模态正则采用上游 `kOmniMultimodalRegex` 常量（新增 `video` 支持）。
+    - `tokenizer.hpp`：`encode` 采用上游新签名（`with_post_processor` 参数），保留本地 `MNN_PUBLIC` 导出修饰（pymnn/Windows DLL 需要）。
+    - `llm_demo.cpp`：保留本地 `LLM_DEMO_ONELINE` 启用。
   - **Diffusion 引擎架构（MNN upstream rebase 2025-02）**：
     - **继承体系**：官方 upstream 将 Diffusion 引擎重构为抽象基类 + 子类模式，我们的 fork 在此基础上扩展了 ZImage 和 LongCat 子类：
       ```
@@ -191,6 +198,9 @@ flowchart TB
       ```
     - **工厂分发约束（2026-06 rebase 修正）**：`Diffusion::createDiffusion()` 的基础重载与全参数重载都必须覆盖已支持的 `DiffusionModelType`。尤其 `WAN2_1_T2V` 不能在全参数入口回退到 `StableDiffusion`，否则会把视频模型静默分发到文生图实现，造成上游 Wan 功能被误路由。
     - **StableDiffusion warmup 约束（2026-06 rebase 修正）**：`StableDiffusion::load()` 中的 text encoder / UNet / VAE warmup 统一走 `forwardWithResizeCache()` 路径，先得到 `text_embeddings` 再给后续 UNet 预热，保证 `Session_Resize_Check -> onForward -> Session_Resize_Fix` 与 `mResizeCachePrepared` 状态一致，避免只做外部 fix 或遗漏局部输出引用导致的 warmup 不完整。
+    - **WAN2.1-T2V JNI/UI 集成约束（2026-06）**：视频模型必须走独立 `runVideo()` / `generateVideo()` 通路，禁止复用文生图 `run()` / `generateImageWithInput()` 做模型类型分流。原因是 WAN 原生输出是帧目录（`frame_XXXX.png`）而非单张图片，参数集额外包含 `frames`，进度与结果语义也不同；若复用图片入口会把视频模型的输出目录、marker 协议和 UI 结果类型混入图片管线，增加回归风险。
+    - **WAN2.1-T2V 输出约束（2026-06）**：MNN / JNI 层只负责生成 PNG 帧序列，不负责直接编码视频文件。MP4 封装必须在 Android App 层完成，统一使用系统 `MediaCodec + MediaMuxer`，避免在 native 层引入 FFmpeg / x264 之类额外依赖与 license 风险。
+    - **RAG 聊天气泡多媒体协议扩展（2026-06）**：Diffusion 输出 marker 除 `[IMAGE:path]` 外，新增 `[VIDEO:path]`；`RagQaFragment` / `ChatDataItem` / `ChatViewHolders` 必须把视频结果视为与图片并列的一级媒体类型，单独维护 `videoUri` 与渲染逻辑。编码成功后应立即删除 WAN 中间 PNG 帧目录，只保留最终 MP4，避免聊天目录被大量中间帧占满。
 
      - `isAgentEnabled`（RagQaFragment）：用户 UI 开关状态
    - **消息保存机制**（分工明确）：
