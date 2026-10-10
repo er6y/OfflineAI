@@ -186,6 +186,14 @@ flowchart TB
     - `omni.hpp` / `omni.cpp`：`currentIdx()` 采用上游四维 `max(T,H,W,X)+1` 版本（覆盖并超越本地 mrope 修复意图）；Qwen VL 图像预处理采用上游 `qwenVlSmartResize()`（min/max pixels 可配置 + INTER_CUBIC，覆盖本地 floor 对齐修复意图）；`visionProcess()` 融合上游空图日志与本地 `mVisionModule` 空指针防护；多模态正则采用上游 `kOmniMultimodalRegex` 常量（新增 `video` 支持）。
     - `tokenizer.hpp`：`encode` 采用上游新签名（`with_post_processor` 参数），保留本地 `MNN_PUBLIC` 导出修饰（pymnn/Windows DLL 需要）。
     - `llm_demo.cpp`：保留本地 `LLM_DEMO_ONELINE` 启用。
+  - **Qwen-Image-2.1 → MNN 转换（2026-10-11，GPU 服务器 `/ux/work/yilei.wang/Qwen-Image-2.1`）**：
+    - 模型构成：TE = Qwen3-VL 8B 语言塔（36 层，导出为 llmexport 散装 LLM 目录，int8 权重 7.7GB + `embeddings_bf16.bin` 磁盘 embedding 1.2GB，visual 塔单独 int8 586MB 备编辑功能）；DiT = QwenImage21Transformer2DModel 7B/32 层（fp16 14.2GB）；VAE = AutoencoderKLQwenImage21 视频 VAE（encoder 输入 4 通道 RGBA，z_dim=64，spatial 缩放 16）。
+    - **TE 数值验证（int8）**：MNN 全序列 `hidden_states (1,seq,4096)` vs PyTorch bf16 pre-norm GT，末位置 cosine **0.9999**（首位置 0.9861，int8 正常）。llmexport 补丁已推 fork `cf13da53`：`--disable_transformer_c4` 时导标准 attention（OSS runtime 无 FusedAttention executor）+ qwen3_vl `tie_last_hidden_states=false` 输出 pre-norm 全序列 hidden_states（DiT 需全部位置）。
+    - **DiT 数值验证（fp16）**：C++ 8 步 FlowMatchEuler 全链对拍，每步 noise_pred cosine 0.99994→0.99483，**最终 latents cosine 0.99875**。踩坑：① complex RoPE 不可导 ONNX，用 `.real/.imag` 等价 float 展开补丁（parity 0.0）；② MNNConvert 不认 `ONNX::IsNaN`，diffusers attention 的 NaN-guard（64 处 `Where(IsNaN(sm),0,sm)`）需在 ONNX 侧**折叠直连**——仅替换成常量 False 不行，MNN 的 `Where` 标量条件广播语义与 ONNX 不一致会把输出变全零；③ DiT 的 `img_mask` 是 text+target 联合序列 `[text_len 个 0][img_seq/4 个 1]`（每个 True 槽代表 2×2 latent 组），timestep 输入是 `t/1000`，输出是 2048 行联合序列需切最后 1024。
+    - **框架级修复（fork `c37b1264`）**：`InitNet.cpp` 的 DT_HALF 常量在 external data（`.weight`）下被误判缺数据导致所有 `--fp16 --saveExternalData` 模型加载失败（"Alloc memory for const tensor error"）；awq 校准支持 `.txt` 逐行 prompt 直读。
+    - 转换链路：diffusers → ONNX（torch.onnx dynamo=False, opset 17/18）→ MNNConvert（DiT/VAE 带 `--transformerFuse --fp16 --saveExternalData`）。VAE decoder ORT-vs-PT max diff 2.2e-05。
+    - T2I 约定：TE 模板 prompt（45 tokens）前 14 个 system 行 drop 后 31 行 padding 到 1024 喂 DiT；true_cfg=1.0 无 CFG；8 步实验截断。
+    - 待办：TE int4+AWQ（校准中）、全链引擎类入 fork（当前用独立验证器 `test_pipeline.cpp`：TE→DiT→VAE 一条龙）、TE int8 vs int4 出图对比、DiT int8 版本。
   - **Diffusion 引擎架构（MNN upstream rebase 2025-02）**：
     - **继承体系**：官方 upstream 将 Diffusion 引擎重构为抽象基类 + 子类模式，我们的 fork 在此基础上扩展了 ZImage 和 LongCat 子类：
       ```
