@@ -68,3 +68,18 @@
   cd ../.. && git add libs/mnn # 更新主仓库的子模块指针
   ```
   本地若有针对 MNN 的定制补丁，rebase 冲突需保留定制逻辑并适配上游变更。
+
+## 8. GPU 训练机（远程 Linux，2×4090）
+
+深度学习 / 模型转换 / 推理验证任务可使用内网 GPU 机（主机名 kemove-R5210-G11）：
+
+- **连接**：`ssh yilei.wang@172.16.160.138`（用户名必须显式带，裸 IP 会拿本地用户名连导致 Permission denied；端口 22；本机 `~/.ssh/id_ed25519` 已在远端授权免密）
+- **CUDA**：12.2，位于 `/usr/local/cuda-12.2`，`nvcc` 不在 PATH，调用必须写全路径 `/usr/local/cuda-12.2/bin/nvcc`
+- **目录布局**（2026-10-10 确认）：
+  - `/ux/work/yilei.wang/MNN` —— MNN 源码仓库，可 pull 同步到 `er6y/MNN` fork 最新 master
+  - `/ux/work/yilei.wang/` —— 各模型工作目录，如 `Z-Image-Turbo/`、`Qwen-Image-2.1/`
+- **禁区（重要）**：
+  - ⛔ `/ux/work/yilei.wang/ldpc` —— 隔壁 **LDPC 项目**的目录，**绝对不要读写、写入任何东西**；
+  - ⛔ 禁写 `/tmp`、`/home`；
+  - 机上常有其他任务在跑（`n19_`、`results_floor2.csv` 等），连上去先只读观察，不要动正在运行的文件。
+- **连通性验证**：`ssh yilei.wang@172.16.160.138 'nvidia-smi'`
