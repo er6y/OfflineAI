@@ -191,7 +191,7 @@ flowchart TB
     - **TE 数值验证（int8）**：MNN 全序列 `hidden_states (1,seq,4096)` vs PyTorch bf16 pre-norm GT，末位置 cosine **0.9999**（首位置 0.9861，int8 正常）。llmexport 补丁已推 fork `cf13da53`：`--disable_transformer_c4` 时导标准 attention（OSS runtime 无 FusedAttention executor）+ qwen3_vl `tie_last_hidden_states=false` 输出 pre-norm 全序列 hidden_states（DiT 需全部位置）。
     - **DiT 数值验证（fp16）**：C++ 8 步 FlowMatchEuler 全链对拍，每步 noise_pred cosine 0.99994→0.99483，**最终 latents cosine 0.99875**。踩坑：① complex RoPE 不可导 ONNX，用 `.real/.imag` 等价 float 展开补丁（parity 0.0）；② MNNConvert 不认 `ONNX::IsNaN`，diffusers attention 的 NaN-guard（64 处 `Where(IsNaN(sm),0,sm)`）需在 ONNX 侧**折叠直连**——仅替换成常量 False 不行，MNN 的 `Where` 标量条件广播语义与 ONNX 不一致会把输出变全零；③ DiT 的 `img_mask` 是 text+target 联合序列 `[text_len 个 0][img_seq/4 个 1]`（每个 True 槽代表 2×2 latent 组），timestep 输入是 `t/1000`，输出是 2048 行联合序列需切最后 1024。
     - **框架级修复（fork `c37b1264`）**：`InitNet.cpp` 的 DT_HALF 常量在 external data（`.weight`）下被误判缺数据导致所有 `--fp16 --saveExternalData` 模型加载失败（"Alloc memory for const tensor error"）；awq 校准支持 `.txt` 逐行 prompt 直读。
-    - 转换链路：diffusers → ONNX（torch.onnx dynamo=False, opset 17/18）→ MNNConvert（DiT/VAE 带 `--transformerFuse --fp16 --saveExternalData`）。VAE decoder ORT-vs-PT max diff 2.2e-05。
+    - 转换链路：diffusers → ONNX（torch.onnx dynamo=False, opset 17/18）→ MNNConvert。VAE decoder ORT-vs-PT max diff 2.2e-05。**MNNConvert 量化铁律（2026-10-11 实锤）**：`--fp16` 会使 `--weightQuantBits` **静默失效**（Conv/MatMul 全按 fp16 存储，JSON 里 quanParameter bits=0）——量化模型转换**不能带 --fp16**（DiT int8/int4、VAE int8/int4 实际都是无 --fp16 转的，fp16 非量化模型才用 --fp16）；验证手段 `MNNDump2Json` 后查 `quanParameter.aMaxOrBits`。
     - T2I 约定：TE 模板 prompt（45 tokens）前 14 个 system 行 drop 后 31 行 padding 到 1024 喂 DiT；true_cfg=1.0 无 CFG；8 步实验截断。
     - 待办：TE int4+AWQ（校准中）、全链引擎类入 fork（当前用独立验证器 `test_pipeline.cpp`：TE→DiT→VAE 一条龙）、TE int8 vs int4 出图对比、DiT int8 版本。
   - **Qwen-Image-2.1 MNN 全链打通 + 量化结论（2026-10-11）**：
@@ -200,6 +200,10 @@ flowchart TB
     - **TE int4+AWQ**（105 条 T2I prompts 校准，fork AWQ + `--calib_data xx.txt` 直读 + `CUDA_VISIBLE_DEVICES=""` 强制 CPU；7B 校准 ~13min/层×36）：hidden_states vs PT bf16 GT：末位置（DiT 主要消费）cosine **0.9968**（int8 为 0.9999）、row11 0.9939、首位置 0.7747（int4 首行敏感）。权重 4.02GB（int8 7.7GB 的一半）。
     - **VAE decoder 修复链**：MNN `ReduceL2`（F.normalize 降级形式）在 5D 输入上算错（norm 3730→8）→ torch 导出侧换成 `clamp(sum²)+rsqrt` 等价形式；动态 shape 的 39 个 If 使 MNNConvert 对 attention 子图 FPE 崩溃 → polygraphy `fold_constants` 全折叠（2294→617 节点）。修复后 cosine 1.00000/maxdiff 0.005。
     - 工具沉淀（GPU 服务器 `/ux/work/yilei.wang/Qwen-Image-2.1/`）：`dump_pipeline_io.py`（PT 黄金数据）、`test_te_verify/test_dit_verify/test_vae_verify/test_seg_run.cpp`（分级对拍）、`bisect_vae*.py/sh`（ONNX 分段 bisect 方法）、`awq_verify.sh`（int4 一键验证+三方出图对比）。
+  - **三链四图 grid + DiT int4 校准结论（2026-10-11）**：
+    - **三量化组合同 seed 8 步出图对比**（`grid_run.sh` → `quant_compare_grid.png`，PT 原生/888/848/448 四面板）：**888（TE8/DiT8/VAE8）图像 cosine 0.9930**，视觉与原生难辨；**848（DiT int4）0.7517、448（TE4+DiT4）0.7605**——DiT int4 的每步 0.969 经 8 步 flow-match 混沌累积后**构图漂移**（单行灯牌变三行堆叠、文字崩坏），数值上"看着还行"的 0.969 在图像级完全不可接受。
+    - **DiT int4 校准变体（无 --fp16 重转，232 MatMul 真 4bit）**：sym 基线 0.96898 / asym 0.96691（+1.3GB 零收益）/ **hqq 0.97499（最优）** / hqq+fp16scale 0.97474（scale 精度无关）。MNNConvert 侧 int4 天花板 ≈0.975，仍远低于 int8 的 0.9996；AWQ 式激活感知校准 MNNConvert 不支持，需自研才有下一档。
+    - **定版建议**：**DiT int8（7.57GB）+ VAE int8（255MB）固定**；DiT int4 仅在内存预算极端受限时用 hqq 变体（3.8GB）并接受可见质量损失。VAE int4 弃用（用户拍板 + OOD 鲁棒性数据支持：int8 全场景 0.997+，int4 分布外 0.12-0.8）。手机部署权重预算：TE int4+AWQ 4.02GB + DiT int8 7.57GB + VAE int8 0.26GB ≈ **11.9GB**。
   - **Diffusion 引擎架构（MNN upstream rebase 2025-02）**：
     - **继承体系**：官方 upstream 将 Diffusion 引擎重构为抽象基类 + 子类模式，我们的 fork 在此基础上扩展了 ZImage 和 LongCat 子类：
       ```
