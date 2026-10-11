@@ -194,6 +194,12 @@ flowchart TB
     - 转换链路：diffusers → ONNX（torch.onnx dynamo=False, opset 17/18）→ MNNConvert（DiT/VAE 带 `--transformerFuse --fp16 --saveExternalData`）。VAE decoder ORT-vs-PT max diff 2.2e-05。
     - T2I 约定：TE 模板 prompt（45 tokens）前 14 个 system 行 drop 后 31 行 padding 到 1024 喂 DiT；true_cfg=1.0 无 CFG；8 步实验截断。
     - 待办：TE int4+AWQ（校准中）、全链引擎类入 fork（当前用独立验证器 `test_pipeline.cpp`：TE→DiT→VAE 一条龙）、TE int8 vs int4 出图对比、DiT int8 版本。
+  - **Qwen-Image-2.1 MNN 全链打通 + 量化结论（2026-10-11）**：
+    - **全链 C++（TE int8→DiT fp16×8步→VAE）vs PT 官方管线同 seed：最终图像 cosine 0.9924**。构图/灯牌/反射对齐，文字渲染有 int8 典型轻微扭曲（前例同款）。验证脚本：`test_pipeline.cpp`（TE 模板 45 tokens→drop 前 14 行→pad 1024 喂 DiT）。
+    - **DiT int8（weightQuantBits 8/block 128，权重 7.57GB）优于 fp16**：8 步累积 final latents cosine **0.9996**（fp16 是 0.99875），step0 noise_pred cosine 0.99996。**结论：DiT 直接用 int8，无需 fp16**。
+    - **TE int4+AWQ**（105 条 T2I prompts 校准，fork AWQ + `--calib_data xx.txt` 直读 + `CUDA_VISIBLE_DEVICES=""` 强制 CPU；7B 校准 ~13min/层×36）：hidden_states vs PT bf16 GT：末位置（DiT 主要消费）cosine **0.9968**（int8 为 0.9999）、row11 0.9939、首位置 0.7747（int4 首行敏感）。权重 4.02GB（int8 7.7GB 的一半）。
+    - **VAE decoder 修复链**：MNN `ReduceL2`（F.normalize 降级形式）在 5D 输入上算错（norm 3730→8）→ torch 导出侧换成 `clamp(sum²)+rsqrt` 等价形式；动态 shape 的 39 个 If 使 MNNConvert 对 attention 子图 FPE 崩溃 → polygraphy `fold_constants` 全折叠（2294→617 节点）。修复后 cosine 1.00000/maxdiff 0.005。
+    - 工具沉淀（GPU 服务器 `/ux/work/yilei.wang/Qwen-Image-2.1/`）：`dump_pipeline_io.py`（PT 黄金数据）、`test_te_verify/test_dit_verify/test_vae_verify/test_seg_run.cpp`（分级对拍）、`bisect_vae*.py/sh`（ONNX 分段 bisect 方法）、`awq_verify.sh`（int4 一键验证+三方出图对比）。
   - **Diffusion 引擎架构（MNN upstream rebase 2025-02）**：
     - **继承体系**：官方 upstream 将 Diffusion 引擎重构为抽象基类 + 子类模式，我们的 fork 在此基础上扩展了 ZImage 和 LongCat 子类：
       ```
