@@ -623,11 +623,14 @@ public class MnnInference {
      * @param gpuMemoryMode GPU memory mode: 0=AUTO, 1=BUFFER, 2=IMAGE
      * @param precisionMode Precision mode: 0=AUTO, 1=LOW(FP16), 2=NORMAL(FP32), 3=HIGH(FP32)
      * @param numThreads CPU thread count for inference (from settings)
+     * @param weightMmapOn Weight-mmap pool switch: true = file-backed evictable weights
+     *                     (survives low-memory pressure, costs disk + first-load time),
+     *                     false = anonymous heap. Overrides package config.json.
      * @param cachePath Path to cache directory
      * @param callback Callback for progress updates
      * @return Diffusion handle (pointer)
      */
-    public static native long createDiffusionWithSize(String modelDir, int modelType, int backendType, int memoryMode, int imageWidth, int imageHeight, boolean textEncoderOnCPU, int gpuMemoryMode, int precisionMode, int numThreads, String cachePath, DiffusionCallback callback);
+    public static native long createDiffusionWithSize(String modelDir, int modelType, int backendType, int memoryMode, int imageWidth, int imageHeight, boolean textEncoderOnCPU, int gpuMemoryMode, int precisionMode, int numThreads, boolean weightMmapOn, String cachePath, DiffusionCallback callback);
     
     /**
      * Generate image from text prompt

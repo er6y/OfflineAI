@@ -174,6 +174,7 @@ public class SettingsFragment extends Fragment {
     private EditText editTextDiffusionSeed;
     private SwitchCompat switchDiffusionSeedRandom;
     private SwitchCompat switchDiffusionTeOnCpu;
+    private SwitchCompat switchWeightMmapPool;
     
     // ASR语音识别设置
     private Spinner spinnerAsrModel;
@@ -348,6 +349,7 @@ public class SettingsFragment extends Fragment {
         editTextDiffusionSeed = view.findViewById(R.id.editTextDiffusionSeed);
         switchDiffusionSeedRandom = view.findViewById(R.id.switchDiffusionSeedRandom);
         switchDiffusionTeOnCpu = view.findViewById(R.id.switchDiffusionTeOnCpu);
+        switchWeightMmapPool = view.findViewById(R.id.switchWeightMmapPool);
         
         // ASR/TTS设置控件
         spinnerAsrModel = view.findViewById(R.id.spinnerAsrModel);
@@ -592,6 +594,10 @@ public class SettingsFragment extends Fragment {
         // Diffusion Text Encoder on CPU switch listener
         switchDiffusionTeOnCpu.setOnCheckedChangeListener((buttonView, isChecked) -> {
             ConfigManager.setDiffusionTextEncoderOnCPU(requireContext(), isChecked);
+        });
+
+        switchWeightMmapPool.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            ConfigManager.setWeightMmapPool(requireContext(), isChecked);
         });
         
         // 设置所有SeekBar监听器
@@ -1724,6 +1730,7 @@ public class SettingsFragment extends Fragment {
         // Text Encoder on CPU setting
         boolean teOnCpu = ConfigManager.getDiffusionTextEncoderOnCPU(ctx);
         switchDiffusionTeOnCpu.setChecked(teOnCpu);
+        switchWeightMmapPool.setChecked(ConfigManager.getWeightMmapPool(ctx));
         
         // RAG settings
         int chunkSize = ConfigManager.getChunkSize(ctx);

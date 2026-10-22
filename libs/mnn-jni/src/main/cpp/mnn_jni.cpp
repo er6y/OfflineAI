@@ -3521,19 +3521,19 @@ Java_com_offlineai_mnn_MnnInference_createDiffusionAdvanced(
 // New JNI method with separate width and height for non-square aspect ratios
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_offlineai_mnn_MnnInference_createDiffusionWithSize(
-    JNIEnv* env, jclass clazz, 
-    jstring jModelDir, jint modelType, jint backendType, jint memoryMode, 
+    JNIEnv* env, jclass clazz,
+    jstring jModelDir, jint modelType, jint backendType, jint memoryMode,
     jint imageWidth, jint imageHeight, jboolean textEncoderOnCPU,
-    jint gpuMemoryMode, jint precisionMode, jint numThreads, jstring jCachePath, jobject callback) {
-    
+    jint gpuMemoryMode, jint precisionMode, jint numThreads, jboolean weightMmapOn, jstring jCachePath, jobject callback) {
+
     try {
         const char* modelDir = env->GetStringUTFChars(jModelDir, nullptr);
         const char* cachePath = env->GetStringUTFChars(jCachePath, nullptr);
         std::string modelDirStr(modelDir ? modelDir : "");
         std::string cachePathStr(cachePath ? cachePath : "");
-        
-        LOGI("[DIFFUSION] Creating diffusion session (with size): modelDir=%s, modelType=%d, backend=%d, memory=%d, size=%dx%d, textEncoderOnCPU=%d, gpuMemMode=%d, precision=%d, numThreads=%d",
-             modelDirStr.c_str(), modelType, backendType, memoryMode, imageWidth, imageHeight, (int)textEncoderOnCPU, gpuMemoryMode, precisionMode, numThreads);
+
+        LOGI("[DIFFUSION] Creating diffusion session (with size): modelDir=%s, modelType=%d, backend=%d, memory=%d, size=%dx%d, textEncoderOnCPU=%d, gpuMemMode=%d, precision=%d, numThreads=%d, weightMmap=%d",
+             modelDirStr.c_str(), modelType, backendType, memoryMode, imageWidth, imageHeight, (int)textEncoderOnCPU, gpuMemoryMode, precisionMode, numThreads, (int)weightMmapOn);
         
         jmethodID onTokenMethod = nullptr;
         if (callback != nullptr) {
@@ -3572,7 +3572,18 @@ Java_com_offlineai_mnn_MnnInference_createDiffusionWithSize(
         
         env->ReleaseStringUTFChars(jModelDir, modelDir);
         env->ReleaseStringUTFChars(jCachePath, cachePath);
-        
+
+        // Weight-mmap pool user switch: force-enable (<modelDir>/mmap) or
+        // force-disable, overriding any package config.json weight_mmap_dir.
+        // Must be set before load() arms the runtime managers.
+        if (weightMmapOn) {
+            diffusion->setWeightMmap(modelDirStr + "/mmap", 0, 0);
+            LOGI("[DIFFUSION] Weight mmap pool: ON (dir=%s/mmap)", modelDirStr.c_str());
+        } else {
+            diffusion->setWeightMmap("", 0, 0);
+            LOGI("[DIFFUSION] Weight mmap pool: OFF (user setting)");
+        }
+
         LOGI("[DIFFUSION] Starting diffusion->load() (backend=%d, size=%dx%d)...", actualBackend, imageWidth, imageHeight);
         
         auto start_time = std::chrono::high_resolution_clock::now();

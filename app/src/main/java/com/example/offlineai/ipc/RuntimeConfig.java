@@ -44,6 +44,7 @@ public class RuntimeConfig implements Parcelable {
     public int diffusionGpuMemoryMode;  // 0=AUTO, 1=BUFFER, 2=IMAGE
     public int diffusionPrecisionMode;  // 0=AUTO, 1=LOW(FP16), 2=NORMAL(FP32), 3=HIGH(FP32)
     public int diffusionFrames;         // WAN2.1-T2V frames per clip (16~81)
+    public boolean diffusionWeightMmap = true; // Weight-mmap pool: file-backed evictable weights
 
     // Prompting / chat folder
     public String systemPrompt;
@@ -98,6 +99,7 @@ public class RuntimeConfig implements Parcelable {
         diffusionGpuMemoryMode = in.readInt();
         diffusionPrecisionMode = in.readInt();
         diffusionFrames = in.readInt();
+        diffusionWeightMmap = in.readByte() != 0;
 
         systemPrompt = in.readString();
         currentChatFolder = in.readString();
@@ -146,6 +148,7 @@ public class RuntimeConfig implements Parcelable {
         dest.writeInt(diffusionGpuMemoryMode);
         dest.writeInt(diffusionPrecisionMode);
         dest.writeInt(diffusionFrames);
+        dest.writeByte((byte) (diffusionWeightMmap ? 1 : 0));
 
         dest.writeString(systemPrompt);
         dest.writeString(currentChatFolder);

@@ -58,6 +58,7 @@ public final class RuntimeConfigUtil {
         config.diffusionGpuMemoryMode = ConfigManager.getDiffusionGpuMemoryMode(appCtx);
         config.diffusionPrecisionMode = ConfigManager.getDiffusionPrecisionMode(appCtx);
         config.diffusionFrames = ConfigManager.getDiffusionFrames(appCtx);
+        config.diffusionWeightMmap = ConfigManager.getWeightMmapPool(appCtx);
 
         // Prompting and chat folder
         config.systemPrompt = ConfigManager.getSystemPrompt(appCtx);

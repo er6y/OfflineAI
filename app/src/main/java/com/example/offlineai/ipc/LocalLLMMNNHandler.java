@@ -544,6 +544,15 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         String mnnConfig = buildMnnConfig(null);
         try {
             org.json.JSONObject configObj = new org.json.JSONObject(mnnConfig);
+            // Weight-mmap pool switch (same user setting as Diffusion): LLM weights
+            // become file-backed evictable pages -> survives low-memory pressure.
+            // tmp_path is the pool dir (llm.cpp MNNCreateDir's it); also hosts the
+            // OpenCL shader cache, which is harmless collateral.
+            boolean weightMmapPool = RuntimeConfigHolder.getWeightMmapPoolOrDefault(ConfigManager.DEFAULT_WEIGHT_MMAP_POOL);
+            configObj.put("use_mmap", weightMmapPool);
+            if (weightMmapPool) {
+                configObj.put("tmp_path", new java.io.File(modelPath, "mmap").getAbsolutePath());
+            }
             org.json.JSONObject jinjaObj = configObj.optJSONObject("jinja");
             if (jinjaObj == null) { jinjaObj = new org.json.JSONObject(); configObj.put("jinja", jinjaObj); }
             org.json.JSONObject contextObj = jinjaObj.optJSONObject("context");
@@ -1295,6 +1304,11 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
 
         LogManager.logI(TAG, "[Diffusion] numThreads: " + numThreads);
 
+        // Weight-mmap pool switch: file-backed evictable weights survive memory
+        // pressure instead of getting the process LMK-killed (costs disk + load time)
+        boolean weightMmapPool = RuntimeConfigHolder.getWeightMmapPoolOrDefault(ConfigManager.DEFAULT_WEIGHT_MMAP_POOL);
+        LogManager.logI(TAG, "[Diffusion] weightMmapPool: " + weightMmapPool);
+
         
 
         // Use createDiffusionWithSize to pass separate width and height for non-square aspect ratios
@@ -1320,6 +1334,8 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
             precisionMode,   // Precision mode: 0=AUTO, 1=LOW(FP16), 2=NORMAL(FP32), 3=HIGH(FP32)
 
             numThreads,      // CPU thread count from settings
+
+            weightMmapPool,  // Weight-mmap pool switch (file-backed evictable weights)
 
             cachePath,
 

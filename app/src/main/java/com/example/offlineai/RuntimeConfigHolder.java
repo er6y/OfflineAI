@@ -183,6 +183,14 @@ public final class RuntimeConfigHolder {
         return (cfg != null) ? cfg.diffusionTextEncoderOnCPU : defaultValue;
     }
 
+    public static boolean getWeightMmapPoolOrDefault(boolean defaultValue) {
+        RuntimeConfig cfg;
+        synchronized (LOCK) {
+            cfg = current;
+        }
+        return (cfg != null) ? cfg.diffusionWeightMmap : defaultValue;
+    }
+
     public static int getDiffusionGpuMemoryModeOrDefault(int defaultValue) {
         RuntimeConfig cfg;
         synchronized (LOCK) {

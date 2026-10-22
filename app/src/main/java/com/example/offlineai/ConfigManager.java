@@ -192,6 +192,7 @@ public class ConfigManager {
     public static final String KEY_DIFFUSION_SEED = "diffusion_seed"; // 随机种子 (-1=随机)
     public static final String KEY_DIFFUSION_SEED_RANDOM = "diffusion_seed_random"; // 是否使用随机种子
     public static final String KEY_DIFFUSION_TE_ON_CPU = "diffusion_te_on_cpu"; // 文本编码器固定CPU
+    public static final String KEY_WEIGHT_MMAP_POOL = "weight_mmap_pool"; // 权重mmap池（防低内存杀进程，LLM/Diffusion通用）
     public static final String KEY_DIFFUSION_FRAMES = "diffusion_frames"; // WAN T2V frames per clip (16~81)
     
     // ASR语音识别配置键
@@ -280,6 +281,7 @@ public class ConfigManager {
     public static final int DEFAULT_DIFFUSION_SEED = -1; // -1表示随机
     public static final boolean DEFAULT_DIFFUSION_SEED_RANDOM = true; // 默认使用随机种子
     public static final boolean DEFAULT_DIFFUSION_TE_ON_CPU = true; // 默认文本编码器固定CPU（避免GPU内存限制）
+    public static final boolean DEFAULT_WEIGHT_MMAP_POOL = true; // 默认开启：file-backed可逐出权重，防LMK杀进程
     public static final int DEFAULT_DIFFUSION_FRAMES = 81; // WAN2.1-T2V official default (≈5s @16fps)
     
     // ASR语音识别默认值
@@ -2337,6 +2339,14 @@ public class ConfigManager {
      * @param context 上下文
      * @param onCPU true=固定CPU，false=跟随主后端
      */
+    public static boolean getWeightMmapPool(Context context) {
+        return getBoolean(context, KEY_WEIGHT_MMAP_POOL, DEFAULT_WEIGHT_MMAP_POOL);
+    }
+
+    public static void setWeightMmapPool(Context context, boolean enabled) {
+        setBoolean(context, KEY_WEIGHT_MMAP_POOL, enabled);
+    }
+
     public static void setDiffusionTextEncoderOnCPU(Context context, boolean onCPU) {
         setBoolean(context, KEY_DIFFUSION_TE_ON_CPU, onCPU);
     }
