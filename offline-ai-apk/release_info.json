@@ -1,6 +1,6 @@
 {
-  "build_version": "20261022193159",
-  "git_commit_id": "d10102bbeb1c833e928fe10c0609541c58fa43cd",
-  "git_commit_message": "SPEC+tools: CFG 定论(默认1.0) + VAE 动态尺寸版(256-960 全验证) + MNN 内核 2^28 元素 int32 溢出 bug 精确复现",
+  "build_version": "20261022212154",
+  "git_commit_id": "87fa1d6da8d4c13a3b1fbc8efe52b380b7d519bb",
+  "git_commit_message": "MOSS-Image APP integration + inference-crash honest failure + memory fixes\n\n- LocalLLMMNNHandler: DIFFUSION_MODEL_MOSS_IMAGE=9, moss_image_mnn detection\n  (before vae.bn_mean fallback), FlowMatch-Euler recipe hint (8 steps / no CFG)\n- RagQaFragment: service death mid-query now finalizes the LLM task as\n  FAILED (was fake COMPLETED/100) with an OOM hint message; generic for\n  all inference models\n- VideoEncoder: new IPC video encoder module\n- MNN submodule: MOSS engine (enum 9), row-wise bf16 embedding reads,\n  weight-mmap base wiring, AWQ GDN export fixes (697e0f70)\n- SPEC.md: MOSS phone first-run postmortem (LMK at TE forward) + fixes",
   "app_url": ""
 }
