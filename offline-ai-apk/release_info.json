@@ -1,6 +1,6 @@
 {
-  "build_version": "20261023004525",
-  "git_commit_id": "b6063f2396524c4583673a3d3a9ef888935cba06",
-  "git_commit_message": "SPEC: weight-mmap pool surgery (fork 4d50da71) - root-cause chain, fixes, regression matrix",
+  "build_version": "20261023073331",
+  "git_commit_id": "14e8e3f40a4ba6fbbededb04b397e67d00b85881",
+  "git_commit_message": "SPEC: weight-mmap pool user switch, LLM wiring, Z-Image/FLUX.2 regression (FLUX.2 pool fenced)",
   "app_url": ""
 }
