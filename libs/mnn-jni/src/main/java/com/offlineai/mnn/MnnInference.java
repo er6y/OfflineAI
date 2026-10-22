@@ -672,6 +672,37 @@ public class MnnInference {
         String inputImagePath,
         DiffusionCallback callback
     );
+
+    /**
+     * Generate video frames from a text prompt using a video-capable diffusion
+     * model (currently WAN2.1-T2V, modelType=3). The native side writes a sequence
+     * of PNG frames (frame_0000.png ... frame_NNNN.png) into outputDir; MP4 muxing
+     * is performed by the Java caller via MediaCodec/MediaMuxer.
+     *
+     * @param diffusionHandle Diffusion handle returned by createDiffusion (modelType must be WAN2_1_T2V=3)
+     * @param prompt Text prompt
+     * @param outputDir Output directory to receive frame PNGs
+     * @param width Frame width (multiple of 16 recommended, e.g. 480/832)
+     * @param height Frame height (multiple of 16 recommended)
+     * @param frames Number of frames to decode (e.g. 81)
+     * @param steps Number of denoising steps (e.g. 25/50)
+     * @param randomSeed Random seed (-1 for random)
+     * @param cfgScale CFG scale (e.g. 6.0)
+     * @param callback Progress + status callback
+     * @return true on success, false otherwise
+     */
+    public static native boolean generateVideo(
+        long diffusionHandle,
+        String prompt,
+        String outputDir,
+        int width,
+        int height,
+        int frames,
+        int steps,
+        int randomSeed,
+        float cfgScale,
+        DiffusionCallback callback
+    );
     
     /**
      * Release diffusion session and free resources

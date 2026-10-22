@@ -1,6 +1,6 @@
 {
-  "build_version": "20260613101726",
-  "git_commit_id": "cf46d42ce1f29600e795dbe494bbefcc667b7dd6",
-  "git_commit_message": "1. add OfflineAI_release.apk release",
-  "app_url": "https://github.com/er6y/OfflineAI/releases/download/latest/OfflineAI_release.apk"
+  "build_version": "20261022193159",
+  "git_commit_id": "d10102bbeb1c833e928fe10c0609541c58fa43cd",
+  "git_commit_message": "SPEC+tools: CFG 定论(默认1.0) + VAE 动态尺寸版(256-960 全验证) + MNN 内核 2^28 元素 int32 溢出 bug 精确复现",
+  "app_url": ""
 }

@@ -57,6 +57,7 @@ public final class RuntimeConfigUtil {
         config.diffusionTextEncoderOnCPU = ConfigManager.getDiffusionTextEncoderOnCPU(appCtx);
         config.diffusionGpuMemoryMode = ConfigManager.getDiffusionGpuMemoryMode(appCtx);
         config.diffusionPrecisionMode = ConfigManager.getDiffusionPrecisionMode(appCtx);
+        config.diffusionFrames = ConfigManager.getDiffusionFrames(appCtx);
 
         // Prompting and chat folder
         config.systemPrompt = ConfigManager.getSystemPrompt(appCtx);

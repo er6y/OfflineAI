@@ -175,6 +175,7 @@ object ChatViewHolders {
         
         private val viewText: TextView = view.findViewById(R.id.tv_chat_text)
         private val imageGenerated: ImageView = view.findViewById(R.id.image_generated)
+        private val videoGenerated: android.widget.VideoView = view.findViewById(R.id.video_generated)
         var viewAssistantLoading: View = view.findViewById(R.id.view_assistant_loading)
         
         // TTS Audio Player
@@ -400,6 +401,25 @@ object ChatViewHolders {
             imageGenerated.visibility = if (data.imageUri != null) View.VISIBLE else View.GONE
             if (data.imageUri != null) {
                 imageGenerated.setImageURI(data.imageUri)
+            }
+
+            // Generated video (WAN2.1-T2V mp4)
+            val videoUri = data.videoUri
+            videoGenerated.visibility = if (videoUri != null) View.VISIBLE else View.GONE
+            if (videoUri != null) {
+                try {
+                    videoGenerated.setVideoURI(videoUri)
+                    val controller = android.widget.MediaController(videoGenerated.context)
+                    controller.setAnchorView(videoGenerated)
+                    videoGenerated.setMediaController(controller)
+                    videoGenerated.setOnPreparedListener { mp ->
+                        mp.isLooping = false
+                        // Seek to first frame so a thumbnail is visible without auto-play.
+                        mp.seekTo(1)
+                    }
+                } catch (t: Throwable) {
+                    android.util.Log.w("ChatViewHolders", "Failed to bind videoUri: ${t.message}")
+                }
             }
             
             // TTS Audio Player

@@ -178,3 +178,39 @@ libs/mnn-lib/src/main/cpp/source/
 /log2.txt
 /log3.txt
 /log_3thread_test.txt
+
+# Model packages (multi-GB, distributed via ModelScope)
+/models_release/
+
+# ---- Local artifacts (2026-10): models, inference output, scratch tools ----
+# Model packages / inference outputs / downloaded docs (multi-GB, not source)
+/models_release/
+/engine_out/
+/engine_out_turbo/
+/allinone/
+/apk_analysis_temp/
+/py_mnn_kb/
+/config.json
+
+# Ad-hoc debug scripts, prompts and logs at repo root
+/debug_f2.py
+/diag_a*.py
+/run_f2_test.py
+/fix_svg.py
+/grid_compose4.py
+/fix_qwen35_*.ps1
+/build_embedding_demo.bat
+/build_pymnn.bat
+/build_wrapper.bat
+/check_deps.bat
+/check_mnn_dll.bat
+/test_emb*.bat
+/upload_to_release.bat
+/agent_test_prompt.txt
+/test_*.txt
+/test_*.md
+/test_json_null.java
+/log.txt
+/f2_picks.txt
+/dit_i4asym.json
+/ms_files_tmp.json

@@ -271,12 +271,23 @@
         android:background="#00f"
         tools:src="@drawable/testtest"/>
 
+    <!-- WAN2.1-T2V generated video output -->
+    <VideoView
+        android:id="@+id/video_generated"
+        android:layout_width="240dp"
+        android:layout_height="180dp"
+        android:layout_marginTop="10dp"
+        android:layout_toEndOf="@id/ic_header"
+        android:layout_below="@id/image_generated"
+        android:visibility="gone"
+        tools:visibility="visible" />
+
     <!-- Performance section - LAST (after content) -->
     <LinearLayout
         android:id="@+id/ll_performance_toggle"
         android:layout_width="wrap_content"
         android:layout_height="30dp"
-        android:layout_below="@id/image_generated"
+        android:layout_below="@id/video_generated"
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:visibility="gone">

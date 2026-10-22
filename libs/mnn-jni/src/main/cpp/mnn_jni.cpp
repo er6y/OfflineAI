@@ -4457,6 +4457,236 @@ Java_com_offlineai_mnn_MnnInference_releaseDiffusion(
     }
 }
 
+// ========== Diffusion Video Generation (WAN2.1-T2V) ==========
+// This entry point mirrors generateImageWithInput() but routes to runVideo()
+// which is overridden by WanDiffusion. The output is a directory of PNG frames
+// (frame_0000.png ... frame_NNNN.png); MP4 muxing is performed in Java layer
+// via MediaCodec + MediaMuxer, keeping MNN free of video codec dependencies.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_offlineai_mnn_MnnInference_generateVideo(
+    JNIEnv* env, jclass clazz,
+    jlong handle, jstring jPrompt, jstring jOutputDir,
+    jint width, jint height, jint frames, jint steps, jint seed,
+    jfloat cfgScale, jobject callback) {
+
+    try {
+        // Look up diffusion session and memory mode
+        Diffusion* diffusion = nullptr;
+        int memoryMode = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+            auto it = g_diffusion_sessions.find(handle);
+            if (it == g_diffusion_sessions.end()) {
+                LOGE("[DIFFUSION_VIDEO] Invalid diffusion handle: %lld", (long long)handle);
+                return JNI_FALSE;
+            }
+            diffusion = it->second.get();
+
+            auto memIt = g_diffusion_memory_modes.find(handle);
+            if (memIt != g_diffusion_memory_modes.end()) {
+                memoryMode = memIt->second;
+            }
+        }
+
+        const char* prompt = env->GetStringUTFChars(jPrompt, nullptr);
+        const char* outputDir = env->GetStringUTFChars(jOutputDir, nullptr);
+
+        LOGI("[DIFFUSION_VIDEO] Generating video: prompt='%s', outputDir='%s', "
+             "size=%dx%d, frames=%d, steps=%d, seed=%d, cfg=%.2f, memoryMode=%d",
+             prompt, outputDir, width, height, frames, steps, seed, cfgScale, memoryMode);
+
+        jclass callbackClass = env->GetObjectClass(callback);
+        jmethodID onProgressMethod = env->GetMethodID(callbackClass, "onProgress", "(I)Z");
+        jmethodID onTokenMethod    = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)Z");
+
+        // Track first run (mirrors generateImageWithInput)
+        bool is_first = false;
+        {
+            std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+            auto it = g_diffusion_first_run.find(handle);
+            if (it != g_diffusion_first_run.end() && it->second) {
+                is_first = true;
+                g_diffusion_first_run[handle] = false;
+            }
+        }
+
+        // Streaming debug header (model + GPU + cache + reload status)
+        if (onTokenMethod) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "\nWAN2.1-T2V mode (size=%dx%d, frames=%d)",
+                     width, height, frames);
+            jstring jmsg = env->NewStringUTF(buf);
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+
+            // GPU settings
+            {
+                std::lock_guard<std::mutex> lock(g_diffusion_sessions_mutex);
+                auto it = g_diffusion_params.find(handle);
+                if (it != g_diffusion_params.end()) {
+                    const char* gpuMemModeStr = (it->second.gpuMemoryMode == 2) ? "IMAGE" : "BUFFER";
+                    const char* precisionStr = "AUTO";
+                    switch (it->second.precisionMode) {
+                        case 1: precisionStr = "LOW(FP16)"; break;
+                        case 2: precisionStr = "NORMAL"; break;
+                        case 3: precisionStr = "HIGH(FP32)"; break;
+                    }
+                    char gbuf[256];
+                    snprintf(gbuf, sizeof(gbuf), "\nGPU: MemMode=%s, Precision=%s",
+                             gpuMemModeStr, precisionStr);
+                    jstring jg = env->NewStringUTF(gbuf);
+                    env->CallBooleanMethod(callback, onTokenMethod, jg);
+                    env->DeleteLocalRef(jg);
+                }
+            }
+
+            // Kernel cache status
+            struct stat cstat;
+            bool cacheExists = (stat(".tempcache_wan", &cstat) == 0);
+            char cbuf[256];
+            if (cacheExists) {
+                long cacheSize = cstat.st_size / 1024;
+                snprintf(cbuf, sizeof(cbuf), "\nGPU Kernel Cache: EXISTS (%ld KB)", cacheSize);
+            } else {
+                snprintf(cbuf, sizeof(cbuf), "\nGPU Kernel Cache: None");
+            }
+            jstring jc = env->NewStringUTF(cbuf);
+            env->CallBooleanMethod(callback, onTokenMethod, jc);
+            env->DeleteLocalRef(jc);
+        }
+
+        if (is_first && onTokenMethod) {
+            jstring jmsg = env->NewStringUTF("\nModels loaded successfully!");
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        } else if (onTokenMethod) {
+            jstring jmsg = env->NewStringUTF("\nStatus: Ready");
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+
+        if (onTokenMethod) {
+            char buf[512];
+            snprintf(buf, sizeof(buf),
+                     "\nPreparing: Steps=%d, CFG=%.2f, Scheduler=FlowMatch, Frames=%d, Seed=%s",
+                     steps, cfgScale, frames,
+                     seed < 0 ? "Random" : std::to_string(seed).c_str());
+            jstring jmsg = env->NewStringUTF(buf);
+            env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+            env->DeleteLocalRef(jmsg);
+        }
+
+        // Progress tracking (FlowMatch step-driven, single-stage UNet equivalent)
+        int total_steps = steps;
+        int last_step = 0;
+        bool unet_started = false;
+        long peakRssKB = getCurrentRssKB();
+
+        std::function<void(int)> progressCallback =
+            [env, callback, onProgressMethod, onTokenMethod, total_steps, &last_step, &unet_started, &peakRssKB](int progress) {
+                long currentRss = getCurrentRssKB();
+                if (currentRss > peakRssKB) {
+                    peakRssKB = currentRss;
+                }
+
+                if (onTokenMethod) {
+                    char buf[256];
+                    if (progress >= 10 && !unet_started) {
+                        snprintf(buf, sizeof(buf), "\nText Encoder: done\nTransformer Steps(%d): ", total_steps);
+                        last_step = 0;
+                        unet_started = true;
+                    } else if (progress >= 10 && progress < 95 && unet_started) {
+                        int current_step = ((progress - 10) * total_steps) / 85 + 1;
+                        if (current_step > last_step && current_step <= total_steps) {
+                            snprintf(buf, sizeof(buf), "%d..", current_step);
+                            last_step = current_step;
+                            if (current_step == total_steps) {
+                                snprintf(buf, sizeof(buf), "%d\nTransformer: done\nVAE Decoder: generating...", total_steps);
+                                unet_started = false;
+                            }
+                        } else {
+                            buf[0] = '\0';
+                        }
+                    } else if (progress >= 95 && progress < 100) {
+                        if (unet_started) {
+                            snprintf(buf, sizeof(buf), "%d\nTransformer: done\nVAE Decoder: generating...", total_steps);
+                            unet_started = false;
+                        } else {
+                            buf[0] = '\0';
+                        }
+                    } else if (progress == 100) {
+                        snprintf(buf, sizeof(buf), "\nVAE Decoder: done");
+                    } else {
+                        buf[0] = '\0';
+                    }
+                    if (buf[0] != '\0') {
+                        jstring jmsg = env->NewStringUTF(buf);
+                        env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                        env->DeleteLocalRef(jmsg);
+                    }
+                }
+
+                if (onProgressMethod) {
+                    env->CallBooleanMethod(callback, onProgressMethod, progress);
+                }
+            };
+
+        // Run video generation; runVideo is virtual (default returns false on non-WAN)
+        auto start = std::chrono::high_resolution_clock::now();
+        bool success = diffusion->runVideo(
+            std::string(prompt),
+            std::string(outputDir),
+            width, height, frames, steps, seed, cfgScale,
+            progressCallback);
+        auto end = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+        env->ReleaseStringUTFChars(jPrompt, prompt);
+        env->ReleaseStringUTFChars(jOutputDir, outputDir);
+
+        if (success) {
+            LOGI("[DIFFUSION_VIDEO] Frames generated successfully in %lld ms", (long long)duration);
+
+            long finalRssKB = getCurrentRssKB();
+            if (finalRssKB > peakRssKB) {
+                peakRssKB = finalRssKB;
+            }
+
+            if (onTokenMethod) {
+                char buf[512];
+                snprintf(buf, sizeof(buf), "\nFrames generated (%.1fs)", duration / 1000.0);
+                jstring jmsg = env->NewStringUTF(buf);
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+
+                if (peakRssKB > 0) {
+                    snprintf(buf, sizeof(buf), "[MEMORY_STATS:peak=%.1f,rss=%.1f]",
+                             peakRssKB / 1024.0, finalRssKB / 1024.0);
+                    jmsg = env->NewStringUTF(buf);
+                    env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                    env->DeleteLocalRef(jmsg);
+                }
+            }
+        } else {
+            LOGE("[DIFFUSION_VIDEO] Video generation failed");
+            if (onTokenMethod) {
+                jstring jmsg = env->NewStringUTF("\nGeneration failed");
+                env->CallBooleanMethod(callback, onTokenMethod, jmsg);
+                env->DeleteLocalRef(jmsg);
+            }
+        }
+
+        return success ? JNI_TRUE : JNI_FALSE;
+
+    } catch (const std::exception& e) {
+        LOGE("[DIFFUSION_VIDEO] Exception: %s", e.what());
+        return JNI_FALSE;
+    } catch (...) {
+        LOGE("[DIFFUSION_VIDEO] Unknown exception");
+        return JNI_FALSE;
+    }
+}
+
 // ========== ASR (Automatic Speech Recognition) ==========
 // NOTE: ASR functionality has been moved to sherpa-mnn-jni module
 // MnnInference.java still declares these methods for compatibility,

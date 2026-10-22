@@ -1076,6 +1076,37 @@
                 android:gravity="center"
                 android:layout_marginStart="0dp" />
         </LinearLayout>
+
+        <!-- Frames slider (WAN2.1-T2V only; ignored by image diffusion models) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="100dp"
+                android:layout_height="wrap_content"
+                android:text="@string/label_diffusion_frames"
+                android:textSize="16sp" />
+
+            <SeekBar
+                android:id="@+id/seekBarDiffusionFrames"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:max="65"
+                android:progress="65" />
+
+            <TextView
+                android:id="@+id/textViewDiffusionFramesValue"
+                android:layout_width="40dp"
+                android:layout_height="wrap_content"
+                android:text="81"
+                android:textSize="14sp"
+                android:gravity="center" />
+        </LinearLayout>
         
         <!-- CFG滑块 -->
         <LinearLayout

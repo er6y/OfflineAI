@@ -21,6 +21,10 @@ class ChatDataItem {
     @JvmField
     var imageUri: Uri? = null
 
+    // WAN2.1-T2V generated video output (mp4 file). Mirrors imageUri lifecycle.
+    @JvmField
+    var videoUri: Uri? = null
+
     @JvmField
     var audioUri: Uri? = null
     

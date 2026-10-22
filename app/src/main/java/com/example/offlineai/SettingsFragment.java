@@ -167,6 +167,8 @@ public class SettingsFragment extends Fragment {
     private Spinner spinnerDiffusionImageSize;
     private SeekBar seekBarDiffusionSteps;
     private TextView textViewDiffusionStepsValue;
+    private SeekBar seekBarDiffusionFrames;
+    private TextView textViewDiffusionFramesValue;
     private SeekBar seekBarDiffusionCfg;
     private TextView textViewDiffusionCfgValue;
     private EditText editTextDiffusionSeed;
@@ -339,6 +341,8 @@ public class SettingsFragment extends Fragment {
         spinnerDiffusionImageSize = view.findViewById(R.id.spinnerDiffusionImageSize);
         seekBarDiffusionSteps = view.findViewById(R.id.seekBarDiffusionSteps);
         textViewDiffusionStepsValue = view.findViewById(R.id.textViewDiffusionStepsValue);
+        seekBarDiffusionFrames = view.findViewById(R.id.seekBarDiffusionFrames);
+        textViewDiffusionFramesValue = view.findViewById(R.id.textViewDiffusionFramesValue);
         seekBarDiffusionCfg = view.findViewById(R.id.seekBarDiffusionCfg);
         textViewDiffusionCfgValue = view.findViewById(R.id.textViewDiffusionCfgValue);
         editTextDiffusionSeed = view.findViewById(R.id.editTextDiffusionSeed);
@@ -500,6 +504,24 @@ public class SettingsFragment extends Fragment {
             public void onStopTrackingTouch(SeekBar seekBar) {
                 int steps = seekBar.getProgress() + 1;
                 ConfigManager.setDiffusionSteps(requireContext(), steps);
+            }
+        });
+
+        // Diffusion Frames slider listener (WAN2.1-T2V; range 16~81)
+        seekBarDiffusionFrames.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                int frames = progress + 16; // map to 16~81
+                textViewDiffusionFramesValue.setText(String.valueOf(frames));
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {}
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                int frames = seekBar.getProgress() + 16;
+                ConfigManager.setDiffusionFrames(requireContext(), frames);
             }
         });
         
@@ -1675,6 +1697,13 @@ public class SettingsFragment extends Fragment {
         int diffStepsProgress = diffSteps - 1;
         seekBarDiffusionSteps.setProgress(diffStepsProgress);
         textViewDiffusionStepsValue.setText(String.valueOf(diffSteps));
+
+        // Frames setting (WAN2.1-T2V; 16~81 mapped to seekbar progress 0~65)
+        int diffFrames = ConfigManager.getDiffusionFrames(ctx);
+        if (diffFrames < 16) diffFrames = 16;
+        if (diffFrames > 81) diffFrames = 81;
+        seekBarDiffusionFrames.setProgress(diffFrames - 16);
+        textViewDiffusionFramesValue.setText(String.valueOf(diffFrames));
         
         // CFG setting (0~10, step 0.25)
         float diffCfg = ConfigManager.getDiffusionCfg(ctx);

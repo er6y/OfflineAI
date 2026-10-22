@@ -258,7 +258,12 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
     // Once a paragraph boundary is detected, keep full markdown rendering enabled
     // for the rest of current streaming query to avoid instant fallback to plain text.
     private volatile boolean markdownStreamingActivated = false;
-    
+
+    // Set when the inference service process dies (LMK kill / native crash) while a
+    // query is in flight, so resetSendingState() finalizes the task as FAILED
+    // instead of a misleading COMPLETED. Cleared right after task finalization.
+    private volatile boolean inferenceKilledByServiceDeath = false;
+
     // Audio decoding state tracking (for selected audio files)
     private final AtomicBoolean isAudioDecoding = new AtomicBoolean(false); // Audio decoding in progress
     private final AtomicInteger decodingProgress = new AtomicInteger(0);    // Decoding progress (0-100)
@@ -2489,6 +2494,10 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                 finalState = BackgroundTask.TaskState.CANCELLED;
                 finalProgress = 0;
                 finalMessage = "LLM inference cancelled";
+            } else if (inferenceKilledByServiceDeath) {
+                finalState = BackgroundTask.TaskState.FAILED;
+                finalProgress = 0;
+                finalMessage = "LLM inference failed: inference process terminated (likely killed by system for memory)";
             } else {
                 finalState = BackgroundTask.TaskState.COMPLETED;
                 finalProgress = 100;
@@ -2496,6 +2505,7 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
             }
 
             finalizeLlmTask(finalState, finalProgress, finalMessage);
+            inferenceKilledByServiceDeath = false;
         }
 
         isTaskRunning = false;
@@ -4776,6 +4786,21 @@ public class RagQaFragment extends Fragment implements StatefulFragment {
                     LogManager.logI(TAG, "Image marker detected, path: " + imagePath);
                 }
             }
+
+            // Check for video marker [VIDEO:path] (WAN2.1-T2V generated mp4)
+            if (newText.contains("[VIDEO:")) {
+                int startIdx = newText.indexOf("[VIDEO:");
+                int endIdx = newText.indexOf("]", startIdx);
+                if (endIdx > startIdx) {
+                    String videoPath = newText.substring(startIdx + 7, endIdx);
+                    if (!videoPath.isEmpty()) {
+                        lastMsg.videoUri = Uri.fromFile(new File(videoPath));
+                        LogManager.logI(TAG, "Video marker detected, path: " + videoPath);
+                    }
+                    // Remove marker from text (handles both [VIDEO:] sentinel and [VIDEO:path])
+                    newText = newText.substring(0, startIdx) + newText.substring(endIdx + 1);
+                }
+            }
             
             // Check for audio marker [AUDIO:path] and remove from UI display
             // Audio is handled by TTS callback, marker should not be shown in chat
@@ -6089,6 +6114,9 @@ private static class UserInput {
         // 4. Filter image tags and paths (e.g., [IMAGE:path/to/image.jpg])
         filtered = filtered.replaceAll("\\[IMAGE:[^\\]]*\\]", "");
 
+        // 4b. Filter video tags and paths (e.g., [VIDEO:path/to/video.mp4])
+        filtered = filtered.replaceAll("\\[VIDEO:[^\\]]*\\]", "");
+
         // 5. Filter audio tags and paths (e.g., [AUDIO:path/to/audio.wav])
         filtered = filtered.replaceAll("\\[AUDIO:[^\\]]*\\]", "");
 
@@ -6434,7 +6462,17 @@ private static class UserInput {
             // Handle service disconnect/error to reset UI state
             if ("SERVICE".equalsIgnoreCase(component)) {
                 if ("DISCONNECTED".equalsIgnoreCase(state) || "ERROR".equalsIgnoreCase(state)) {
-                    updateChatMessage("本地推理服务已中断或出错，已重置发送状态，请稍后重试。\n");
+                    boolean taskInFlight = isSending.get() || isTaskRunning;
+                    boolean userStopped = isTaskCancelled || globalStopFlag || userRequestedStop;
+                    if (taskInFlight && !userStopped) {
+                        // Inference process died mid-query (typically LMK kill for memory).
+                        // Mark the flag so resetSendingState() finalizes as FAILED, not COMPLETED.
+                        inferenceKilledByServiceDeath = true;
+                        LogManager.logE(TAG, "[SERVICE_DEATH] Inference process died mid-query, task will be finalized as FAILED");
+                        updateChatMessage("推理进程意外终止（通常为内存不足被系统杀掉），本次生成已失败。请清理后台应用释放内存后重试。\n");
+                    } else if (!userStopped) {
+                        updateChatMessage("本地推理服务已中断或出错，已重置发送状态，请稍后重试。\n");
+                    }
                     resetSendingState();
                 }
                 return;

@@ -192,6 +192,7 @@ public class ConfigManager {
     public static final String KEY_DIFFUSION_SEED = "diffusion_seed"; // 随机种子 (-1=随机)
     public static final String KEY_DIFFUSION_SEED_RANDOM = "diffusion_seed_random"; // 是否使用随机种子
     public static final String KEY_DIFFUSION_TE_ON_CPU = "diffusion_te_on_cpu"; // 文本编码器固定CPU
+    public static final String KEY_DIFFUSION_FRAMES = "diffusion_frames"; // WAN T2V frames per clip (16~81)
     
     // ASR语音识别配置键
     public static final String KEY_ASR_MODEL = "asr_model"; // ASR模型选择
@@ -279,6 +280,7 @@ public class ConfigManager {
     public static final int DEFAULT_DIFFUSION_SEED = -1; // -1表示随机
     public static final boolean DEFAULT_DIFFUSION_SEED_RANDOM = true; // 默认使用随机种子
     public static final boolean DEFAULT_DIFFUSION_TE_ON_CPU = true; // 默认文本编码器固定CPU（避免GPU内存限制）
+    public static final int DEFAULT_DIFFUSION_FRAMES = 81; // WAN2.1-T2V official default (≈5s @16fps)
     
     // ASR语音识别默认值
     public static final String DEFAULT_ASR_MODEL = "无"; // 默认无（不使用ASR）
@@ -1912,6 +1914,7 @@ public class ConfigManager {
                 KEY_DIFFUSION_STEPS.equals(key) ||
                 KEY_DIFFUSION_MEMORY_MODE.equals(key) ||
                 KEY_DIFFUSION_SEED.equals(key) ||
+                KEY_DIFFUSION_FRAMES.equals(key) ||
                 KEY_CURRENT_CHAT_FOLDER.equals(key)) {
                 LogManager.logD(TAG, "[CFG] setString key=" + key + ", old=" + (oldValue == null ? "<none>" : oldValue) + ", new=" + value);
             }
@@ -2250,6 +2253,20 @@ public class ConfigManager {
      */
     public static void setDiffusionSteps(Context context, int steps) {
         setInt(context, KEY_DIFFUSION_STEPS, steps);
+    }
+
+    /**
+     * Get WAN2.1-T2V frames per clip (16~81).
+     */
+    public static int getDiffusionFrames(Context context) {
+        return getInt(context, KEY_DIFFUSION_FRAMES, DEFAULT_DIFFUSION_FRAMES);
+    }
+
+    /**
+     * Set WAN2.1-T2V frames per clip.
+     */
+    public static void setDiffusionFrames(Context context, int frames) {
+        setInt(context, KEY_DIFFUSION_FRAMES, frames);
     }
     
     /**

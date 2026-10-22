@@ -43,6 +43,7 @@ public class RuntimeConfig implements Parcelable {
     public boolean diffusionTextEncoderOnCPU = true; // Force text_encoder on CPU to avoid GPU buffer size limit
     public int diffusionGpuMemoryMode;  // 0=AUTO, 1=BUFFER, 2=IMAGE
     public int diffusionPrecisionMode;  // 0=AUTO, 1=LOW(FP16), 2=NORMAL(FP32), 3=HIGH(FP32)
+    public int diffusionFrames;         // WAN2.1-T2V frames per clip (16~81)
 
     // Prompting / chat folder
     public String systemPrompt;
@@ -96,6 +97,7 @@ public class RuntimeConfig implements Parcelable {
         diffusionTextEncoderOnCPU = in.readByte() != 0;
         diffusionGpuMemoryMode = in.readInt();
         diffusionPrecisionMode = in.readInt();
+        diffusionFrames = in.readInt();
 
         systemPrompt = in.readString();
         currentChatFolder = in.readString();
@@ -143,6 +145,7 @@ public class RuntimeConfig implements Parcelable {
         dest.writeByte((byte) (diffusionTextEncoderOnCPU ? 1 : 0));
         dest.writeInt(diffusionGpuMemoryMode);
         dest.writeInt(diffusionPrecisionMode);
+        dest.writeInt(diffusionFrames);
 
         dest.writeString(systemPrompt);
         dest.writeString(currentChatFolder);

@@ -127,11 +127,18 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
     // Diffusion model type for native engine (must match MNN upstream DiffusionModelType)
     // 0=SD1.5, 1=Taiyi, 2=Sana, 3=Wan2.1-T2V, 4=ZImage(custom), 5=LongCat(custom), 6=Flux2Klein
     private static final int DIFFUSION_MODEL_SD15 = 0;
+    private static final int DIFFUSION_MODEL_WAN_T2V = 3;
     private static final int DIFFUSION_MODEL_ZIMAGE = 4;
     private static final int DIFFUSION_MODEL_LONGCAT_IMAGE_EDIT = 5;
     private static final int DIFFUSION_MODEL_FLUX2_KLEIN = 6;
 
-    
+    private static final int DIFFUSION_MODEL_QWEN_IMAGE_21 = 7;
+
+    private static final int DIFFUSION_MODEL_FLUX3_KLEIN = 8;
+
+    private static final int DIFFUSION_MODEL_MOSS_IMAGE = 9;
+
+
 
     // Context reference
 
@@ -640,6 +647,25 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
         // Determine diffusion subtype (SD1.5 vs ZImage) from config.json
 
         int diffusionModelType = detectDiffusionModelTypeFromConfig(modelDir);
+
+        if (diffusionModelType == DIFFUSION_MODEL_FLUX3_KLEIN) {
+
+            // FLUX.3-Klein: step-distilled flow-map (recipe = 16 steps, no CFG);
+            // static per-size export — the package config inference.width/height
+            // overrides the app size setting inside the engine
+
+            LogManager.logI(TAG, "[Diffusion] FLUX.3-Klein recipe: steps=16 recommended (distilled), CFG ignored, render size fixed by package config");
+
+        }
+
+        if (diffusionModelType == DIFFUSION_MODEL_MOSS_IMAGE) {
+
+            // MOSS-Image: 8-step DMD turbo LoRA (recipe = 8 steps, no CFG);
+            // dynamic-size DiT — the size setting is honored (16-aligned)
+
+            LogManager.logI(TAG, "[Diffusion] MOSS-Image recipe: steps=8 recommended (DMD distilled), CFG ignored, dynamic size");
+
+        }
 
 
 
@@ -1363,6 +1389,14 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
 
             }
 
+            if (!modelType.isEmpty() && modelType.equalsIgnoreCase("WAN2_1_T2V")) {
+
+                LogManager.logI(TAG, "[Diffusion] Detected WAN2.1-T2V model from config.json (model_type=WAN2_1_T2V)");
+
+                return DIFFUSION_MODEL_WAN_T2V;
+
+            }
+
             if (!modelType.isEmpty() && modelType.equalsIgnoreCase("zimage_diffusion_mnn")) {
 
                 LogManager.logI(TAG, "[Diffusion] Detected ZImage diffusion model from config.json (model_type=zimage_diffusion_mnn)");
@@ -1376,6 +1410,33 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
                 LogManager.logI(TAG, "[Diffusion] Detected Flux2Klein diffusion model from config.json (model_type=flux2_klein_diffusion_mnn)");
 
                 return DIFFUSION_MODEL_FLUX2_KLEIN;
+
+            }
+
+            if (!modelType.isEmpty() && modelType.equalsIgnoreCase("qwen_image_21_diffusion_mnn")) {
+
+                LogManager.logI(TAG, "[Diffusion] Detected Qwen-Image-2.1 diffusion model from config.json (model_type=qwen_image_21_diffusion_mnn)");
+
+                return DIFFUSION_MODEL_QWEN_IMAGE_21;
+
+            }
+
+            if (!modelType.isEmpty() && modelType.equalsIgnoreCase("flux3_klein_mnn")) {
+
+                LogManager.logI(TAG, "[Diffusion] Detected FLUX.3-Klein diffusion model from config.json (model_type=flux3_klein_mnn)");
+
+                return DIFFUSION_MODEL_FLUX3_KLEIN;
+
+            }
+
+            // MOSS-Image: must be checked BEFORE the vae.bn_mean fallback below
+            // (its config.json also carries vae.bn_mean/bn_std)
+
+            if (!modelType.isEmpty() && modelType.equalsIgnoreCase("moss_image_mnn")) {
+
+                LogManager.logI(TAG, "[Diffusion] Detected MOSS-Image diffusion model from config.json (model_type=moss_image_mnn)");
+
+                return DIFFUSION_MODEL_MOSS_IMAGE;
 
             }
 
@@ -4222,6 +4283,19 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
 
         }
 
+        // Route to WAN2.1-T2V video generation pipeline if the loaded diffusion model is WAN.
+
+        // The session was created by initializeDiffusion()/createDiffusionWithSize() with
+        // modelType = DIFFUSION_MODEL_WAN_T2V (3); only the inference entrypoint differs.
+
+        if (lastDiffusionModelType == DIFFUSION_MODEL_WAN_T2V) {
+
+            inferenceWanVideo(prompt, params, callback);
+
+            return;
+
+        }
+
         
 
         LogManager.logI(TAG, "Starting image generation with prompt: " + prompt);
@@ -4310,7 +4384,9 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
 
                         && lastDiffusionMemoryMode != currentMemoryMode);
 
-                boolean sizeChanged = (lastDiffusionModelType == DIFFUSION_MODEL_ZIMAGE
+                boolean sizeChanged = ((lastDiffusionModelType == DIFFUSION_MODEL_ZIMAGE
+
+                        || lastDiffusionModelType == DIFFUSION_MODEL_QWEN_IMAGE_21)
 
                         && (lastDiffusionImageWidth >= 0 || lastDiffusionImageHeight >= 0)
 
@@ -4834,6 +4910,369 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
 
     /**
 
+     * WAN2.1-T2V video generation pipeline. Mirrors inferenceDiffusion() but
+     * calls MnnInference.generateVideo (which writes PNG frames to a temp dir),
+     * then muxes those frames into an MP4 via VideoEncoder, and finally pushes
+     * a [VIDEO:...] marker through the streaming callback.
+     */
+
+    private void inferenceWanVideo(String prompt, LocalLlmHandler.InferenceParams params,
+                                   LocalLlmHandler.StreamingCallback callback) {
+
+        LogManager.logI(TAG, "Starting WAN2.1-T2V video generation with prompt: " + prompt);
+
+        executorService.submit(() -> {
+            String wanTaskId = null;
+            File framesDir = null;
+            try {
+                isGenerating.set(true);
+                shouldStop.set(false);
+
+                // BackgroundTask snapshot (reuse DIFFUSION TaskType)
+                try {
+                    String chatFolder = RuntimeConfigHolder.getCurrentChatFolderOrNull();
+                    java.util.Map<String, String> extras = new java.util.HashMap<>();
+                    extras.put("chatFolder", chatFolder != null ? chatFolder : "");
+                    extras.put("modelPath", currentModelPath != null ? currentModelPath : "");
+                    extras.put("prompt", prompt != null ? prompt : "");
+                    extras.put("kind", "wan_video");
+                    BackgroundTask task = BackgroundTaskManager.getInstance().createTask(
+                            BackgroundTask.TaskType.DIFFUSION,
+                            "WAN2.1-T2V video generation",
+                            true,
+                            extras
+                    );
+                    wanTaskId = task.getId();
+                    LogManager.logI(TAG, "[TASK] Created WAN background task, id=" + wanTaskId);
+                } catch (Exception e) {
+                    LogManager.logE(TAG, "[TASK] Failed to create WAN background task: " + e.getMessage(), e);
+                }
+
+                // Detect Diffusion backend/memory changes (same as image inference path)
+                String currentBackend = RuntimeConfigHolder.getBackendPreferenceOrDefault("CPU");
+                int currentMemoryMode = RuntimeConfigHolder.getDiffusionMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_MEMORY_MODE);
+                int currentImageWidth = RuntimeConfigHolder.getDiffusionImageWidthOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_WIDTH);
+                int currentImageHeight = RuntimeConfigHolder.getDiffusionImageHeightOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_HEIGHT);
+                int currentGpuMemoryMode = RuntimeConfigHolder.getDiffusionGpuMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_GPU_MEMORY_MODE);
+                int currentPrecisionMode = RuntimeConfigHolder.getDiffusionPrecisionModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_PRECISION_MODE);
+
+                boolean backendChanged = (lastDiffusionBackend != null
+                        && !lastDiffusionBackend.equalsIgnoreCase(currentBackend));
+                boolean memoryChanged = (lastDiffusionMemoryMode >= 0
+                        && lastDiffusionMemoryMode != currentMemoryMode);
+                boolean sizeChanged = (lastDiffusionModelType == DIFFUSION_MODEL_WAN_T2V
+                        && (lastDiffusionImageWidth >= 0 || lastDiffusionImageHeight >= 0)
+                        && (lastDiffusionImageWidth != currentImageWidth || lastDiffusionImageHeight != currentImageHeight));
+                boolean gpuMemModeChanged = (lastDiffusionGpuMemoryMode >= 0
+                        && lastDiffusionGpuMemoryMode != currentGpuMemoryMode);
+                boolean precisionChanged = (lastDiffusionPrecisionMode >= 0
+                        && lastDiffusionPrecisionMode != currentPrecisionMode);
+
+                if (diffusionHandle != 0 && (backendChanged || memoryChanged || sizeChanged || gpuMemModeChanged || precisionChanged)) {
+                    LogManager.logI(TAG, String.format(
+                            "[CONFIG][Diffusion] Runtime config changed (backend: %s -> %s, memory: %d -> %d, size: %dx%d -> %dx%d, gpuMemMode: %d -> %d, precision: %d -> %d), forcing session reload",
+                            lastDiffusionBackend, currentBackend,
+                            lastDiffusionMemoryMode, currentMemoryMode,
+                            lastDiffusionImageWidth, lastDiffusionImageHeight, currentImageWidth, currentImageHeight,
+                            lastDiffusionGpuMemoryMode, currentGpuMemoryMode,
+                            lastDiffusionPrecisionMode, currentPrecisionMode));
+
+                    try {
+                        MnnInference.releaseDiffusion(diffusionHandle);
+                        LogManager.logI(TAG, "[CONFIG][Diffusion] Old Diffusion session released due to config change");
+                    } catch (Exception e) {
+                        LogManager.logW(TAG, "[CONFIG][Diffusion] Failed to release old session: " + e.getMessage());
+                    }
+                    diffusionHandle = 0;
+                    lastDiffusionBackend = currentBackend;
+                    lastDiffusionMemoryMode = currentMemoryMode;
+                    lastDiffusionImageWidth = currentImageWidth;
+                    lastDiffusionImageHeight = currentImageHeight;
+                    lastDiffusionGpuMemoryMode = currentGpuMemoryMode;
+                    lastDiffusionPrecisionMode = currentPrecisionMode;
+                }
+
+                // Validate session (reinitialize if handle lost)
+                if (!isInitialized.get() || diffusionHandle == 0) {
+                    LogManager.logW(TAG, "WAN diffusion handle lost, reinitializing...");
+                    try {
+                        if (this.currentModelPath != null) {
+                            initializeDiffusion(this.currentModelPath, null, callback);
+                        } else {
+                            callback.onError("WAN diffusion not initialized and no model path available");
+                            return;
+                        }
+                    } catch (Exception e) {
+                        LogManager.logE(TAG, "Failed to reinitialize WAN diffusion: " + e.getMessage(), e);
+                        callback.onError("Failed to reinitialize WAN diffusion: " + e.getMessage());
+                        return;
+                    }
+                }
+
+                // Output directories: chatFolder/wan_<ts>/ for frames, .mp4 alongside
+                String chatFolderPath = RuntimeConfigHolder.getCurrentChatFolderOrNull();
+                if (chatFolderPath == null || chatFolderPath.isEmpty()) {
+                    callback.onError("对话文件夹未初始化，请重试");
+                    return;
+                }
+                File chatDir = new File(chatFolderPath);
+                if (!chatDir.exists()) {
+                    callback.onError("对话文件夹不存在，请重试");
+                    return;
+                }
+                long ts = System.currentTimeMillis();
+                framesDir = new File(chatDir, "wan_" + ts);
+                if (!framesDir.mkdirs() && !framesDir.isDirectory()) {
+                    callback.onError("Failed to create frames dir: " + framesDir.getAbsolutePath());
+                    return;
+                }
+                String mp4Path = new File(chatDir, "wan_" + ts + ".mp4").getAbsolutePath();
+
+                // Inference parameters: reuse existing diffusion settings + new frames key
+                int steps = RuntimeConfigHolder.getDiffusionStepsOrDefault(ConfigManager.DEFAULT_DIFFUSION_STEPS);
+                steps = Math.max(MIN_DIFFUSION_STEPS, Math.min(steps, MAX_DIFFUSION_STEPS));
+                float cfgScale = RuntimeConfigHolder.getDiffusionCfgOrDefault(ConfigManager.DEFAULT_DIFFUSION_CFG);
+                int frames = RuntimeConfigHolder.getDiffusionFramesOrDefault(ConfigManager.DEFAULT_DIFFUSION_FRAMES);
+                if (frames < 8) frames = 8;
+                if (frames > 161) frames = 161;
+                int width = RuntimeConfigHolder.getDiffusionImageWidthOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_WIDTH);
+                int height = RuntimeConfigHolder.getDiffusionImageHeightOrDefault(ConfigManager.DEFAULT_DIFFUSION_IMAGE_HEIGHT);
+                if (width <= 0) width = 480;
+                if (height <= 0) height = 832;
+
+                int seed;
+                boolean useRandomSeed = RuntimeConfigHolder.isDiffusionSeedRandomOrDefault(ConfigManager.DEFAULT_DIFFUSION_SEED_RANDOM);
+                if (useRandomSeed) {
+                    seed = new java.util.Random().nextInt(Integer.MAX_VALUE);
+                } else {
+                    seed = RuntimeConfigHolder.getDiffusionSeedOrDefault(ConfigManager.DEFAULT_DIFFUSION_SEED);
+                }
+                final int actualSeed = seed;
+                final int finalFrames = frames;
+
+                LogManager.logI(TAG, "WAN params: size=" + width + "x" + height + ", frames=" + frames
+                        + ", steps=" + steps + ", cfg=" + cfgScale + ", seed=" + actualSeed);
+
+                final long startTime = System.currentTimeMillis();
+                final String wanTaskIdFinal = wanTaskId;
+                final float[] capturedPeakMemMB = {-1f};
+                final float[] capturedRssMB = {-1f};
+
+                boolean genOk = MnnInference.generateVideo(
+                        diffusionHandle,
+                        prompt,
+                        framesDir.getAbsolutePath(),
+                        width, height, frames, steps, actualSeed, cfgScale,
+                        new MnnInference.DiffusionCallback() {
+                            @Override
+                            public boolean onProgress(int progress) {
+                                if (shouldStop.get()) {
+                                    LogManager.logI(TAG, "WAN generation cancelled by user");
+                                    return false;
+                                }
+                                if (wanTaskIdFinal != null) {
+                                    try {
+                                        // Reserve last 5% of progress for MP4 encoding stage
+                                        int p = (int) (progress * 0.95f);
+                                        BackgroundTaskManager.getInstance().updateTask(
+                                                wanTaskIdFinal,
+                                                BackgroundTask.TaskState.RUNNING,
+                                                p,
+                                                "Frame generation " + p + "%"
+                                        );
+                                    } catch (Exception e) {
+                                        LogManager.logE(TAG, "[TASK] Failed to update WAN task: " + e.getMessage(), e);
+                                    }
+                                }
+                                return true;
+                            }
+
+                            @Override
+                            public boolean onToken(String message) {
+                                if (message != null && message.startsWith("[MEMORY_STATS:")) {
+                                    try {
+                                        String data = message.substring(14, message.length() - 1);
+                                        String[] parts = data.split(",");
+                                        for (String part : parts) {
+                                            String[] kv = part.split("=");
+                                            if (kv.length == 2) {
+                                                if ("peak".equals(kv[0])) {
+                                                    capturedPeakMemMB[0] = Float.parseFloat(kv[1]);
+                                                } else if ("rss".equals(kv[0])) {
+                                                    capturedRssMB[0] = Float.parseFloat(kv[1]);
+                                                }
+                                            }
+                                        }
+                                    } catch (Exception e) {
+                                        LogManager.logE(TAG, "Failed to parse memory stats: " + message, e);
+                                    }
+                                    return !shouldStop.get();
+                                }
+                                callback.onToken(message);
+                                return !shouldStop.get();
+                            }
+                        }
+                );
+
+                long inferDuration = System.currentTimeMillis() - startTime;
+
+                if (shouldStop.get()) {
+                    LogManager.logI(TAG, "WAN generation stopped by user (post-generateVideo)");
+                    if (wanTaskIdFinal != null) {
+                        try {
+                            BackgroundTaskManager.getInstance().updateTask(
+                                    wanTaskIdFinal,
+                                    BackgroundTask.TaskState.CANCELLED,
+                                    0,
+                                    "WAN generation cancelled by user"
+                            );
+                        } catch (Exception ignore) {}
+                    }
+                    return;
+                }
+
+                if (!genOk) {
+                    callback.onError("Failed to generate video frames");
+                    if (wanTaskIdFinal != null) {
+                        try {
+                            BackgroundTaskManager.getInstance().updateTask(
+                                    wanTaskIdFinal,
+                                    BackgroundTask.TaskState.FAILED,
+                                    0,
+                                    "Frame generation failed"
+                            );
+                        } catch (Exception ignore) {}
+                    }
+                    return;
+                }
+
+                // Encode PNG frames -> MP4 via system MediaCodec/MediaMuxer
+                callback.onToken("\nMP4 muxing...");
+                long muxStart = System.currentTimeMillis();
+                File mp4File = new File(mp4Path);
+                boolean muxOk = VideoEncoder.encodeFramesToMp4(framesDir, mp4File, 16);
+                long muxDuration = System.currentTimeMillis() - muxStart;
+
+                if (!muxOk || !mp4File.exists()) {
+                    callback.onError("MP4 muxing failed (frames remain at: " + framesDir.getAbsolutePath() + ")");
+                    if (wanTaskIdFinal != null) {
+                        try {
+                            BackgroundTaskManager.getInstance().updateTask(
+                                    wanTaskIdFinal,
+                                    BackgroundTask.TaskState.FAILED,
+                                    0,
+                                    "MP4 muxing failed"
+                            );
+                        } catch (Exception ignore) {}
+                    }
+                    return;
+                }
+
+                // Cleanup PNG frames now that MP4 is ready
+                deleteRecursively(framesDir);
+
+                long totalDuration = System.currentTimeMillis() - startTime;
+
+                String perfStats = getWanPerformanceStats(
+                        totalDuration, inferDuration, muxDuration,
+                        steps, finalFrames, actualSeed,
+                        currentModelPath,
+                        capturedPeakMemMB[0], capturedRssMB[0],
+                        width, height);
+
+                // Atomicity-style emission: marker, then path, then perf
+                callback.onToken("\n[VIDEO:]");
+                callback.onToken("\n\n[VIDEO:" + mp4Path + "]");
+                callback.onToken("\n\n" + perfStats);
+                callback.onComplete("Video generation completed");
+
+                if (wanTaskIdFinal != null) {
+                    try {
+                        BackgroundTaskManager.getInstance().updateTask(
+                                wanTaskIdFinal,
+                                BackgroundTask.TaskState.COMPLETED,
+                                100,
+                                "Video generation completed"
+                        );
+                    } catch (Exception ignore) {}
+                }
+
+            } catch (Exception e) {
+                LogManager.logE(TAG, "Error during WAN video generation", e);
+                callback.onError("WAN video generation error: " + e.getMessage());
+            } finally {
+                isGenerating.set(false);
+            }
+        });
+    }
+
+    /**
+     * Recursively delete a directory. Best-effort; logs warnings on failure.
+     */
+    private static void deleteRecursively(File f) {
+        if (f == null || !f.exists()) return;
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File c : children) deleteRecursively(c);
+            }
+        }
+        if (!f.delete()) {
+            LogManager.logW(TAG, "Failed to delete: " + f.getAbsolutePath());
+        }
+    }
+
+    /**
+     * Performance statistics for WAN T2V (mirrors getDiffusionPerformanceStats).
+     */
+    private String getWanPerformanceStats(long totalDuration, long inferDuration, long muxDuration,
+                                          int steps, int frames, int seed, String modelPath,
+                                          float peakMemMB, float rssMB,
+                                          int width, int height) {
+        float totalSec = totalDuration / 1000.0f;
+        float inferSec = inferDuration / 1000.0f;
+        float muxSec = muxDuration / 1000.0f;
+        float secPerStep = inferSec / Math.max(1, steps);
+
+        long jvmTotalMemory = runtime.totalMemory();
+        long jvmUsedMemory = jvmTotalMemory - runtime.freeMemory();
+
+        StringBuilder stats = new StringBuilder();
+        stats.append("<performance>\n");
+        if (modelPath != null) {
+            stats.append(String.format("Model: %s (WAN2.1-T2V)\n", new File(modelPath).getName()));
+        }
+        if (peakMemMB > 0 && rssMB > 0) {
+            stats.append(String.format("Time: %.1fs (infer %.1fs, mux %.1fs) • %.2fs/step\n",
+                    totalSec, inferSec, muxSec, secPerStep));
+            stats.append(String.format("   • Peak RSS: %.1f MB (inference process)\n", peakMemMB));
+        } else {
+            stats.append(String.format("Time: %.1fs (infer %.1fs, mux %.1fs) • %.2fs/step • JVMUsedMem: %dMB\n",
+                    totalSec, inferSec, muxSec, secPerStep, jvmUsedMemory / (1024 * 1024)));
+        }
+        String backendPreference = SettingsFragment.getBackendPreference(context);
+        String memoryModeStr = ConfigManager.getDiffusionMemoryModeString(context);
+        int gpuMemMode = RuntimeConfigHolder.getDiffusionGpuMemoryModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_GPU_MEMORY_MODE);
+        int precisionMode = RuntimeConfigHolder.getDiffusionPrecisionModeOrDefault(ConfigManager.DEFAULT_DIFFUSION_PRECISION_MODE);
+        String gpuMemModeStr = (gpuMemMode == 2) ? "IMAGE" : "BUFFER";
+        String precisionStr = "AUTO";
+        switch (precisionMode) {
+            case 1: precisionStr = "LOW(FP16)"; break;
+            case 2: precisionStr = "NORMAL"; break;
+            case 3: precisionStr = "HIGH(FP32)"; break;
+        }
+        stats.append(String.format("   • Backend: %s\n", backendPreference));
+        stats.append(String.format("   • Memory Mode: %s\n", memoryModeStr));
+        stats.append(String.format("   • GPU: MemMode=%s, Precision=%s\n", gpuMemModeStr, precisionStr));
+        float cfgValue = RuntimeConfigHolder.getDiffusionCfgOrDefault(ConfigManager.DEFAULT_DIFFUSION_CFG);
+        stats.append(String.format("   • wanParam: steps=%d, frames=%d, cfg=%.2f, scheduler=FlowMatch, seed=%d, size=%dx%d\n",
+                steps, frames, cfgValue, seed, width, height));
+        stats.append("</performance>\n");
+        return stats.toString();
+    }
+
+    /**
+
      * Generate performance statistics for Diffusion
 
      * @param peakMemMB Peak memory in MB (from native layer), -1 if not available
@@ -4936,7 +5375,13 @@ public class LocalLLMMNNHandler implements LocalLlmHandler.InferenceEngine {
 
         float cfgValue = RuntimeConfigHolder.getDiffusionCfgOrDefault(ConfigManager.DEFAULT_DIFFUSION_CFG);
 
-        boolean isZImage = (lastDiffusionModelType == DIFFUSION_MODEL_ZIMAGE);
+        boolean isZImage = (lastDiffusionModelType == DIFFUSION_MODEL_ZIMAGE
+
+                || lastDiffusionModelType == DIFFUSION_MODEL_QWEN_IMAGE_21
+
+                || lastDiffusionModelType == DIFFUSION_MODEL_FLUX3_KLEIN
+
+                || lastDiffusionModelType == DIFFUSION_MODEL_MOSS_IMAGE); // FlowMatch-Euler schedulers
 
         String scheduler = isZImage ? "FlowMatch-Euler" : "PLMS";
 

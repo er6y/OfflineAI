@@ -124,6 +124,14 @@ public final class RuntimeConfigHolder {
         return (cfg != null && cfg.diffusionSteps > 0) ? cfg.diffusionSteps : defaultValue;
     }
 
+    public static int getDiffusionFramesOrDefault(int defaultValue) {
+        RuntimeConfig cfg;
+        synchronized (LOCK) {
+            cfg = current;
+        }
+        return (cfg != null && cfg.diffusionFrames > 0) ? cfg.diffusionFrames : defaultValue;
+    }
+
     public static float getDiffusionCfgOrDefault(float defaultValue) {
         RuntimeConfig cfg;
         synchronized (LOCK) {
