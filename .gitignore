@@ -214,3 +214,6 @@ libs/mnn-lib/src/main/cpp/source/
 /f2_picks.txt
 /dit_i4asym.json
 /ms_files_tmp.json
+# Release APK is distributed outside git (GitHub 100MB file limit)
+/OfflineAI_release.apk
+/OfflineAI_release_*.apk
